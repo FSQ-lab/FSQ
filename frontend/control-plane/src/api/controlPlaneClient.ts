@@ -13,6 +13,8 @@ import type {
   ConfigResponse,
   ConnectionTestResponse,
   GitHubDeviceFlowResponse,
+  GitHubModelsResponse,
+  ProviderStatusResponse,
   PlatformId,
   ReadinessResponse,
   ReplayFramesResponse,
@@ -60,6 +62,7 @@ const statuses = new Set(['preparing', 'running', 'finalizing', 'success', 'fail
 const readinessStatuses = new Set(['ready', 'unavailable', 'error']);
 const deviceFlowStatuses = new Set(['waiting', 'loading_models', 'ready', 'model_error', 'success', 'failed', 'expired', 'cancelled']);
 const providerTypes = new Set(['openai', 'azure_openai', 'deepseek', 'google_gemini', 'kimi', 'github_copilot']);
+const providerSessionStatuses = new Set(['not_configured', 'session_available', 'sign_in_required', 'temporarily_unavailable']);
 const kimiRegions = new Set(['cn', 'global']);
 
 export class ControlPlaneApiError extends Error {
@@ -253,15 +256,38 @@ function validateConfig(value: unknown): ConfigResponse {
   } else if (provider.type === 'azure_openai') {
     if (!hasOnlyKeys(provider, ['type', 'modelName', 'baseUrl', 'apiKey']) || !string(provider.baseUrl) || !provider.baseUrl
       || !string(provider.apiKey) || !provider.apiKey) invalidResponse('config', 'Invalid Azure Provider fields.');
-  } else if (!hasOnlyKeys(provider, ['type', 'modelName', 'authenticated']) || provider.authenticated !== true) {
+  } else if (!hasOnlyKeys(provider, ['type', 'modelName', 'sessionStatus']) || provider.sessionStatus !== 'configured') {
     invalidResponse('config', 'Invalid GitHub Provider fields.');
   }
   return value as unknown as ConfigResponse;
+}
+function validateProviderStatus(value: unknown): ProviderStatusResponse {
+  if (!record(value) || !hasNoUnknownKeys(value, ['configured', 'provider', 'modelName', 'sessionStatus', 'authenticated', 'message', 'action'])
+    || !bool(value.configured) || !(value.provider === null || (string(value.provider) && providerTypes.has(value.provider)))
+    || !nullableString(value.modelName) || !string(value.sessionStatus) || !providerSessionStatuses.has(value.sessionStatus)
+    || !bool(value.authenticated) || !string(value.message) || !value.message
+    || !(value.action === undefined || string(value.action))
+    || value.authenticated !== (value.sessionStatus === 'session_available')
+    || (!value.configured && (value.provider !== null || value.modelName !== null || value.sessionStatus !== 'not_configured'))
+    || (value.configured && (value.provider === null || !value.modelName || value.sessionStatus === 'not_configured'))) {
+    invalidResponse('Provider status', 'Invalid Provider status fields.');
+  }
+  return value as unknown as ProviderStatusResponse;
 }
 function validateOpenAIModels(value: unknown): OpenAIModelsResponse {
   const model = (item: unknown) => record(item) && hasOnlyKeys(item, ['id', 'name']) && string(item.id) && Boolean(item.id.trim()) && string(item.name) && Boolean(item.name.trim());
   if (!record(value) || !hasOnlyKeys(value, ['models']) || !arrayOf(value.models, model)) invalidResponse('Provider models', 'Invalid model-list fields.');
   return value as unknown as OpenAIModelsResponse;
+}
+function validateGithubModels(value: unknown): GitHubModelsResponse {
+  const model = (item: unknown) => record(item) && hasOnlyKeys(item, ['id', 'name'])
+    && string(item.id) && Boolean(item.id.trim()) && string(item.name) && Boolean(item.name.trim());
+  if (!record(value) || !hasOnlyKeys(value, ['modelName', 'sessionStatus', 'models'])
+    || !string(value.modelName) || !value.modelName.trim() || value.sessionStatus !== 'session_available'
+    || !arrayOf(value.models, model)) {
+    invalidResponse('GitHub saved-session models', 'Invalid saved-session model fields.');
+  }
+  return value as unknown as GitHubModelsResponse;
 }
 function validateDeviceFlow(value: unknown): GitHubDeviceFlowResponse {
   if (!record(value) || !string(value.authRequestId) || !value.authRequestId || !string(value.status) || !deviceFlowStatuses.has(value.status)
@@ -506,6 +532,7 @@ export const controlPlaneClient = {
   saveYaml: (requestId: string, payload: SaveYamlPayload, signal?: AbortSignal) =>
     jsonRequest(`/runs/${encodeURIComponent(requestId)}/save-yaml`, validateSaveYaml, { method: 'POST', body: JSON.stringify(payload), signal }),
   config: (signal?: AbortSignal) => jsonRequest('/config', validateConfig, { signal }),
+  configStatus: (signal?: AbortSignal) => jsonRequest('/config/status', validateProviderStatus, { signal }),
   openaiModels: (apiKey: string, signal?: AbortSignal) =>
     jsonRequest('/config/openai/models', validateOpenAIModels, { method: 'POST', body: JSON.stringify({ apiKey }), signal }),
   deepseekModels: (apiKey: string, signal?: AbortSignal) =>
@@ -524,6 +551,10 @@ export const controlPlaneClient = {
     jsonRequest('/config/deepseek', validateConfig, { method: 'PUT', body: JSON.stringify(payload), signal }),
   saveAzureConfig: (payload: AzureConfigPayload, signal?: AbortSignal) =>
     jsonRequest('/config/azure', validateConfig, { method: 'PUT', body: JSON.stringify(payload), signal }),
+  githubModels: (signal?: AbortSignal) =>
+    jsonRequest('/config/github/models', validateGithubModels, { method: 'POST', body: '{}', signal }),
+  updateGithubModel: (modelName: string, signal?: AbortSignal) =>
+    jsonRequest('/config/github/model', validateConfig, { method: 'PUT', body: JSON.stringify({ modelName }), signal }),
   startGithubDeviceFlow: (signal?: AbortSignal) =>
     jsonRequest('/config/github/device-flow', validateDeviceFlow, { method: 'POST', signal }),
   githubDeviceFlow: (authRequestId: string, signal?: AbortSignal) =>

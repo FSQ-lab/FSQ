@@ -456,6 +456,36 @@ def activate_github_copilot_provider(
         return _load_complete_user_config(root)
 
 
+def update_github_copilot_model(
+    *,
+    model: str,
+    user_config_root: str | Path | None = None,
+) -> UserProviderConfig:
+    try:
+        provider = _GitHubCopilotProviderRecord(type="github_copilot", model=model)
+    except ValidationError as exc:
+        raise ConfigurationError(
+            "Invalid GitHub Copilot Provider configuration.",
+            context={"provider": "github_copilot", "reason": "invalid_candidate"},
+        ) from exc
+    root = _user_config_root(user_config_root)
+    with _user_config_lock(root, provider="github_copilot"):
+        complete = _load_complete_user_config(root)
+        if complete.provider is None or complete.provider.type != "github_copilot":
+            raise ConfigurationError(
+                "GitHub Copilot is not the active Provider.",
+                context={"provider": "github_copilot", "reason": "authentication"},
+            )
+        current, config_path, _ = _load_user_document(root)
+        updated = current.model_copy(update={"provider": provider})
+        _commit_replacement(
+            {config_path: _yaml_bytes(updated)},
+            [],
+            provider="github_copilot",
+        )
+        return _load_complete_user_config(root)
+
+
 def refresh_provider_settings(
     settings: Settings,
     user_config_root: str | Path | None = None,

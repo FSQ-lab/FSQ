@@ -12,11 +12,17 @@ import type {
   ConfigResponse,
   ConnectionTestResponse,
   GitHubDeviceFlowResponse,
+  GitHubModelsResponse,
+  ProviderStatusResponse,
   RequestResource,
 } from '../../../api/types';
 
 export type DeviceFlowPending = 'starting' | 'waiting' | 'loading_models' | 'retrying_models' | 'saving' | 'cancelling' | null;
 export type OpenAIModelsState = { state: 'idle' | 'loading' | 'ready' | 'error'; data: OpenAIModelsResponse | null; error: ApiErrorBody | null };
+export type GitHubModelsState =
+  | { state: 'idle' | 'loading'; data: null; error: null }
+  | { state: 'ready'; data: GitHubModelsResponse; error: null }
+  | { state: 'error' | 'sign_in_required'; data: null; error: ApiErrorBody };
 export type SaveRecovery = 'none' | 'loading' | 'unavailable' | 'reconciled';
 const rejectedApiKeySaves: Record<string, number> = {
   invalid_request: 400, invalid_provider_config: 400, provider_model_not_offered: 400, provider_no_eligible_models: 400,
@@ -45,6 +51,7 @@ function isUnsaved(flow: GitHubDeviceFlowResponse): boolean {
 
 export function useProviderConfig(client: ControlPlaneClient = controlPlaneClient) {
   const [config, setConfig] = useState<RequestResource<ConfigResponse>>({ state: 'loading', data: null, error: null });
+  const [providerStatus, setProviderStatus] = useState<RequestResource<ProviderStatusResponse>>({ state: 'loading', data: null, error: null });
   const [savePending, setSavePending] = useState(false);
   const [saveError, setSaveError] = useState<ApiErrorBody | null>(null);
   const clearSaveError = useCallback(() => setSaveError(null), []);
@@ -54,6 +61,7 @@ export function useProviderConfig(client: ControlPlaneClient = controlPlaneClien
   const deepseekModelsControllerRef = useRef<AbortController | null>(null);
   const geminiModelsControllerRef = useRef<AbortController | null>(null);
   const [kimiModels, setKimiModels] = useState<OpenAIModelsState>({ state: 'idle', data: null, error: null });
+  const [githubModels, setGithubModels] = useState<GitHubModelsState>({ state: 'idle', data: null, error: null });
   const kimiModelsControllerRef = useRef<AbortController | null>(null);
   const kimiModelsIdentityRef = useRef('');
   const [saveRecovery, setSaveRecovery] = useState<SaveRecovery>('none');
@@ -67,12 +75,15 @@ export function useProviderConfig(client: ControlPlaneClient = controlPlaneClien
   const [connectionResult, setConnectionResult] = useState<ConnectionResult | null>(null);
   const mountedRef = useRef(false);
   const configControllerRef = useRef<AbortController | null>(null);
+  const statusControllerRef = useRef<AbortController | null>(null);
+  const githubModelsControllerRef = useRef<AbortController | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
   const deviceControllerRef = useRef<AbortController | null>(null);
   const testControllerRef = useRef<AbortController | null>(null);
   const pollTimerRef = useRef<number | null>(null);
   const deviceGenerationRef = useRef(0);
   const deviceFlowRef = useRef<GitHubDeviceFlowResponse | null>(null);
+  const githubDeviceSaveInFlightRef = useRef(false);
 
   const setDeviceFlow = useCallback((next: GitHubDeviceFlowResponse | null) => {
     deviceFlowRef.current = next;
@@ -102,6 +113,50 @@ export function useProviderConfig(client: ControlPlaneClient = controlPlaneClien
       return null;
     }
   }, [client]);
+
+  const loadProviderStatus = useCallback(async () => {
+    statusControllerRef.current?.abort();
+    const controller = new AbortController();
+    statusControllerRef.current = controller;
+    setProviderStatus((current) => ({ state: 'loading', data: current.data, error: null }));
+    try {
+      const data = await client.configStatus(controller.signal);
+      if (mountedRef.current && statusControllerRef.current === controller) setProviderStatus({ state: 'ready', data, error: null });
+      return data;
+    } catch (error) {
+      if (!isAbort(error) && mountedRef.current && statusControllerRef.current === controller) {
+        setProviderStatus({ state: 'error', data: null, error: toApiError(error) });
+      }
+      return null;
+    }
+  }, [client]);
+
+  const loadGithubModels = useCallback(async () => {
+    if (saveControllerRef.current || recoveryBlocked) return null;
+    githubModelsControllerRef.current?.abort();
+    const controller = new AbortController();
+    githubModelsControllerRef.current = controller;
+    setGithubModels({ state: 'loading', data: null, error: null });
+    try {
+      const data = await client.githubModels(controller.signal);
+      if (!mountedRef.current || githubModelsControllerRef.current !== controller || controller.signal.aborted) return null;
+      setGithubModels({ state: 'ready', data, error: null });
+      return data;
+    } catch (error) {
+      if (!mountedRef.current || githubModelsControllerRef.current !== controller || controller.signal.aborted) return null;
+      const safe = providerRequestError(error, 'GitHub Copilot');
+      const signIn = error instanceof ControlPlaneApiError
+        && error.status === 401 && error.body.code === 'provider_sign_in_required';
+      setGithubModels({ state: signIn ? 'sign_in_required' : 'error', data: null, error: safe });
+      return null;
+    }
+  }, [client, recoveryBlocked]);
+
+  const clearGithubModels = useCallback(() => {
+    githubModelsControllerRef.current?.abort();
+    githubModelsControllerRef.current = null;
+    setGithubModels({ state: 'idle', data: null, error: null });
+  }, []);
 
   const clearOpenAIModels = useCallback(() => {
     modelsControllerRef.current?.abort();
@@ -396,21 +451,61 @@ export function useProviderConfig(client: ControlPlaneClient = controlPlaneClien
     deviceControllerRef.current = controller;
     setDeviceFlowError(null);
     setDeviceFlowPending('saving');
+    setSavePending(true);
+    githubDeviceSaveInFlightRef.current = true;
     try {
       const data = await client.saveGithubModel(active.authRequestId, selectedModel, controller.signal);
       if (!mountedRef.current || generation !== deviceGenerationRef.current) return null;
       setSaveRecovery('none');
       setConfig({ state: 'ready', data, error: null });
+      void loadProviderStatus();
       setDeviceFlow({ authRequestId: active.authRequestId, status: 'success', message: 'GitHub Copilot Provider saved.' });
       return data;
     } catch (error) {
-      if (!isAbort(error) && mountedRef.current && generation === deviceGenerationRef.current) setDeviceFlowError(toApiError(error));
+      if (!mountedRef.current || generation !== deviceGenerationRef.current) return null;
+      if (error instanceof ControlPlaneApiError && rejectedApiKeySaves[error.body.code] === error.status) {
+        setDeviceFlowError(error.body);
+      } else {
+        await reconcileConfig();
+      }
       return null;
     } finally {
       if (mountedRef.current && generation === deviceGenerationRef.current) setDeviceFlowPending(null);
+      if (mountedRef.current && generation === deviceGenerationRef.current) setSavePending(false);
+      githubDeviceSaveInFlightRef.current = false;
       if (deviceControllerRef.current === controller) deviceControllerRef.current = null;
     }
-  }, [clearPoll, client, setDeviceFlow, recoveryBlocked]);
+  }, [clearPoll, client, loadProviderStatus, reconcileConfig, setDeviceFlow, recoveryBlocked]);
+
+  const saveSavedGithubModel = useCallback(async (modelName: string) => {
+    if (saveControllerRef.current || recoveryBlocked) return null;
+    const controller = new AbortController();
+    saveControllerRef.current = controller;
+    setSavePending(true);
+    setSaveError(null);
+    try {
+      const data = await client.updateGithubModel(modelName.trim(), controller.signal);
+      if (!mountedRef.current || saveControllerRef.current !== controller || controller.signal.aborted) return null;
+      setConfig({ state: 'ready', data, error: null });
+      setSaveRecovery('none');
+      clearGithubModels();
+      void loadProviderStatus();
+      return data;
+    } catch (error) {
+      if (!mountedRef.current || saveControllerRef.current !== controller) return null;
+      if (error instanceof ControlPlaneApiError && rejectedApiKeySaves[error.body.code] === error.status) {
+        setSaveError(error.body);
+      } else {
+        await reconcileConfig();
+      }
+      return null;
+    } finally {
+      if (saveControllerRef.current === controller) {
+        saveControllerRef.current = null;
+        if (mountedRef.current) setSavePending(false);
+      }
+    }
+  }, [clearGithubModels, client, loadProviderStatus, reconcileConfig, recoveryBlocked]);
 
   const cancelGithub = useCallback(async () => {
     const active = deviceFlowRef.current;
@@ -474,10 +569,13 @@ export function useProviderConfig(client: ControlPlaneClient = controlPlaneClien
   useEffect(() => {
     mountedRef.current = true;
     void loadConfig();
+    void loadProviderStatus();
     return () => {
       mountedRef.current = false;
       ++deviceGenerationRef.current;
       configControllerRef.current?.abort();
+      statusControllerRef.current?.abort();
+      githubModelsControllerRef.current?.abort();
       saveControllerRef.current?.abort();
       modelsControllerRef.current?.abort();
       deepseekModelsControllerRef.current?.abort();
@@ -487,13 +585,15 @@ export function useProviderConfig(client: ControlPlaneClient = controlPlaneClien
       testControllerRef.current?.abort();
       clearPoll();
       const active = deviceFlowRef.current;
-      if (active && isUnsaved(active)) void client.cancelGithubDeviceFlow(active.authRequestId);
+      if (active && isUnsaved(active) && !githubDeviceSaveInFlightRef.current) void client.cancelGithubDeviceFlow(active.authRequestId);
     };
   }, [clearPoll, client, loadConfig]);
 
   return {
     config,
     reload: loadConfig,
+    providerStatus,
+    reloadProviderStatus: loadProviderStatus,
     openaiModels,
     deepseekModels,
     geminiModels,
@@ -522,6 +622,10 @@ export function useProviderConfig(client: ControlPlaneClient = controlPlaneClien
     startGithub,
     retryGithubModels,
     saveGithubModel,
+    githubModels,
+    loadGithubModels,
+    clearGithubModels,
+    saveSavedGithubModel,
     cancelGithub,
     clearDeviceFlow,
     testSavedConnection,

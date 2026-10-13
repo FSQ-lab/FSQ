@@ -5,6 +5,7 @@ from fsq_agent.providers._connection_test import ProviderConnectionTestResult, t
 from fsq_agent.providers._deepseek import DeepSeekModel, list_deepseek_models
 from fsq_agent.providers._factory import (
     ModelProviderFactory,
+    ProviderReadiness,
     build_model_provider_session,
     check_provider_readiness,
     prepare_model_provider_session,
@@ -17,6 +18,7 @@ from fsq_agent.providers._github_copilot import (
     activate_github_copilot_authorization,
     complete_github_copilot_device_flow,
     list_github_copilot_models,
+    list_saved_github_copilot_models,
     request_github_copilot_device_code,
 )
 from fsq_agent.providers._google_gemini import GoogleGeminiModel, list_google_gemini_models
@@ -35,6 +37,7 @@ __all__ = [
     "ModelProviderSession",
     "OpenAIModel",
     "ProviderConnectionTestResult",
+    "ProviderReadiness",
     "activate_github_copilot_authorization",
     "build_model_provider_session",
     "check_provider_readiness",
@@ -44,6 +47,7 @@ __all__ = [
     "list_google_gemini_models",
     "list_kimi_models",
     "list_openai_models",
+    "list_saved_github_copilot_models",
     "prepare_model_provider_session",
     "refresh_model_provider_session",
     "request_github_copilot_device_code",

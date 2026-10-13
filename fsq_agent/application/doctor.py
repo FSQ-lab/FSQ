@@ -123,7 +123,7 @@ def diagnose_platform_settings(settings) -> DoctorPlatformResult:
     target_availability = _safe_check("target_availability", lambda: environment.check_target_availability(settings, prerequisite_facts))
     foundation = (runtime_check, target_configuration, target_availability)
     strict_core = _dependent_check("strict_core", foundation, lambda: _strict(settings))
-    provider = _safe_check("provider", lambda: check_provider_readiness(settings))
+    provider = _safe_check("provider", lambda: _provider_readiness(settings))
     suggestion = _safe_check("suggestion_analyzer", lambda: check_case_suggestion_readiness(settings))
     dynamic = _dependent_check("dynamic_agent", (*foundation, strict_core, provider), lambda: check_dynamic_agent_readiness(settings))
     checks = DoctorChecks(
@@ -193,6 +193,11 @@ def _safe_check(name: str, operation: Callable[[], tuple[bool, str, str]]) -> Do
     if ready:
         return _ready(message)
     return DoctorStatusDetail(status="unavailable", code=f"doctor.{name}_unavailable", message=message, action=action or None)
+
+
+def _provider_readiness(settings) -> tuple[bool, str, str]:
+    readiness = check_provider_readiness(settings)
+    return readiness.ready, readiness.message, readiness.action
 
 
 def _configuration_check(name: str, operation: Callable[[], tuple[bool, str, str]]) -> DoctorStatusDetail:

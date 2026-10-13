@@ -18,6 +18,7 @@ from fsq_agent.config import (
     load_user_provider_config,
     refresh_provider_settings,
     save_azure_openai_provider,
+    update_github_copilot_model,
     validate_provider_settings,
 )
 from fsq_agent.models import ConfigurationError
@@ -380,6 +381,42 @@ def test_activate_github_provider_replaces_azure_only_after_complete_auth(tmp_pa
     assert saved.github_token == github_token
     assert saved.provider_token == provider_token
     assert not (user_root / "auth" / "azure-openai.json").exists()
+
+
+def test_update_github_model_preserves_credential_files_byte_for_byte(tmp_path: Path) -> None:
+    user_root = tmp_path / "user"
+    activate_github_copilot_provider(
+        model="gpt-5",
+        github_token={"access_token": "github-token", "expires_at": 9999999999},
+        provider_token={"token": "provider-token", "expires_at": 9999999999, "plan": "individual"},
+        user_config_root=user_root,
+    )
+    github_path = user_root / "auth" / "github-copilot-token.json"
+    provider_path = user_root / "auth" / "github-copilot-provider-token.json"
+    github_before = github_path.read_bytes()
+    provider_before = provider_path.read_bytes()
+
+    saved = update_github_copilot_model(model="gpt-5.2", user_config_root=user_root)
+
+    assert saved.provider is not None
+    assert saved.provider.model == "gpt-5.2"
+    assert github_path.read_bytes() == github_before
+    assert provider_path.read_bytes() == provider_before
+
+
+def test_update_github_model_requires_complete_active_github_configuration(tmp_path: Path) -> None:
+    user_root = tmp_path / "user"
+    save_azure_openai_provider(
+        base_url="https://example.openai.azure.com",
+        model="azure-model",
+        api_key="azure-key",
+        user_config_root=user_root,
+    )
+
+    with pytest.raises(ConfigurationError, match="not the active Provider"):
+        update_github_copilot_model(model="gpt-5.2", user_config_root=user_root)
+
+    assert load_user_provider_config(user_root).provider.model == "azure-model"
 
 
 def test_invalid_replacement_preserves_active_provider(tmp_path: Path) -> None:

@@ -221,7 +221,7 @@ export interface AzureProviderConfig {
 export interface GitHubProviderConfig {
   type: 'github_copilot';
   modelName: string;
-  authenticated: true;
+  sessionStatus: 'configured';
 }
 export type ProviderConfig = OpenAIProviderConfig | AzureProviderConfig | DeepSeekProviderConfig | GoogleGeminiProviderConfig | KimiProviderConfig | GitHubProviderConfig;
 export type ConfigResponse =
@@ -229,6 +229,21 @@ export type ConfigResponse =
   | { configured: true; provider: ProviderConfig };
 export interface AzureConfigPayload { baseUrl: string; modelName: string; apiKey: string }
 export interface GitHubCopilotModel { id: string; name: string }
+export type ProviderSessionStatus = 'not_configured' | 'session_available' | 'sign_in_required' | 'temporarily_unavailable';
+export interface ProviderStatusResponse {
+  configured: boolean;
+  provider: ProviderConfig['type'] | null;
+  modelName: string | null;
+  sessionStatus: ProviderSessionStatus;
+  authenticated: boolean;
+  message: string;
+  action?: string;
+}
+export interface GitHubModelsResponse {
+  modelName: string;
+  sessionStatus: 'session_available';
+  models: GitHubCopilotModel[];
+}
 export type GitHubDeviceFlowResponse =
   | { authRequestId: string; status: 'waiting'; verificationUri: string; userCode: string; expiresAt: string; pollIntervalSeconds: number; message?: string }
   | { authRequestId: string; status: 'loading_models'; expiresAt: string; pollIntervalSeconds: number; message?: string }

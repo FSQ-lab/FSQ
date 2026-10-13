@@ -10,6 +10,7 @@ import yaml
 from fsq_agent.application import ApplicationError, DoctorRequest, diagnose_workspace
 from fsq_agent.config import list_workspace_registry, load_workspace_platform_settings
 from fsq_agent.models import ConfigurationError, PlatformPrerequisiteCheck, PlatformRuntimeCheck, WorkspacePlatformStatus, WorkspaceRegistryEntry, WorkspaceStatus
+from fsq_agent.providers import ProviderReadiness
 
 
 def _platform(platform: str, root: Path, status: str = "available") -> WorkspacePlatformStatus:
@@ -44,7 +45,16 @@ def _base(monkeypatch: pytest.MonkeyPatch, root: Path, platforms: list[Workspace
     monkeypatch.setattr("fsq_agent.application.doctor.PlatformRuntimeService.check_target_configuration", lambda *_args: (True, "ready", ""))
     monkeypatch.setattr("fsq_agent.application.doctor.PlatformRuntimeService.check_target_availability", lambda *_args: (True, "ready", ""))
     monkeypatch.setattr("fsq_agent.application.doctor.PlatformRuntimeService.check_prerequisites", lambda *_args: ())
-    monkeypatch.setattr("fsq_agent.application.doctor.check_provider_readiness", lambda _settings: (True, "ready", ""))
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.check_provider_readiness",
+        lambda _settings: ProviderReadiness(
+            ready=True,
+            session_status="session_available",
+            code="provider_session_available",
+            message="ready",
+            action="",
+        ),
+    )
     monkeypatch.setattr("fsq_agent.application.doctor.check_case_suggestion_readiness", lambda _settings: (True, "ready", ""))
 
 
@@ -98,7 +108,13 @@ def test_provider_failure_keeps_case_test_ready_and_ai_commands_unavailable(tmp_
     _base(monkeypatch, tmp_path, [_platform("web", tmp_path)])
     monkeypatch.setattr(
         "fsq_agent.application.doctor.check_provider_readiness",
-        lambda _settings: (False, "Provider unavailable.", "Configure Provider."),
+        lambda _settings: ProviderReadiness(
+            ready=False,
+            session_status="temporarily_unavailable",
+            code="provider_temporarily_unavailable",
+            message="Provider unavailable.",
+            action="Configure Provider.",
+        ),
     )
 
     result = diagnose_workspace(DoctorRequest(current_directory=tmp_path))

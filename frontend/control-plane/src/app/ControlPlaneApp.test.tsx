@@ -5,7 +5,7 @@ import { controlPlaneClient } from '../api/controlPlaneClient';
 import { ControlPlaneApp } from './ControlPlaneApp';
 
 vi.mock('../api/controlPlaneClient', () => ({
-  controlPlaneClient: { workspaces: vi.fn().mockResolvedValue({ workspaces: [] }), config: vi.fn().mockResolvedValue({ configured: false, provider: null }) },
+  controlPlaneClient: { workspaces: vi.fn().mockResolvedValue({ workspaces: [] }), config: vi.fn().mockResolvedValue({ configured: false, provider: null }), configStatus: vi.fn().mockResolvedValue({ configured: false, provider: null, modelName: null, sessionStatus: 'not_configured', authenticated: false, message: 'Not configured.' }) },
   toApiError: vi.fn((error) => error),
 }));
 
@@ -41,6 +41,7 @@ vi.mock('../features/workspace/WorkspacePage', () => ({
 beforeEach(() => {
   vi.mocked(controlPlaneClient.workspaces).mockResolvedValue({ workspaces: [] });
   vi.mocked(controlPlaneClient.config).mockResolvedValue({ configured: false, provider: null });
+  vi.mocked(controlPlaneClient.configStatus).mockResolvedValue({ configured: false, provider: null, modelName: null, sessionStatus: 'not_configured', authenticated: false, message: 'Not configured.' });
 });
 afterEach(() => vi.restoreAllMocks());
 

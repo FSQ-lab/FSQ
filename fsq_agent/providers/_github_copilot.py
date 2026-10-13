@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from fsq_agent.config import Settings, UserProviderConfig, activate_github_copilot_provider
+from fsq_agent.config import Settings, UserProviderConfig, activate_github_copilot_provider, load_user_provider_config
 from fsq_agent.models import ConfigurationError
 from fsq_agent.providers._client_config import ProviderClientConfig
 
@@ -269,20 +269,33 @@ def list_github_copilot_models(authorization: GitHubCopilotAuthorization) -> tup
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
+        reason = _http_failure_reason(exc.response.status_code)
         raise ConfigurationError(
             "GitHub Copilot model discovery failed.",
-            context={"status_code": exc.response.status_code},
+            context={"provider": "github_copilot", "reason": reason, "status_code": exc.response.status_code},
         ) from exc
     except httpx.TimeoutException as exc:
-        raise ConfigurationError("GitHub Copilot model discovery timed out.") from exc
+        raise ConfigurationError(
+            "GitHub Copilot model discovery timed out.",
+            context={"provider": "github_copilot", "reason": "timeout"},
+        ) from exc
     except httpx.HTTPError as exc:
-        raise ConfigurationError("GitHub Copilot model discovery failed.") from exc
+        raise ConfigurationError(
+            "GitHub Copilot model discovery failed.",
+            context={"provider": "github_copilot", "reason": "network"},
+        ) from exc
     try:
         data = response.json()
     except (TypeError, ValueError) as exc:
-        raise ConfigurationError("GitHub Copilot model response was invalid.") from exc
+        raise ConfigurationError(
+            "GitHub Copilot model response was invalid.",
+            context={"provider": "github_copilot", "reason": "malformed_response"},
+        ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("data"), list):
-        raise ConfigurationError("GitHub Copilot model response was invalid.")
+        raise ConfigurationError(
+            "GitHub Copilot model response was invalid.",
+            context={"provider": "github_copilot", "reason": "malformed_response"},
+        )
     models: list[GitHubCopilotModel] = []
     seen: set[str] = set()
     for candidate in data["data"]:
@@ -292,6 +305,99 @@ def list_github_copilot_models(authorization: GitHubCopilotAuthorization) -> tup
         seen.add(model.id.casefold())
         models.append(model)
     return tuple(models)
+
+
+def list_saved_github_copilot_models(
+    *,
+    user_config_root: str | Path | None = None,
+) -> tuple[GitHubCopilotModel, ...]:
+    try:
+        configured = load_user_provider_config(user_config_root)
+    except ConfigurationError as exc:
+        raise _saved_session_error("authentication") from exc
+    if configured.provider is None or configured.provider.type != "github_copilot":
+        raise _saved_session_error("authentication")
+
+    authorization = _saved_authorization(configured)
+    if authorization is None:
+        authorization = _refresh_saved_authorization(configured, user_config_root)
+    try:
+        return list_github_copilot_models(authorization)
+    except ConfigurationError as exc:
+        if exc.context.get("reason") != "authentication":
+            raise
+    refreshed = _refresh_saved_authorization(configured, user_config_root)
+    return list_github_copilot_models(refreshed)
+
+
+def _saved_authorization(configured: UserProviderConfig) -> GitHubCopilotAuthorization | None:
+    cached = _load_provider_token(configured.provider_token)
+    if cached is None:
+        return None
+    github = configured.github_token or {}
+    expires_at = github.get("expires_at")
+    return GitHubCopilotAuthorization(
+        github_access_token="",
+        github_expires_at=float(expires_at) if isinstance(expires_at, int | float) else None,
+        copilot_token=cached.token,
+        copilot_expires_at=cached.expires_at,
+        plan=cached.plan,
+    )
+
+
+def _refresh_saved_authorization(
+    configured: UserProviderConfig,
+    user_config_root: str | Path | None,
+) -> GitHubCopilotAuthorization:
+    github_payload = configured.github_token
+    github_token = _load_github_token(github_payload)
+    if github_token is None:
+        raise _saved_session_error("authentication")
+    try:
+        plan = _get_copilot_plan(github_token)
+        token = _get_copilot_token(github_token)
+    except ConfigurationError as exc:
+        reason = exc.context.get("reason")
+        if reason in {"authentication", "rate_limited", "timeout", "network", "malformed_response"}:
+            raise
+        raise _saved_session_error("internal") from exc
+    authorization = GitHubCopilotAuthorization(
+        github_access_token=github_token,
+        github_expires_at=None,
+        copilot_token=token.token,
+        copilot_expires_at=token.expires_at,
+        plan=plan,
+    )
+    activate_github_copilot_provider(
+        model=configured.provider.model,
+        github_token=github_payload or {},
+        provider_token={"token": token.token, "expires_at": token.expires_at, "plan": plan},
+        user_config_root=user_config_root,
+    )
+    return authorization
+
+
+def _saved_session_error(reason: str) -> ConfigurationError:
+    messages = {
+        "authentication": "GitHub Copilot sign-in is required.",
+        "internal": "GitHub Copilot saved session could not be used.",
+    }
+    return ConfigurationError(
+        messages.get(reason, messages["internal"]),
+        context={"provider": "github_copilot", "reason": reason},
+    )
+
+
+def _http_failure_reason(status_code: int) -> str:
+    if status_code == 401:
+        return "authentication"
+    if status_code == 403:
+        return "access_denied"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code >= 500:
+        return "network"
+    return "internal"
 
 
 def activate_github_copilot_authorization(
@@ -379,14 +485,35 @@ def _get_copilot_token(github_token: str) -> CopilotToken:
     except httpx.HTTPStatusError as exc:
         raise ConfigurationError(
             "GitHub Copilot token exchange failed. Confirm the signed-in account has Copilot access.",
-            context={"status_code": exc.response.status_code},
+            context={
+                "provider": "github_copilot",
+                "reason": _http_failure_reason(exc.response.status_code),
+                "status_code": exc.response.status_code,
+            },
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise ConfigurationError(
+            "GitHub Copilot token exchange timed out.",
+            context={"provider": "github_copilot", "reason": "timeout"},
         ) from exc
     except httpx.HTTPError as exc:
-        raise ConfigurationError("GitHub Copilot token exchange failed.", context={"error": str(exc)}) from exc
-    data = response.json()
+        raise ConfigurationError(
+            "GitHub Copilot token exchange failed.",
+            context={"provider": "github_copilot", "reason": "network"},
+        ) from exc
+    try:
+        data = response.json()
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            "GitHub Copilot token response was invalid.",
+            context={"provider": "github_copilot", "reason": "malformed_response"},
+        ) from exc
     token = data.get("token")
     if not token:
-        raise ConfigurationError("GitHub Copilot token response did not include a token.")
+        raise ConfigurationError(
+            "GitHub Copilot token response did not include a token.",
+            context={"provider": "github_copilot", "reason": "malformed_response"},
+        )
     return CopilotToken(token=token, expires_at=data.get("expires_at", time.time() + 600))
 
 
@@ -405,12 +532,33 @@ def _get_copilot_plan(github_token: str) -> str:
     except httpx.HTTPStatusError as exc:
         raise ConfigurationError(
             "GitHub Copilot plan detection failed. Confirm the signed-in account has Copilot access.",
-            context={"status_code": exc.response.status_code},
+            context={
+                "provider": "github_copilot",
+                "reason": _http_failure_reason(exc.response.status_code),
+                "status_code": exc.response.status_code,
+            },
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise ConfigurationError(
+            "GitHub Copilot plan detection timed out.",
+            context={"provider": "github_copilot", "reason": "timeout"},
         ) from exc
     except httpx.HTTPError as exc:
-        raise ConfigurationError("GitHub Copilot plan detection failed.", context={"error": str(exc)}) from exc
-    data = response.json()
+        raise ConfigurationError(
+            "GitHub Copilot plan detection failed.",
+            context={"provider": "github_copilot", "reason": "network"},
+        ) from exc
+    try:
+        data = response.json()
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            "GitHub Copilot plan response was invalid.",
+            context={"provider": "github_copilot", "reason": "malformed_response"},
+        ) from exc
     plan = data.get("copilot_plan")
     if plan not in COPILOT_BASE_URLS:
-        raise ConfigurationError("Unknown GitHub Copilot plan.", context={"plan": plan})
+        raise ConfigurationError(
+            "Unknown GitHub Copilot plan.",
+            context={"provider": "github_copilot", "reason": "malformed_response"},
+        )
     return plan

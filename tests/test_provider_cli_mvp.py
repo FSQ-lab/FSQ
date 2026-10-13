@@ -11,7 +11,7 @@ from fsq_agent.adapters.cli._main import main
 from fsq_agent.application import ProviderConfigurationResult, ProviderStatusResult
 from fsq_agent.application.providers import complete_github_configuration, configure_azure_openai, provider_status
 from fsq_agent.config import activate_github_copilot_provider, load_user_provider_config
-from fsq_agent.providers import GitHubCopilotModel
+from fsq_agent.providers import GitHubCopilotModel, ProviderReadiness
 
 
 def test_azure_application_configuration_is_visible_to_ui_config_api(tmp_path: Path) -> None:
@@ -74,7 +74,16 @@ def test_status_reads_github_configuration_written_by_shared_ui_api(tmp_path: Pa
     activate_github_copilot_provider(
         model="gpt-5", github_token={"access_token": "oauth-secret"}, provider_token={"token": "provider-secret", "expires_at": 9999999999, "plan": "individual"}, user_config_root=tmp_path
     )
-    monkeypatch.setattr("fsq_agent.application.providers.check_provider_readiness", lambda _settings: (True, "Provider is ready.", ""))
+    monkeypatch.setattr(
+        "fsq_agent.application.providers.check_provider_readiness",
+        lambda _settings: ProviderReadiness(
+            ready=True,
+            session_status="session_available",
+            code="provider_session_available",
+            message="Provider is ready.",
+            action="",
+        ),
+    )
 
     result = provider_status(user_config_root=tmp_path)
 

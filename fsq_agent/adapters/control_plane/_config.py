@@ -15,10 +15,13 @@ from fsq_agent.application import (
     configure_google_gemini,
     configure_kimi,
     configure_openai,
+    configure_saved_github_copilot_model,
     list_deepseek_models,
     list_google_gemini_models,
     list_kimi_models,
     list_openai_models,
+    list_saved_github_copilot_models,
+    provider_status,
 )
 from fsq_agent.config import load_user_provider_config, save_azure_openai_provider
 from fsq_agent.models import ConfigurationError
@@ -75,9 +78,43 @@ def get_config(user_config_root: Path | None) -> dict[str, Any]:
         presentation = {
             "type": "github_copilot",
             "modelName": provider.model,
-            "authenticated": True,
+            "sessionStatus": "configured",
         }
     return {"configured": True, "provider": presentation}
+
+
+def get_config_status(user_config_root: Path | None) -> dict[str, Any]:
+    status = provider_status(user_config_root=user_config_root)
+    result = {
+        "configured": status.configured,
+        "provider": status.provider,
+        "modelName": status.model,
+        "sessionStatus": status.session_status,
+        "authenticated": status.authenticated,
+        "message": status.message,
+    }
+    if status.action is not None:
+        result["action"] = status.action
+    return result
+
+
+def list_saved_github_config_models(body: dict[str, Any], user_config_root: Path | None) -> dict[str, Any]:
+    _require_exact_fields(body, set())
+    configured = load_user_provider_config(user_config_root)
+    models = list_saved_github_copilot_models(user_config_root=user_config_root)
+    return {
+        "modelName": configured.provider.model if configured.provider is not None else None,
+        "sessionStatus": "session_available",
+        "models": [{"id": model.id, "name": model.name} for model in models],
+    }
+
+
+def save_github_config_model(body: dict[str, Any], user_config_root: Path | None) -> dict[str, Any]:
+    _require_exact_fields(body, {"modelName"})
+    if not isinstance(body["modelName"], str) or not body["modelName"].strip():
+        raise ConfigAPIError(400, "invalid_provider_config", "GitHub Copilot model must be a non-empty string.", "Select an offered model and retry.")
+    configure_saved_github_copilot_model(model=body["modelName"], user_config_root=user_config_root)
+    return get_config(user_config_root)
 
 
 def list_openai_config_models(body: dict[str, Any]) -> dict[str, Any]:
@@ -168,14 +205,14 @@ def test_saved_connection(body: dict[str, Any], user_config_root: Path | None) -
 def map_config_exception(exc: BaseException) -> ConfigAPIError:
     if isinstance(exc, ConfigAPIError):
         return exc
-    if isinstance(exc, ApplicationError) and exc.details.get("provider") in {"openai", "deepseek", "google_gemini", "kimi"}:
+    if isinstance(exc, ApplicationError) and exc.details.get("provider") in {"openai", "deepseek", "google_gemini", "kimi", "github_copilot"}:
         provider = exc.details["provider"]
-        name = {"openai": "OpenAI", "deepseek": "DeepSeek", "google_gemini": "Google Gemini", "kimi": "Kimi"}[provider]
+        name = {"openai": "OpenAI", "deepseek": "DeepSeek", "google_gemini": "Google Gemini", "kimi": "Kimi", "github_copilot": "GitHub Copilot"}[provider]
         mappings = {
             "invalid_candidate": (400, "invalid_provider_config"),
             "model_not_offered": (400, "provider_model_not_offered"),
             "no_eligible_models": (400, "provider_no_eligible_models"),
-            "authentication": (401, "provider_authorization_failed"),
+            "authentication": (401, "provider_sign_in_required" if provider == "github_copilot" else "provider_authorization_failed"),
             "access_denied": (403, "provider_access_denied"),
             "rate_limited": (429, "provider_rate_limited"),
             "timeout": (504, "provider_timeout"),

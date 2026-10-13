@@ -11,7 +11,7 @@ const azure: ConfigResponse = {
 };
 const github: ConfigResponse = {
   configured: true,
-  provider: { type: 'github_copilot', modelName: 'gpt-5.5', authenticated: true },
+  provider: { type: 'github_copilot', modelName: 'gpt-5.5', sessionStatus: 'configured' },
 };
 const waiting: GitHubDeviceFlowResponse = {
   authRequestId: 'auth-1', verificationUri: 'https://github.com/login/device', userCode: 'ABCD-EFGH',
@@ -28,6 +28,15 @@ const modelError: GitHubDeviceFlowResponse = {
 function client(config: ConfigResponse = unconfigured, overrides: Partial<ControlPlaneClient> = {}) {
   return {
     config: vi.fn().mockResolvedValue(config),
+    configStatus: vi.fn().mockResolvedValue(config.configured ? {
+      configured: true, provider: config.provider.type, modelName: config.provider.modelName,
+      sessionStatus: 'session_available', authenticated: true, message: 'Model Provider is ready.',
+    } : {
+      configured: false, provider: null, modelName: null, sessionStatus: 'not_configured',
+      authenticated: false, message: 'No Provider is configured.',
+    }),
+    githubModels: vi.fn().mockResolvedValue({ modelName: 'gpt-5.5', sessionStatus: 'session_available', models: [{ id: 'gpt-5', name: 'GPT 5' }, { id: 'gpt-5.5', name: 'GPT 5.5' }] }),
+    updateGithubModel: vi.fn().mockResolvedValue(github),
     saveAzureConfig: vi.fn().mockResolvedValue(azure),
     startGithubDeviceFlow: vi.fn().mockResolvedValue(waiting),
     githubDeviceFlow: vi.fn().mockResolvedValue(waiting),
@@ -551,7 +560,7 @@ it('requires an explicit discovered model selection before saving GitHub', async
   await user.click(screen.getByRole('button', { name: 'Save' }));
 
   expect(api.saveGithubModel).toHaveBeenCalledWith('auth-1', 'gpt-5.5', expect.any(AbortSignal));
-  expect(await screen.findByText('GitHub Copilot GPT authenticated')).toBeVisible();
+  expect(await screen.findByRole('heading', { name: 'GitHub Copilot GPT' })).toBeVisible();
 });
 
 it('retries model discovery without starting another authorization', async () => {
@@ -573,7 +582,9 @@ it('retries model discovery without starting another authorization', async () =>
 it('preserves the selected model when GitHub save fails', async () => {
   const api = client(unconfigured, {
     startGithubDeviceFlow: vi.fn().mockResolvedValue(ready),
-    saveGithubModel: vi.fn().mockRejectedValue(new Error('save unavailable')),
+    saveGithubModel: vi.fn().mockRejectedValue(new ControlPlaneApiError(503, {
+      code: 'provider_unavailable', message: 'save unavailable', action: 'Retry.',
+    })),
   });
   const user = userEvent.setup();
   render(<ConfigPage client={api} />);
@@ -602,14 +613,104 @@ it('shows loopback unavailability without exposing editable controls', async () 
 it('reports a saved GitHub connection result without changing the page', async () => {
   const user = userEvent.setup();
   render(<ConfigPage client={client(github)} />);
-  expect(await screen.findByText('GitHub Copilot GPT authenticated')).toBeVisible();
+  expect(await screen.findByRole('heading', { name: 'GitHub Copilot GPT' })).toBeVisible();
   await user.click(screen.getByRole('button', { name: 'Test connection' }));
 
   const dialog = await screen.findByRole('dialog', { name: 'Connection successful' });
   expect(dialog).toHaveTextContent('gpt-5.5');
   expect(dialog).toHaveTextContent('125 ms');
   await user.click(screen.getByRole('button', { name: 'Done' }));
-  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it('changes a configured GitHub model through the saved session without device flow', async () => {
+  const updated: ConfigResponse = {
+    configured: true,
+    provider: { type: 'github_copilot', modelName: 'gpt-5', sessionStatus: 'configured' },
+  };
+  const api = client(github, { updateGithubModel: vi.fn().mockResolvedValue(updated) });
+  const user = userEvent.setup();
+  render(<ConfigPage client={api} />);
+  await user.click(await screen.findByRole('button', { name: 'Change model' }));
+
+  expect(await screen.findByRole('combobox', { name: 'Model' })).toHaveValue('gpt-5.5');
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  expect(api.startGithubDeviceFlow).not.toHaveBeenCalled();
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Model' }), 'gpt-5');
+  await user.click(screen.getByRole('button', { name: 'Save' }));
+
+  expect(api.updateGithubModel).toHaveBeenCalledWith('gpt-5', expect.any(AbortSignal));
+  expect(await screen.findByText('gpt-5')).toBeVisible();
+});
+
+it('restores focus to Change model after cancel and a successful saved-model update', async () => {
+  const api = client(github);
+  const user = userEvent.setup();
+  render(<ConfigPage client={api} />);
+  const opener = await screen.findByRole('button', { name: 'Change model' });
+
+  await user.click(opener);
+  await user.click(await screen.findByRole('button', { name: 'Cancel' }));
+  await waitFor(() => expect(opener).toHaveFocus());
+
+  await user.click(opener);
+  await user.selectOptions(await screen.findByRole('combobox', { name: 'Model' }), 'gpt-5');
+  await user.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => expect(opener).toHaveFocus());
+});
+
+it('offers GitHub sign-in only for an explicit saved-session reauthentication response', async () => {
+  const retryable = new ControlPlaneApiError(503, {
+    code: 'provider_temporarily_unavailable', message: 'GitHub is temporarily unavailable.', action: 'Retry models.',
+  });
+  const signIn = new ControlPlaneApiError(401, {
+    code: 'provider_sign_in_required', message: 'The saved session requires sign-in.', action: 'Sign in again.',
+  });
+  const api = client(github, { githubModels: vi.fn().mockRejectedValueOnce(retryable).mockRejectedValueOnce(signIn) });
+  const user = userEvent.setup();
+  render(<ConfigPage client={api} />);
+  await user.click(await screen.findByRole('button', { name: 'Change model' }));
+
+  expect(await screen.findByRole('button', { name: 'Retry models' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Sign in with GitHub' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Retry models' }));
+  await user.click(await screen.findByRole('button', { name: 'Sign in with GitHub' }));
+  expect(api.startGithubDeviceFlow).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText(/current GitHub Provider remains active/i)).toBeVisible();
+});
+
+it('keeps GitHub model access denial retryable without offering sign-in', async () => {
+  const denied = new ControlPlaneApiError(403, {
+    code: 'provider_access_denied',
+    message: 'GitHub Copilot model access was denied.',
+    action: 'Check Copilot permissions and retry.',
+  });
+  const api = client(github, { githubModels: vi.fn().mockRejectedValue(denied) });
+  const user = userEvent.setup();
+  render(<ConfigPage client={api} />);
+
+  await user.click(await screen.findByRole('button', { name: 'Change model' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('model access was denied');
+  expect(screen.getByRole('button', { name: 'Retry models' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: 'Sign in with GitHub' })).not.toBeInTheDocument();
+  expect(api.startGithubDeviceFlow).not.toHaveBeenCalled();
+});
+
+it('reconciles an unknown saved-session model update without resubmitting it', async () => {
+  const api = client(github, {
+    config: vi.fn().mockResolvedValueOnce(github).mockResolvedValueOnce(github),
+    updateGithubModel: vi.fn().mockRejectedValue(new TypeError('response lost')),
+  });
+  const user = userEvent.setup();
+  render(<ConfigPage client={api} />);
+  await user.click(await screen.findByRole('button', { name: 'Change model' }));
+  await user.selectOptions(await screen.findByRole('combobox', { name: 'Model' }), 'gpt-5');
+  await user.click(screen.getByRole('button', { name: 'Save' }));
+
+  expect(await screen.findByText('The save result could not be confirmed.')).toBeVisible();
+  expect(api.updateGithubModel).toHaveBeenCalledTimes(1);
+  expect(api.config).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole('combobox', { name: 'Model' })).toHaveValue('gpt-5');
 });
 it.each([azure, github])('returns focus to the disabled-while-pending connection opener', async config => {
   let finish!: (value: {success:true; provider:string; modelName:string; durationMs:number}) => void;

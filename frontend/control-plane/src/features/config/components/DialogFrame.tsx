@@ -5,17 +5,20 @@ interface DialogFrameProps {
   children: ReactNode;
   onClose: () => void;
   returnFocus?: HTMLElement | null;
+  closeDisabled?: boolean;
 }
 
-export function DialogFrame({ title, children, onClose, returnFocus }: DialogFrameProps) {
+export function DialogFrame({ title, children, onClose, returnFocus, closeDisabled = false }: DialogFrameProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const restoreTimer = useRef<number | null>(null);
   const onCloseRef = useRef(onClose);
+  const closeDisabledRef = useRef(closeDisabled);
   const explicitReturnFocus = useRef(returnFocus);
   explicitReturnFocus.current = returnFocus;
   onCloseRef.current = onClose;
+  closeDisabledRef.current = closeDisabled;
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -33,7 +36,7 @@ export function DialogFrame({ title, children, onClose, returnFocus }: DialogFra
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        onCloseRef.current();
+        if (!closeDisabledRef.current) onCloseRef.current();
         return;
       }
       const controls = focusable();
@@ -49,7 +52,7 @@ export function DialogFrame({ title, children, onClose, returnFocus }: DialogFra
     return () => {
       document.removeEventListener('keydown', onKeyDown);
       observer.disconnect();
-      const opener = returnFocusRef.current;
+      const opener = explicitReturnFocus.current ?? returnFocusRef.current;
       restoreTimer.current = window.setTimeout(() => { if (opener?.isConnected) opener.focus(); }, 0);
     };
   }, []);

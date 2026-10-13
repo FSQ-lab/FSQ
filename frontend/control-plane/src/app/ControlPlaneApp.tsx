@@ -81,12 +81,17 @@ export function ControlPlaneApp() {
   const refreshOverviewProvider = (signal?: AbortSignal) => {
     const request = ++providerRequest.current;
     setOverviewProvider({ status: 'loading' });
-    return controlPlaneClient.config(signal).then((response) => {
+    const configRequest = controlPlaneClient.config(signal);
+    const statusRequest = controlPlaneClient.configStatus(signal).catch(() => null);
+    return Promise.all([configRequest, statusRequest]).then(([response, status]) => {
       if (request !== providerRequest.current || signal?.aborted) return;
       if (!response.configured) {
         setOverviewProvider({ status: 'unconfigured' });
       } else if (response.provider.type === 'github_copilot') {
-        setOverviewProvider({ status: 'configured', provider: 'GitHub Copilot', modelName: response.provider.modelName, authenticated: true });
+        const matchingStatus = status?.configured && status.provider === 'github_copilot' && status.modelName === response.provider.modelName ? status : null;
+        const sessionStatus = matchingStatus?.sessionStatus === 'session_available' ? 'Session available'
+          : matchingStatus?.sessionStatus === 'sign_in_required' ? 'Sign-in required' : 'Temporarily unavailable';
+        setOverviewProvider({ status: 'configured', provider: 'GitHub Copilot', modelName: response.provider.modelName, sessionStatus });
       } else if (response.provider.type === 'openai') {
         setOverviewProvider({ status: 'configured', provider: 'OpenAI', modelName: response.provider.modelName });
       } else if (response.provider.type === 'deepseek') {

@@ -18,10 +18,12 @@ interface ProviderDialogProps {
   onSaveModel: (modelName: string) => Promise<unknown>;
   onCancelAuthentication: () => Promise<void>;
   onClose: () => void;
+  initialStep?: 'choice' | 'github';
+  replacement?: boolean;
 }
 
 export function ProviderDialog(props: ProviderDialogProps) {
-  const [step, setStep] = useState<'choice' | 'github'>('choice');
+  const [step, setStep] = useState<'choice' | 'github'>(props.initialStep ?? 'choice');
   const [modelName, setModelName] = useState('');
   const [copied, setCopied] = useState(false);
   const modelRef = useRef<HTMLSelectElement>(null);
@@ -75,12 +77,14 @@ export function ProviderDialog(props: ProviderDialogProps) {
   </DialogFrame>;
 
   if (props.deviceFlowPending === 'starting' && !flow) return <DialogFrame title="Connect GitHub Copilot GPT" onClose={props.onClose}>
+    {props.replacement && <p>The current GitHub Provider remains active until the new authorization and selected model are saved.</p>}
     <p className="config-status" role="status">Requesting a GitHub device code...</p>
     <div className="config-dialog-actions"><button className="button" type="button" onClick={props.onClose}>Cancel</button></div>
   </DialogFrame>;
 
   if (flow?.status === 'waiting') return <DialogFrame title="Connect GitHub Copilot GPT" onClose={props.onClose}>
     <>
+      {props.replacement && <p>The current GitHub Provider remains active until the new authorization and selected model are saved.</p>}
       <p className="config-status" role="status">Waiting for authorization in GitHub.</p>
       <a ref={verificationRef} className="verification-link" data-dialog-initial href={flow.verificationUri} target="_blank" rel="noreferrer">Open GitHub verification</a>
       <div className="device-code-block">
@@ -102,7 +106,7 @@ export function ProviderDialog(props: ProviderDialogProps) {
     <div className="config-dialog-actions"><button className="button" type="button" onClick={() => void props.onCancelAuthentication()}>Cancel</button></div>
   </DialogFrame>;
 
-  if (flow?.status === 'ready') return <DialogFrame title="Choose GitHub Copilot model" onClose={props.onClose}>
+  if (flow?.status === 'ready') return <DialogFrame title="Choose GitHub Copilot model" onClose={props.onClose} closeDisabled={props.deviceFlowPending === 'saving'}>
     {flow.models.length ? <form onSubmit={(event) => { event.preventDefault(); void props.onSaveModel(modelName); }}>
       <div className="config-field">
         <label htmlFor="github-model-name">Model</label>
@@ -114,7 +118,7 @@ export function ProviderDialog(props: ProviderDialogProps) {
       </div>
       {props.deviceFlowError && <div className="config-error" role="alert"><strong>{props.deviceFlowError.message}</strong><span>{props.deviceFlowError.action}</span></div>}
       <div className="config-dialog-actions">
-        <button className="button" type="button" onClick={() => void props.onCancelAuthentication()}>Cancel</button>
+        <button className="button" type="button" disabled={props.deviceFlowPending === 'saving'} onClick={() => void props.onCancelAuthentication()}>Cancel</button>
         <button className="button button--primary" type="submit" disabled={!modelName || props.deviceFlowPending === 'saving'}>{props.deviceFlowPending === 'saving' ? 'Saving...' : 'Save'}</button>
       </div>
     </form> : <>

@@ -18,12 +18,15 @@ const ready: GitHubDeviceFlowResponse = {
 };
 const githubConfig: ConfigResponse = {
   configured: true,
-  provider: { type: 'github_copilot', modelName: 'gpt-5.5', authenticated: true },
+  provider: { type: 'github_copilot', modelName: 'gpt-5.5', sessionStatus: 'configured' },
 };
 
 function client(overrides: Partial<ControlPlaneClient> = {}) {
   return {
     config: vi.fn().mockResolvedValue(unconfigured),
+    configStatus: vi.fn().mockResolvedValue({ configured: false, provider: null, modelName: null, sessionStatus: 'not_configured', authenticated: false, message: 'No Provider is configured.' }),
+    githubModels: vi.fn().mockResolvedValue({ modelName: 'gpt-5.5', sessionStatus: 'session_available', models: [{ id: 'gpt-5', name: 'GPT 5' }, { id: 'gpt-5.5', name: 'GPT 5.5' }] }),
+    updateGithubModel: vi.fn().mockResolvedValue(githubConfig),
     saveAzureConfig: vi.fn().mockResolvedValue(azure),
     startGithubDeviceFlow: vi.fn().mockResolvedValue(waiting),
     githubDeviceFlow: vi.fn().mockResolvedValue(waiting),

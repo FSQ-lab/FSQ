@@ -1,5 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, model_serializer, model_validator
 
 
@@ -41,11 +43,17 @@ class ProviderStatusResult(BaseModel):
     model: str | None = None
     region: str | None = None
     authenticated: bool
+    session_status: Literal["not_configured", "session_available", "sign_in_required", "temporarily_unavailable"] | None = None
     message: str
     action: str | None = None
 
     @model_validator(mode="after")
     def _validate_region(self):
+        expected_status = "not_configured" if not self.configured else ("session_available" if self.authenticated else "temporarily_unavailable")
+        if self.session_status is None:
+            object.__setattr__(self, "session_status", expected_status)
+        elif self.authenticated != (self.session_status == "session_available"):
+            raise ValueError("authenticated must be true exactly when session_status is session_available")
         if self.provider == "kimi":
             if self.region not in {"cn", "global"}:
                 raise ValueError("Kimi Provider status requires region cn or global")
@@ -61,6 +69,7 @@ class ProviderStatusResult(BaseModel):
             "provider": self.provider,
             "model": self.model,
             "authenticated": self.authenticated,
+            "session_status": self.session_status,
             "message": self.message,
             "action": self.action,
         }

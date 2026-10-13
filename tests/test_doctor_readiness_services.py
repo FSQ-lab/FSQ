@@ -29,9 +29,10 @@ def test_provider_readiness_constructs_and_closes_without_inference(monkeypatch)
     session = _Session()
     monkeypatch.setattr("fsq_agent.providers._factory.prepare_model_provider_session", lambda _settings: session)
 
-    ready, _, _ = check_provider_readiness(object())
+    readiness = check_provider_readiness(object())
 
-    assert ready is True
+    assert readiness.ready is True
+    assert readiness.session_status == "session_available"
     assert session.closed is True
 
 

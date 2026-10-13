@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fsq_agent.ai_services import build_ai_assertion_evaluator
-from fsq_agent.config import Settings
+from fsq_agent.config import Settings, activate_github_copilot_provider
 from fsq_agent.models import AgentRuntimeSettings, ConfigurationError
 from fsq_agent.providers import _github_copilot as copilot
 from fsq_agent.providers import (
@@ -314,6 +314,93 @@ def test_list_copilot_models_rejects_malformed_envelope_without_exposing_token()
         copilot.list_github_copilot_models(_authorization())
 
     assert _fake_copilot_token("pending") not in str(captured.value)
+
+
+def test_saved_copilot_models_refreshes_and_retries_once_after_auth_rejection(tmp_path) -> None:
+    activate_github_copilot_provider(
+        model="gpt-5",
+        github_token={"access_token": _fake_github_token("saved"), "expires_at": time.time() + 3600},
+        provider_token={"token": _fake_copilot_token("cached"), "expires_at": time.time() + 1800, "plan": "individual"},
+        user_config_root=tmp_path,
+    )
+    authentication_error = ConfigurationError(
+        "rejected",
+        context={"provider": "github_copilot", "reason": "authentication"},
+    )
+
+    with (
+        patch.object(
+            copilot,
+            "list_github_copilot_models",
+            side_effect=[authentication_error, (copilot.GitHubCopilotModel(id="gpt-5.2", name="GPT 5.2"),)],
+        ) as discover,
+        patch.object(copilot, "_get_copilot_plan", return_value="business") as get_plan,
+        patch.object(
+            copilot,
+            "_get_copilot_token",
+            return_value=copilot.CopilotToken(token=_fake_copilot_token("fresh"), expires_at=time.time() + 1800),
+        ) as get_token,
+    ):
+        models = copilot.list_saved_github_copilot_models(user_config_root=tmp_path)
+
+    assert models == (copilot.GitHubCopilotModel(id="gpt-5.2", name="GPT 5.2"),)
+    assert discover.call_count == 2
+    get_plan.assert_called_once_with(_fake_github_token("saved"))
+    get_token.assert_called_once_with(_fake_github_token("saved"))
+
+
+def test_saved_copilot_models_does_not_refresh_temporary_failure(tmp_path) -> None:
+    activate_github_copilot_provider(
+        model="gpt-5",
+        github_token={"access_token": _fake_github_token("saved"), "expires_at": time.time() + 3600},
+        provider_token={"token": _fake_copilot_token("cached"), "expires_at": time.time() + 1800, "plan": "individual"},
+        user_config_root=tmp_path,
+    )
+    timeout_error = ConfigurationError(
+        "timeout",
+        context={"provider": "github_copilot", "reason": "timeout"},
+    )
+
+    with (
+        patch.object(copilot, "list_github_copilot_models", side_effect=timeout_error),
+        patch.object(copilot, "_get_copilot_plan") as get_plan,
+        pytest.raises(ConfigurationError) as captured,
+    ):
+        copilot.list_saved_github_copilot_models(user_config_root=tmp_path)
+
+    assert captured.value.context["reason"] == "timeout"
+    get_plan.assert_not_called()
+
+
+def test_saved_copilot_models_does_not_refresh_access_denied(tmp_path) -> None:
+    activate_github_copilot_provider(
+        model="gpt-5",
+        github_token={"access_token": _fake_github_token("saved"), "expires_at": time.time() + 3600},
+        provider_token={"token": _fake_copilot_token("cached"), "expires_at": time.time() + 1800, "plan": "individual"},
+        user_config_root=tmp_path,
+    )
+    denied = ConfigurationError(
+        "denied",
+        context={"provider": "github_copilot", "reason": "access_denied"},
+    )
+
+    with (
+        patch.object(copilot, "list_github_copilot_models", side_effect=denied),
+        patch.object(copilot, "_get_copilot_plan") as get_plan,
+        pytest.raises(ConfigurationError) as captured,
+    ):
+        copilot.list_saved_github_copilot_models(user_config_root=tmp_path)
+
+    assert captured.value.context["reason"] == "access_denied"
+    get_plan.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "reason"),
+    [(401, "authentication"), (403, "access_denied"), (429, "rate_limited"), (503, "network")],
+)
+def test_copilot_http_failure_reason_preserves_auth_and_access_distinction(status_code: int, reason: str) -> None:
+    assert copilot._http_failure_reason(status_code) == reason
 
 
 def test_activate_copilot_authorization_commits_exact_credentials_and_model(tmp_path) -> None:

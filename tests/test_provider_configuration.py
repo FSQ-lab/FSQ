@@ -8,6 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fsq_agent.agent_engine import ModelRequest, ModelResult
+from fsq_agent.application import (
+    ApplicationError,
+    ApplicationErrorCategory,
+    ApplicationErrorCode,
+    list_saved_github_copilot_models,
+)
 from fsq_agent.config import (
     Settings,
     activate_github_copilot_provider,
@@ -88,6 +94,30 @@ def test_runtime_missing_github_credentials_never_starts_device_flow(tmp_path: P
         build_model_provider_session(settings)
 
     request_device_code.assert_not_called()
+
+
+def test_application_preserves_saved_github_access_denied_without_sign_in_guidance(tmp_path: Path) -> None:
+    denied = ConfigurationError(
+        "denied",
+        context={"provider": "github_copilot", "reason": "access_denied"},
+    )
+
+    with (
+        patch(
+            "fsq_agent.application.providers._discover_saved_github_copilot_models",
+            side_effect=denied,
+        ),
+        pytest.raises(ApplicationError) as captured,
+    ):
+        list_saved_github_copilot_models(user_config_root=tmp_path)
+
+    error = captured.value
+    assert error.code == ApplicationErrorCode.PROVIDER_UNAVAILABLE
+    assert error.category == ApplicationErrorCategory.UNAVAILABLE
+    assert error.details == {"provider": "github_copilot", "reason": "access_denied"}
+    assert "access was denied" in error.message
+    assert "permission" in (error.action or "").casefold()
+    assert "sign in" not in f"{error.message} {error.action}".casefold()
 
 
 def test_request_github_device_code_returns_observable_values_without_printing() -> None:

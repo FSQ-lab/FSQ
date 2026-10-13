@@ -77,7 +77,7 @@ def test_released_workspace_and_provider_load_without_data_migration(released_wo
 
     settings = load_workspace_platform_settings(released_workspace, "android")
     validate_provider_settings(settings)
-    assert check_provider_readiness(settings)[0] is True
+    assert check_provider_readiness(settings).ready is True
     refreshed = refresh_provider_settings(settings)
 
     assert settings.agent_runtime.model == refreshed.agent_runtime.model == "fixture-model"

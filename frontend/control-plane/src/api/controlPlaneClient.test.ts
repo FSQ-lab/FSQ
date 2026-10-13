@@ -40,6 +40,9 @@ it.each([
   ['replay video', () => controlPlaneClient.replayVideo('request-1')],
   ['replay upload', () => controlPlaneClient.uploadReplayVideo('request-1', 'video/webm', 'encoded')],
   ['config', () => controlPlaneClient.config()],
+  ['Provider status', () => controlPlaneClient.configStatus()],
+  ['saved GitHub models', () => controlPlaneClient.githubModels()],
+  ['saved GitHub model update', () => controlPlaneClient.updateGithubModel('gpt-5')],
   ['Azure config save', () => controlPlaneClient.saveAzureConfig({ baseUrl: 'https://example.test', modelName: 'model', apiKey: 'key' })],
   ['GitHub device-flow start', () => controlPlaneClient.startGithubDeviceFlow()],
   ['GitHub device-flow status', () => controlPlaneClient.githubDeviceFlow('auth-1')],
@@ -82,6 +85,51 @@ it('rejects environment values in the workspace registry projection', async () =
   await expect(controlPlaneClient.workspaces()).rejects.toMatchObject({
     body: expect.objectContaining({ code: 'invalid_response' }),
   });
+});
+
+it('strictly separates saved GitHub configuration from session readiness', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        configured: true,
+        provider: { type: 'github_copilot', modelName: 'gpt-5.2', sessionStatus: 'configured' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        configured: true, provider: 'github_copilot', modelName: 'gpt-5.2',
+        sessionStatus: 'sign_in_required', authenticated: false,
+        message: 'The saved Provider session requires sign-in.', action: 'Sign in again.',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(controlPlaneClient.config()).resolves.toMatchObject({
+      provider: { sessionStatus: 'configured' },
+    });
+    await expect(controlPlaneClient.configStatus()).resolves.toMatchObject({
+      sessionStatus: 'sign_in_required',
+    });
+
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      configured: true,
+      provider: { type: 'github_copilot', modelName: 'gpt-5.2', authenticated: true },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    await expect(controlPlaneClient.config()).rejects.toMatchObject({ body: { code: 'invalid_response' } });
+});
+
+it('uses saved-session GitHub model endpoints and validates their secret-free shapes', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        modelName: 'gpt-5', sessionStatus: 'session_available',
+        models: [{ id: 'gpt-5', name: 'GPT 5' }, { id: 'gpt-5.2', name: 'GPT 5.2' }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        configured: true,
+        provider: { type: 'github_copilot', modelName: 'gpt-5.2', sessionStatus: 'configured' },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+
+    await expect(controlPlaneClient.githubModels()).resolves.toMatchObject({ modelName: 'gpt-5' });
+    await expect(controlPlaneClient.updateGithubModel('gpt-5.2')).resolves.toMatchObject({
+      provider: { modelName: 'gpt-5.2' },
+    });
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/control-plane/config/github/models', expect.objectContaining({ method: 'POST', body: '{}' }));
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/control-plane/config/github/model', expect.objectContaining({ method: 'PUT', body: '{"modelName":"gpt-5.2"}' }));
 });
 
 it('accepts unavailable workspace platforms without optional macOS diagnostic flags', async () => {
@@ -294,19 +342,19 @@ it('rejects an OpenAI configuration with a custom endpoint', async () => {
 it('accepts Config responses without admitting GitHub token fields into the contract', async () => {
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
     configured: true,
-    provider: { type: 'github_copilot', modelName: 'gpt-5.5', authenticated: true },
+    provider: { type: 'github_copilot', modelName: 'gpt-5.5', sessionStatus: 'configured' },
   }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
 
   await expect(controlPlaneClient.config()).resolves.toEqual({
     configured: true,
-    provider: { type: 'github_copilot', modelName: 'gpt-5.5', authenticated: true },
+    provider: { type: 'github_copilot', modelName: 'gpt-5.5', sessionStatus: 'configured' },
   });
 });
 
 it('rejects a GitHub Config projection containing an unexpected token field', async () => {
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
     configured: true,
-    provider: { type: 'github_copilot', modelName: 'gpt-5.5', authenticated: true, accessToken: 'must-not-enter-state' },
+    provider: { type: 'github_copilot', modelName: 'gpt-5.5', sessionStatus: 'configured', accessToken: 'must-not-enter-state' },
   }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
 
   await expect(controlPlaneClient.config()).rejects.toMatchObject({

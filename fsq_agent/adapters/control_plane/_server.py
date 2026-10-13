@@ -29,15 +29,18 @@ from ._cases import discover_cases, resolve_case
 from ._config import (
     ConfigAPIError,
     get_config,
+    get_config_status,
     list_deepseek_config_models,
     list_google_gemini_config_models,
     list_kimi_config_models,
     list_openai_config_models,
+    list_saved_github_config_models,
     map_config_exception,
     require_config_access,
     require_same_origin_write,
     save_azure_config,
     save_deepseek_config,
+    save_github_config_model,
     save_google_gemini_config,
     save_kimi_config,
     save_openai_config,
@@ -280,6 +283,9 @@ class ControlPlaneServer:
             if path == f"{_API_PREFIX}/config":
                 self._require_config_access(peer_host)
                 return 200, get_config(self.options.user_config_root), dict(_JSON_HEADERS)
+            if path == f"{_API_PREFIX}/config/status":
+                self._require_config_access(peer_host)
+                return 200, get_config_status(self.options.user_config_root), dict(_JSON_HEADERS)
             if path == f"{_API_PREFIX}/workspaces":
                 self._require_config_access(peer_host)
                 return 200, list_workspaces(self.options.user_config_root), dict(_JSON_HEADERS)
@@ -585,6 +591,8 @@ class ControlPlaneServer:
                 return 200, list_google_gemini_config_models(body)
             if method == "POST" and path == f"{_API_PREFIX}/config/kimi/models":
                 return 200, list_kimi_config_models(body)
+            if method == "POST" and path == f"{_API_PREFIX}/config/github/models":
+                return 200, list_saved_github_config_models(body, self.options.user_config_root)
             if method == "PUT" and path == f"{_API_PREFIX}/config/google-gemini":
                 return 200, save_google_gemini_config(body, self.options.user_config_root)
             if method == "PUT" and path == f"{_API_PREFIX}/config/kimi":
@@ -595,6 +603,8 @@ class ControlPlaneServer:
                 return 200, save_deepseek_config(body, self.options.user_config_root)
             if method == "PUT" and path == f"{_API_PREFIX}/config/azure":
                 return 200, save_azure_config(body, self.options.user_config_root)
+            if method == "PUT" and path == f"{_API_PREFIX}/config/github/model":
+                return 200, save_github_config_model(body, self.options.user_config_root)
             if method == "POST" and path == f"{_API_PREFIX}/config/github/device-flow":
                 return 202, self._provider_auth.start(body)
             models_auth_request_id = _device_flow_models_route_or_none(path)

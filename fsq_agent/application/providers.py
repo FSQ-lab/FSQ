@@ -15,6 +15,7 @@ from fsq_agent.config import (
     save_google_gemini_provider,
     save_kimi_provider,
     save_openai_provider,
+    update_github_copilot_model,
 )
 from fsq_agent.models import ConfigurationError
 from fsq_agent.providers import (
@@ -34,6 +35,9 @@ from fsq_agent.providers import list_deepseek_models as _discover_deepseek_model
 from fsq_agent.providers import list_google_gemini_models as _discover_google_gemini_models
 from fsq_agent.providers import list_kimi_models as _discover_kimi_models
 from fsq_agent.providers import list_openai_models as _discover_openai_models
+from fsq_agent.providers import (
+    list_saved_github_copilot_models as _discover_saved_github_copilot_models,
+)
 
 _OPENAI_FAILURES = {
     "invalid_candidate": ("OpenAI model or API key is invalid.", "Complete the model and API key fields and retry."),
@@ -266,21 +270,92 @@ def complete_github_configuration(
     return ProviderConfigurationResult(provider="github_copilot", model=saved.provider.model if saved.provider is not None else selected)
 
 
+_GITHUB_FAILURES = {
+    "authentication": ("GitHub Copilot sign-in is required.", "Sign in again from Control Plane Settings."),
+    "access_denied": ("GitHub Copilot model access was denied.", "Check the account or organization Copilot permissions, then retry."),
+    "rate_limited": ("GitHub Copilot model discovery was rate limited.", "Wait and retry loading models."),
+    "timeout": ("GitHub Copilot model discovery timed out.", "Check network access and retry."),
+    "network": ("GitHub Copilot model discovery is temporarily unavailable.", "Check network access and retry."),
+    "malformed_response": ("GitHub Copilot returned an invalid model response.", "Retry model discovery later."),
+    "model_not_offered": ("The selected GitHub Copilot model is not available.", "Reload models and select an offered model."),
+    "storage": ("GitHub Copilot model configuration could not be stored.", "Check local configuration permissions and retry."),
+    "internal": ("GitHub Copilot model configuration could not be completed.", "Reload the current configuration before retrying."),
+}
+
+
+def _github_error(reason: object) -> ApplicationError:
+    normalized = reason if isinstance(reason, str) and reason in _GITHUB_FAILURES else "internal"
+    message, action = _GITHUB_FAILURES[normalized]
+    if normalized in {"model_not_offered", "storage"}:
+        code, category = ApplicationErrorCode.CONFIGURATION_INVALID, ApplicationErrorCategory.CONFIGURATION
+    elif normalized == "internal":
+        code, category = ApplicationErrorCode.INTERNAL_ERROR, ApplicationErrorCategory.INTERNAL
+    else:
+        code, category = ApplicationErrorCode.PROVIDER_UNAVAILABLE, ApplicationErrorCategory.UNAVAILABLE
+    return ApplicationError(
+        code=code,
+        category=category,
+        message=message,
+        action=action,
+        details={"provider": "github_copilot", "reason": normalized},
+    )
+
+
+def list_saved_github_copilot_models(
+    *,
+    user_config_root: str | Path | None = None,
+) -> tuple[GitHubCopilotModel, ...]:
+    try:
+        return _discover_saved_github_copilot_models(user_config_root=user_config_root)
+    except ConfigurationError as error:
+        raise _github_error(error.context.get("reason")) from None
+    except Exception as error:
+        if isinstance(error, ApplicationError):
+            raise
+        raise _github_error("internal") from None
+
+
+def configure_saved_github_copilot_model(
+    *,
+    model: str,
+    user_config_root: str | Path | None = None,
+) -> ProviderConfigurationResult:
+    normalized = model.strip() if isinstance(model, str) else ""
+    if not normalized:
+        raise _github_error("model_not_offered")
+    models = list_saved_github_copilot_models(user_config_root=user_config_root)
+    if normalized not in {item.id for item in models}:
+        raise _github_error("model_not_offered")
+    try:
+        saved = update_github_copilot_model(model=normalized, user_config_root=user_config_root)
+    except ConfigurationError as error:
+        raise _github_error(error.context.get("reason")) from None
+    return ProviderConfigurationResult(provider="github_copilot", model=saved.provider.model if saved.provider is not None else normalized)
+
+
 def provider_status(*, user_config_root: str | Path | None = None) -> ProviderStatusResult:
     try:
         configured = load_user_provider_config(user_config_root)
         if configured.provider is None:
-            return ProviderStatusResult(status="unavailable", configured=False, authenticated=False, message="No model Provider is configured.", action="Run fsq providers configure.")
-        ready, message, action = check_provider_readiness(refresh_provider_settings(Settings(), user_config_root))
+            return ProviderStatusResult(
+                status="unavailable",
+                configured=False,
+                authenticated=False,
+                session_status="not_configured",
+                message="No model Provider is configured.",
+                action="Run fsq providers configure.",
+            )
+        readiness = check_provider_readiness(refresh_provider_settings(Settings(), user_config_root))
         return ProviderStatusResult(
-            status="ready" if ready else "unavailable",
+            status="ready" if readiness.ready else "unavailable",
             configured=True,
             provider=configured.provider.type,
             model=configured.provider.model,
             region=getattr(configured.provider, "region", None),
-            authenticated=ready,
-            message=message,
-            action=action or None,
+            authenticated=readiness.ready,
+            session_status=readiness.session_status,
+            message=readiness.message,
+            action=readiness.action or None,
         )
     except Exception as exc:
         raise _provider_error("Provider status could not be read.", "Repair the user Provider configuration and retry.", configuration=True) from exc
@@ -307,10 +382,12 @@ __all__ = [
     "configure_google_gemini",
     "configure_kimi",
     "configure_openai",
+    "configure_saved_github_copilot_model",
     "list_deepseek_models",
     "list_google_gemini_models",
     "list_kimi_models",
     "list_openai_models",
+    "list_saved_github_copilot_models",
     "provider_status",
     "request_github_device_code",
 ]

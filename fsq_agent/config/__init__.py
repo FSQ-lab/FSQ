@@ -24,6 +24,7 @@ from fsq_agent.config._user_provider import (
     save_google_gemini_provider,
     save_kimi_provider,
     save_openai_provider,
+    update_github_copilot_model,
 )
 from fsq_agent.config._workspace import (
     add_workspace_platform,
@@ -78,6 +79,7 @@ __all__ = [
     "save_google_gemini_provider",
     "save_kimi_provider",
     "save_openai_provider",
+    "update_github_copilot_model",
     "update_workspace_platform",
     "validate_provider_settings",
     "validate_runtime_settings",

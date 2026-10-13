@@ -83,6 +83,85 @@ def test_config_azure_put_and_get_return_complete_local_projection(tmp_path: Pat
     }
 
 
+def test_config_github_projection_and_status_do_not_assume_authentication(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    activate_github_copilot_provider(
+        model="gpt-5",
+        github_token={"access_token": "oauth", "expires_at": 1},
+        provider_token={"token": "provider", "expires_at": 1, "plan": "individual"},
+        user_config_root=tmp_path / "user",
+    )
+
+    config_status, config, _ = server.handle_get("/api/control-plane/config", peer_host="127.0.0.1")
+    status_status, provider_status, status_headers = server.handle_get("/api/control-plane/config/status", peer_host="127.0.0.1")
+
+    assert config_status == status_status == 200
+    assert config["provider"] == {
+        "type": "github_copilot",
+        "modelName": "gpt-5",
+        "sessionStatus": "configured",
+    }
+    assert provider_status["configured"] is True
+    assert provider_status["sessionStatus"] == "sign_in_required"
+    assert provider_status["authenticated"] is False
+    assert status_headers["Cache-Control"] == "no-store"
+
+
+def test_saved_github_model_endpoints_validate_and_return_authoritative_config(tmp_path: Path) -> None:
+    server = _server(tmp_path)
+    activate_github_copilot_provider(
+        model="gpt-5",
+        github_token={"access_token": "oauth"},
+        provider_token={"token": "provider", "expires_at": 9999999999, "plan": "individual"},
+        user_config_root=tmp_path / "user",
+    )
+    offered = (
+        GitHubCopilotModel(id="gpt-5", name="GPT 5"),
+        GitHubCopilotModel(id="gpt-5.2", name="GPT 5.2"),
+    )
+
+    with (
+        patch("fsq_agent.adapters.control_plane._config.list_saved_github_copilot_models", return_value=offered),
+        patch("fsq_agent.application.providers._discover_saved_github_copilot_models", return_value=offered),
+    ):
+        list_status, listed = server.handle_post("/api/control-plane/config/github/models", {}, peer_host="127.0.0.1")
+        invalid_status, invalid = server.handle_post("/api/control-plane/config/github/models", {"extra": True}, peer_host="127.0.0.1")
+        save_status, saved = server.handle_put(
+            "/api/control-plane/config/github/model",
+            {"modelName": "gpt-5.2"},
+            peer_host="127.0.0.1",
+        )
+
+    assert list_status == save_status == 200
+    assert listed["modelName"] == "gpt-5"
+    assert listed["sessionStatus"] == "session_available"
+    assert listed["models"] == [{"id": "gpt-5", "name": "GPT 5"}, {"id": "gpt-5.2", "name": "GPT 5.2"}]
+    assert invalid_status == 400
+    assert invalid["code"] == "invalid_request"
+    assert saved["provider"]["modelName"] == "gpt-5.2"
+    assert saved["provider"]["sessionStatus"] == "configured"
+
+
+def test_saved_github_models_maps_access_denied_without_requesting_sign_in(tmp_path: Path) -> None:
+    from fsq_agent.application import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode
+
+    server = _server(tmp_path)
+    denied = ApplicationError(
+        code=ApplicationErrorCode.PROVIDER_UNAVAILABLE,
+        category=ApplicationErrorCategory.UNAVAILABLE,
+        message="GitHub Copilot model access was denied.",
+        action="Check the account or organization Copilot permissions, then retry.",
+        details={"provider": "github_copilot", "reason": "access_denied"},
+    )
+
+    with patch("fsq_agent.adapters.control_plane._config.list_saved_github_copilot_models", side_effect=denied):
+        status, error = server.handle_post("/api/control-plane/config/github/models", {}, peer_host="127.0.0.1")
+
+    assert status == 403
+    assert error["code"] == "provider_access_denied"
+    assert "sign in" not in str(error).casefold()
+
+
 def test_config_rejects_nonloopback_bind_peer_and_cross_origin_write(tmp_path: Path) -> None:
     nonloopback_server = _server(tmp_path / "bind", host="0.0.0.0")  # noqa: S104 - validates the rejection gate without binding.
     bind_status, bind_error, _ = nonloopback_server.handle_get("/api/control-plane/config", peer_host="127.0.0.1")
@@ -218,7 +297,7 @@ def test_device_flow_discovers_models_and_saves_only_an_offered_selection(tmp_pa
     assert rejected_status == 400
     assert rejected["code"] == "model_not_offered"
     assert save_status == 200
-    assert saved["provider"] == {"type": "github_copilot", "modelName": "gpt-5.1", "authenticated": True}
+    assert saved["provider"] == {"type": "github_copilot", "modelName": "gpt-5.1", "sessionStatus": "configured"}
 
 
 def test_device_flow_save_failure_preserves_retryable_ready_state(tmp_path: Path) -> None:

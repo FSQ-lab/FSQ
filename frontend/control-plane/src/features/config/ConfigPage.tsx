@@ -8,6 +8,7 @@ import { GoogleGeminiConfigForm } from './components/GoogleGeminiConfigForm';
 import { KimiConfigForm, type KimiDraftPayload } from './components/KimiConfigForm';
 import { ConnectionResultDialog } from './components/ConnectionResultDialog';
 import { ProviderDialog } from './components/ProviderDialog';
+import { DialogFrame } from './components/DialogFrame';
 import { useProviderConfig } from './hooks/useProviderConfig';
 
 interface ConfigPageProps {
@@ -62,15 +63,20 @@ function copyDraft(draft: ConfigDraft | null): ConfigDraft | null {
 export function ConfigPage({ client, onDirtyChange, onSavePendingChange, onSaveUncertainChange }: ConfigPageProps) {
   const provider = useProviderConfig(client);
   const connectionOpener = useRef<HTMLElement | null>(null);
+  const githubModelOpener = useRef<HTMLButtonElement | null>(null);
   const [draft, setDraft] = useState<ConfigDraft | null>(null);
   const appliedConfig = useRef<ConfigResponse | null>(null);
   const [providerDialogOpen, setProviderDialogOpen] = useState(false);
+  const [providerDialogInitialStep, setProviderDialogInitialStep] = useState<'choice' | 'github'>('choice');
+  const [githubModelDialogOpen, setGithubModelDialogOpen] = useState(false);
+  const [githubModelSelection, setGithubModelSelection] = useState('');
   const loadedProvider = provider.config.data?.configured ? provider.config.data.provider : null;
   const loadedDraft = useMemo(() => persistedDraft(provider.config.data), [provider.config.data]);
   const dirty = draft !== null && (loadedDraft?.type === draft.type ? !sameDraft(draft, loadedDraft) : draftHasValue(draft));
   const replacementDraft = draft !== null && loadedProvider !== null && loadedProvider.type !== draft.type;
   const recoveryBlocked = provider.saveRecovery === 'loading' || provider.saveRecovery === 'unavailable';
-  const saveUncertain = provider.saveRecovery !== 'none';
+  const recoveryNotice = provider.saveRecovery !== 'none';
+  const saveUncertain = recoveryBlocked;
   const deviceBusy = provider.deviceFlowPending !== null;
 
   useEffect(() => {
@@ -107,7 +113,24 @@ export function ConfigPage({ client, onDirtyChange, onSavePendingChange, onSaveU
     if (recoveryBlocked || !confirmDiscard()) return;
     discardDraft();
     void provider.clearDeviceFlow();
+    setProviderDialogInitialStep('choice');
     setProviderDialogOpen(true);
+  };
+  const signInAgain = () => {
+    if (recoveryBlocked || provider.savePending || deviceBusy || provider.testPending) return;
+    setGithubModelDialogOpen(false);
+    provider.clearGithubModels();
+    setProviderDialogInitialStep('github');
+    setProviderDialogOpen(true);
+    void provider.startGithub();
+  };
+  const changeGithubModel = () => {
+    if (recoveryBlocked || provider.savePending || deviceBusy || provider.testPending) return;
+    setGithubModelSelection('');
+    setGithubModelDialogOpen(true);
+    void provider.loadGithubModels().then((models) => {
+      if (models?.models.some((model) => model.id === models.modelName)) setGithubModelSelection(models.modelName);
+    });
   };
   const cancelDraft = () => {
     if (confirmDiscard()) discardDraft();
@@ -193,8 +216,8 @@ export function ConfigPage({ client, onDirtyChange, onSavePendingChange, onSaveU
     setProviderDialogOpen(false);
   };
 
-  if (provider.config.state === 'loading' && !provider.config.data && !saveUncertain) return <div className="config-page"><p className="config-loading" role="status">Loading Provider configuration...</p></div>;
-  if (provider.config.error && !provider.config.data && !saveUncertain) {
+  if (provider.config.state === 'loading' && !provider.config.data && !recoveryNotice) return <div className="config-page"><p className="config-loading" role="status">Loading Provider configuration...</p></div>;
+  if (provider.config.error && !provider.config.data && !recoveryNotice) {
     const unavailable = provider.config.error.code === 'config_unavailable';
     return <div className="config-page"><section className="config-state" aria-labelledby="config-error-title">
       <p className="config-eyebrow">{unavailable ? 'Local access required' : 'Configuration unavailable'}</p>
@@ -206,9 +229,15 @@ export function ConfigPage({ client, onDirtyChange, onSavePendingChange, onSaveU
 
   const configured = provider.config.data?.configured === true;
   const discoveryLoading = provider.openaiModels.state === 'loading' || provider.deepseekModels.state === 'loading' || provider.geminiModels.state === 'loading' || provider.kimiModels.state === 'loading';
-  const canTest = configured && !dirty && !replacementDraft && !provider.savePending && !deviceBusy && !provider.testPending && !recoveryBlocked && !discoveryLoading;
+  const githubDiscoveryLoading = provider.githubModels.state === 'loading';
+  const githubStatus = loadedProvider?.type === 'github_copilot'
+    && provider.providerStatus.data?.configured
+    && provider.providerStatus.data.provider === 'github_copilot'
+    && provider.providerStatus.data.modelName === loadedProvider.modelName
+    ? provider.providerStatus.data : null;
+  const canTest = configured && !dirty && !replacementDraft && !provider.savePending && !deviceBusy && !provider.testPending && !recoveryBlocked && !discoveryLoading && !githubDiscoveryLoading;
   return <div className="config-page">
-    {saveUncertain && <div className="config-recovery" role="status">
+    {recoveryNotice && <div className="config-recovery" role="status">
       <strong>The save result could not be confirmed.</strong>
       <p>{provider.saveRecovery === 'loading' ? 'Reading current configuration...' : provider.saveRecovery === 'unavailable' ? 'Current configuration is unavailable. Changes remain blocked.' : 'Current configuration reloaded. The earlier request may still complete. Remaining changes are unsaved.'}</p>
       <button className="button" type="button" disabled={provider.savePending || provider.saveRecovery === 'loading'} onClick={() => void provider.reconcileConfig()}>Reload configuration</button>
@@ -261,10 +290,23 @@ export function ConfigPage({ client, onDirtyChange, onSavePendingChange, onSaveU
       onTest={testConnection}
     /> : loadedProvider?.type === 'github_copilot' ? <section className="config-provider" aria-labelledby="github-provider-title">
       <div className="config-section-heading">
-        <div><p className="config-eyebrow">Active provider</p><h1 id="github-provider-title">GitHub Copilot GPT authenticated</h1></div>
-        <button className="button" type="button" disabled={recoveryBlocked || provider.savePending} onClick={openProviderDialog}>Change provider</button>
+        <div><p className="config-eyebrow">Active provider</p><h1 id="github-provider-title">GitHub Copilot GPT</h1></div>
+        <button className="button" type="button" disabled={recoveryBlocked || provider.savePending || deviceBusy || githubDiscoveryLoading || provider.testPending} onClick={openProviderDialog}>Change provider</button>
       </div>
-      <dl className="provider-details"><div><dt>Provider</dt><dd>GitHub Copilot GPT</dd></div><div><dt>Model</dt><dd className="mono">{loadedProvider.modelName}</dd></div><div><dt>Status</dt><dd><span className="config-status-dot" />Authenticated</dd></div></dl>
+      <dl className="provider-details"><div><dt>Provider</dt><dd>GitHub Copilot GPT</dd></div><div><dt>Model</dt><dd className="mono">{loadedProvider.modelName}</dd></div><div><dt>Configuration</dt><dd>Configured</dd></div><div><dt>Session</dt><dd>
+        {provider.providerStatus.state === 'loading' ? 'Checking session…'
+          : provider.providerStatus.state === 'error' ? 'Temporarily unavailable'
+            : githubStatus?.sessionStatus === 'session_available' ? 'Session available'
+              : githubStatus?.sessionStatus === 'sign_in_required' ? 'Sign-in required'
+                : githubStatus?.sessionStatus === 'temporarily_unavailable' ? 'Temporarily unavailable' : 'Temporarily unavailable'}
+      </dd></div></dl>
+      {provider.providerStatus.error && <div className="config-error" role="alert"><strong>Session status is temporarily unavailable.</strong><span>{provider.providerStatus.error.action}</span><button className="button" type="button" onClick={() => void provider.reloadProviderStatus()}>Retry status</button></div>}
+      {githubStatus && githubStatus.sessionStatus !== 'session_available' && <div className="config-error" role="status"><strong>{githubStatus.message}</strong>{githubStatus.action && <span>{githubStatus.action}</span>}</div>}
+      {provider.providerStatus.state === 'ready' && !githubStatus && <div className="config-error" role="status"><strong>Session status is temporarily unavailable.</strong><span>Retry the status check without changing the saved Provider.</span><button className="button" type="button" onClick={() => void provider.reloadProviderStatus()}>Retry status</button></div>}
+      <div className="config-dialog-actions">
+        <button ref={githubModelOpener} className="button" type="button" disabled={recoveryBlocked || provider.savePending || deviceBusy || githubDiscoveryLoading || provider.testPending} onClick={changeGithubModel}>Change model</button>
+        <button className="button" type="button" disabled={recoveryBlocked || provider.savePending || deviceBusy || githubDiscoveryLoading || provider.testPending} onClick={signInAgain}>Sign in again / Change account</button>
+      </div>
       <div className="config-test-actions"><div><strong>Connection check</strong><span>Send a fixed minimal request using only the saved configuration.</span></div><button className="button" type="button" disabled={!canTest} onClick={testConnection}>{provider.testPending ? 'Testing...' : 'Test connection'}</button></div>
     </section> : <section className="config-state" aria-labelledby="empty-config-title">
       <p className="config-eyebrow">Model provider</p><h1 id="empty-config-title">No Provider configured</h1>
@@ -281,7 +323,31 @@ export function ConfigPage({ client, onDirtyChange, onSavePendingChange, onSaveU
       onStartGithub={provider.startGithub} onRetryModels={provider.retryGithubModels}
       onSaveModel={provider.saveGithubModel} onCancelAuthentication={cancelAuthentication}
       onClose={() => void closeProviderDialog()}
+      initialStep={providerDialogInitialStep}
+      replacement={loadedProvider?.type === 'github_copilot'}
     />}
+    {githubModelDialogOpen && <DialogFrame title="Change GitHub Copilot model" returnFocus={githubModelOpener.current} closeDisabled={provider.savePending || recoveryBlocked} onClose={() => {
+      if (provider.savePending || recoveryBlocked) return;
+      provider.clearGithubModels();
+      setGithubModelDialogOpen(false);
+    }}>
+      {provider.githubModels.state === 'loading' && <p role="status">Loading models using the saved GitHub account…</p>}
+      {provider.githubModels.state === 'ready' && (provider.githubModels.data.models.length ? <form onSubmit={(event) => {
+        event.preventDefault();
+        void provider.saveSavedGithubModel(githubModelSelection).then((saved) => {
+          if (saved) setGithubModelDialogOpen(false);
+        });
+      }}>
+        <div className="config-field"><label htmlFor="saved-github-model">Model</label><select id="saved-github-model" required value={githubModelSelection} onChange={(event) => setGithubModelSelection(event.target.value)}>
+          <option value="">Select a model</option>
+          {provider.githubModels.data.models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+        </select><small>Models available to the saved GitHub account.</small></div>
+        {provider.saveError && <div className="config-error" role="alert"><strong>{provider.saveError.message}</strong><span>{provider.saveError.action}</span></div>}
+        <div className="config-dialog-actions"><button className="button" type="button" disabled={provider.savePending} onClick={() => { provider.clearGithubModels(); setGithubModelDialogOpen(false); }}>Cancel</button><button className="button button--primary" type="submit" disabled={provider.savePending || !githubModelSelection || githubModelSelection === provider.githubModels.data.modelName}>{provider.savePending ? 'Saving…' : 'Save'}</button></div>
+      </form> : <><div className="config-error" role="status"><strong>No eligible models are available.</strong><span>The saved Provider is unchanged.</span></div><button className="button" type="button" onClick={() => void provider.loadGithubModels()}>Retry models</button></>)}
+      {provider.githubModels.state === 'error' && <><div className="config-error" role="alert"><strong>{provider.githubModels.error.message}</strong><span>{provider.githubModels.error.action}</span></div><button className="button" type="button" onClick={() => void provider.loadGithubModels()}>Retry models</button></>}
+      {provider.githubModels.state === 'sign_in_required' && <><div className="config-error" role="alert"><strong>{provider.githubModels.error.message}</strong><span>{provider.githubModels.error.action}</span></div><button className="button button--primary" type="button" onClick={signInAgain}>Sign in with GitHub</button></>}
+    </DialogFrame>}
     {provider.connectionResult && <ConnectionResultDialog result={provider.connectionResult} onClose={provider.dismissConnectionResult} returnFocus={connectionOpener.current} />}
   </div>;
 }

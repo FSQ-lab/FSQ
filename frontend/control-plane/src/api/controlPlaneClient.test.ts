@@ -84,6 +84,33 @@ it('rejects environment values in the workspace registry projection', async () =
   });
 });
 
+it('accepts unavailable workspace platforms without optional macOS diagnostic flags', async () => {
+  const payload = {
+    workspaces: [
+      {
+        name: 'ready-web', rootPath: '/projects/ready-web', status: 'available', message: 'Workspace is available.',
+        platforms: [{
+          platform: 'web', configPath: '/projects/ready-web/.fsq/config/config.web.yaml',
+          status: 'available', message: 'Platform configuration is available.',
+        }],
+      },
+      {
+        name: 'broken-mac', rootPath: '/projects/broken-mac', status: 'unavailable',
+        message: 'No valid platform configuration is available.', action: 'Add or repair a supported platform configuration.',
+        platforms: [{
+          platform: 'macos', configPath: '/projects/broken-mac/.fsq/config/config.macos.yaml',
+          status: 'unavailable', message: 'Platform configuration is unavailable.', action: 'Repair config.macos.yaml manually.',
+        }],
+      },
+    ],
+  };
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(payload), {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  }));
+
+  await expect(controlPlaneClient.workspaces()).resolves.toEqual(payload);
+});
+
 it('encodes explicit workspace and platform identity in Devices discovery requests', async () => {
   const ready = { status: 'ready', message: 'Ready.', action: '' };
   const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({

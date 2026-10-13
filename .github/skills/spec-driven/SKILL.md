@@ -14,7 +14,7 @@ Turn an explicitly supplied confirmed project design document or direct project 
 
 Run this skill only when the user explicitly invokes `/spec-driven` with either a confirmed project design document path or a direct project change request. Do not infer invocation or skill input from ordinary discussion, editor state, a natural-language project edit request outside the skill invocation, a skill-name mention, or prose approval. If the explicit invocation or a non-empty input is absent, stop without writing and ask the user to invoke `/spec-driven <confirmed-design-document-path | direct-project-change-request>`.
 
-This skill does not handle workflow-control-only maintenance. If the supplied input changes only `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, `.github/prompts/**`, or `.github/skills/**`, stop and explain that a clear ordinary edit request is sufficient.
+This skill does not handle workflow-control-only maintenance. If the supplied input changes only `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, `.github/agents/**`, `.github/prompts/**`, or `.github/skills/**`, stop and explain that a clear ordinary edit request is sufficient.
 
 ## Core Rule
 
@@ -221,6 +221,19 @@ After required project SPEC confirmation or a recorded no-SPEC-delta decision:
 5. For behavior changes, write or update tests before production code unless the user explicitly accepts a generated-code or throwaway exception.
 6. For frontend work, follow the confirmed framework/language contract and the staged frontend implementation rules; do not mix a partial migration into an existing exception.
 7. Run the repository's available verification commands and the applicable frontend verification checklist.
+
+## Agent Team Orchestration
+
+When the workspace agent team is available, Tech Lead is the coordinator for this workflow and uses the shared protocol in root `AGENTS.md`.
+
+1. Give PM the resolved request and authoritative references to clarify scope, non-goals, acceptance criteria, and Ready blockers.
+2. Use Designer only when the change affects user flow, interaction, visual state, accessibility, or user-facing failure handling.
+3. Tech Lead owns the SPEC-delta decision and all user confirmation gates. Read-only team output is advisory until persisted in an authorized authoritative file.
+4. After SPEC confirmation or a recorded no-SPEC-delta decision, give Developer one bounded implementation task at a time with exclusive file ownership and required verification.
+5. After implementation verification, Tech Lead creates and identifies the complete audit artifacts required below. Give Reviewer a fresh, independent task package that directs it to `.github/skills/spec-implementation-audit/SKILL.md`, the relevant SPEC files, and the complete artifact identities.
+6. Return implementation-fixable findings to the original Developer, then use Reviewer for the required repair-only audit. Tech Lead owns integration validation and the final Done decision.
+
+If custom-agent invocation is unavailable, state that limitation and follow the same role separation directly. Do not pretend delegation occurred, and do not weaken the independent audit requirement.
 
 ## Project Audit Lifecycle
 

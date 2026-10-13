@@ -324,7 +324,7 @@ function workspaceTarget(value: unknown, platformId: PlatformId): boolean {
 function workspacePlatformStatus(value: unknown, summary: boolean): boolean {
   if (!record(value) || !platform(value.platform) || !string(value.configPath) || !string(value.status) || !string(value.message)) return false;
   if (value.status === 'unavailable') {
-    return hasOnlyKeys(value, ['platform', 'configPath', 'status', 'message', 'action','diagnosticAvailable','repairAvailable']) && string(value.action)
+    return hasNoUnknownKeys(value, ['platform', 'configPath', 'status', 'message', 'action', 'diagnosticAvailable', 'repairAvailable']) && string(value.action)
       && (value.diagnosticAvailable === undefined || (value.platform === 'macos' && bool(value.diagnosticAvailable)))
       && (value.repairAvailable === undefined || (value.platform === 'macos' && bool(value.repairAvailable)));
   }

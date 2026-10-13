@@ -36,7 +36,34 @@ fsq runs export RUN_ID --format bundle --baseline BASELINE_RUN_ID --related-run 
 
 Choose one `--format json|junit|html|bundle`. Omitted `--output` creates a unique Run-local export directory; an explicit path names an absent output file. Existing files are not overwritten. `--baseline` requires comparable source identity; `--related-run` requires persisted lineage. `--share-profile PATH` selects bounded, local artifact/text/mask transformations on copies, without publishing. The global `--output json` controls CLI output, while the subcommand's `--output` controls the exported file. A successful export exits zero even for a failed Run; the report retains its non-passing gate. See [CI evidence](ci-evidence.md) and the [public demo source](../examples/evidence-demo/README.md).
 
-`fsq init --agent codex` installs the two FSQ Codex TOML definitions byte-for-byte in the current project and uses the packaged `AGENTS.md` workflow content without path rendering. When `AGENTS.md` is absent, installation creates it with one FSQ managed block. Any existing entry at that path is always skipped without reading or modification. `--no-overwrite` skips every existing TOML destination. At least one of `--platform` or `--agent` is required.
+`fsq init --agent skill` installs the host-neutral FSQ Agent Skill manifest
+byte-for-byte at `.agents/skills/fsq/` in the current project. The manifest
+contains exactly `SKILL.md` and
+`assets/getting-started.web.fsq.yaml`. The bundled Case is a provider-free Web
+Strict check of the `FSQ Web Strict Replay` heading in a package-owned inline
+HTML document; a configured browser is its only external prerequisite. The
+Skill requires the exact registered Workspace root, performs read-only Doctor
+and static checks, submits the Case at most once, and hands the exact persistent
+Run identity to the local Control Plane. It does not start `fsq ui`, discover a
+host's Skill-management UI, initialize or configure a Workspace, configure a
+Provider, install prerequisites, or operate browser UI itself. Review the
+installed instructions and use the discovery/reload flow documented by the
+compatible Coding Agent host.
+
+`fsq init --agent codex` retains the compatibility integration: it installs the
+two FSQ Codex TOML definitions byte-for-byte in the current project and uses the
+packaged `AGENTS.md` workflow content without path rendering. When `AGENTS.md`
+is absent, installation creates it with one FSQ managed block. Any existing
+entry at that path is always skipped without reading or modification.
+
+Compatible GitHub Copilot and Codex clients discover the same
+`.agents/skills/fsq/` installation; there is no separate Codex Skill
+distribution. `--agent codex` is a different, advanced compatibility path for
+the older TOML/managed-`AGENTS.md` workflow. Installing one integration does not
+create or remove the other's files, and users should not install both for the
+first self-check. For either integration, `--no-overwrite` skips each existing
+managed destination independently. At least one of `--platform` or `--agent` is
+required.
 
 `init` never installs Driver/Runtime packages or system prerequisites. The public CLI has no `environments` command, `providers list`, or `--install-driver` option.
 

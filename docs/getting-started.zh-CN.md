@@ -1,43 +1,81 @@
 # 快速开始
 
-这份指南帮助新用户从安装开始，完成一次针对公开 [TodoMVC](https://todomvc.com/examples/react/dist/) 的确定性 Web Run。FSQ v0.1.0 是 Alpha 软件；生产采用前请先阅读[支持与稳定性说明](support-and-stability.md)。
+这份指南先完成包内置、无需 Provider 的 Web Strict 自检，再进入 Case
+创建、审查、重放和 suggestion。FSQ 是 Alpha 软件；生产采用前请先阅读
+[支持与稳定性说明](support-and-stability.md)。
 
 ## 前置条件
 
 - Python 3.11 或更新版本。
 - 已安装受支持的 Chromium 系浏览器。示例使用稳定版 Chrome。
-- 一个可用作本地 FSQ Workspace 的空目录。
+- 一个可打开为本地 FSQ 项目和 Workspace 的目录。
 
 AI 探索和 suggestion 分析还需要 OpenAI、DeepSeek、Google Gemini、Kimi、GitHub Copilot 或 Azure OpenAI。确定性 Case 重放不需要规划 LLM，除非已编写的 Case 包含 AI assertion。
 
-## 安装
+## 推荐的首次路径
 
 ```bash
-python -m pip install fsq-agent
-fsq --help
-```
-
-基础包包含所有支持平台的 Python 依赖。FSQ 不会安装浏览器、应用、ADB、设备、Appium 服务或其他主机前置条件。
-
-## 初始化空 Workspace
-
-```bash
+python -m pip install --upgrade fsq-agent
 mkdir fsq-web-demo
 cd fsq-web-demo
-fsq init --platform web --browser-channel chrome
-fsq doctor
+fsq init --platform web --browser-channel chrome --agent skill
 ```
 
-如果当前目录为空，它会成为 Workspace root。如果当前目录非空，`init` 会保留它并创建一个缺失的 `<current-directory>/<workspace-name>` 子目录。其他 Workspace 命令必须在准确注册的 root 中运行；它们不会向父目录搜索。
+请使用 fsq-agent 0.1.5。空的 `fsq-web-demo` 目录会成为准确注册的
+Workspace root，并在 `.agents/skills/fsq/` 安装主机中立 Skill。在非空
+目录中执行 `init` 时会改为创建子 Workspace；请使用 `init` 报告的准确
+root。Workspace 命令不会向父目录搜索。
 
-## 运行公开确定性示例
+让兼容的 GitHub Copilot 或 Codex 客户端重新加载项目资源，或启动新的
+agent session。然后粘贴下面这段**重载后的自检提示词**：
 
-把当前的 [`examples/web/example-domain.fsq.yaml`](../examples/web/example-domain.fsq.yaml) 下载到 Workspace 的 `cases/web/`，然后运行：
+> 使用已安装的 FSQ Skill，从准确注册的 Workspace root
+> `<ABSOLUTE_WORKSPACE_ROOT>` 运行它内置的、无需 Provider 的 Web Strict
+> 自检，最多执行一次。返回权威状态、准确的持久化 Run ID 和相对
+> Control Plane 路由。不要初始化、配置、编辑 Case、重试或启动 Control Plane。
+
+Skill 会运行只读 Doctor 和静态 Case 检查，只执行一次，并只读取准确返回的
+Run。请自行启动 Control Plane，再打开返回的
+`/#runs?workspace=...&platform=web&run=...` 路由：
+
+```bash
+fsq ui
+```
+
+没有经过验证的持久化 Run ID 时，结果为 `unknown`：不得重试，也不得生成
+路由。Web readiness 未就绪会在执行前阻止流程；内置 Case 无效或非 canonical
+也会阻止执行，且不得改写。
+
+## 可复制的安装提示词
+
+下面的安装提示词用于现有 Coding Agent session。它不同于上一节只能在重载
+之后使用的自检提示词。
+
+> 检查 Python 3.11 或更高版本是否可用。运行 `fsq init --help`，确认支持
+> `--agent skill`。如果没有 `fsq`、版本低于 fsq-agent 0.1.5，或缺少该能力，
+> 必须先征得我的同意，才能运行
+> `python -m pip install --upgrade fsq-agent`；未经同意不要安装。在准确的项目
+> 目录中运行 `fsq init --platform web --browser-channel chrome --agent skill`。
+> 不要手工创建或修改任何 Skill 或 Case 文件，不要配置或修改 Provider 或
+> secret，也不要运行 Case。报告准确的 Workspace root 和 Skill 路径，然后提醒
+> 我重新加载资源或启动新的 agent session，再使用单独的重载后自检提示词。
+
+安装 CLI 可以初始化 Workspace；安装后的 Skill 不可以。Skill 也不能配置
+Provider/secret、编辑 Case、重试、操作 UI、运行 Explore/suggestion、启动
+`fsq ui` 或调用 Control Plane。GitHub Copilot 与兼容 Codex 客户端共享
+`.agents/skills/fsq/`，没有单独 Skill 包。Codex TOML/托管 `AGENTS.md` 集成是
+单独的[高级兼容路径](codex-integration.md)，首次检查无需同时安装。
+
+## 高级/历史 TodoMVC 示例
+
+现有 [`examples/web/example-domain.fsq.yaml`](../examples/web/example-domain.fsq.yaml)
+虽然保留历史文件名，实际是已记录的 TodoMVC 示例；它不再是推荐的首次运行。
+完成上述设置后可这样运行：
 
 ```bash
 mkdir -p cases/web
 curl --fail --location --output cases/web/example-domain.fsq.yaml \
-  https://raw.githubusercontent.com/microsoft/FSQ/main/examples/web/example-domain.fsq.yaml
+  https://raw.githubusercontent.com/FSQ-lab/FSQ/main/examples/web/example-domain.fsq.yaml
 fsq case test --platform web cases/web/example-domain.fsq.yaml
 fsq runs list --platform web
 ```
@@ -80,6 +118,8 @@ Kimi API Key 可在[中国区平台](https://platform.kimi.com/console/api-keys)
 
 ```bash
 fsq case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
+fsq case format cases/web/YOUR_CASE.fsq.yaml --check
+fsq case test --platform web cases/web/YOUR_CASE.fsq.yaml
 fsq runs list
 fsq runs show RUN_ID
 fsq runs logs RUN_ID

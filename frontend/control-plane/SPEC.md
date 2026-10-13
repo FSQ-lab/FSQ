@@ -138,11 +138,27 @@ The browser omits branch selection, Add file, Search, Go to file, upload/downloa
 
 Runs consumes `/api/control-plane/history` and shared `fsq.report/v1` projection, never classifies outcomes or computes snapshot differences locally. `/#runs` opens history scope selection; list hashes contain encoded registry Workspace and optional platform, while detail requires Workspace/platform/Run and optional execution-step ID. Malformed/incomplete identity is a scoped error, not a guessed fallback. Refresh/back/forward preserve validated history, and unknown step selection retains the correct Run with an explanation. URLs contain no host paths, targets, secrets, source content, or share profiles. Browser built-ins implement hash routing without a router library or durable store.
 
-Readable registered history remains inspectable without a ready Provider/target/platform execution configuration. History identity never enables Start. Explicit navigation transfers safe identity only; terminal allocated tasks expose `Open report` outside Save YAML/New run controls, without treating request ID as durable identity. Existing dirty-draft and Provider-save navigation protection remains effective for Runs navigation.
+Readable registered history remains inspectable without a ready Provider/target/platform execution configuration. History identity never enables Start. Explicit navigation transfers safe identity only; terminal allocated tasks display the persistent Run ID when present and expose `Open report` outside Save YAML/New run controls, without treating request ID as durable identity. Existing dirty-draft and Provider-save navigation protection remains effective for Runs navigation.
 
 Lists show server-provided source/platform/mode/status/time/duration and failure/evidence facts, with status/mode/Case/since filters and bounded limits (20 default, 200 maximum). Counts/truncation, empty/no-match, loading, inferred/partial, unavailable, and retry states are distinct; there is no implicit unbounded pagination.
 
 Detail presents result/primary failure first, then action timeline and selected evidence, explicit before/after or baseline comparison, Strict/Explore/Case lineage, and downloads/inventory. Execution, verification, evidence health, and processing remain independent. Plans/helpers/attempts never inflate test counts; action failures remain visible beside capture errors. Screenshot-only and snapshot-only steps are selectable, all captures retain identity/reason, and missing/clipped/transformed facts are explicit. Comparisons and relationships follow server validation, not names/order or visual guesses. Screenshot video is captured-frame playback, not Case replay.
+
+Resolved persisted Run detail provides `Copy safe result` as a user-triggered local clipboard convenience. Clipboard and manual fallback use the same immutable string with this exact field order and one trailing newline:
+
+```text
+FSQ Run result
+Workspace: <registered workspace name>
+Platform: <platform>
+Run ID: <run id>
+Mode: <strict|explore|unknown>
+Gate: <passed|failed|error|incomplete|unknown>
+Open report: /#runs?workspace=<encoded>&platform=<encoded>&run=<encoded>
+```
+
+Values come only from the validated persisted Run response. The browser preserves the backend public gate without reclassification; absent recognized mode or gate becomes `unknown`. Workspace, platform, and Run identity must be non-empty and contain no C0/C1 control character or Unicode line separator, otherwise copying is unavailable. The route uses `URLSearchParams`-equivalent percent encoding and the fixed `workspace`, `platform`, `run` order. The payload excludes request ID, Workspace/config/Case paths, Goal or source content, target/device/browser/application identity, Provider/model/endpoint facts, environment names or values, credentials, logs, errors, summaries, screenshots, UI snapshots, and arbitrary report fields. The copy projection introduces no backend endpoint, export, file write, execution, retry, or Run mutation.
+
+Copy uses `navigator.clipboard.writeText` and exposes idle, pending, success, and failed states without equating copy success with test success. Success is announced politely while focus remains on the action. Missing Clipboard support, permission denial, or write rejection displays the identical safe text in a labelled readonly selectable control, moves focus to it, and reports the failure beside the action. Missing or unvalidated Run identity disables copying rather than constructing a guessed route. Keyboard, screen-reader, narrow-layout, long-identity, and no-horizontal-overflow behavior follows the shared control and responsive contracts.
 
 JSON/JUnit/portable HTML/bundle export uses server-issued export/file IDs and one format per request; the browser accepts no output path or share-profile file and makes no public-sharing safety claim. Requests, comparisons, downloads, and artifact state bind to complete Run identity; context changes cancel/invalidate stale responses. A valid explicit step hash takes precedence over default failure selection without unexpected focus movement.
 

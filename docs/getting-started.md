@@ -1,43 +1,89 @@
 # Getting Started
 
-This guide takes a new user from installation to a deterministic Web run against public [TodoMVC](https://todomvc.com/examples/react/dist/). FSQ v0.1.0 is alpha software; review [support and stability](support-and-stability.md) before production adoption.
+This guide begins with the package-owned, provider-free Web Strict self-check,
+then continues into Case creation, review, replay, and suggestions. FSQ is alpha
+software; review [support and stability](support-and-stability.md) before
+production adoption.
 
 ## Prerequisites
 
 - Python 3.11 or newer.
 - A supported installed Chromium-family browser. The examples use stable Chrome.
-- An empty directory you can use as a local FSQ Workspace.
+- A directory you can open as a local FSQ project and Workspace.
 
 AI exploration and suggestion analysis also require OpenAI, DeepSeek, Google Gemini, Kimi, GitHub Copilot, or Azure OpenAI. Deterministic Case replay does not require a planning LLM unless the authored Case contains an AI assertion.
 
-## Install
+## Recommended first path
 
 ```bash
-python -m pip install fsq-agent
-fsq --help
-```
-
-The package includes all supported platform Python dependencies. FSQ does not install browsers, applications, ADB, devices, Appium services, or other host prerequisites.
-
-## Initialize an empty Workspace
-
-```bash
+python -m pip install --upgrade fsq-agent
 mkdir fsq-web-demo
 cd fsq-web-demo
-fsq init --platform web --browser-channel chrome
-fsq doctor
+fsq init --platform web --browser-channel chrome --agent skill
 ```
 
-An empty current directory becomes the Workspace root. When the current directory is non-empty, `init` preserves it and creates an absent `<current-directory>/<workspace-name>` child instead. Other Workspace commands must run from the exact registered root; they do not search parent directories.
+Use fsq-agent 0.1.5. The empty `fsq-web-demo` directory becomes the exact
+registered Workspace root and also contains the host-neutral Skill at
+`.agents/skills/fsq/`. In a non-empty current directory, `init` instead creates
+an absent child Workspace; use the exact root reported by `init`. Workspace
+commands do not search parents.
 
-## Run the public deterministic example
+Reload project resources in a compatible GitHub Copilot or Codex client, or
+start a new agent session. Then paste this **post-reload self-check prompt**:
 
-Download the current [`examples/web/example-domain.fsq.yaml`](../examples/web/example-domain.fsq.yaml) into `cases/web/` in the Workspace, then run:
+> Use the installed FSQ Skill to run its bundled provider-free Web Strict
+> self-check from the exact registered Workspace root
+> `<ABSOLUTE_WORKSPACE_ROOT>`. Run it at most once. Return the authoritative
+> status, exact persistent Run ID, and relative Control Plane route. Do not
+> initialize, configure, edit a Case, retry, or start the Control Plane.
+
+The Skill runs read-only Doctor and static Case checks, executes once, and reads
+only the exact returned Run. Start Control Plane yourself and open the returned
+`/#runs?workspace=...&platform=web&run=...` route:
+
+```bash
+fsq ui
+```
+
+Without a verified persistent Run ID the outcome is `unknown`: do not retry and
+do not produce a route. Web readiness blocks before execution. An invalid or
+noncanonical bundled Case also blocks without being rewritten.
+
+## Copy-paste installer prompt
+
+This installer prompt is for an existing Coding Agent session. It is distinct
+from the self-check prompt above, which must be used only after reload.
+
+> Check that Python 3.11 or newer is available. Run `fsq init --help` and verify
+> that `--agent skill` is supported. If `fsq` is missing, older than fsq-agent
+> 0.1.5, or lacks that capability, ask my permission before running
+> `python -m pip install --upgrade fsq-agent`; do not install without approval.
+> From the exact project directory run
+> `fsq init --platform web --browser-channel chrome --agent skill`. Do not
+> hand-create or modify any Skill or Case file, do not configure or change a
+> Provider or secret, and do not run a Case. Report the exact Workspace root and
+> Skill path, then remind me to reload resources or start a new agent session
+> before using the separate post-reload self-check prompt.
+
+The installer CLI can initialize a Workspace; the installed Skill cannot. The
+Skill also cannot configure Providers/secrets, edit Cases, retry, operate UI,
+run Explore/suggestions, start `fsq ui`, or call Control Plane. GitHub Copilot
+and compatible Codex clients share `.agents/skills/fsq/`; there is no separate
+Skill package. The Codex TOML/managed-`AGENTS.md` integration is a separate
+[advanced compatibility path](codex-integration.md), not something to install
+alongside the Skill for this first check.
+
+## Advanced/historical TodoMVC example
+
+The existing
+[`examples/web/example-domain.fsq.yaml`](../examples/web/example-domain.fsq.yaml)
+is the recorded TodoMVC example despite its historical filename. It is not the
+recommended first run. To use it after setup:
 
 ```bash
 mkdir -p cases/web
 curl --fail --location --output cases/web/example-domain.fsq.yaml \
-  https://raw.githubusercontent.com/microsoft/FSQ/main/examples/web/example-domain.fsq.yaml
+  https://raw.githubusercontent.com/FSQ-lab/FSQ/main/examples/web/example-domain.fsq.yaml
 fsq case test --platform web cases/web/example-domain.fsq.yaml
 fsq runs list --platform web
 ```
@@ -80,6 +126,8 @@ If the save response is lost, the page reports an unknown outcome and re-reads c
 
 ```bash
 fsq case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
+fsq case format cases/web/YOUR_CASE.fsq.yaml --check
+fsq case test --platform web cases/web/YOUR_CASE.fsq.yaml
 fsq runs list
 fsq runs show RUN_ID
 fsq runs logs RUN_ID

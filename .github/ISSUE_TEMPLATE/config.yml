@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Getting started and documentation
-    url: https://github.com/microsoft/FSQ#readme
+    url: https://github.com/FSQ-lab/FSQ#readme
     about: Start here for installation, Workspace rules, platform prerequisites, and CLI usage.
   - name: Security vulnerability
-    url: https://github.com/microsoft/FSQ/security/policy
+    url: https://github.com/FSQ-lab/FSQ/security/policy
     about: Report security vulnerabilities privately through the Security Policy.

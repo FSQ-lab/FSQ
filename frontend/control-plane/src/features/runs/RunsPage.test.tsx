@@ -2,9 +2,193 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { controlPlaneClient } from '../../api/controlPlaneClient';
-import { RunsPage } from './RunsPage';
+import { buildSafeRunResult, RunsPage } from './RunsPage';
 
 beforeEach(() => vi.restoreAllMocks());
+
+const detail = (overrides: Record<string, unknown> = {}): Awaited<ReturnType<typeof controlPlaneClient.runReport>> => ({
+  workspace: 'Demo workspace',
+  run_id: 'run/1',
+  platform: 'web',
+  warnings: [],
+  report: {
+    schema_version: 'fsq.report/v1',
+    run: { run_id: 'run/1', platform: 'web', mode: 'strict', gate: { status: 'passed', reasons: [] } },
+    source: { case_id: 'must-not-copy', path: '/secret/case.fsq.yaml' },
+    execution: { outcome: 'success', summary: 'must-not-copy' },
+    verification: {},
+    evidence: { status: 'complete', secret: 'must-not-copy' },
+    processing: {},
+    steps: [],
+    artifacts: [],
+    tool_calls: [],
+    logs: [{ message: 'must-not-copy' }],
+    metrics: {},
+    comparison: {},
+    lineage: {},
+    warnings: [],
+  },
+  ...overrides,
+} as Awaited<ReturnType<typeof controlPlaneClient.runReport>>);
+
+it('builds the exact safe result payload with fixed encoding and one trailing newline', () => {
+  expect(buildSafeRunResult(detail(), { workspace: 'Demo workspace', platform: 'web', run: 'run/1' })).toBe(
+    'FSQ Run result\n' +
+    'Workspace: Demo workspace\n' +
+    'Platform: web\n' +
+    'Run ID: run/1\n' +
+    'Mode: strict\n' +
+    'Gate: passed\n' +
+    'Open report: /#runs?workspace=Demo+workspace&platform=web&run=run%2F1\n',
+  );
+});
+
+it('allows only recognized mode and gate values and excludes unsafe report fields', () => {
+  const recognized = detail();
+  recognized.report.run.mode = 'explore';
+  recognized.report.run.gate = { status: 'failed', reasons: ['must-not-copy'] };
+  const payload = buildSafeRunResult(recognized, { workspace: 'Demo workspace', platform: 'web', run: 'run/1' })!;
+  expect(payload).toContain('Mode: explore\nGate: failed\n');
+  for (const excluded of ['must-not-copy', '/secret/case.fsq.yaml', 'complete', 'success']) expect(payload).not.toContain(excluded);
+
+  const unknown = detail();
+  unknown.report.run.mode = 'future-mode';
+  unknown.report.run.gate = { status: 'future-gate' };
+  expect(buildSafeRunResult(unknown, { workspace: 'Demo workspace', platform: 'web', run: 'run/1' })).toContain('Mode: unknown\nGate: unknown\n');
+});
+
+it.each(['passed', 'failed', 'error', 'incomplete'])('preserves the recognized public gate %s', gate => {
+  const response = detail();
+  response.report.run.gate = { status: gate };
+  expect(buildSafeRunResult(response, { workspace: 'Demo workspace', platform: 'web', run: 'run/1' })).toContain(`Gate: ${gate}\n`);
+});
+
+it.each(['bad\nworkspace', 'bad\u0085platform', 'bad\u2028run'])('rejects control-character or Unicode-line-separator identity %s', identity => {
+  const response = detail({ workspace: identity, platform: identity, run_id: identity });
+  response.report.run.run_id = identity;
+  response.report.run.platform = identity;
+  expect(buildSafeRunResult(response, { workspace: identity, platform: identity as 'web', run: identity })).toBeNull();
+});
+
+it('offers copy only after persisted detail matches the complete route identity', async () => {
+  let resolve!: (value: Awaited<ReturnType<typeof controlPlaneClient.runReport>>) => void;
+  vi.spyOn(controlPlaneClient, 'runReport').mockImplementation(() => new Promise(done => { resolve = done; }));
+  render(<RunsPage route={{ workspace: 'Demo workspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  expect(screen.queryByRole('button', { name: 'Copy safe result' })).not.toBeInTheDocument();
+  await act(async () => resolve(detail({ run_id: 'different' })));
+  expect(screen.queryByRole('button', { name: 'Copy safe result' })).not.toBeInTheDocument();
+});
+
+it('copies the immutable safe payload and announces success without moving focus', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  vi.spyOn(controlPlaneClient, 'runReport').mockResolvedValue(detail());
+  render(<RunsPage route={{ workspace: 'Demo workspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  const button = await screen.findByRole('button', { name: 'Copy safe result' });
+  button.focus();
+  await userEvent.click(button);
+  expect(writeText).toHaveBeenCalledWith(buildSafeRunResult(detail(), { workspace: 'Demo workspace', platform: 'web', run: 'run/1' }));
+  expect(await screen.findByText('Safe Run result copied.')).toHaveAttribute('aria-live', 'polite');
+  expect(screen.getByRole('button', { name: 'Copied' })).toHaveFocus();
+});
+
+it('exposes a disabled busy state while clipboard writing is pending', async () => {
+  let finish!: () => void;
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn(() => new Promise<void>(resolve => { finish = resolve; })) } });
+  vi.spyOn(controlPlaneClient, 'runReport').mockResolvedValue(detail());
+  render(<RunsPage route={{ workspace: 'Demo workspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Copy safe result' }));
+  expect(screen.getByRole('button', { name: 'Copying…' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Copying…' })).toHaveAttribute('aria-busy', 'true');
+  await act(async () => finish());
+});
+
+it.each(['failure', 'unsupported'])('shows and selects the identical manual fallback on clipboard %s', async kind => {
+  if (kind === 'failure') Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } });
+  else Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  const select = vi.spyOn(HTMLTextAreaElement.prototype, 'select');
+  vi.spyOn(controlPlaneClient, 'runReport').mockResolvedValue(detail());
+  render(<RunsPage route={{ workspace: 'Demo workspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Copy safe result' }));
+  expect(await screen.findByText('Copy failed. Select and copy the safe result below.')).toHaveAttribute('role', 'alert');
+  const fallback = screen.getByRole('textbox', { name: 'Safe Run result for manual copy' });
+  expect(fallback).toHaveValue(buildSafeRunResult(detail(), { workspace: 'Demo workspace', platform: 'web', run: 'run/1' }));
+  expect(fallback).toHaveAttribute('readonly');
+  expect(fallback).toHaveFocus();
+  expect(select).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole('button', { name: 'Copy safe result' })).toBeEnabled();
+});
+
+it('allows retry after copy failure', async () => {
+  const writeText = vi.fn().mockRejectedValueOnce(new Error('denied')).mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  vi.spyOn(controlPlaneClient, 'runReport').mockResolvedValue(detail());
+  render(<RunsPage route={{ workspace: 'Demo workspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Copy safe result' }));
+  await screen.findByText('Copy failed. Select and copy the safe result below.');
+  await userEvent.click(screen.getByRole('button', { name: 'Copy safe result' }));
+  expect(await screen.findByText('Safe Run result copied.')).toBeVisible();
+  expect(writeText).toHaveBeenCalledTimes(2);
+});
+
+it('disables and resets safe copy while persisted detail is being revalidated, then restores it', async () => {
+  let finishRefresh!: (value: Awaited<ReturnType<typeof controlPlaneClient.runReport>>) => void;
+  vi.spyOn(controlPlaneClient, 'runReport')
+    .mockResolvedValueOnce(detail())
+    .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }));
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
+  render(<RunsPage route={{ workspace: 'Demo workspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'Copy safe result' }));
+  expect(await screen.findByRole('button', { name: 'Copied' })).toBeEnabled();
+
+  await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+  expect(await screen.findByRole('button', { name: 'Copy safe result' })).toBeDisabled();
+  expect(screen.getByText('Copy is unavailable while persisted Run detail is being revalidated.')).toBeVisible();
+  expect(screen.queryByText('Safe Run result copied.')).not.toBeInTheDocument();
+  await act(async () => finishRefresh(detail()));
+  expect(await screen.findByRole('button', { name: 'Copy safe result' })).toBeEnabled();
+  expect(screen.queryByText('Copy is unavailable while persisted Run detail is being revalidated.')).not.toBeInTheDocument();
+});
+
+it('keeps stale detail visible but disables copy after failed refresh until revalidation succeeds', async () => {
+  vi.spyOn(controlPlaneClient, 'runReport')
+    .mockResolvedValueOnce(detail())
+    .mockRejectedValueOnce(new Error('refresh failed'))
+    .mockResolvedValueOnce(detail());
+  render(<RunsPage route={{ workspace: 'Demo workspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  expect(await screen.findByRole('button', { name: 'Copy safe result' })).toBeEnabled();
+
+  await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+  expect(await screen.findByText(/Previously loaded report is stale/)).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Copy safe result' })).toBeDisabled();
+  expect(screen.getByText('Copy is unavailable until persisted Run detail is fully revalidated.')).toBeVisible();
+  expect(screen.getByRole('heading', { name: 'Result and failure' })).toBeVisible();
+
+  await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  expect(await screen.findByRole('button', { name: 'Copy safe result' })).toBeEnabled();
+});
+
+it('disables safe copy immediately when the requested comparison no longer matches displayed detail', async () => {
+  vi.spyOn(controlPlaneClient, 'runReport')
+    .mockResolvedValueOnce(detail())
+    .mockImplementationOnce(() => new Promise(() => undefined));
+  render(<RunsPage route={{ workspace: 'Demo workspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  expect(await screen.findByRole('button', { name: 'Copy safe result' })).toBeEnabled();
+  await userEvent.type(screen.getByLabelText('Baseline Run ID'), 'baseline-2');
+  await userEvent.click(screen.getByRole('button', { name: 'Compare baseline' }));
+  expect(screen.getByRole('button', { name: 'Copy safe result' })).toBeDisabled();
+  expect(screen.getByText('Copy is unavailable while the requested persisted detail is unresolved.')).toBeVisible();
+});
+
+it('disables copy for an unsafe persisted identity with the required reason', async () => {
+  const unsafe = detail({ workspace: 'bad\nworkspace' });
+  vi.spyOn(controlPlaneClient, 'runReport').mockResolvedValue(unsafe);
+  render(<RunsPage route={{ workspace: 'bad\nworkspace', platform: 'web', run: 'run/1' }} workspaces={[]} onNavigate={vi.fn()} />);
+  expect(await screen.findByRole('button', { name: 'Copy safe result' })).toBeDisabled();
+  expect(screen.getByText('A persistent Run ID is not available.')).toBeVisible();
+});
 
 it.each(['baseline', 'related', 'format', 'refresh', 'failed-refresh'])('invalidates pending and completed exports after %s changes', async change => {
   const response: Awaited<ReturnType<typeof controlPlaneClient.runReport>> = {workspace:'demo',run_id:'r1',platform:'web',warnings:[],report:{schema_version:'fsq.report/v1',run:{run_id:'r1',platform:'web',gate:{status:'passed',reasons:[]}},source:{},execution:{outcome:'success'},verification:{status:'success'},evidence:{status:'complete'},processing:{},steps:[],artifacts:[],tool_calls:[],logs:[],metrics:{},comparison:{},lineage:{},warnings:[]}};

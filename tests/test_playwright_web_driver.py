@@ -617,6 +617,54 @@ def test_playwright_web_driver_accepts_all_supported_channels(channel: str) -> N
         driver.close()
 
 
+@pytest.mark.parametrize(
+    ("url", "base_url", "expected"),
+    [
+        ("http://example.test/path", None, "http://example.test/path"),
+        ("https://example.test/path", None, "https://example.test/path"),
+        (
+            "data:text/html,%3Ch1%3EFSQ%20Web%20Strict%20Replay%3C%2Fh1%3E",
+            None,
+            "data:text/html,%3Ch1%3EFSQ%20Web%20Strict%20Replay%3C%2Fh1%3E",
+        ),
+        ("settings/profile", "https://example.test/app", "https://example.test/app/settings/profile"),
+    ],
+)
+def test_navigate_to_accepts_supported_absolute_and_relative_urls(url: str, base_url: str | None, expected: str) -> None:
+    page = _FakePage()
+    driver = PlaywrightWebDriver(page=page, base_url=base_url)
+
+    try:
+        result = driver.navigate_to(WebNavigateToParams(url=url))
+    finally:
+        driver.close()
+
+    assert result == {"status": "passed", "output": {"url": expected, "status": 200}}
+    assert page.url == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "data:application/json,%7B%7D",
+        "file:///tmp/page.html",
+        "ftp://example.test/page.html",
+        "javascript:alert(1)",
+    ],
+)
+def test_navigate_to_rejects_unsupported_absolute_schemes_instead_of_joining_to_base_url(url: str) -> None:
+    page = _FakePage()
+    driver = PlaywrightWebDriver(page=page, base_url="https://example.test/app")
+
+    try:
+        with pytest.raises(ConfigurationError, match=r"absolute URL or configured harness\.web\.base_url"):
+            driver.navigate_to(WebNavigateToParams(url=url))
+    finally:
+        driver.close()
+
+    assert page.url == "about:blank"
+
+
 def test_click_on_uses_case_sensitive_snapshot_name_matching() -> None:
     locator = _ClickFakeLocator()
     page = _ClickFakePage(locator)

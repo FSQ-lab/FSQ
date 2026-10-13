@@ -208,7 +208,7 @@ def main(context: click.Context, output_format: str, non_interactive: bool) -> N
 
 @main.command()
 @click.option("--platform", type=PLATFORMS, default=None)
-@click.option("--agent", type=click.Choice(["codex"]), default=None)
+@click.option("--agent", type=click.Choice(["skill", "codex"]), default=None)
 @click.option("--no-overwrite", is_flag=True, default=False)
 @click.option("--name", default=None)
 @click.option("--app-id", default=None)
@@ -288,7 +288,7 @@ def init(
             raise ApplicationError(
                 code=exc.code,
                 category=exc.category,
-                message=f"Workspace initialization completed, but Codex agent installation failed: {exc.message}",
+                message=f"Workspace initialization completed, but Coding Agent integration installation failed: {exc.message}",
                 action=exc.action,
                 details={**exc.details, "workspace_status": workspace.status, "workspace_root": str(workspace.root_path)},
             ) from exc

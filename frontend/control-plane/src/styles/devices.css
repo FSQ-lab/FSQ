@@ -251,6 +251,7 @@
 .run-context-bar { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; padding:14px 18px; border:1px solid var(--cp-border); border-radius:var(--cp-card-radius); background:var(--cp-surface); }
 .run-context-bar > div:first-child { display:flex; align-items:center; gap:12px; flex-wrap:wrap; min-width:0; }
 .run-context-bar strong,.run-context-bar span { overflow-wrap:anywhere; }
+.run-context-id { min-width:0; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; word-break:break-word; }
 .run-context-bar small { color:var(--cp-muted); }
 .run-context-actions { display:flex; gap:8px; }
 .run-context-actions .button { min-height:var(--cp-control-compact); font-size: var(--cp-type-meta); width:auto; flex:none; margin:0;  line-height: var(--cp-leading-meta); }

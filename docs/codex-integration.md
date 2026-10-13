@@ -1,5 +1,12 @@
 # Codex integration
 
+> [!NOTE]
+> The recommended first-run integration is the package-owned host-neutral Skill:
+> `fsq init --agent skill`. Compatible Codex and GitHub Copilot clients discover
+> that same `.agents/skills/fsq/` location; there is no separate Codex Skill
+> distribution. The TOML/managed-`AGENTS.md` integration below is an advanced
+> compatibility path. Do not install both paths for the first self-check.
+
 Delegate a complete UI test to FSQ from a project-scoped Codex subagent. Codex
 keeps responsibility for the development task; FSQ keeps its own planning,
 Provider session, UI execution, verification, recording, and evidence.

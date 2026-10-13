@@ -20,6 +20,11 @@ During `/spec-driven`, determine whether the requested project change requires a
 
 Run repository workflow skills only through an explicit user-invoked slash command. `/requirements-to-design` is available for any requested change; `/spec-driven` remains project-development-only. This file is an agent workflow entry point, not a project specification; keep project and module requirements in `SPEC.md` files and detailed workflow procedures in `.github/skills/`.
 
+## Repository Hosting
+
+- `FSQ-lab/FSQ` is the canonical repository and the default target for development, fetch, push, pull requests, issues, releases, and GitHub Actions.
+- `microsoft/FSQ` is a compatibility synchronization remote only. Use it only for an explicitly requested or authorized sync; never treat it as the default development or publication target.
+
 ## Shared Agent Team Protocol
 
 - **Entry and authorization.** Tech Lead is the normal user-facing coordinator for the FSQ development team. PM, Designer, Developer, and Reviewer work only from bounded task packages supplied by Tech Lead. The team does not change the write gates above: an ordinary project change request must stop before project writes and direct the user to `/spec-driven <confirmed-design-document-path | direct-project-change-request>`. Workflow-control-only maintenance may proceed under the direct authorization described above.

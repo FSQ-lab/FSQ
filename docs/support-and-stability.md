@@ -1,6 +1,6 @@
 # Support, Stability, and Privacy
 
-FSQ v0.1.0 is an alpha release for evaluation and early contribution, not a 1.0 compatibility commitment.
+FSQ is alpha software for evaluation and early contribution, not a 1.0 compatibility commitment.
 
 ## Stability
 

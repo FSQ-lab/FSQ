@@ -22,7 +22,7 @@ FSQ 把 UI 目标转换为可观察的 Run，并保存截图、UI Snapshot、事
 
 ## 推荐的首次运行
 
-前置条件是 **Python 3.11+** 和已安装的受支持 Chromium 系浏览器（下列命令使用 Chrome）。安装或升级到 **fsq-agent 0.1.5**，创建并打开一个空目录，再用官方 CLI 一次初始化 Web 和包内置的主机中立 Skill：
+前置条件是 **Python 3.11+** 和已安装的受支持 Chromium 系浏览器（下列命令使用 Chrome）。安装或升级到 **fsq-agent 0.1.6**，创建并打开一个空目录，再用官方 CLI 一次初始化 Web 和包内置的主机中立 Skill：
 
 ```bash
 python -m pip install --upgrade fsq-agent

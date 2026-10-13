@@ -30,7 +30,7 @@ FSQ turns UI goals into observable Runs with screenshots, UI snapshots, events, 
 
 ## Recommended first run
 
-Prerequisites are **Python 3.11+** and an installed supported Chromium-family browser (the commands below use Chrome). Install or upgrade **fsq-agent 0.1.5**, create and open an empty directory, and initialize Web plus the package-owned, host-neutral Skill:
+Prerequisites are **Python 3.11+** and an installed supported Chromium-family browser (the commands below use Chrome). Install or upgrade **fsq-agent 0.1.6**, create and open an empty directory, and initialize Web plus the package-owned, host-neutral Skill:
 
 ```bash
 python -m pip install --upgrade fsq-agent

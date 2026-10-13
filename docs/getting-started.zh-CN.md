@@ -21,7 +21,7 @@ cd fsq-web-demo
 fsq init --platform web --browser-channel chrome --agent skill
 ```
 
-请使用 fsq-agent 0.1.5。空的 `fsq-web-demo` 目录会成为准确注册的
+请使用 fsq-agent 0.1.6。空的 `fsq-web-demo` 目录会成为准确注册的
 Workspace root，并在 `.agents/skills/fsq/` 安装主机中立 Skill。在非空
 目录中执行 `init` 时会改为创建子 Workspace；请使用 `init` 报告的准确
 root。Workspace 命令不会向父目录搜索。

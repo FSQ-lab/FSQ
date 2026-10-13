@@ -9,9 +9,10 @@ from xml.etree import ElementTree
 import pytest
 
 from fsq_agent.core import AndroidDriverInterface
+from fsq_agent.core.harness._android import AndroidHarness
 from fsq_agent.core.harness._driver_tools import _discover_driver_capability_definitions
 from fsq_agent.core.harness._uiautomator2_driver import UiAutomator2AndroidDriver
-from fsq_agent.models import AndroidAssertWithAIParams, ConfigurationError, ReplayPolicy
+from fsq_agent.models import AndroidAssertWithAIParams, ConfigurationError, HarnessContext, ReplayPolicy
 
 
 class FakeSelector:
@@ -100,6 +101,10 @@ class FakeDevice:
     def app_stop(self, app_id: str) -> None:
         self.calls.append(("app_stop", app_id))
 
+    def app_current(self) -> dict[str, str]:
+        self.calls.append(("app_current",))
+        raise AssertionError("context must not issue a separate foreground-activity probe")
+
     def press(self, key: str) -> None:
         self.calls.append(("press", key))
 
@@ -146,6 +151,21 @@ def test_uiautomator2_driver_context_launch_kill_and_artifacts() -> None:
     assert isinstance(driver, AndroidDriverInterface)
     assert context["session_id"] == "uiautomator2:fake-device"
     assert context["screen_size"] == (1080, 2400)
+    assert context["metadata"] == {
+        "backend": "uiautomator2",
+        "current_package": "com.example.app",
+    }
+    assert "current_activity" not in context
+    assert AndroidHarness(driver=driver).get_context() == HarnessContext(
+        platform="android",
+        session_id="uiautomator2:fake-device",
+        current_activity=None,
+        screen_size=(1080, 2400),
+        metadata={
+            "backend": "uiautomator2",
+            "current_package": "com.example.app",
+        },
+    )
     assert driver.launch_app({})["status"] == "passed"
     assert driver.kill_app({})["status"] == "passed"
     assert driver.screenshot() == b"fake-png"

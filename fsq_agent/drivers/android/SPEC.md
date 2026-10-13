@@ -27,3 +27,4 @@ Instances satisfy `AndroidDriverInterface`; the concrete backend class is privat
 
 - Construction does not connect to a device.
 - Compact UI snapshots preserve the documented normalized XML payload and safe fallback.
+- Built-in Android context reports session, display size, backend, and current-package metadata from the device-info observation. It leaves the optional `current_activity` context field unavailable and does not issue a separate foreground-activity probe.

@@ -83,7 +83,6 @@ class UiAutomator2AndroidDriver(AIAssertionBackendToolMixin):
         height = info.get("displayHeight")
         return {
             "session_id": f"uiautomator2:{self.serial or 'fake-device'}",
-            "current_activity": self._current_activity(),
             "screen_size": (width, height) if isinstance(width, int) and isinstance(height, int) else None,
             "metadata": {
                 "backend": "uiautomator2",
@@ -409,16 +408,6 @@ class UiAutomator2AndroidDriver(AIAssertionBackendToolMixin):
     def _device_info(self) -> dict[str, object]:
         info = getattr(self.device, "info", {})
         return info if isinstance(info, dict) else {}
-
-    def _current_activity(self) -> str | None:
-        app_current = getattr(self.device, "app_current", None)
-        if not callable(app_current):
-            return None
-        current = app_current()
-        if not isinstance(current, dict):
-            return None
-        activity = current.get("activity")
-        return activity if isinstance(activity, str) else None
 
     def _screen_size(self) -> tuple[int, int]:
         info = self._device_info()

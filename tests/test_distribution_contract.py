@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -267,6 +268,26 @@ def test_sdist_uses_tracked_package_runtime_resources() -> None:
         ROOT / "fsq_agent/resources/skills/fsq/assets/getting-started.web.fsq.yaml",
     ):
         assert path.is_file()
+
+
+def test_canonical_skill_resources_are_checked_out_with_lf() -> None:
+    resources = (
+        "fsq_agent/resources/skills/fsq/SKILL.md",
+        "fsq_agent/resources/skills/fsq/assets/getting-started.web.fsq.yaml",
+    )
+    result = subprocess.run(  # noqa: S603 - Fixed Git query against repository-owned paths.
+        ["git", "check-attr", "-z", "text", "eol", "--", *resources],  # noqa: S607 - Git is provided by CI.
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    fields = result.stdout.decode("utf-8").split("\0")
+    assert fields.pop() == ""
+    attributes = {(path, attribute): value for path, attribute, value in zip(fields[::3], fields[1::3], fields[2::3], strict=True)}
+
+    for resource in resources:
+        assert attributes[(resource, "text")] == "set"
+        assert attributes[(resource, "eol")] == "lf"
 
 
 def test_skill_first_readmes_cover_the_same_install_and_handoff_contract() -> None:

@@ -22,7 +22,7 @@ cd fsq-web-demo
 fsq init --platform web --browser-channel chrome --agent skill
 ```
 
-Use fsq-agent 0.1.5. The empty `fsq-web-demo` directory becomes the exact
+Use fsq-agent 0.1.6. The empty `fsq-web-demo` directory becomes the exact
 registered Workspace root and also contains the host-neutral Skill at
 `.agents/skills/fsq/`. In a non-empty current directory, `init` instead creates
 an absent child Workspace; use the exact root reported by `init`. Workspace

@@ -23,6 +23,7 @@ from fsq_agent.application.contracts import (
 from fsq_agent.config import inspect_registered_workspace, list_workspace_registry, load_workspace_platform_settings, validate_strict_core_settings
 from fsq_agent.core import CapabilityDefinitionFactory, CapabilityRegistry, CommonPlatformTools
 from fsq_agent.environments import PlatformRuntimeService
+from fsq_agent.models import ConfigurationError
 from fsq_agent.providers import check_provider_readiness
 
 _PLATFORMS = ("android", "web", "windows", "macos")
@@ -38,8 +39,10 @@ def diagnose_workspace(request: DoctorRequest) -> DoctorResult:
     root = request.current_directory.expanduser().resolve()
     try:
         entry = next((item for item in list_workspace_registry() if item.root_path.resolve() == root), None)
-    except Exception as exc:
-        raise _workspace_error() from exc
+    except ConfigurationError as exc:
+        raise _workspace_configuration_error("workspace_registry", exc) from None
+    except Exception as exc:  # noqa: BLE001 - trust-boundary defects become a redacted internal error.
+        raise _workspace_internal_error("workspace_registry", exc) from None
     if entry is None:
         raise ApplicationError(
             code=ApplicationErrorCode.WORKSPACE_NOT_INITIALIZED,
@@ -49,12 +52,18 @@ def diagnose_workspace(request: DoctorRequest) -> DoctorResult:
         )
     try:
         workspace_status = inspect_registered_workspace(entry.name, validate_target_paths=False)
-    except Exception as exc:
-        raise _workspace_error() from exc
-    if workspace_status.root_path.resolve() != root or not workspace_status.platforms:
-        raise _workspace_error()
+        inventory_root = workspace_status.root_path.resolve()
+        inventory_platforms = workspace_status.platforms
+        status_by_platform = {item.platform: item for item in inventory_platforms}
+    except ConfigurationError as exc:
+        raise _workspace_configuration_error("workspace_inventory", exc) from None
+    except Exception as exc:  # noqa: BLE001 - trust-boundary defects become a redacted internal error.
+        raise _workspace_internal_error("workspace_inventory", exc) from None
+    if inventory_root != root:
+        raise _workspace_postcondition_error("workspace_root_mismatch")
+    if not inventory_platforms:
+        raise _workspace_postcondition_error("workspace_inventory_empty")
 
-    status_by_platform = {item.platform: item for item in workspace_status.platforms}
     platforms = tuple(_diagnose_platform(platform, root, status_by_platform[platform]) for platform in _PLATFORMS if platform in status_by_platform)
     result_status = _summary_status([command.status for item in platforms for command in (item.commands.case_test, item.commands.case_test_suggest, item.commands.case_create)])
     actions = tuple(dict.fromkeys(detail.action for item in platforms for detail in _details(item) if detail.action))
@@ -69,9 +78,13 @@ def diagnose_workspace(request: DoctorRequest) -> DoctorResult:
 def diagnose_registered_platform(request: RegisteredPlatformDoctorRequest) -> DoctorResult:
     try:
         status = inspect_registered_workspace(request.workspace_name, request.user_config_root, validate_target_paths=False)
-        selected = next(item for item in status.platforms if item.platform == request.platform)
-    except Exception as exc:
-        raise _workspace_error() from exc
+        selected = next((item for item in status.platforms if item.platform == request.platform), None)
+    except ConfigurationError as exc:
+        raise _workspace_configuration_error("workspace_inventory", exc) from None
+    except Exception as exc:  # noqa: BLE001 - trust-boundary defects become a redacted internal error.
+        raise _workspace_internal_error("workspace_inventory", exc) from None
+    if selected is None:
+        raise _workspace_postcondition_error("registered_platform_missing")
     result = _diagnose_platform(request.platform, status.root_path, selected, request.user_config_root, target_id=request.target_id)
     return DoctorResult(
         status=result.status,
@@ -228,12 +241,36 @@ def _details(platform: DoctorPlatformResult):
     ]
 
 
-def _workspace_error() -> ApplicationError:
+def _workspace_configuration_error(stage: str, error: ConfigurationError) -> ApplicationError:
+    message = str(error)
+    if not message or "\n" in message or "\r" in message:
+        message = "The registered FSQ Workspace configuration is invalid."
+    return ApplicationError(
+        code=ApplicationErrorCode.CONFIGURATION_INVALID,
+        category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
+        message=message,
+        action="Repair the Workspace registry and root configuration.",
+        details={"stage": stage},
+    )
+
+
+def _workspace_postcondition_error(reason: str) -> ApplicationError:
     return ApplicationError(
         code=ApplicationErrorCode.CONFIGURATION_INVALID,
         category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
         message="The registered FSQ Workspace cannot be diagnosed reliably.",
         action="Repair the Workspace registry and root configuration.",
+        details={"stage": "workspace_inventory", "reason": reason},
+    )
+
+
+def _workspace_internal_error(stage: str, error: Exception) -> ApplicationError:
+    return ApplicationError(
+        code=ApplicationErrorCode.INTERNAL_ERROR,
+        category=ApplicationErrorCategory.INTERNAL,
+        message="FSQ could not complete Workspace diagnostics safely.",
+        action="Inspect local diagnostics and retry Workspace diagnostics.",
+        details={"stage": stage, "exception_type": type(error).__name__},
     )
 
 

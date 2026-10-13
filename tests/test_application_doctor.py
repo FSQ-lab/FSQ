@@ -8,8 +8,8 @@ import pytest
 import yaml
 
 from fsq_agent.application import ApplicationError, DoctorRequest, diagnose_workspace
-from fsq_agent.config import load_workspace_platform_settings
-from fsq_agent.models import PlatformPrerequisiteCheck, PlatformRuntimeCheck, WorkspacePlatformStatus, WorkspaceRegistryEntry, WorkspaceStatus
+from fsq_agent.config import list_workspace_registry, load_workspace_platform_settings
+from fsq_agent.models import ConfigurationError, PlatformPrerequisiteCheck, PlatformRuntimeCheck, WorkspacePlatformStatus, WorkspaceRegistryEntry, WorkspaceStatus
 
 
 def _platform(platform: str, root: Path, status: str = "available") -> WorkspacePlatformStatus:
@@ -56,6 +56,42 @@ def test_doctor_reports_configured_platforms_in_canonical_order(tmp_path: Path, 
     assert result.status == "ready"
     assert [item.platform for item in result.platforms] == ["android", "web", "macos"]
     assert all(item.commands.case_test.status == "ready" for item in result.platforms)
+
+
+def test_doctor_reads_valid_registry_when_writable_lock_access_is_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace_root = tmp_path / "checkout"
+    workspace_root.mkdir()
+    user_root = tmp_path / "user"
+    user_root.mkdir()
+    config_path = user_root / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 3,
+                "provider": None,
+                "workspaces": [{"name": "checkout", "root_path": str(workspace_root)}],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    _base(monkeypatch, workspace_root, [_platform("web", workspace_root)])
+    monkeypatch.setattr("fsq_agent.application.doctor.list_workspace_registry", lambda: list_workspace_registry(user_root))
+    original_open = Path.open
+
+    def deny_writable_lock(path: Path, mode: str = "r", *args, **kwargs):
+        if path == user_root / ".config.lock" and any(flag in mode for flag in ("a", "w", "+")):
+            raise PermissionError("read-only sandbox denies writable lock access")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_writable_lock)
+    before = config_path.read_bytes()
+
+    result = diagnose_workspace(DoctorRequest(current_directory=workspace_root))
+
+    assert result.status == "ready"
+    assert config_path.read_bytes() == before
+    assert not (user_root / ".config.lock").exists()
 
 
 def test_provider_failure_keeps_case_test_ready_and_ai_commands_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,17 +251,121 @@ def test_doctor_rejects_unregistered_current_directory(tmp_path: Path, monkeypat
     assert error.value.code.value == "workspace.not_initialized"
 
 
-def test_doctor_normalizes_unreadable_registry_as_workspace_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_doctor_preserves_safe_registry_configuration_error_without_copying_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def fail_registry():
-        raise ValueError("unsafe registry detail")
+        raise ConfigurationError(
+            "Workspace registry document is invalid.",
+            context={"path": "secret-registry-path", "raw": "secret-registry-value"},
+        )
 
     monkeypatch.setattr("fsq_agent.application.doctor.list_workspace_registry", fail_registry)
 
     with pytest.raises(ApplicationError) as error:
         diagnose_workspace(DoctorRequest(current_directory=tmp_path))
 
+    assert error.value.code.value == "configuration.invalid"
     assert error.value.category.value == "workspace_configuration"
-    assert "unsafe registry detail" not in error.value.message
+    assert error.value.message == "Workspace registry document is invalid."
+    assert error.value.details == {"stage": "workspace_registry"}
+    assert "secret-registry" not in str(error.value.to_record())
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_stage"),
+    [("registry", "workspace_registry"), ("inventory", "workspace_inventory")],
+)
+def test_doctor_classifies_unexpected_trust_chain_exceptions_as_safe_internal_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+    expected_stage: str,
+) -> None:
+    sentinel = "private-unexpected-detail"
+
+    def fail():
+        raise RuntimeError(sentinel)
+
+    if failure_stage == "registry":
+        monkeypatch.setattr("fsq_agent.application.doctor.list_workspace_registry", fail)
+    else:
+        monkeypatch.setattr(
+            "fsq_agent.application.doctor.list_workspace_registry",
+            lambda: [WorkspaceRegistryEntry(name="checkout", root_path=tmp_path)],
+        )
+        monkeypatch.setattr("fsq_agent.application.doctor.inspect_registered_workspace", lambda *_args, **_kwargs: fail())
+
+    with pytest.raises(ApplicationError) as error:
+        diagnose_workspace(DoctorRequest(current_directory=tmp_path))
+
+    assert error.value.code.value == "internal.error"
+    assert error.value.category.value == "internal"
+    assert error.value.message == "FSQ could not complete Workspace diagnostics safely."
+    assert error.value.details == {"stage": expected_stage, "exception_type": "RuntimeError"}
+    assert sentinel not in str(error.value.to_record())
+
+
+def test_doctor_preserves_safe_inventory_configuration_error_with_distinct_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.list_workspace_registry",
+        lambda: [WorkspaceRegistryEntry(name="checkout", root_path=tmp_path)],
+    )
+
+    def fail_inventory(*_args, **_kwargs):
+        raise ConfigurationError(
+            "Registered Workspace inventory is invalid.",
+            context={"name": "secret-workspace-name", "config": "secret-config-value"},
+        )
+
+    monkeypatch.setattr("fsq_agent.application.doctor.inspect_registered_workspace", fail_inventory)
+
+    with pytest.raises(ApplicationError) as error:
+        diagnose_workspace(DoctorRequest(current_directory=tmp_path))
+
+    assert error.value.message == "Registered Workspace inventory is invalid."
+    assert error.value.details == {"stage": "workspace_inventory"}
+    assert "secret-" not in str(error.value.to_record())
+
+
+@pytest.mark.parametrize(
+    ("root_matches", "platforms", "reason"),
+    [
+        (False, [_platform("web", Path.cwd())], "workspace_root_mismatch"),
+        (True, [], "workspace_inventory_empty"),
+    ],
+)
+def test_doctor_inventory_postcondition_failure_has_only_safe_fixed_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_matches: bool,
+    platforms: list[WorkspacePlatformStatus],
+    reason: str,
+) -> None:
+    registered_root = tmp_path
+    inventory_root = registered_root if root_matches else tmp_path / "secret-actual-root"
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.list_workspace_registry",
+        lambda: [WorkspaceRegistryEntry(name="secret-workspace-name", root_path=registered_root)],
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.inspect_registered_workspace",
+        lambda *_args, **_kwargs: WorkspaceStatus(
+            name="secret-inventory-name",
+            root_path=inventory_root,
+            status="available",
+            message="secret-config-message",
+            platforms=platforms,
+        ),
+    )
+
+    with pytest.raises(ApplicationError) as error:
+        diagnose_workspace(DoctorRequest(current_directory=tmp_path))
+
+    assert error.value.code.value == "configuration.invalid"
+    assert error.value.category.value == "workspace_configuration"
+    assert error.value.details == {"stage": "workspace_inventory", "reason": reason}
+    record = str(error.value.to_record())
+    assert "secret-" not in record
+    assert str(inventory_root) not in record
 
 
 def test_doctor_result_collections_are_immutable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

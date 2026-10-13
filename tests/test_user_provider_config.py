@@ -158,6 +158,38 @@ workspaces:
     assert [(entry.name, entry.root_path) for entry in registry] == [("checkout", workspace_root)]
 
 
+def test_list_workspace_registry_is_non_mutating_when_lock_writes_are_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    user_root = tmp_path / "user"
+    user_root.mkdir()
+    workspace_root = (tmp_path / "checkout").resolve()
+    config_path = user_root / "config.yaml"
+    source = f"""
+version: 2
+provider: null
+workspaces:
+  - name: checkout
+    config_path: {(workspace_root / ".fsq" / "config.yaml").as_posix()}
+"""
+    config_path.write_text(source, encoding="utf-8")
+    original_open = Path.open
+
+    def deny_writable_lock(path: Path, mode: str = "r", *args, **kwargs):
+        if path == user_root / ".config.lock" and any(flag in mode for flag in ("a", "w", "+")):
+            raise PermissionError("read-only sandbox denies writable lock access")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_writable_lock)
+    before = {path.relative_to(user_root): path.read_bytes() for path in user_root.rglob("*") if path.is_file()}
+
+    registry = list_workspace_registry(user_root)
+
+    assert [(entry.name, entry.root_path) for entry in registry] == [("checkout", workspace_root)]
+    assert {path.relative_to(user_root): path.read_bytes() for path in user_root.rglob("*") if path.is_file()} == before
+    assert config_path.read_text(encoding="utf-8") == source
+    assert not (user_root / ".config.lock").exists()
+    assert not (user_root / "auth").exists()
+
+
 @pytest.mark.parametrize("duplicate", ["name", "path"])
 def test_load_user_provider_config_rejects_duplicate_workspace_identity(tmp_path: Path, duplicate: str) -> None:
     user_root = tmp_path / "user"
@@ -464,7 +496,7 @@ def test_windows_provider_replacement_waits_past_native_lock_retry_window(tmp_pa
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows CRT file locking")
-@pytest.mark.parametrize("operation", ["load", "save", "registry"])
+@pytest.mark.parametrize("operation", ["load", "save"])
 def test_windows_user_config_retries_repeated_lock_contention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
     import msvcrt
 
@@ -484,8 +516,6 @@ def test_windows_user_config_retries_repeated_lock_contention(tmp_path: Path, mo
     monkeypatch.setattr(msvcrt, "locking", locking)
     if operation == "load":
         assert load_user_provider_config(tmp_path).provider is None
-    elif operation == "registry":
-        assert list_workspace_registry(tmp_path) == []
     else:
         saved = save_azure_openai_provider(base_url="https://example.openai.azure.com", model="azure-model", api_key="azure-key", user_config_root=tmp_path)
         assert saved.provider is not None

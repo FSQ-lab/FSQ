@@ -204,9 +204,8 @@ def load_user_provider_config(user_config_root: str | Path | None = None) -> Use
 
 def list_workspace_registry(user_config_root: str | Path | None = None) -> list[WorkspaceRegistryEntry]:
     root = _user_config_root(user_config_root)
-    with _user_config_lock(root):
-        config, _, _ = _load_user_document(root)
-        return [entry.model_copy(deep=True) for entry in config.workspaces]
+    config, _, _ = _load_user_document(root, initialize=False, persist_upgrade=False)
+    return [entry.model_copy(deep=True) for entry in config.workspaces]
 
 
 def _register_workspace(entry: WorkspaceRegistryEntry, user_config_root: str | Path | None = None) -> None:
@@ -559,10 +558,22 @@ def _ensure_layout(root: Path) -> tuple[Path, Path]:
     return config_path, auth_dir
 
 
-def _load_user_document(root: Path) -> tuple[UserProviderConfig, Path, Path]:
-    config_path, auth_dir = _ensure_layout(root)
+def _load_user_document(
+    root: Path,
+    *,
+    initialize: bool = True,
+    persist_upgrade: bool = True,
+) -> tuple[UserProviderConfig, Path, Path]:
+    if initialize:
+        config_path, auth_dir = _ensure_layout(root)
+    else:
+        config_path, auth_dir = root / USER_CONFIG_FILENAME, root / AUTH_DIRECTORY
     try:
         data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        if not initialize:
+            return UserProviderConfig(), config_path, auth_dir
+        raise ConfigurationError("Unable to read user Provider configuration.", context={"path": str(config_path)}) from exc
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigurationError("Unable to read user Provider configuration.", context={"path": str(config_path)}) from exc
     if not isinstance(data, dict):
@@ -583,13 +594,14 @@ def _load_user_document(root: Path) -> tuple[UserProviderConfig, Path, Path]:
                 "Invalid user Provider configuration.",
                 context={"path": str(config_path), "errors": exc.errors()},
             ) from exc
-        try:
-            _atomic_write(config_path, _yaml_bytes(upgraded))
-        except OSError as exc:
-            raise ConfigurationError(
-                "Unable to upgrade user Provider configuration.",
-                context={"path": str(config_path)},
-            ) from exc
+        if persist_upgrade:
+            try:
+                _atomic_write(config_path, _yaml_bytes(upgraded))
+            except OSError as exc:
+                raise ConfigurationError(
+                    "Unable to upgrade user Provider configuration.",
+                    context={"path": str(config_path)},
+                ) from exc
         return upgraded, config_path, auth_dir
     try:
         config = UserProviderConfig.model_validate(data)

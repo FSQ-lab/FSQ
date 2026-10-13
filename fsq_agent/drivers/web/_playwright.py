@@ -513,8 +513,11 @@ class PlaywrightWebDriver(AIAssertionBackendToolMixin):
         return self._context.new_page()
 
     def _resolve_url(self, url: str) -> str:
-        if url.startswith(("http://", "https://")):
+        lowered_url = url.lower()
+        if lowered_url.startswith(("http://", "https://", "data:text/html,")):
             return url
+        if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", url):
+            raise ConfigurationError("Web navigation requires an absolute URL or configured harness.web.base_url.")
         if self.base_url is None:
             raise ConfigurationError("Web navigation requires an absolute URL or configured harness.web.base_url.")
         return urljoin(self.base_url, url.lstrip("/"))

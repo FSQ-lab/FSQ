@@ -1,9 +1,33 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { RunSnapshot } from '../../api/types';
 import { DevicesPage } from './DevicesPage';
 import { useDeviceWorkspace } from './hooks/useDeviceWorkspace';
 
 vi.mock('./hooks/useDeviceWorkspace', () => ({ useDeviceWorkspace: vi.fn() }));
+
+function terminalWorkspace(snapshot: RunSnapshot): ReturnType<typeof useDeviceWorkspace> {
+  return {
+    bootstrap: { state: 'ready', data: { apiVersion: '1.0', platforms: [{ id: 'web', label: 'Web' }], busy: false, activeTask: null }, error: null },
+    workspaceName: 'test', platform: 'web', setPlatform: vi.fn(), targetId: 'chrome', setTargetId: vi.fn(), mode: 'explore', setMode: vi.fn(), goal: 'Verify', setGoal: vi.fn(), casePath: '', setCasePath: vi.fn(),
+    readiness: { state: 'ready', data: null, error: null }, starting: false, blockedReason: '',
+    targets: { state: 'ready', data: { platform: 'web', targetLabel: 'Browser', targets: [] }, error: null },
+    cases: { state: 'ready', data: { platform: 'web', cases: [], truncated: false }, error: null },
+    selectedTarget: null, selectedCase: null, requestId: snapshot.requestId, snapshot, streamError: null, startError: null,
+    evidenceTab: 'screen', setEvidenceTab: vi.fn(), selectedStepId: null, setSelectedStepId: vi.fn(),
+    saveYamlState: { state: 'idle', data: null, error: null }, controlsLocked: true, canStart: false,
+    connection: 'ended', connectionLabel: 'Complete', refresh: vi.fn(), start: vi.fn(), cancel: vi.fn(), saveYaml: vi.fn(), newRun: vi.fn(),
+  };
+}
+
+function terminalSnapshot(runId: string | null): RunSnapshot {
+  return {
+    requestId: 'request-must-not-display', runId, workspaceName: 'test', platform: 'web', targetId: 'chrome', mode: 'explore', status: 'success',
+    source: { goal: 'Verify' }, startedAt: '', completedAt: '', cancelRequested: false, events: [], activeStep: null,
+    result: null, summary: 'Complete', screenshotRevision: 0, uiSnapshotRevision: 0,
+    evidenceAvailable: true, reportAvailable: true, terminal: true,
+  };
+}
 
 it('shows completed macOS preflight while Explore case discovery is still pending',()=>{
   const ok={status:'ready' as const,message:'Ready',action:''};
@@ -48,6 +72,8 @@ it('announces live run truth and locks target controls without moving focus', ()
 
   expect(screen.queryByRole('combobox', { name: 'Workspace' })).not.toBeInTheDocument();
   expect(screen.getByLabelText('Run context')).toHaveTextContent('test');
+  expect(screen.queryByText(/Run ID:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/request-1/)).not.toBeInTheDocument();
   expect(document.querySelector('.operation-body')).toHaveClass('operation-body--run');
   expect(document.querySelector('[aria-live="polite"]')).toHaveTextContent('Run running. Executing step 1. Live.');
   expect(document.body).toHaveFocus();
@@ -72,4 +98,22 @@ it('keeps reconnecting visible in the execution context without changing run sta
  expect(screen.getByText('Reconnecting')).toBeVisible();
  expect(screen.getByText('Reconnecting')).toHaveAttribute('role','status');
  expect(screen.getByLabelText('Run context')).toHaveTextContent('running');
+});
+
+it('shows only the persistent Run ID in terminal run context and preserves Open report', async () => {
+  const onOpenReport = vi.fn();
+  vi.mocked(useDeviceWorkspace).mockReturnValue(terminalWorkspace(terminalSnapshot('persistent-run-1')));
+  render(<DevicesPage workspaces={[]} workspaceRegistryReady selectedWorkspaceName="test" onWorkspaceChange={vi.fn()} onOpenReport={onOpenReport} renderShell={(_, content) => <>{content}</>} />);
+  expect(screen.getByLabelText('Run context')).toHaveTextContent('Run ID: persistent-run-1');
+  expect(screen.queryByText(/request-must-not-display/)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Open report' }));
+  expect(onOpenReport).toHaveBeenCalledWith('test', 'web', 'persistent-run-1');
+});
+
+it('does not show a request ID or Run ID label when a terminal snapshot has no persistent Run ID', () => {
+  vi.mocked(useDeviceWorkspace).mockReturnValue(terminalWorkspace(terminalSnapshot(null)));
+  render(<DevicesPage workspaces={[]} workspaceRegistryReady selectedWorkspaceName="test" onWorkspaceChange={vi.fn()} onOpenReport={vi.fn()} renderShell={(_, content) => <>{content}</>} />);
+  expect(screen.queryByText(/Run ID:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/request-must-not-display/)).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Open report' })).not.toBeInTheDocument();
 });

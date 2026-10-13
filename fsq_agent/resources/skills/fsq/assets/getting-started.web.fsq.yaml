@@ -1,0 +1,18 @@
+schemaVersion: fsq.ai-test/v1
+name: fsq-web-getting-started
+description: Verify the package-owned inline heading with provider-free Web Strict Replay.
+platform: web
+tags: []
+env: {}
+properties: {}
+onCaseStart: []
+onCaseComplete: []
+---
+- startBrowser: {}
+- navigateTo:
+    url: data:text/html,%3C%21doctype%20html%3E%3Chtml%20lang%3D%22en%22%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3EFSQ%20Web%20Strict%20Replay%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3Ch1%3EFSQ%20Web%20Strict%20Replay%3C%2Fh1%3E%3C%2Fbody%3E%3C%2Fhtml%3E
+- assertVisible:
+    locator:
+      role: heading
+      name: FSQ Web Strict Replay
+- closeBrowser: {}

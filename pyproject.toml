@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
  
 [project]
 name = "fsq-agent"
-version = "0.1.4"
+version = "0.1.5"
 description = "Goal-driven FSQ automated testing agent with a local agent engine, OpenAI-compatible model access, harness actions, local utilities, observation, and reporting."
 readme = "README.md"
 license = "MIT"
@@ -43,9 +43,9 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/microsoft/FSQ#readme"
-Issues = "https://github.com/microsoft/FSQ/issues"
-Repository = "https://github.com/microsoft/FSQ"
+Documentation = "https://github.com/FSQ-lab/FSQ#readme"
+Issues = "https://github.com/FSQ-lab/FSQ/issues"
+Repository = "https://github.com/FSQ-lab/FSQ"
  
 [project.optional-dependencies]
 dev = [

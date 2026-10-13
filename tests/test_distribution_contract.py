@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -77,6 +78,7 @@ def test_default_distribution_contract() -> None:
     metadata = project["project"]
 
     assert metadata["name"] == "fsq-agent"
+    assert metadata["version"] == "0.1.5"
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
@@ -90,9 +92,9 @@ def test_default_distribution_contract() -> None:
     assert metadata["license"] == "MIT"
     assert metadata["authors"] == [{"name": "Microsoft Corporation"}]
     assert metadata["urls"] == {
-        "Documentation": "https://github.com/microsoft/FSQ#readme",
-        "Issues": "https://github.com/microsoft/FSQ/issues",
-        "Repository": "https://github.com/microsoft/FSQ",
+        "Documentation": "https://github.com/FSQ-lab/FSQ#readme",
+        "Issues": "https://github.com/FSQ-lab/FSQ/issues",
+        "Repository": "https://github.com/FSQ-lab/FSQ",
     }
     classifiers = set(metadata["classifiers"])
     assert "Operating System :: OS Independent" in classifiers
@@ -262,8 +264,55 @@ def test_sdist_uses_tracked_package_runtime_resources() -> None:
         ROOT / "fsq_agent/resources/skills/windows-harness.md",
         ROOT / "fsq_agent/resources/skills/macos-harness.md",
         ROOT / "fsq_agent/resources/skills/automation-basics.md",
+        ROOT / "fsq_agent/resources/skills/fsq/SKILL.md",
+        ROOT / "fsq_agent/resources/skills/fsq/assets/getting-started.web.fsq.yaml",
     ):
         assert path.is_file()
+
+
+def test_canonical_skill_resources_are_checked_out_with_lf() -> None:
+    resources = (
+        "fsq_agent/resources/skills/fsq/SKILL.md",
+        "fsq_agent/resources/skills/fsq/assets/getting-started.web.fsq.yaml",
+    )
+    result = subprocess.run(  # noqa: S603 - Fixed Git query against repository-owned paths.
+        ["git", "check-attr", "-z", "text", "eol", "--", *resources],  # noqa: S607 - Git is provided by CI.
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    )
+    fields = result.stdout.decode("utf-8").split("\0")
+    assert fields.pop() == ""
+    attributes = {(path, attribute): value for path, attribute, value in zip(fields[::3], fields[1::3], fields[2::3], strict=True)}
+
+    for resource in resources:
+        assert attributes[(resource, "text")] == "set"
+        assert attributes[(resource, "eol")] == "lf"
+
+
+def test_skill_first_readmes_cover_the_same_install_and_handoff_contract() -> None:
+    readmes = (
+        (ROOT / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "README.zh-CN.md").read_text(encoding="utf-8"),
+    )
+
+    for readme in readmes:
+        for required in (
+            "Python 3.11",
+            "python -m pip install --upgrade fsq-agent",
+            "fsq init --help",
+            "--agent skill",
+            "fsq init --platform web --browser-channel chrome --agent skill",
+            ".agents/skills/fsq/",
+            "fsq doctor",
+            "fsq case format",
+            "fsq case test",
+            "fsq runs show",
+            "fsq ui",
+            "runs/",
+            "Kimi",
+        ):
+            assert required in readme
 
 
 def test_ci_verifies_all_runtime_package_resources() -> None:
@@ -307,7 +356,7 @@ def test_ci_verifies_all_runtime_package_resources() -> None:
 def test_readme_uses_current_installation_and_cli_contract() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "pip install fsq-agent" in readme
+    assert "python -m pip install --upgrade fsq-agent" in readme
     assert "README.zh-CN.md" in readme
     assert "docs/getting-started.zh-CN.md" in readme
     assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
@@ -337,7 +386,7 @@ def test_readme_uses_current_installation_and_cli_contract() -> None:
 def test_chinese_readme_uses_current_installation_and_cli_contract() -> None:
     readme = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
 
-    assert "pip install fsq-agent" in readme
+    assert "python -m pip install --upgrade fsq-agent" in readme
     assert "Workspace Root Strategy" in readme
     assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
     assert "https://youtu.be/QqCahxGDdS0" in readme

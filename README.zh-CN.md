@@ -20,8 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="#安装-fsq">安装</a> ·
-  <a href="#尝试一个测试">尝试一个测试</a> ·
+  <a href="#快速开始">快速开始</a> ·
   <a href="README.md">English</a> ·
   <a href="docs/getting-started.zh-CN.md">指南</a> ·
   <a href="CONTRIBUTING.md">参与贡献</a>
@@ -41,33 +40,37 @@ https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939
 
 最终得到带证据的结果和可移植、可复用的测试；你可以审查、保留和重放，控制权始终在你手中。
 
-## 安装 FSQ
+## 快速开始
 
-将这段提示词复制给你的 Coding Agent：
+你需要 Python 3.11 或更高版本，并满足[平台和目标的前置条件](docs/platform-prerequisites.md)。请从以下两条路径中选择一条。Provider 凭据只能由你在 FSQ UI 中输入，不要发送到 Coding Agent 聊天中；审查结果和生成的 Case 后，再另行决定是否批准重放。
 
-> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。按照该项目的官方安装说明安装 FSQ CLI。修改我的环境前，先说明变更并征得我的同意。验证 `fsq` 命令可以工作，报告结果，然后停止。不要初始化 Workspace、配置 Provider 或运行测试。
+### 1. Coding Agent
+
+**初始设置。** 在 Coding Agent 中打开你的项目，然后粘贴：
+> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。请先与我确认当前项目根目录。按照官方说明，先解释将修改的 Python 环境和项目文件并获得我的同意，再安装或升级 FSQ CLI，并在当前项目运行 `fsq init --agent skill`。验证 `fsq` 可以工作，并报告 Skill 的安装位置。然后让我打开 `fsq ui`，在 **Settings** 中配置 FSQ 使用的 LLM Provider 和模型；不要要求我在聊天中提供凭据。不要初始化 Workspace 或运行测试。设置完成后，告诉我如何重新加载 Coding Agent 或启动新 session，然后停止。
+
+完成重新加载后再继续。
+
+**首次测试。** 将这段提示词复制给你的 Coding Agent：
+> 引导我完成一个 FSQ 测试。与我一起配置或选择 Workspace、平台和准确目标。确认 Goal、可观察的成功标准，以及允许和禁止的操作。不要在聊天中提供凭据。仅在我批准后执行。先报告结果，再原样展示准确返回的 Case。只有在我另行明确批准重放后才能重放。
+
+审查返回的结果和未经改动的 Case 后，再另行决定是否批准重放。
+
+### 2. FSQ UI
+
+**初始设置。**
 
 ```bash
 python -m pip install --upgrade fsq-agent
-```
-
-[安装指南](docs/getting-started.zh-CN.md)
-
-## 尝试一个测试
-
-在项目目录运行 `fsq init --agent skill`。重新加载或启动新的 Coding Agent session 后再继续。
-
-将这段提示词复制给你的 Coding Agent：
-
-> 引导我完成一个 FSQ 测试。确认平台和目标、测试目的和成功标准，以及允许和禁止的操作。不要在聊天中提供凭据。只执行我批准的内容；先总结结果，再原样展示返回的测试。仅在我另行明确确认后重放。
-
-### 直接使用 FSQ UI
-
-```bash
 fsq ui
 ```
 
-在 Test Runner 中选择平台和目标，描述要验证的结果，然后开始测试。
+在 **Settings** 中配置 FSQ LLM Provider，并显式选择模型。
+
+**首次测试。**
+1. 创建或选择 Workspace，并按需配置其平台和目标。
+2. 在 **Test Runner** 中选择准确目标。
+3. 描述可验证的结果，审查测试设置，然后开始测试。审查结果和 Case 后，再另行决定是否批准任何重放。
 
 ![用于描述测试目标的 FSQ Test Runner](docs/media/01-describe-goal.png)
 

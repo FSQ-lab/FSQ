@@ -312,31 +312,47 @@ def test_concise_readmes_cover_the_same_install_and_ui_contract() -> None:
         assert readme.index("> [!IMPORTANT]") < readme.index(documentation_heading)
 
 
-def test_bilingual_readmes_put_skill_install_and_reload_before_the_test_prompt() -> None:
+def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
     contracts = {
         "en": {
             "path": ROOT / "README.md",
-            "install": "## Install FSQ",
-            "try": "## Try one test",
-            "reload": "Reload or start a new Coding Agent session",
+            "quick_start": "## Quick start",
+            "agent": "### 1. Coding Agent",
+            "ui": "### 2. FSQ UI",
+            "reload": "reload or start a new Coding Agent session",
             "prompt": "> Guide me through one FSQ test.",
+            "workspace": "Workspace",
+            "platform": "platform",
+            "target": "exact target",
+            "credentials": "credentials",
+            "replay": "separately approving any replay",
         },
         "zh": {
             "path": ROOT / "README.zh-CN.md",
-            "install": "## 安装 FSQ",
-            "try": "## 尝试一个测试",
-            "reload": "重新加载或启动新的 Coding Agent session",
+            "quick_start": "## 快速开始",
+            "agent": "### 1. Coding Agent",
+            "ui": "### 2. FSQ UI",
+            "reload": "重新加载 Coding Agent 或启动新 session",
             "prompt": "> 引导我完成一个 FSQ 测试。",
+            "workspace": "Workspace",
+            "platform": "平台",
+            "target": "准确目标",
+            "credentials": "凭据",
+            "replay": "另行决定是否批准重放",
         },
     }
 
     for contract in contracts.values():
         readme = contract["path"].read_text(encoding="utf-8")
-        install_section = readme[readme.index(contract["install"]) : readme.index(contract["try"])]
-        try_section = readme[readme.index(contract["try"]) :]
+        quick_start = readme[readme.index(contract["quick_start"]) :]
+        agent_section = quick_start[quick_start.index(contract["agent"]) : quick_start.index(contract["ui"])]
+        ui_section = quick_start[quick_start.index(contract["ui"]) :]
 
-        assert "fsq init --agent skill" not in install_section
-        assert try_section.index("fsq init --agent skill") < try_section.index(contract["reload"]) < try_section.index(contract["prompt"])
+        assert agent_section.index("https://github.com/FSQ-lab/FSQ") < agent_section.index("fsq init --agent skill")
+        assert agent_section.index("fsq init --agent skill") < agent_section.index(contract["reload"]) < agent_section.index(contract["prompt"])
+        assert all(value in agent_section for value in (contract["workspace"], contract["platform"], contract["target"], contract["credentials"]))
+        assert contract["replay"] in quick_start
+        assert all(value in ui_section for value in ("python -m pip install --upgrade fsq-agent", "fsq ui", "Settings", contract["workspace"], contract["platform"]))
 
 
 def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> None:
@@ -473,12 +489,14 @@ def test_readme_uses_current_installation_and_cli_contract() -> None:
     headline = "Describe what to test. Let AI help to test the user flow."
     assert readme.index(headline) < readme.index("FSQ Lab")
     assert "python -m pip install --upgrade fsq-agent" in readme
-    install_prompt = (
-        "> The official FSQ project is https://github.com/FSQ-lab/FSQ. Follow that project's official installation instructions to install the FSQ CLI. "
-        "Before changing my environment, explain the change and obtain my permission. Verify that the `fsq` command works, report the result, and then stop. "
-        "Do not initialize a Workspace, configure a Provider, or run a test."
-    )
-    assert install_prompt in readme
+    assert "## Quick start" in readme
+    assert "### 1. Coding Agent" in readme
+    assert "### 2. FSQ UI" in readme
+    assert "fsq init --agent skill" in readme
+    assert "configure the FSQ LLM Provider and model in **Settings**" in readme
+    assert "never ask me to put credentials in chat" in readme
+    assert "Workspace, platform, and exact target" in readme
+    assert "separately and explicitly approve replay" in readme
     assert "README.zh-CN.md" in readme
     assert "docs/getting-started.zh-CN.md" in readme
     assert "![FSQ Test Runner for describing a test goal](docs/media/01-describe-goal.png)" in readme
@@ -510,12 +528,14 @@ def test_chinese_readme_uses_current_installation_and_cli_contract() -> None:
     headline = "描述你要测试什么\uff0c让 AI 帮你测试用户流程。"
     assert readme.index(headline) < readme.index("FSQ Lab")
     assert "python -m pip install --upgrade fsq-agent" in readme
-    install_prompt = (
-        "> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。按照该项目的官方安装说明安装 FSQ CLI。"
-        "修改我的环境前\uff0c先说明变更并征得我的同意。验证 `fsq` 命令可以工作\uff0c报告结果\uff0c然后停止。"
-        "不要初始化 Workspace、配置 Provider 或运行测试。"
-    )
-    assert install_prompt in readme
+    assert "## 快速开始" in readme
+    assert "### 1. Coding Agent" in readme
+    assert "### 2. FSQ UI" in readme
+    assert "fsq init --agent skill" in readme
+    assert "在 **Settings** 中配置 FSQ 使用的 LLM Provider 和模型" in readme
+    assert "不要要求我在聊天中提供凭据" in readme
+    assert "Workspace、平台和准确目标" in readme
+    assert "另行明确批准重放" in readme
     assert "![用于描述测试目标的 FSQ Test Runner](docs/media/01-describe-goal.png)" in readme
     assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
     assert "https://youtu.be/QqCahxGDdS0" in readme

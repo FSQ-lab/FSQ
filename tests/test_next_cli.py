@@ -3,6 +3,7 @@
 
 import ast
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -159,6 +160,10 @@ def test_providers_list_is_not_public() -> None:
 
 def test_case_create_json_maps_application_result(tmp_path: Path, monkeypatch) -> None:
     async def fake_create(_request, *, event_sink=None, agent_factory=None):
+        assert event_sink is not None
+        event_sink(RunEvent(run_id="run-1", task_id="task-1", type="run_started", title="Started", sequence=1, timestamp=datetime(2026, 1, 1, tzinfo=UTC)))
+        sys.stdout.flush()
+        assert sys.stdout.buffer.getvalue() == b""
         return CaseCreateResult(run_id="run-1", task_id="task-1", status="success", summary="passed", report_path=tmp_path / "report.md", candidate_case_path=tmp_path / "recorded.fsq.yaml")
 
     monkeypatch.setattr("fsq_agent.adapters.cli._main.create_case", fake_create)
@@ -201,7 +206,13 @@ def test_case_create_jsonl_emits_events_then_one_terminal_result(tmp_path: Path,
     async def fake_create(_request, *, event_sink=None, agent_factory=None):
         assert event_sink is not None
         event_sink(RunEvent(run_id="run-1", task_id="task-1", type="run_started", title="Started", sequence=1, timestamp=datetime(2026, 1, 1, tzinfo=UTC)))
+        sys.stdout.flush()
+        first_records = [json.loads(line) for line in sys.stdout.buffer.getvalue().decode().splitlines()]
+        assert [(record["type"], record["event"]["sequence"]) for record in first_records] == [("event", 1)]
         event_sink(RunEvent(run_id="run-1", task_id="task-1", type="run_completed", title="Completed", sequence=2, timestamp=datetime(2026, 1, 1, tzinfo=UTC)))
+        sys.stdout.flush()
+        second_records = [json.loads(line) for line in sys.stdout.buffer.getvalue().decode().splitlines()]
+        assert [(record["type"], record["event"]["sequence"]) for record in second_records] == [("event", 1), ("event", 2)]
         return CaseCreateResult(run_id="run-1", task_id="task-1", status="success", summary="passed", report_path=tmp_path / "report.md")
 
     monkeypatch.setattr("fsq_agent.adapters.cli._main.create_case", fake_create)
@@ -212,6 +223,86 @@ def test_case_create_jsonl_emits_events_then_one_terminal_result(tmp_path: Path,
     assert [record["type"] for record in records] == ["event", "event", "result"]
     assert all(record["operation"] == "case.create" for record in records)
     assert records[-1]["result"]["candidate_case_path"] is None
+
+
+def test_case_create_jsonl_emits_event_then_application_error(monkeypatch) -> None:
+    async def fail(_request, *, event_sink=None, agent_factory=None):
+        assert event_sink is not None
+        event_sink(RunEvent(run_id="run-1", task_id="task-1", type="run_started", title="Started", sequence=1, timestamp=datetime(2026, 1, 1, tzinfo=UTC)))
+        sys.stdout.flush()
+        records = [json.loads(line) for line in sys.stdout.buffer.getvalue().decode().splitlines()]
+        assert [record["type"] for record in records] == ["event"]
+        raise ApplicationError(
+            code=ApplicationErrorCode.PROVIDER_UNAVAILABLE,
+            category=ApplicationErrorCategory.UNAVAILABLE,
+            message="Provider unavailable.",
+        )
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.create_case", fail)
+    result = CliRunner().invoke(main, ["--output", "jsonl", "case", "create", "--platform", "web", "--goal", "Verify search"])
+    records = [json.loads(line) for line in result.output.splitlines()]
+
+    assert result.exit_code == 4
+    assert [record["type"] for record in records] == ["event", "error"]
+    assert all(record["operation"] == "case.create" for record in records)
+
+
+def test_case_create_jsonl_stdout_write_failure_is_safe(monkeypatch) -> None:
+    async def fail_on_event_write(_request, *, event_sink=None, agent_factory=None):
+        assert event_sink is not None
+        stdout_buffer = sys.stdout.buffer
+        original_write = stdout_buffer.write
+        failed = False
+
+        def write(value):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError("secret transport detail")
+            return original_write(value)
+
+        monkeypatch.setattr(stdout_buffer, "write", write)
+        event_sink(RunEvent(run_id="run-1", task_id="task-1", type="run_started", title="Started", sequence=1, timestamp=datetime(2026, 1, 1, tzinfo=UTC)))
+        pytest.fail("event write failure must stop case creation")
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.create_case", fail_on_event_write)
+    result = CliRunner().invoke(main, ["--output", "jsonl", "case", "create", "--platform", "web", "--goal", "Verify search"])
+
+    assert result.exit_code == 5
+    assert "secret transport detail" not in result.output
+    records = [json.loads(line) for line in result.output.splitlines()]
+    assert [record["type"] for record in records] == ["error"]
+    assert records[0]["operation"] == "case.create"
+
+
+@pytest.mark.parametrize("transport_error", [BrokenPipeError, OSError])
+def test_case_create_jsonl_persistent_stdout_failure_exits_internal_without_retry(monkeypatch, transport_error: type[OSError]) -> None:
+    calls = 0
+    continued_after_failure = False
+
+    async def fail_on_every_write(_request, *, event_sink=None, agent_factory=None):
+        nonlocal calls, continued_after_failure
+        calls += 1
+        assert event_sink is not None
+        stdout_buffer = sys.stdout.buffer
+
+        def write(_value):
+            raise transport_error("secret persistent transport detail")
+
+        monkeypatch.setattr(stdout_buffer, "write", write)
+        event_sink(RunEvent(run_id="run-1", task_id="task-1", type="run_started", title="Started", sequence=1, timestamp=datetime(2026, 1, 1, tzinfo=UTC)))
+        continued_after_failure = True
+        return CaseCreateResult(run_id="run-1", task_id="task-1", status="success", summary="passed", report_path=Path("report.md"))
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.create_case", fail_on_every_write)
+    result = CliRunner().invoke(main, ["--output", "jsonl", "case", "create", "--platform", "web", "--goal", "Verify search"])
+
+    assert result.exit_code == 5
+    assert calls == 1
+    assert continued_after_failure is False
+    assert result.output == ""
+    assert "success" not in result.output
+    assert "secret persistent transport detail" not in result.output
 
 
 def test_case_create_failed_result_uses_exit_one(tmp_path: Path, monkeypatch) -> None:

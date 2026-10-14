@@ -163,7 +163,7 @@ Azure OpenAI configuration requires base URL, model/deployment name, and API key
 
 - Global `--output human|json|jsonl` selects presentation before the command; `runs export --output PATH` independently selects a destination file.
 - `--non-interactive` forbids prompts and implicit interactive authentication.
-- Human output may be styled; JSON emits one complete operation envelope; JSONL emits one object per event followed by one terminal result or error object.
+- Human output may be styled; JSON emits one complete operation envelope. JSONL writes each safe event object to stdout when the event is received, preserving callback order without terminal replay, then writes one terminal result or error object when the transport remains writable.
 - Machine output is stdout-only. Diagnostics that cannot be represented as protocol records use stderr. Secrets and hidden reasoning are never emitted.
 - Exit categories are `0` success, `1` test/case failure, `2` usage or validation error, `3` workspace/configuration error, `4` provider/environment unavailable, `5` internal/infrastructure error, and `130` interruption.
 

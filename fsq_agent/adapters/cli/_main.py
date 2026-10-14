@@ -336,20 +336,25 @@ def case_group() -> None:
 @click.option("--name", default=None, help="Stable Case name without a suffix.")
 @click.pass_context
 def case_create(context: click.Context, platform: str, goal: str, name: str | None) -> None:
-    events: list[dict[str, object]] = []
-
-    def collect_event(event: object) -> None:
-        events.append(event.model_dump(mode="json"))
+    def emit_event(event: object) -> None:
+        if context.obj["output"] == "jsonl":
+            click.echo(
+                json.dumps(
+                    event_record(event.model_dump(mode="json"), operation=_context_operation(context)),
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
 
     try:
         result = asyncio.run(
             create_case(
                 CaseCreateRequest(current_directory=Path.cwd(), platform=platform, goal=goal, case_name=name),
-                event_sink=collect_event,
+                event_sink=emit_event,
                 agent_factory=create_case_agent,
             )
         )
-        _emit_terminal(context, result.model_dump(mode="json"), events=events)
+        _emit_terminal(context, result.model_dump(mode="json"))
     except ApplicationError as exc:
         _application_error(context, exc)
     except KeyboardInterrupt as exc:
@@ -819,7 +824,10 @@ def _application_error(context: click.Context, error: ApplicationError) -> None:
             click.echo(f"Action: {error.action}", err=True)
         _emit_safe_internal_diagnostic(error)
     else:
-        click.echo(json.dumps(error.to_record(operation=_context_operation(context)), ensure_ascii=False, default=str))
+        try:
+            click.echo(json.dumps(error.to_record(operation=_context_operation(context)), ensure_ascii=False, default=str))
+        except OSError as exc:
+            raise click.exceptions.Exit(ExitCode.INTERNAL) from exc
     raise click.exceptions.Exit(_error_exit_code(error))
 
 

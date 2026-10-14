@@ -1,77 +1,96 @@
 # Getting Started
 
-This guide begins with the package-owned, provider-free Web Strict self-check,
-then continues into Case creation, review, replay, and suggestions. FSQ is alpha
+This guide uses the package-owned Skill for a guided, platform-neutral AI
+Explore, followed by review and optional deterministic replay. FSQ is alpha
 software; review [support and stability](support-and-stability.md) before
 production adoption.
 
 ## Prerequisites
 
 - Python 3.11 or newer.
-- A supported installed Chromium-family browser. The examples use stable Chrome.
-- A directory you can open as a local FSQ project and Workspace.
+- The prerequisites for the platform and target you want to test.
+- A directory you can open as the exact local Coding Agent project root.
 
 AI exploration and suggestion analysis also require OpenAI, DeepSeek, Google Gemini, Kimi, GitHub Copilot, or Azure OpenAI. Deterministic Case replay does not require a planning LLM unless the authored Case contains an AI assertion.
 
-## Recommended first path
+## Install the CLI and project-local Skill
 
 ```bash
 python -m pip install --upgrade fsq-agent
-mkdir fsq-web-demo
-cd fsq-web-demo
-fsq init --platform web --browser-channel chrome --agent skill
+cd /path/to/your/project
+fsq init --agent skill
 ```
 
-Use fsq-agent 0.1.8. The empty `fsq-web-demo` directory becomes the exact
-registered Workspace root and also contains the host-neutral Skill at
-`.agents/skills/fsq/`. In a non-empty current directory, `init` instead creates
-an absent child Workspace; use the exact root reported by `init`. Workspace
-commands do not search parents.
+Run the Skill installation from that exact project root. It installs
+`.agents/skills/fsq/` independently of Workspace initialization. Reload or
+start a new Coding Agent session so the client discovers the installed Skill.
+After a package upgrade, rerun `fsq init --agent skill` and reload again to
+update the copied Skill.
 
-Reload project resources in a compatible GitHub Copilot or Codex client, or
-start a new agent session. Then paste this **post-reload self-check prompt**:
+Then paste:
 
-> Use the installed FSQ Skill to run its bundled provider-free Web Strict
-> self-check from the exact registered Workspace root
-> `<ABSOLUTE_WORKSPACE_ROOT>`. Run it at most once. Return the authoritative
-> status, exact persistent Run ID, and relative Control Plane route. Do not
-> initialize, configure, edit a Case, retry, or start the Control Plane.
+> Guide me through one FSQ test. Confirm the platform and target, Goal and
+> observable success criteria, allowed and forbidden actions, and all required
+> permissions. Keep credentials out of chat. Execute only what I approve,
+> summarize the result first, show the returned Case unchanged, and offer
+> deterministic replay only after my separate explicit confirmation.
 
-The Skill runs read-only Doctor and static Case checks, executes once, and reads
-only the exact returned Run. Start Control Plane yourself and open the returned
-`/#runs?workspace=...&platform=web&run=...` route:
+## Guided AI Explore
+
+The installed Skill leads the dialogue and uses the public FSQ CLI. It will:
+
+1. Confirm the project directory, platform and exact current target without
+   guessing.
+2. Confirm the exact registered Workspace status and root, Goal and observable
+   success criteria, allowed and forbidden actions, data limits, and
+   permissions for initialization, target access, Provider/network use,
+   evidence, Case publication, and any replay.
+3. If Workspace initialization is needed, explain the mutation, ask permission,
+   run the matching `fsq init --platform ...` form once, and use the actual
+   returned root.
+4. Check Doctor readiness for the requested operation. Ambiguous scope or an
+   unmet prerequisite blocks rather than being silently defaulted.
+
+### Provider handoff
+
+If AI Explore needs Provider setup, this is a user-controlled handoff. API
+keys, tokens, and authentication secrets must not enter chat. The Coding Agent
+asks you to open `fsq ui` yourself and enter credentials in **Settings**; the
+private interactive `fsq providers configure "<provider>"` command is the
+fallback. After you report completion, it checks Provider status and Doctor
+readiness again. Readiness is not a connection test or a successful execution.
+
+### Create, review, and optionally replay
+
+After showing the complete confirmed Goal, the Skill may submit one approved
+AI Explore with `fsq --output json --non-interactive case create ...`. It does
+not retry an unknown, interrupted, failed, or contradictory result.
+
+The Skill summarizes the authoritative result first, keeping execution,
+recording, publication, and warnings distinct. It then selects only the exact
+returned Case path: `published_case_path`, or otherwise
+`candidate_case_path` marked as unpublished. It reads that exact returned Case
+unchanged and runs a read-only static check:
 
 ```bash
-fsq ui
+fsq case format "<exact-case-path>" --check --json
 ```
 
-Without a verified persistent Run ID the outcome is `unknown`: do not retry and
-do not produce a route. Web readiness blocks before execution. An invalid or
-noncanonical bundled Case also blocks without being rewritten.
+Only after canonical static validity, current replay readiness, and your
+separate explicit confirmation may it submit the unchanged Case once with
+`fsq --output json --non-interactive case test --platform "<platform>"
+"<exact-case-path>"`, without suggestions. Creating a Case never pre-approves
+replay, and Explore success does not prove deterministic replay success.
 
-## Copy-paste installer prompt
+## Provider-free Web troubleshooting fallback
 
-This installer prompt is for an existing Coding Agent session. It is distinct
-from the self-check prompt above, which must be used only after reload.
-
-> Check that Python 3.11 or newer is available. Run `fsq init --help` and verify
-> that `--agent skill` is supported. If `fsq` is missing, older than fsq-agent
-> 0.1.8, or lacks that capability, ask my permission before running
-> `python -m pip install --upgrade fsq-agent`; do not install without approval.
-> From the exact project directory run
-> `fsq init --platform web --browser-channel chrome --agent skill`. Do not
-> hand-create or modify any Skill or Case file, do not configure or change a
-> Provider or secret, and do not run a Case. Report the exact Workspace root and
-> Skill path, then remind me to reload resources or start a new agent session
-> before using the separate post-reload self-check prompt.
-
-The installer CLI can initialize a Workspace; the installed Skill cannot. The
-Skill also cannot configure Providers/secrets, edit Cases, retry, operate UI,
-run Explore/suggestions, start `fsq ui`, or call Control Plane. GitHub Copilot
-and compatible Codex clients share `.agents/skills/fsq/`; there is no separate
-Skill package. The Codex TOML/managed-`AGENTS.md` integration is a separate
-[advanced compatibility path](codex-integration.md), not something to install
-alongside the Skill for this first check.
+This bundled Strict Case is an explicit troubleshooting fallback, not the
+primary experience or a prerequisite for your Goal. Ask the installed Skill to
+use `assets/getting-started.web.fsq.yaml` only when you intentionally want to
+check a configured Web target without a Provider. It verifies Doctor and
+canonical formatting first, obtains explicit execution confirmation, executes
+at most once, and uses only the exact returned Run ID. It does not configure a
+Provider, use suggestions, retry, or start Control Plane.
 
 ## Advanced/historical TodoMVC example
 
@@ -125,16 +144,18 @@ If the save response is lost, the page reports an unknown outcome and re-reads c
 ## Explore and inspect
 
 ```bash
-fsq case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
-fsq case format cases/web/YOUR_CASE.fsq.yaml --check
-fsq case test --platform web cases/web/YOUR_CASE.fsq.yaml
-fsq runs list
-fsq runs show RUN_ID
-fsq runs logs RUN_ID
-fsq runs show RUN_ID --open
+fsq --output json --non-interactive case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
+fsq case format "<exact-returned-case-path>" --check --json
+# Only after separate explicit confirmation:
+fsq --output json --non-interactive case test --platform web "<exact-returned-case-path>"
+fsq --output json --non-interactive runs show "<exact-returned-run-id>" --platform web
+fsq --output json --non-interactive runs logs "<exact-returned-run-id>" --platform web --limit 50
 ```
 
-The final command creates an offline report from persisted Run facts. It does not operate the target UI or invoke a Provider.
+Use only the Case path and persistent Run ID returned by the submitted
+operation; do not construct either value or infer the latest Run. The static
+check is read-only, and the unchanged Case is replayed only after the separate
+confirmation described above.
 
 ## Analyze a deterministic run
 

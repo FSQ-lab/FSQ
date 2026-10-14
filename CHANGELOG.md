@@ -31,7 +31,7 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 - Initial open-source release preparation.
 - DeepSeek Provider configuration through the CLI and Control Plane, with official Responses API inference and forward-compatible Flash/Pro model discovery.
-- Package-owned, host-neutral FSQ Agent Skill for a platform-neutral guided AI testing workflow, with the provider-free Web Strict self-check available as a fallback.
+- Package-owned, host-neutral FSQ Agent Skill onboarding for a provider-free Web Strict self-check and exact Run handoff to the local Control Plane.
 
 ### Changed
 

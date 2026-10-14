@@ -55,6 +55,8 @@ python -m pip install --upgrade fsq-agent
 
 ## Try one test
 
+From the project directory, run `fsq init --agent skill`. Reload or start a new Coding Agent session before continuing.
+
 Copy this prompt into your Coding Agent:
 
 > Guide me through one FSQ test. Confirm the platform and target, goal and success criteria, and allowed and forbidden actions. Keep credentials out of chat. Execute only what I approve, summarize the result first, and show the returned test unchanged. Replay only after my separate explicit confirmation.

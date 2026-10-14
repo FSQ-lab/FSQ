@@ -312,6 +312,123 @@ def test_concise_readmes_cover_the_same_install_and_ui_contract() -> None:
         assert readme.index("> [!IMPORTANT]") < readme.index(documentation_heading)
 
 
+def test_bilingual_readmes_put_skill_install_and_reload_before_the_test_prompt() -> None:
+    contracts = {
+        "en": {
+            "path": ROOT / "README.md",
+            "install": "## Install FSQ",
+            "try": "## Try one test",
+            "reload": "Reload or start a new Coding Agent session",
+            "prompt": "> Guide me through one FSQ test.",
+        },
+        "zh": {
+            "path": ROOT / "README.zh-CN.md",
+            "install": "## 安装 FSQ",
+            "try": "## 尝试一个测试",
+            "reload": "重新加载或启动新的 Coding Agent session",
+            "prompt": "> 引导我完成一个 FSQ 测试。",
+        },
+    }
+
+    for contract in contracts.values():
+        readme = contract["path"].read_text(encoding="utf-8")
+        install_section = readme[readme.index(contract["install"]) : readme.index(contract["try"])]
+        try_section = readme[readme.index(contract["try"]) :]
+
+        assert "fsq init --agent skill" not in install_section
+        assert try_section.index("fsq init --agent skill") < try_section.index(contract["reload"]) < try_section.index(contract["prompt"])
+
+
+def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> None:
+    contracts = {
+        "en": {
+            "path": ROOT / "docs" / "getting-started.md",
+            "reload": "Reload or start a new Coding Agent session",
+            "guided": "## Guided AI Explore",
+            "scope": "platform and exact current target",
+            "workspace": "exact registered Workspace status and root",
+            "goal": "Goal and observable success criteria",
+            "permissions": "permissions",
+            "provider": "Provider handoff",
+            "result": "result first",
+            "returned": "exact returned Case",
+            "static": "fsq case format",
+            "confirmation": "separate explicit confirmation",
+            "fallback": "Provider-free Web troubleshooting fallback",
+        },
+        "zh": {
+            "path": ROOT / "docs" / "getting-started.zh-CN.md",
+            "reload": "重新加载或启动新的 Coding Agent session",
+            "guided": "## 引导式 AI Explore",
+            "scope": "平台和准确的当前目标",
+            "workspace": "准确注册的 Workspace 状态与 root",
+            "goal": "Goal 和可观察的成功标准",
+            "permissions": "权限",
+            "provider": "Provider 交接",
+            "result": "先总结结果",
+            "returned": "准确返回的 Case",
+            "static": "fsq case format",
+            "confirmation": "另行明确确认",
+            "fallback": "无需 Provider 的 Web 故障排查后备流程",
+        },
+    }
+
+    for contract in contracts.values():
+        guide = " ".join(contract["path"].read_text(encoding="utf-8").split())
+        install_markers = (
+            "python -m pip install --upgrade fsq-agent",
+            "fsq init --agent skill",
+            contract["reload"],
+        )
+        install_positions = [guide.index(marker) for marker in install_markers]
+        assert install_positions == sorted(install_positions)
+
+        protocol = guide[guide.index(contract["guided"]) :]
+        scope_markers = (
+            contract["scope"],
+            contract["workspace"],
+            contract["goal"],
+            contract["permissions"],
+        )
+        scope_positions = [protocol.index(marker) for marker in scope_markers]
+        ordered_markers = (
+            contract["provider"],
+            "case create",
+            contract["result"],
+            contract["returned"],
+            contract["static"],
+            contract["confirmation"],
+            "case test",
+            contract["fallback"],
+        )
+        positions = [protocol.index(marker) for marker in ordered_markers]
+        assert positions == sorted(positions)
+        assert max(scope_positions) < positions[0]
+        assert "assets/getting-started.web.fsq.yaml" in protocol[positions[-1] :]
+
+        for obsolete_claim in (
+            "installed Skill cannot",
+            "Skill cannot configure",
+            "cannot run Explore",
+            "relative Control Plane route",
+            "安装后的 Skill 不可以",
+            "Skill 也不能配置",
+            "运行 Explore/suggestion",
+            "相对 Control Plane 路由",
+        ):
+            assert obsolete_claim not in guide
+
+
+def test_changelog_keeps_released_skill_behavior_historical() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog[changelog.index("## [Unreleased]") : changelog.index("## [0.1.6]")]
+    release_015 = changelog[changelog.index("## [0.1.5]") : changelog.index("## [0.1.0]")]
+
+    assert "platform-neutral AI testing workflow" in unreleased
+    assert ("Package-owned, host-neutral FSQ Agent Skill onboarding for a provider-free Web Strict self-check and exact Run handoff to the local Control Plane.") in release_015
+    assert "platform-neutral guided AI testing workflow" not in release_015
+
+
 def test_ci_verifies_all_runtime_package_resources() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 

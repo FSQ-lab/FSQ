@@ -1,70 +1,85 @@
 # 快速开始
 
-这份指南先完成包内置、无需 Provider 的 Web Strict 自检，再进入 Case
-创建、审查、重放和 suggestion。FSQ 是 Alpha 软件；生产采用前请先阅读
+这份指南使用包内置 Skill，引导你完成平台中立的 AI Explore，再审查结果并
+选择是否进行确定性重放。FSQ 是 Alpha 软件；生产采用前请先阅读
 [支持与稳定性说明](support-and-stability.md)。
 
 ## 前置条件
 
 - Python 3.11 或更新版本。
-- 已安装受支持的 Chromium 系浏览器。示例使用稳定版 Chrome。
-- 一个可打开为本地 FSQ 项目和 Workspace 的目录。
+- 满足要测试的平台和目标的前置条件。
+- 一个可作为准确本地 Coding Agent 项目根目录打开的目录。
 
 AI 探索和 suggestion 分析还需要 OpenAI、DeepSeek、Google Gemini、Kimi、GitHub Copilot 或 Azure OpenAI。确定性 Case 重放不需要规划 LLM，除非已编写的 Case 包含 AI assertion。
 
-## 推荐的首次路径
+## 安装 CLI 和项目本地 Skill
 
 ```bash
 python -m pip install --upgrade fsq-agent
-mkdir fsq-web-demo
-cd fsq-web-demo
-fsq init --platform web --browser-channel chrome --agent skill
+cd /path/to/your/project
+fsq init --agent skill
 ```
 
-请使用 fsq-agent 0.1.8。空的 `fsq-web-demo` 目录会成为准确注册的
-Workspace root，并在 `.agents/skills/fsq/` 安装主机中立 Skill。在非空
-目录中执行 `init` 时会改为创建子 Workspace；请使用 `init` 报告的准确
-root。Workspace 命令不会向父目录搜索。
+请从这个准确的项目根目录安装 Skill。该命令独立于 Workspace 初始化，把
+Skill 安装到 `.agents/skills/fsq/`。重新加载或启动新的 Coding Agent session，
+让客户端发现已安装的 Skill。升级包后，应再次运行 `fsq init --agent skill`
+并再次重载，以更新已复制的 Skill。
 
-让兼容的 GitHub Copilot 或 Codex 客户端重新加载项目资源，或启动新的
-agent session。然后粘贴下面这段**重载后的自检提示词**：
+然后粘贴：
 
-> 使用已安装的 FSQ Skill，从准确注册的 Workspace root
-> `<ABSOLUTE_WORKSPACE_ROOT>` 运行它内置的、无需 Provider 的 Web Strict
-> 自检，最多执行一次。返回权威状态、准确的持久化 Run ID 和相对
-> Control Plane 路由。不要初始化、配置、编辑 Case、重试或启动 Control Plane。
+> 引导我完成一个 FSQ 测试。确认平台和目标、Goal 和可观察的成功标准、允许和
+> 禁止的操作，以及所有必要权限。不要在聊天中提供凭据。只执行我批准的内容；
+> 先总结结果，原样展示返回的 Case，并且仅在我另行明确确认后提供确定性重放。
 
-Skill 会运行只读 Doctor 和静态 Case 检查，只执行一次，并只读取准确返回的
-Run。请自行启动 Control Plane，再打开返回的
-`/#runs?workspace=...&platform=web&run=...` 路由：
+## 引导式 AI Explore
+
+安装后的 Skill 负责对话引导，并使用公开 FSQ CLI。它会：
+
+1. 确认项目目录、平台和准确的当前目标，不进行猜测。
+2. 确认准确注册的 Workspace 状态与 root、Goal 和可观察的成功标准、允许与
+   禁止的操作、数据限制，以及初始化、访问目标、使用 Provider/网络、写入
+   证据、发布 Case 和任何重放所需的权限。
+3. 如果需要初始化 Workspace，它会解释变更、征得权限，使用匹配的
+   `fsq init --platform ...` 形式执行一次，并采用实际返回的 root。
+4. 检查当前操作的 Doctor readiness。范围不明确或前置条件未满足时会阻止流程，
+   而不是静默使用默认值。
+
+### Provider 交接
+
+如果 AI Explore 需要设置 Provider，这一步由用户控制。API Key、token 和认证
+secret 不得进入聊天。Coding Agent 会请你自行打开 `fsq ui`，在 **Settings**
+中输入凭据；私下交互式运行 `fsq providers configure "<provider>"` 是后备方式。
+你报告完成后，它会再次检查 Provider status 和 Doctor readiness。readiness
+不等于连接测试或成功执行。
+
+### 创建、审查并选择是否重放
+
+展示完整且已确认的 Goal 后，Skill 可以用
+`fsq --output json --non-interactive case create ...` 提交一次获准的 AI
+Explore。对于结果未知、中断、失败或矛盾的执行，它不会重试。
+
+Skill 会先总结结果，并分别说明执行、记录、发布和 warning。随后只选择准确
+返回的 Case 路径：优先 `published_case_path`，否则使用
+`candidate_case_path` 并标明尚未发布。它会原样读取这个准确返回的 Case，并
+执行只读静态检查：
 
 ```bash
-fsq ui
+fsq case format "<exact-case-path>" --check --json
 ```
 
-没有经过验证的持久化 Run ID 时，结果为 `unknown`：不得重试，也不得生成
-路由。Web readiness 未就绪会在执行前阻止流程；内置 Case 无效或非 canonical
-也会阻止执行，且不得改写。
+只有 Case 静态有效且为 canonical、当前 replay readiness 已就绪，并得到你的
+另行明确确认后，Skill 才能用
+`fsq --output json --non-interactive case test --platform "<platform>"
+"<exact-case-path>"` 原样提交一次，且不启用 suggestion。创建 Case 不会预先
+授权重放，Explore 成功也不代表确定性重放会成功。
 
-## 可复制的安装提示词
+## 无需 Provider 的 Web 故障排查后备流程
 
-下面的安装提示词用于现有 Coding Agent session。它不同于上一节只能在重载
-之后使用的自检提示词。
-
-> 检查 Python 3.11 或更高版本是否可用。运行 `fsq init --help`，确认支持
-> `--agent skill`。如果没有 `fsq`、版本低于 fsq-agent 0.1.8，或缺少该能力，
-> 必须先征得我的同意，才能运行
-> `python -m pip install --upgrade fsq-agent`；未经同意不要安装。在准确的项目
-> 目录中运行 `fsq init --platform web --browser-channel chrome --agent skill`。
-> 不要手工创建或修改任何 Skill 或 Case 文件，不要配置或修改 Provider 或
-> secret，也不要运行 Case。报告准确的 Workspace root 和 Skill 路径，然后提醒
-> 我重新加载资源或启动新的 agent session，再使用单独的重载后自检提示词。
-
-安装 CLI 可以初始化 Workspace；安装后的 Skill 不可以。Skill 也不能配置
-Provider/secret、编辑 Case、重试、操作 UI、运行 Explore/suggestion、启动
-`fsq ui` 或调用 Control Plane。GitHub Copilot 与兼容 Codex 客户端共享
-`.agents/skills/fsq/`，没有单独 Skill 包。Codex TOML/托管 `AGENTS.md` 集成是
-单独的[高级兼容路径](codex-integration.md)，首次检查无需同时安装。
+这个内置 Strict Case 只用于明确选择的故障排查，不是主要体验，也不是用户
+Goal 的前置步骤。只有在你有意检查一个不使用 Provider 的已配置 Web 目标时，
+才让已安装的 Skill 使用 `assets/getting-started.web.fsq.yaml`。它会先检查
+Doctor 和 canonical 格式，取得明确执行确认，最多执行一次，并且只使用准确
+返回的 Run ID。它不会配置 Provider、启用 suggestion、重试或启动 Control Plane。
 
 ## 高级/历史 TodoMVC 示例
 
@@ -117,16 +132,17 @@ Kimi API Key 可在[中国区平台](https://platform.kimi.com/console/api-keys)
 ## 探索与检查
 
 ```bash
-fsq case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
-fsq case format cases/web/YOUR_CASE.fsq.yaml --check
-fsq case test --platform web cases/web/YOUR_CASE.fsq.yaml
-fsq runs list
-fsq runs show RUN_ID
-fsq runs logs RUN_ID
-fsq runs show RUN_ID --open
+fsq --output json --non-interactive case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
+fsq case format "<exact-returned-case-path>" --check --json
+# 仅在另行明确确认后：
+fsq --output json --non-interactive case test --platform web "<exact-returned-case-path>"
+fsq --output json --non-interactive runs show "<exact-returned-run-id>" --platform web
+fsq --output json --non-interactive runs logs "<exact-returned-run-id>" --platform web --limit 50
 ```
 
-最后一个命令基于已保存的 Run 事实创建离线报告。它不会操作目标 UI，也不会调用 Provider。
+只使用已提交操作准确返回的 Case 路径和持久化 Run ID；不要自行构造这些值，
+也不要推断“最新”Run。静态检查是只读的，并且只有在上述另行确认后才原样
+重放 Case。
 
 ## 分析确定性 Run
 

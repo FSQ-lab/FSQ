@@ -55,6 +55,8 @@ python -m pip install --upgrade fsq-agent
 
 ## 尝试一个测试
 
+在项目目录运行 `fsq init --agent skill`。重新加载或启动新的 Coding Agent session 后再继续。
+
 将这段提示词复制给你的 Coding Agent：
 
 > 引导我完成一个 FSQ 测试。确认平台和目标、测试目的和成功标准，以及允许和禁止的操作。不要在聊天中提供凭据。只执行我批准的内容；先总结结果，再原样展示返回的测试。仅在我另行明确确认后重放。

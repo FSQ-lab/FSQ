@@ -78,7 +78,7 @@ def test_default_distribution_contract() -> None:
     metadata = project["project"]
 
     assert metadata["name"] == "fsq-agent"
-    assert metadata["version"] == "0.1.8"
+    assert metadata["version"] == "0.1.9"
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]

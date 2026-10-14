@@ -8,15 +8,15 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 - Initial open-source release preparation.
 - DeepSeek Provider configuration through the CLI and Control Plane, with official Responses API inference and forward-compatible Flash/Pro model discovery.
-- Package-owned, host-neutral FSQ Agent Skill onboarding for a provider-free Web Strict self-check and exact Run handoff to the local Control Plane.
+- Package-owned, host-neutral FSQ Agent Skill for a platform-neutral guided AI testing workflow, with the provider-free Web Strict self-check available as a fallback.
 
 ### Changed
 
 - FSQ business runtime and settings use SDK-neutral names: `DefaultCodingAgentRuntime`, `AgentRuntimeSettings`, `AgentPromptConfig`, and `agent_runtime`. Custom Python integrations and low-level runtime YAML must use the canonical names; the old SDK-prefixed exports and configuration key are not aliases.
 - New dynamic Run provenance uses `agent_runtime.runner` and `agent_runtime.verifier`, with `agent_runtime_error` for generic runtime failures. External scripts matching old output strings need to adopt the new values. The actual OpenAI SDK backend and supplier identifiers are unchanged.
 - Existing local data from v0.1.0 and later retains its original formats, labels, contents, and artifact paths. This naming update requires no Workspace reinitialization, configuration edits, or reauthentication; historical queries do not rewrite authoritative data.
-- Documentation now recommends Skill-first onboarding, retains the TodoMVC Case as an advanced historical example, and describes the separate Codex compatibility integration.
-- Package and repository metadata are prepared for version 0.1.5 and the canonical `FSQ-lab/FSQ` repository. This does not claim publication, merge, or release completion.
+- Documentation now leads with platform-neutral guided AI testing through a Coding Agent or `fsq ui`, keeps the Web Strict self-check as a fallback, retains the TodoMVC Case as an advanced historical example, and describes the separate Codex compatibility integration.
+- Package and repository metadata are prepared for version 0.1.8 and the canonical `FSQ-lab/FSQ` repository. This does not claim publication, merge, or release completion.
 
 ### Removed
 

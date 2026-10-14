@@ -7,6 +7,21 @@
 > distribution. The TOML/managed-`AGENTS.md` integration below is an advanced
 > compatibility path. Do not install both paths for the first self-check.
 
+The host-neutral Skill guides a user-confirmed workflow from exact project,
+Workspace, platform/target, constraints, and permissions through command-specific
+Doctor readiness, one Goal creation, unchanged generated-Case review, and an
+optional separately confirmed strict replay. The Coding Agent owns dialogue and
+orchestration; FSQ remains the passive source of CLI/Application facts. Provider
+secrets never enter chat: the user operates `fsq ui` Settings, or privately uses
+interactive `fsq providers configure`, then the Skill rechecks status. It never
+starts the UI, retries a Case command, enables suggestions, guesses a latest Run
+or Case path, or rewrites YAML.
+
+The installed Skill is a project-local copy. After upgrading `fsq-agent`, rerun
+`fsq init --agent skill` in that project, review any backup/update result, and
+reload Skill discovery or start a new session. Package upgrade or host reload
+alone does not update the copy; `--no-overwrite` preserves the existing version.
+
 Delegate a complete UI test to FSQ from a project-scoped Codex subagent. Codex
 keeps responsibility for the development task; FSQ keeps its own planning,
 Provider session, UI execution, verification, recording, and evidence.

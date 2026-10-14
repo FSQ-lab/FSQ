@@ -22,7 +22,7 @@ cd fsq-web-demo
 fsq init --platform web --browser-channel chrome --agent skill
 ```
 
-Use fsq-agent 0.1.5. The empty `fsq-web-demo` directory becomes the exact
+Use fsq-agent 0.1.8. The empty `fsq-web-demo` directory becomes the exact
 registered Workspace root and also contains the host-neutral Skill at
 `.agents/skills/fsq/`. In a non-empty current directory, `init` instead creates
 an absent child Workspace; use the exact root reported by `init`. Workspace
@@ -56,7 +56,7 @@ from the self-check prompt above, which must be used only after reload.
 
 > Check that Python 3.11 or newer is available. Run `fsq init --help` and verify
 > that `--agent skill` is supported. If `fsq` is missing, older than fsq-agent
-> 0.1.5, or lacks that capability, ask my permission before running
+> 0.1.8, or lacks that capability, ask my permission before running
 > `python -m pip install --upgrade fsq-agent`; do not install without approval.
 > From the exact project directory run
 > `fsq init --platform web --browser-channel chrome --agent skill`. Do not

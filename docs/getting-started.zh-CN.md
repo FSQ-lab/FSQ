@@ -21,7 +21,7 @@ cd fsq-web-demo
 fsq init --platform web --browser-channel chrome --agent skill
 ```
 
-请使用 fsq-agent 0.1.5。空的 `fsq-web-demo` 目录会成为准确注册的
+请使用 fsq-agent 0.1.8。空的 `fsq-web-demo` 目录会成为准确注册的
 Workspace root，并在 `.agents/skills/fsq/` 安装主机中立 Skill。在非空
 目录中执行 `init` 时会改为创建子 Workspace；请使用 `init` 报告的准确
 root。Workspace 命令不会向父目录搜索。
@@ -52,7 +52,7 @@ fsq ui
 之后使用的自检提示词。
 
 > 检查 Python 3.11 或更高版本是否可用。运行 `fsq init --help`，确认支持
-> `--agent skill`。如果没有 `fsq`、版本低于 fsq-agent 0.1.5，或缺少该能力，
+> `--agent skill`。如果没有 `fsq`、版本低于 fsq-agent 0.1.8，或缺少该能力，
 > 必须先征得我的同意，才能运行
 > `python -m pip install --upgrade fsq-agent`；未经同意不要安装。在准确的项目
 > 目录中运行 `fsq init --platform web --browser-channel chrome --agent skill`。

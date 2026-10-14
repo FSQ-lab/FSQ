@@ -78,7 +78,7 @@ def test_default_distribution_contract() -> None:
     metadata = project["project"]
 
     assert metadata["name"] == "fsq-agent"
-    assert metadata["version"] == "0.1.5"
+    assert metadata["version"] == "0.1.8"
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
@@ -290,29 +290,26 @@ def test_canonical_skill_resources_are_checked_out_with_lf() -> None:
         assert attributes[(resource, "eol")] == "lf"
 
 
-def test_skill_first_readmes_cover_the_same_install_and_handoff_contract() -> None:
-    readmes = (
-        (ROOT / "README.md").read_text(encoding="utf-8"),
-        (ROOT / "README.zh-CN.md").read_text(encoding="utf-8"),
-    )
+def test_concise_readmes_cover_the_same_install_and_ui_contract() -> None:
+    readmes = {
+        "en": (ROOT / "README.md").read_text(encoding="utf-8"),
+        "zh": (ROOT / "README.zh-CN.md").read_text(encoding="utf-8"),
+    }
 
-    for readme in readmes:
+    for language, readme in readmes.items():
+        assert len(readme.splitlines()) <= 105
         for required in (
-            "Python 3.11",
+            "https://github.com/FSQ-lab/FSQ",
             "python -m pip install --upgrade fsq-agent",
-            "fsq init --help",
-            "--agent skill",
-            "fsq init --platform web --browser-channel chrome --agent skill",
-            ".agents/skills/fsq/",
-            "fsq doctor",
-            "fsq case format",
-            "fsq case test",
-            "fsq runs show",
             "fsq ui",
-            "runs/",
-            "Kimi",
+            "docs/media/01-describe-goal.png",
+            "aa9d0a12-2f93-4894-8349-52a013424939",
+            "QqCahxGDdS0",
         ):
             assert required in readme
+        assert readme.index("FSQ Lab") < readme.index("##")
+        documentation_heading = {"en": "## Documentation", "zh": "## 文档"}[language]
+        assert readme.index("> [!IMPORTANT]") < readme.index(documentation_heading)
 
 
 def test_ci_verifies_all_runtime_package_resources() -> None:
@@ -356,18 +353,25 @@ def test_ci_verifies_all_runtime_package_resources() -> None:
 def test_readme_uses_current_installation_and_cli_contract() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
+    headline = "Describe what to test. Let AI help to test the user flow."
+    assert readme.index(headline) < readme.index("FSQ Lab")
     assert "python -m pip install --upgrade fsq-agent" in readme
+    install_prompt = (
+        "> The official FSQ project is https://github.com/FSQ-lab/FSQ. Follow that project's official installation instructions to install the FSQ CLI. "
+        "Before changing my environment, explain the change and obtain my permission. Verify that the `fsq` command works, report the result, and then stop. "
+        "Do not initialize a Workspace, configure a Provider, or run a test."
+    )
+    assert install_prompt in readme
     assert "README.zh-CN.md" in readme
     assert "docs/getting-started.zh-CN.md" in readme
+    assert "![FSQ Test Runner for describing a test goal](docs/media/01-describe-goal.png)" in readme
     assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
     assert "https://youtu.be/QqCahxGDdS0" in readme
-    hero = readme.split('<p align="center">\n  <img src="docs/assets/fsq-workflow.svg"', 1)[0]
-    assert "Autoplay demo page" not in hero
-    assert "English captions" not in hero
+    assert "Autoplay demo page" not in readme
+    assert "English captions" not in readme
     assert "docs/demo.html" not in readme
     assert "Bilibili" not in readme
-    for command in ("fsq init", "fsq doctor", "fsq providers", "fsq case create", "fsq case test", "fsq runs", "fsq ui"):
-        assert command in readme
+    assert "fsq ui" in readme
     for obsolete in (
         "fsq-agent run",
         "run --strict",
@@ -386,16 +390,22 @@ def test_readme_uses_current_installation_and_cli_contract() -> None:
 def test_chinese_readme_uses_current_installation_and_cli_contract() -> None:
     readme = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
 
+    headline = "描述你要测试什么\uff0c让 AI 帮你测试用户流程。"
+    assert readme.index(headline) < readme.index("FSQ Lab")
     assert "python -m pip install --upgrade fsq-agent" in readme
-    assert "Workspace Root Strategy" in readme
+    install_prompt = (
+        "> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。按照该项目的官方安装说明安装 FSQ CLI。"
+        "修改我的环境前\uff0c先说明变更并征得我的同意。验证 `fsq` 命令可以工作\uff0c报告结果\uff0c然后停止。"
+        "不要初始化 Workspace、配置 Provider 或运行测试。"
+    )
+    assert install_prompt in readme
+    assert "![用于描述测试目标的 FSQ Test Runner](docs/media/01-describe-goal.png)" in readme
     assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
     assert "https://youtu.be/QqCahxGDdS0" in readme
-    hero = readme.split('<p align="center">\n  <img src="docs/assets/fsq-workflow.svg"', 1)[0]
     assert "自动播放演示页" not in readme
-    assert "中文字幕" not in hero
+    assert "中文字幕" not in readme
     assert "Bilibili" not in readme
-    for command in ("fsq init", "fsq doctor", "fsq providers", "fsq case create", "fsq case test", "fsq runs", "fsq ui"):
-        assert command in readme
+    assert "fsq ui" in readme
     for obsolete in (
         "fsq-agent run",
         "run --strict",

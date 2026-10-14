@@ -1,7 +1,7 @@
 # 快速开始
 
-这份指南使用包内置 Skill，引导你完成平台中立的 AI Explore，再审查结果并
-选择是否进行确定性重放。FSQ 是 Alpha 软件；生产采用前请先阅读
+这份指南使用包内置 Skill，引导你完成平台中立的 AI Explore，并可按需审查
+或由用户发起确定性重放。FSQ 是 Alpha 软件；生产采用前请先阅读
 [支持与稳定性说明](support-and-stability.md)。
 
 ## 前置条件
@@ -27,22 +27,28 @@ Skill 安装到 `.agents/skills/fsq/`。重新加载或启动新的 Coding Agent
 
 然后粘贴：
 
-> 引导我完成一个 FSQ 测试。确认平台和目标、Goal 和可观察的成功标准、允许和
-> 禁止的操作，以及所有必要权限。不要在聊天中提供凭据。只执行我批准的内容；
-> 先总结结果，原样展示返回的 Case，并且仅在我另行明确确认后提供确定性重放。
+> 引导我完成一个 FSQ 测试。先从准确的当前目录发现 readiness，再向我询问
+> FSQ 无法提供的事实。然后逐步确认 Goal 和可观察的成功标准、允许和禁止的
+> 操作以及相关限制。不要在聊天中提供凭据。只在我确认完整 Goal 后创建一次；
+> 先总结结果，并等待我主动请求 Case 审查或重放。
 
 ## 引导式 AI Explore
 
 安装后的 Skill 负责对话引导，并使用公开 FSQ CLI。它会：
 
-1. 确认项目目录、平台和准确的当前目标，不进行猜测。
-2. 确认准确注册的 Workspace 状态与 root、Goal 和可观察的成功标准、允许与
-   禁止的操作、数据限制，以及初始化、访问目标、使用 Provider/网络、写入
-   证据、发布 Case 和任何重放所需的权限。
+1. 把准确的当前工作目录作为唯一初始 Workspace 候选，并先运行 Doctor，再
+   询问 Doctor 已能提供的 Workspace、平台和准确的当前目标信息。
+2. 如果该目录不是 Workspace，则要求准确注册的 Workspace 状态与 root，或
+   准确的初始化目录；不会搜索、扫描、尝试猜测 root，也不会根据历史或
+   “latest” 推断。
 3. 如果需要初始化 Workspace，它会解释变更、征得权限，使用匹配的
    `fsq init --platform ...` 形式执行一次，并采用实际返回的 root。
-4. 检查当前操作的 Doctor readiness。范围不明确或前置条件未满足时会阻止流程，
-   而不是静默使用默认值。
+4. 逐步确认 Goal 和可观察的成功标准、允许与禁止的操作、相关限制和当下所需
+   权限。初始化、一次创建和重放分别确认；Explore 阶段不请求未来重放权限。
+
+相关只读检查会一次紧凑披露准确工作目录、命令、目的和只读影响；普通只读
+命令不需要逐条再次批准。范围不明确或前置条件未满足时会阻止流程，而不是
+静默使用默认值。
 
 ### Provider 交接
 
@@ -56,19 +62,25 @@ secret 不得进入聊天。Coding Agent 会请你自行打开 `fsq ui`，在 **
 
 展示完整且已确认的 Goal 后，Skill 可以用
 `fsq --output json --non-interactive case create ...` 提交一次获准的 AI
-Explore。对于结果未知、中断、失败或矛盾的执行，它不会重试。
+Explore。提交开始即消耗该确认。对于结果未知、中断、失败或矛盾的执行，它
+不会重试。它只报告一次提交，最多主动报告一次没有新的结构化状态，之后静默
+等待，而不会虚构实时操作进度。
 
-Skill 会先总结结果，并分别说明执行、记录、发布和 warning。随后只选择准确
-返回的 Case 路径：优先 `published_case_path`，否则使用
-`candidate_case_path` 并标明尚未发布。它会原样读取这个准确返回的 Case，并
-执行只读静态检查：
+Skill 会先总结结果，把每项可观察验收标准映射为有支持、未满足或未知，然后
+分别说明记录、发布和 warning。随后只选择准确返回的 Case 路径：优先
+`published_case_path`，否则使用 `candidate_case_path` 并标明尚未发布。
+
+它仅在你提出请求时以只读方式原样审查该 Case。重放也只能由你主动发起。
+收到请求后，它会执行只读 Doctor 和静态预检查，包括：
 
 ```bash
 fsq case format "<exact-case-path>" --check --json
 ```
 
-只有 Case 静态有效且为 canonical、当前 replay readiness 已就绪，并得到你的
-另行明确确认后，Skill 才能用
+随后它会显示准确路径和目标，并强烈警告重放是新的目标操作，可能重复副作用。
+已知的失败/恢复或重复纠正 mutation 会作为风险说明，但不会自动改写或拒绝
+重放。如果你在警告后仍想重放，Skill 会重申剩余风险并要求第二次明确确认。
+只有在该确认后，Skill 才能用
 `fsq --output json --non-interactive case test --platform "<platform>"
 "<exact-case-path>"` 原样提交一次，且不启用 suggestion。创建 Case 不会预先
 授权重放，Explore 成功也不代表确定性重放会成功。

@@ -361,6 +361,8 @@ def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> 
             "path": ROOT / "docs" / "getting-started.md",
             "reload": "Reload or start a new Coding Agent session",
             "guided": "## Guided AI Explore",
+            "discovery": "exact current working directory",
+            "doctor_first": "before asking",
             "scope": "platform and exact current target",
             "workspace": "exact registered Workspace status and root",
             "goal": "Goal and observable success criteria",
@@ -368,14 +370,17 @@ def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> 
             "provider": "Provider handoff",
             "result": "result first",
             "returned": "exact returned Case",
+            "optional_review": "only if you ask",
             "static": "fsq case format",
-            "confirmation": "separate explicit confirmation",
+            "confirmation": "second explicit confirmation",
             "fallback": "Provider-free Web troubleshooting fallback",
         },
         "zh": {
             "path": ROOT / "docs" / "getting-started.zh-CN.md",
             "reload": "重新加载或启动新的 Coding Agent session",
             "guided": "## 引导式 AI Explore",
+            "discovery": "准确的当前工作目录",
+            "doctor_first": "先运行 Doctor",
             "scope": "平台和准确的当前目标",
             "workspace": "准确注册的 Workspace 状态与 root",
             "goal": "Goal 和可观察的成功标准",
@@ -383,8 +388,9 @@ def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> 
             "provider": "Provider 交接",
             "result": "先总结结果",
             "returned": "准确返回的 Case",
+            "optional_review": "仅在你提出请求时",
             "static": "fsq case format",
-            "confirmation": "另行明确确认",
+            "confirmation": "第二次明确确认",
             "fallback": "无需 Provider 的 Web 故障排查后备流程",
         },
     }
@@ -400,6 +406,8 @@ def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> 
         assert install_positions == sorted(install_positions)
 
         protocol = guide[guide.index(contract["guided"]) :]
+        assert protocol.index(contract["discovery"]) < protocol.index(contract["doctor_first"])
+        assert protocol.index(contract["doctor_first"]) < protocol.index(contract["scope"])
         scope_markers = (
             contract["scope"],
             contract["workspace"],
@@ -412,6 +420,7 @@ def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> 
             "case create",
             contract["result"],
             contract["returned"],
+            contract["optional_review"],
             contract["static"],
             contract["confirmation"],
             "case test",

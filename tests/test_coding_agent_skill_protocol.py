@@ -14,7 +14,7 @@ from fsq_agent.adapters.cli import main
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_PATH = ROOT / "fsq_agent" / "resources" / "skills" / "fsq" / "SKILL.md"
-EXPECTED_DESCRIPTION = "Guide one user-confirmed FSQ test from readiness through Case creation, review, and optional strict replay."
+EXPECTED_DESCRIPTION = "Guide FSQ UI testing when users want to explore an app, test a UI, verify a workflow, or create an FSQ Case from a Goal, with readiness discovery and user-confirmed execution."
 
 
 def _skill() -> str:
@@ -60,7 +60,7 @@ def test_skill_protocol_contains_confirmed_workflow_boundaries() -> None:
         "Coding Agent owns the dialogue and orchestration",
         "FSQ remains a passive CLI/Application",
         "Provider API keys, tokens, and authentication secrets must not enter chat",
-        "One confirmation authorizes one `case create` submission",
+        "confirmation is consumed when submission begins",
         "FSQ has no new structured status",
         "published_case_path",
         "candidate_case_path",
@@ -72,24 +72,117 @@ def test_skill_protocol_contains_confirmed_workflow_boundaries() -> None:
     ):
         assert text in skill
 
-    assert skill.index("## Establish exact scope and permission") < skill.index("## Initialize only with permission")
-    assert skill.index("## Provider handoff") < skill.index("## Confirm and create exactly once")
-    assert skill.index("## Review the exact returned Case") < skill.index("## Optional strict replay")
+    assert skill.index("## Discover before asking") < skill.index("## Initialize only with permission")
+    assert skill.index("## Provider handoff") < skill.index("## Confirm and create once")
+    assert skill.index("## Interpret and report the terminal result") < skill.index("## Optional exact-Case review")
 
 
-def test_skill_branches_registered_workspace_before_initialization() -> None:
+def test_skill_discovers_exact_current_candidate_before_initialization() -> None:
     skill = " ".join(_skill().split())
 
-    registered_branch = "If an already registered usable Workspace exists"
-    initialization_branch = "Otherwise, explain the initialization mutation"
+    doctor = "`fsq --output json --non-interactive doctor`"
+    unresolved = "ask for either an exact registered Workspace root or an exact directory to initialize"
 
-    assert registered_branch in skill
-    assert "change directly to its exact confirmed registered root" in skill
-    assert "run Doctor there without invoking initialization" in skill
-    assert initialization_branch in skill
+    assert "Use the exact current working directory as the first and only initial Workspace candidate" in skill
+    assert "Before asking for any Workspace, platform, target, or readiness fact Doctor can provide" in skill
+    assert unresolved in skill
+    assert "Do not search parent or sibling directories, scan broadly, or try guessed roots" in skill
     assert "obtain explicit permission, and initialize exactly once" in skill
     assert "actual returned Workspace root" in skill
-    assert skill.index(registered_branch) < skill.index(initialization_branch)
+    assert skill.index(doctor) < skill.index(unresolved)
+
+
+def test_skill_behavior_scenarios_follow_confirmed_policy_table() -> None:
+    # Deterministic text checks guard policy wording; they do not prove model compliance.
+    skill = " ".join(_skill().split())
+    scenarios = (
+        (
+            "read-only batch disclosure",
+            (
+                "one compact batch disclosure",
+                "exact working directory, argv, purpose, and read-only effect",
+                "Do not ask for separate approval for each ordinary read-only command",
+            ),
+            (),
+        ),
+        (
+            "separate mutation boundaries",
+            (
+                "Initialization, one create submission, and replay are three separate mutation boundaries",
+                "Do not ask for future replay permission during Explore",
+            ),
+            (),
+        ),
+        (
+            "minimal duplicate prevention",
+            (
+                "minimal in-session state",
+                "does not provide cross-session exactly-once behavior",
+                "Never submit the same confirmation twice",
+            ),
+            (),
+        ),
+        (
+            "buffered progress silence",
+            (
+                "Report submission exactly once",
+                "at most one unsolicited",
+                "wait silently",
+                "When the user asks for status",
+                "Do not invent an action or stage",
+            ),
+            (),
+        ),
+        (
+            "minimal machine interpretation",
+            (
+                "`fsq.machine/v1`",
+                "operation matches",
+                "structured nonzero",
+                "unknown remainder",
+                "without retry",
+            ),
+            (),
+        ),
+        (
+            "result-first report",
+            (
+                "authoritative execution conclusion and short summary first",
+                "observable acceptance criterion",
+                "recording",
+                "publication",
+                "warnings",
+            ),
+            (),
+        ),
+        (
+            "optional exact-path review",
+            (
+                "Review only when the user asks",
+                "read-only",
+                "Never construct a path",
+            ),
+            (),
+        ),
+        (
+            "two-decision replay",
+            (
+                "Only a user request starts replay consideration",
+                "does not authorize execution",
+                "second explicit confirmation",
+                "known intermediate failure, recovery, adjusted execution, or repeated corrective mutation",
+                "does not hard-block replay",
+                "at most one unchanged `case test` submission",
+            ),
+            ("`--suggest`",),
+        ),
+    )
+
+    for scenario, required, forbidden in scenarios:
+        for text in required:
+            assert text in skill, (scenario, text)
+        for text in forbidden:
+            assert text not in " ".join(" ".join(command) for command in _command_templates(_skill())), (scenario, text)
 
 
 def test_every_literal_skill_command_template_matches_the_real_cli_parser(tmp_path: Path) -> None:

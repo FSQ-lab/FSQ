@@ -1,7 +1,7 @@
 # Getting Started
 
 This guide uses the package-owned Skill for a guided, platform-neutral AI
-Explore, followed by review and optional deterministic replay. FSQ is alpha
+Explore, with optional review and user-initiated deterministic replay. FSQ is alpha
 software; review [support and stability](support-and-stability.md) before
 production adoption.
 
@@ -29,27 +29,36 @@ update the copied Skill.
 
 Then paste:
 
-> Guide me through one FSQ test. Confirm the platform and target, Goal and
-> observable success criteria, allowed and forbidden actions, and all required
-> permissions. Keep credentials out of chat. Execute only what I approve,
-> summarize the result first, show the returned Case unchanged, and offer
-> deterministic replay only after my separate explicit confirmation.
+> Guide me through one FSQ test. Discover readiness from my exact current
+> directory before asking me for facts FSQ can provide. Then progressively
+> confirm the Goal and observable success criteria, allowed and forbidden
+> actions, and relevant limits. Keep credentials out of chat. Execute one
+> creation only after I approve its complete Goal, summarize the result first,
+> and wait for me to request any Case review or replay.
 
 ## Guided AI Explore
 
 The installed Skill leads the dialogue and uses the public FSQ CLI. It will:
 
-1. Confirm the project directory, platform and exact current target without
-   guessing.
-2. Confirm the exact registered Workspace status and root, Goal and observable
-   success criteria, allowed and forbidden actions, data limits, and
-   permissions for initialization, target access, Provider/network use,
-   evidence, Case publication, and any replay.
+1. Use the exact current working directory as its only initial Workspace
+   candidate and run Doctor before asking for facts that Doctor can provide.
+   It uses the returned platform and exact current target plus the exact
+   registered Workspace status and root.
+2. If that directory is not a Workspace, ask for an exact registered Workspace
+   root or exact initialization directory without searching, scanning, trying
+   guessed roots, or using history/latest inference.
 3. If Workspace initialization is needed, explain the mutation, ask permission,
    run the matching `fsq init --platform ...` form once, and use the actual
    returned root.
-4. Check Doctor readiness for the requested operation. Ambiguous scope or an
-   unmet prerequisite blocks rather than being silently defaulted.
+4. Progressively resolve the Goal and observable success criteria, allowed and
+   forbidden actions, relevant limits, and permissions only when each decision
+   is needed. Initialization, one creation, and replay have separate
+   confirmations; Explore never asks for future replay permission.
+
+Related read-only checks use one compact disclosure of their exact working
+directories, commands, purpose, and read-only effect; ordinary read-only
+commands do not each require another approval. Ambiguous scope or an unmet
+prerequisite blocks rather than being silently defaulted.
 
 ### Provider handoff
 
@@ -64,20 +73,31 @@ readiness again. Readiness is not a connection test or a successful execution.
 
 After showing the complete confirmed Goal, the Skill may submit one approved
 AI Explore with `fsq --output json --non-interactive case create ...`. It does
-not retry an unknown, interrupted, failed, or contradictory result.
+not retry an unknown, interrupted, failed, or contradictory result. Submission
+consumes that confirmation. It reports submission once, may report no new
+structured status once without being asked, and then waits silently rather than
+inventing live action progress.
 
-The Skill summarizes the authoritative result first, keeping execution,
-recording, publication, and warnings distinct. It then selects only the exact
-returned Case path: `published_case_path`, or otherwise
-`candidate_case_path` marked as unpublished. It reads that exact returned Case
-unchanged and runs a read-only static check:
+The Skill summarizes the authoritative execution result first and maps your
+observable acceptance criteria to supported, unmet, or unknown evidence before
+separately reporting recording, publication, and warnings. It selects only the
+exact returned Case path: `published_case_path`, or otherwise
+`candidate_case_path` marked as unpublished.
+
+It reviews that exact returned Case, unchanged and read-only, only if you ask.
+Replay is also initiated only by your request. After that request, it runs
+read-only Doctor and static prechecks, including:
 
 ```bash
 fsq case format "<exact-case-path>" --check --json
 ```
 
-Only after canonical static validity, current replay readiness, and your
-separate explicit confirmation may it submit the unchanged Case once with
+It then shows the exact path and target and strongly warns that replay is a new
+target operation that may repeat side effects. Known failure/recovery or
+repeated corrective mutation is included as risk, but does not automatically
+rewrite or refuse replay. If you still want replay after that warning, the
+Skill restates the residual risk and requires a second explicit confirmation.
+Only after that confirmation may it submit the unchanged Case once with
 `fsq --output json --non-interactive case test --platform "<platform>"
 "<exact-case-path>"`, without suggestions. Creating a Case never pre-approves
 replay, and Explore success does not prove deterministic replay success.

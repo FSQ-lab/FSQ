@@ -4,6 +4,12 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+### Changed
+
+- The package-owned, host-neutral FSQ Agent Skill now guides a platform-neutral AI testing workflow, with the provider-free Web Strict self-check retained as a fallback.
+- The bilingual README now leads with user value, supports Coding Agent or `fsq ui` entry paths, and keeps detailed onboarding in the user guides.
+- Python distribution metadata and current-version guidance are prepared for version 0.1.8. This does not claim publication, merge, or release completion.
+
 ## [0.1.6] - 2026-10-13
 
 ### Added

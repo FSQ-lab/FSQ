@@ -56,7 +56,7 @@ body:
     attributes:
       label: FSQ version or source revision
       description: Provide the installed version or Git commit SHA.
-      placeholder: "For example: 0.1.5 or abc1234"
+      placeholder: "For example: 0.1.8 or abc1234"
     validations:
       required: true
 

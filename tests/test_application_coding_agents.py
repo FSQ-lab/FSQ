@@ -19,6 +19,7 @@ GETTING_STARTED_DATA_URL = (
     "Strict%20Replay%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3Ch1%3EFSQ%20Web"
     "%20Strict%20Replay%3C%2Fh1%3E%3C%2Fbody%3E%3C%2Fhtml%3E"
 )
+SKILL_DESCRIPTION = "Guide one user-confirmed FSQ test from readiness through Case creation, review, and optional strict replay."
 
 
 def _web_registry():
@@ -283,7 +284,7 @@ def test_packaged_skill_resources_are_available_and_portable() -> None:
     skill = (root / "SKILL.md").read_text(encoding="utf-8")
     packaged = files("fsq_agent").joinpath("resources", "skills", "fsq")
 
-    assert skill.startswith("---\nname: fsq\ndescription: ")
+    assert skill.startswith(f"---\nname: fsq\ndescription: {SKILL_DESCRIPTION}\n")
     assert skill.count("\n---\n") == 1
     assert "{{" not in skill
     assert (root / "assets/getting-started.web.fsq.yaml").is_file()

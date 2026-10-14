@@ -41,14 +41,40 @@ byte-for-byte at `.agents/skills/fsq/` in the current project. The manifest
 contains exactly `SKILL.md` and
 `assets/getting-started.web.fsq.yaml`. The bundled Case is a provider-free Web
 Strict check of the `FSQ Web Strict Replay` heading in a package-owned inline
-HTML document; a configured browser is its only external prerequisite. The
-Skill requires the exact registered Workspace root, performs read-only Doctor
-and static checks, submits the Case at most once, and hands the exact persistent
-Run identity to the local Control Plane. It does not start `fsq ui`, discover a
-host's Skill-management UI, initialize or configure a Workspace, configure a
-Provider, install prerequisites, or operate browser UI itself. Review the
-installed instructions and use the discovery/reload flow documented by the
-compatible Coding Agent host.
+HTML document; a configured browser is its only external prerequisite and the
+Skill presents it only as an explicit troubleshooting fallback.
+
+The Skill makes the Coding Agent the dialogue/orchestration owner while FSQ
+remains the passive CLI/Application. It requires an exact project directory,
+platform/current target, registered Workspace status/root, Goal, acceptance
+criteria, allowed/forbidden actions, and permissions. Initialization requires
+explicit permission; later commands use the actual returned root and inspect
+Doctor readiness for the specific requested command rather than treating an
+overall `partial` result as failure.
+
+Provider credentials are never a Coding Agent chat input. If Goal creation is
+blocked, the preferred handoff is for the user to run `fsq ui` and enter
+credentials directly in Settings; private interactive `fsq providers configure`
+is the fallback. The Skill does not start or call the UI, receive credentials,
+or treat `providers status` as a connection test.
+
+For creation, one exact user-confirmed Goal argument combines the outcome,
+acceptance criteria, allowed actions, and forbidden actions. One confirmation
+permits one `case create`, with no retry, suggestions, rewriting, parallel
+submission, or latest-Run guessing. The Skill preserves FSQ's structured
+execution/recording/publication outcomes, selects only the returned
+`published_case_path` or returned `candidate_case_path`, and never constructs or
+rewrites a Case path. A separately confirmed strict replay uses the exact
+unchanged, statically valid canonical Case at most once without `--suggest`;
+dynamic success does not prove replay success. Optional Run reads use only an
+exact returned/error-detail Run ID with `runs show` or bounded `runs logs`.
+
+Review the installed instructions and use the compatible host's discovery/reload
+flow. Because installation copies package resources, upgrading the package or
+reloading the host alone does not update an existing project copy. After a
+package upgrade, rerun `fsq init --agent skill`, review its backup/update result,
+then reload discovery or start a new session. `--no-overwrite` deliberately
+preserves an older existing copy.
 
 `fsq init --agent codex` retains the compatibility integration: it installs the
 two FSQ Codex TOML definitions byte-for-byte in the current project and uses the

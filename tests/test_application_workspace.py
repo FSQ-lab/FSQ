@@ -102,6 +102,132 @@ def test_initialize_workspace_delegates_nonempty_selected_directory_to_config(tm
     assert result.root_path == selected / "custom"
 
 
+def test_initialize_workspace_implicit_collision_uses_suffix_without_inspecting_conflicting_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    selected = tmp_path / "project-a" / "fsq_workspace"
+    selected.mkdir(parents=True)
+    conflicting = tmp_path / "project-b" / "fsq_workspace"
+    conflicting.mkdir(parents=True)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "check",
+        lambda self, platform: PlatformRuntimeCheck(platform=platform, status="ready", ready=True, message="ready"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.list_workspace_registry",
+        lambda root: [WorkspaceRegistryEntry(name="FSQ_WORKSPACE", root_path=conflicting)],
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.inspect_registered_workspace",
+        lambda *args: pytest.fail("the conflicting workspace must not be inspected"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.load_registered_workspace",
+        lambda *args: pytest.fail("the conflicting workspace must not be loaded"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.persist_workspace_platform",
+        lambda **kwargs: pytest.fail("the conflicting workspace must not receive a platform"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.persist_workspace_platform_update",
+        lambda **kwargs: pytest.fail("the conflicting workspace must not be updated"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.persist_workspace",
+        lambda **kwargs: captured.update(kwargs) or WorkspaceStatus(name="fsq_workspace-2", root_path=selected, status="available", message="available"),
+    )
+
+    result = initialize_workspace(
+        WorkspaceInitializeRequest(
+            current_directory=selected,
+            platform="android",
+            app_id="com.example.app",
+            user_config_root=tmp_path / "user",
+        )
+    )
+
+    assert captured["selected_path"] == selected.resolve()
+    assert captured["name"] == "fsq_workspace-2"
+    assert result.name == "fsq_workspace-2"
+    assert result.root_path == selected.resolve()
+
+
+def test_initialize_workspace_implicit_collision_uses_smallest_available_case_insensitive_suffix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    selected = tmp_path / "project" / "workspace"
+    selected.mkdir(parents=True)
+    (selected / "existing.txt").write_text("owned", encoding="utf-8")
+    entries = [
+        WorkspaceRegistryEntry(name="WORKSPACE", root_path=tmp_path / "other-1"),
+        WorkspaceRegistryEntry(name="Workspace-2", root_path=tmp_path / "other-2"),
+        WorkspaceRegistryEntry(name="workspace-4", root_path=tmp_path / "other-4"),
+    ]
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "check",
+        lambda self, platform: PlatformRuntimeCheck(platform=platform, status="ready", ready=True, message="ready"),
+    )
+    monkeypatch.setattr("fsq_agent.application._workspace_init.list_workspace_registry", lambda root: entries)
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.persist_workspace",
+        lambda **kwargs: captured.update(kwargs) or WorkspaceStatus(name="workspace-3", root_path=selected / "workspace-3", status="available", message="available"),
+    )
+
+    result = initialize_workspace(
+        WorkspaceInitializeRequest(
+            current_directory=selected,
+            platform="android",
+            app_id="com.example.app",
+            user_config_root=tmp_path / "user",
+        )
+    )
+
+    assert captured["selected_path"] == selected.resolve()
+    assert captured["name"] == "workspace-3"
+    assert result.root_path == selected / "workspace-3"
+
+
+def test_initialize_workspace_implicit_exact_root_reuses_actual_registered_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    selected = tmp_path / "workspace"
+    selected.mkdir()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "check",
+        lambda self, platform: PlatformRuntimeCheck(platform=platform, status="ready", ready=True, message="ready"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.list_workspace_registry",
+        lambda root: [WorkspaceRegistryEntry(name="Registered-Project", root_path=selected)],
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.inspect_registered_workspace",
+        lambda name, root: WorkspaceStatus(name=name, root_path=selected, status="available", message="available"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.persist_workspace_platform",
+        lambda **kwargs: captured.update(kwargs) or type("Config", (), {"name": "Registered-Project", "root_path": selected, "platform": "android"})(),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._workspace_init.persist_workspace",
+        lambda **kwargs: pytest.fail("an exact registered root must not be recreated"),
+    )
+
+    result = initialize_workspace(
+        WorkspaceInitializeRequest(
+            current_directory=selected,
+            platform="android",
+            app_id="com.example.app",
+            user_config_root=tmp_path / "user",
+        )
+    )
+
+    assert captured["name"] == "Registered-Project"
+    assert result.name == "Registered-Project"
+    assert result.root_path == selected.resolve()
+
+
 def test_initialize_workspace_uses_registered_root_independently_of_current_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     selected = tmp_path / "elsewhere"
     selected.mkdir()

@@ -25,11 +25,22 @@ def initialize_workspace(request: WorkspaceInitializeRequest) -> WorkspaceInitia
     target = resolve_workspace_target(request)
     try:
         selected = request.current_directory.expanduser().resolve()
-        name = (request.name or selected.name).strip()
-        entry = next(
-            (item for item in list_workspace_registry(request.user_config_root) if item.name.casefold() == name.casefold()),
-            None,
-        )
+        entries = list_workspace_registry(request.user_config_root)
+        if request.name is not None:
+            name = request.name.strip()
+            entry = next((item for item in entries if item.name.casefold() == name.casefold()), None)
+        else:
+            entry = next((item for item in entries if item.root_path.expanduser().resolve() == selected), None)
+            if entry is not None:
+                name = entry.name
+            else:
+                base = selected.name
+                registered_names = {item.name.casefold() for item in entries}
+                name = base
+                suffix = 2
+                while name.casefold() in registered_names:
+                    name = f"{base}-{suffix}"
+                    suffix += 1
         if entry is None:
             status = persist_workspace(
                 selected_path=selected,

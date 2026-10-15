@@ -18,6 +18,18 @@ each one. Preserve all project instructions outside the managed block.
 The Codex project and intended FSQ Workspace may be different directories.
 Workspace-scoped commands must run from the exact registered root shown above.
 
+## Dependency Download Mirrors
+
+- Mirror restrictions apply only to dependency downloads and installations.
+- For Python package downloads, prefer the Tsinghua PyPI mirror at
+  `https://pypi.tuna.tsinghua.edu.cn/simple`.
+- For npm package downloads, use the company-approved or already configured npm
+  registry. Do not replace it with the public npm registry when access is restricted.
+- Apply download mirrors through command-scoped options or existing local
+  configuration. Do not change package publishing configuration, credentials,
+  or destinations. Python and npm publishing must continue to use the existing
+  release configuration.
+
 ## Required Flow
 
 When the user asks to run an FSQ UI test, create a Case, replay a Case, or validate a page/application with FSQ:

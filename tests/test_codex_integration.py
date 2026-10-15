@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 AGENT_PATH = ROOT / "fsq_agent" / "resources" / "codex" / "agents" / "fsq_test_runner.toml"
 CLI_MODULE = "fsq_agent.adapters.cli._main"
 COMMAND_NAMES = ("doctor", "case.format", "case.create", "case.create.named", "case.test", "case.test.suggest", "runs.show", "runs.logs")
+JSONL_COMMANDS = {"case.create", "case.create.named"}
 
 
 @pytest.fixture
@@ -48,12 +49,15 @@ def commands(agent_definition: dict[str, object]) -> dict[str, list[str]]:
         if not line.startswith("fsq "):
             continue
         tokens = shlex.split(line)
-        assert tokens[:4] == ["fsq", "--output", "json", "--non-interactive"]
+        assert tokens[:2] == ["fsq", "--output"]
+        output_mode = tokens[2]
+        assert tokens[3] == "--non-interactive"
         name = ".".join(tokens[4:6]) if tokens[4] in {"case", "runs"} else tokens[4]
         if "--name" in tokens:
             name += ".named"
         if "--suggest" in tokens:
             name += ".suggest"
+        assert output_mode == ("jsonl" if name in JSONL_COMMANDS else "json")
         assert name not in templates
         templates[name] = tokens[1:]
     assert set(templates) == set(COMMAND_NAMES)
@@ -70,6 +74,24 @@ def _arguments(commands: dict[str, list[str]], name: str, tmp_path: Path, **over
     }
     values.update(overrides)
     return [argument.format_map(values) for argument in commands[name]]
+
+
+def _jsonl_records(output: str) -> list[dict[str, object]]:
+    assert output.endswith("\n")
+    records = [json.loads(line) for line in output.splitlines()]
+    assert records
+    return records
+
+
+def _terminal_payload(output: str, command_name: str) -> dict[str, object]:
+    if command_name in JSONL_COMMANDS:
+        records = _jsonl_records(output)
+        terminals = [record for record in records if record["type"] in {"result", "error"}]
+        assert len(terminals) == 1
+        return terminals[0]
+    payload = json.loads(output)
+    assert isinstance(payload, dict)
+    return payload
 
 
 def test_codex_definition_is_portable_and_task_scoped(agent_definition: dict[str, object]) -> None:
@@ -100,6 +122,49 @@ def test_definition_explicitly_reserves_case_yaml_generation_for_fsq(agent_defin
     ):
         assert rule in instructions
     assert "ask FSQ to generate" in str(agent_definition["description"])
+
+
+def test_codex_create_polls_one_host_managed_process_and_validates_records(agent_definition: dict[str, object]) -> None:
+    instructions = " ".join(str(agent_definition["developer_instructions"]).split())
+
+    for required in (
+        "host-managed asynchronous",
+        "same process",
+        "same process/session handle",
+        "Polling is observation, not another command",
+        "only newly available",
+        "complete newline-terminated",
+        "trailing partial line",
+        "duplicate",
+        "one coherent Run identity",
+        "at most one terminal",
+        "final drain",
+        "terminal-only",
+        "must not claim live progress",
+    ):
+        assert required in instructions
+    assert "shell background" not in instructions
+    assert "create JSONL buffers events until completion" not in instructions
+
+
+def test_codex_progress_rules_are_safe_coalesced_and_never_retry(agent_definition: dict[str, object]) -> None:
+    instructions = " ".join(str(agent_definition["developer_instructions"]).split())
+
+    for required in (
+        "Report submission exactly once",
+        "safe, validated event facts",
+        "hidden reasoning",
+        "unrestricted tool arguments or output",
+        "secrets",
+        "raw UI content",
+        "coalesce",
+        "explicit failure",
+        "at most one unsolicited",
+        "Silence never proves",
+        "unknown",
+        "never retry",
+    ):
+        assert required in instructions
 
 
 @pytest.mark.parametrize("name", COMMAND_NAMES)
@@ -134,9 +199,11 @@ def test_create_template_passes_exact_request_and_published_result(commands, tmp
     monkeypatch.setattr(f"{CLI_MODULE}.create_case", create)
     arguments = _arguments(commands, "case.create.named" if named else "case.create", tmp_path, platform=platform)
     result = CliRunner().invoke(main, arguments)
-    payload = json.loads(result.stdout)
+    records = _jsonl_records(result.stdout)
+    payload = _terminal_payload(result.stdout, "case.create.named" if named else "case.create")
 
     assert result.exit_code == 0, result.output
+    assert [record["type"] for record in records] == ["result"]
     assert len(requests) == 1
     assert requests[0].current_directory == tmp_path
     assert requests[0].platform == platform
@@ -159,12 +226,37 @@ def test_create_execution_and_publication_remain_separate(commands, tmp_path, mo
 
     monkeypatch.setattr(f"{CLI_MODULE}.create_case", create)
     result = CliRunner().invoke(main, _arguments(commands, "case.create", tmp_path))
-    payload = json.loads(result.stdout)
+    payload = _terminal_payload(result.stdout, "case.create")
 
     assert result.exit_code == exit_code
     assert payload["result"]["status"] == status
     assert payload["result"]["publication_outcome"] == publication
     assert payload["result"]["published_case_path"] is None
+
+
+def test_create_jsonl_contains_event_and_single_terminal(commands, tmp_path, monkeypatch) -> None:
+    async def create(_request, *, event_sink=None, agent_factory=None):
+        assert event_sink is not None
+        from fsq_agent.models import RunEvent
+
+        event_sink(RunEvent(run_id="run-1", task_id="task-1", type="run_started", title="Started", sequence=1))
+        return CaseCreateResult(
+            run_id="run-1",
+            task_id="task-1",
+            status="success",
+            summary="Execution result.",
+            report_path=tmp_path / "report.md",
+        )
+
+    monkeypatch.setattr(f"{CLI_MODULE}.create_case", create)
+    result = CliRunner().invoke(main, _arguments(commands, "case.create", tmp_path))
+    records = _jsonl_records(result.stdout)
+
+    assert result.exit_code == 0
+    assert [record["type"] for record in records] == ["event", "result"]
+    assert all(record["schema_version"] == "fsq.machine/v1" for record in records)
+    assert all(record["operation"] == "case.create" for record in records)
+    assert records[0]["event"]["run_id"] == records[1]["result"]["run_id"] == "run-1"
 
 
 @pytest.mark.parametrize("suggest", [False, True])

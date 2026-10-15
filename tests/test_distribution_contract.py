@@ -78,7 +78,7 @@ def test_default_distribution_contract() -> None:
     metadata = project["project"]
 
     assert metadata["name"] == "fsq-agent"
-    assert metadata["version"] == "0.2.0"
+    assert metadata["version"] == "0.2.1"
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
@@ -320,10 +320,11 @@ def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
             "agent": "### 1. Coding Agent",
             "ui": "### 2. FSQ UI",
             "reload": "reload or start a new Coding Agent session",
-            "prompt": "> Test",
+            "prompt": "> Use FSQ to test this user goal",
             "setup_approval": "one approval for the listed changes",
             "setup_scope": "does not initialize a Workspace, configure a Provider, or run a test",
-            "examples": ("Android", "Web", "Windows", "macOS"),
+            "first_test": ("Microsoft Edge Stable", "Bing", "`FSQ GitHub`", "organic search results", "current position/ranking"),
+            "target_guidance": "facts or user-owned decisions",
             "optional_case": "if FSQ returns a Case",
             "replay": "separately requesting any replay",
         },
@@ -333,10 +334,11 @@ def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
             "agent": "### 1. Coding Agent",
             "ui": "### 2. FSQ UI",
             "reload": "重新加载 Coding Agent 或启动新 session",
-            "prompt": "> 测试",
+            "prompt": "> 使用 FSQ 测试这个用户目标",
             "setup_approval": "一次修改批准请求",
             "setup_scope": "不会初始化 Workspace、配置 Provider 或运行测试",
-            "examples": ("Android", "Web", "Windows", "macOS"),
+            "first_test": ("Microsoft Edge Stable", "Bing", "`FSQ GitHub`", "自然搜索结果", "当前所在的位置/排名"),
+            "target_guidance": "事实或由用户决定的事项",
             "optional_case": "如果 FSQ 返回了 Case",
             "replay": "另行决定是否请求重放",
         },
@@ -352,7 +354,10 @@ def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
         assert agent_section.index("fsq init --agent skill") < agent_section.index(contract["reload"]) < agent_section.index(contract["prompt"])
         assert contract["setup_approval"] in agent_section
         assert contract["setup_scope"] in agent_section
-        assert all(value in agent_section for value in contract["examples"])
+        assert all(value in agent_section for value in contract["first_test"])
+        assert contract["target_guidance"] in agent_section
+        assert "[describe the outcome]" not in agent_section
+        assert "[描述期望结果]" not in agent_section
         assert "Skill" in agent_section
         assert contract["optional_case"] in quick_start
         assert contract["replay"] in quick_start
@@ -510,9 +515,10 @@ def test_readme_uses_current_installation_and_cli_contract() -> None:
     assert "### 2. FSQ UI" in readme
     assert "fsq init --agent skill" in readme
     assert "does not initialize a Workspace, configure a Provider, or run a test" in readme
-    assert "Test this user goal with FSQ" in readme
-    assert all(platform in readme for platform in ("Android", "Web", "Windows", "macOS"))
-    assert "examples, not defaults" in readme
+    assert "Use FSQ to test this user goal" in readme
+    assert all(detail in readme for detail in ("Microsoft Edge Stable", "Bing", "`FSQ GitHub`", "organic search results", "current position/ranking"))
+    assert "facts or user-owned decisions" in readme
+    assert "[describe the outcome]" not in readme
     assert "README.zh-CN.md" in readme
     assert "docs/getting-started.zh-CN.md" in readme
     assert "![FSQ Test Runner for describing a test goal](docs/media/01-describe-goal.png)" in readme
@@ -550,9 +556,9 @@ def test_chinese_readme_uses_current_installation_and_cli_contract() -> None:
     assert "fsq init --agent skill" in readme
     assert "不会初始化 Workspace、配置 Provider 或运行测试" in readme
     assert "测试这个用户目标" in readme
-    assert all(platform in readme for platform in ("Android", "Web", "Windows", "macOS"))
-    assert "只是示例" in readme
-    assert "不是默认值" in readme
+    assert all(detail in readme for detail in ("Microsoft Edge Stable", "Bing", "`FSQ GitHub`", "自然搜索结果", "当前所在的位置/排名"))
+    assert "事实或由用户决定的事项" in readme
+    assert "[描述期望结果]" not in readme
     assert "![用于描述测试目标的 FSQ Test Runner](docs/media/01-describe-goal.png)" in readme
     assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
     assert "https://youtu.be/QqCahxGDdS0" in readme

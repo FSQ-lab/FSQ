@@ -77,8 +77,8 @@ from a report. Capture stdout, stderr, and the exit code separately.
 
 fsq --output json --non-interactive doctor
 fsq --output json --non-interactive case format "{case_path}" --check
-fsq --output jsonl --non-interactive case create --platform "{platform}" --goal "{goal}"
-fsq --output jsonl --non-interactive case create --platform "{platform}" --goal "{goal}" --name "{case_name}"
+fsq --output json --non-interactive case create --platform "{platform}" --goal "{goal}"
+fsq --output json --non-interactive case create --platform "{platform}" --goal "{goal}" --name "{case_name}"
 fsq --output json --non-interactive case test --platform "{platform}" "{case_path}"
 fsq --output json --non-interactive case test --platform "{platform}" "{case_path}" --suggest
 fsq --output json --non-interactive runs show "{run_id}" --platform "{platform}"
@@ -112,43 +112,37 @@ must coordinate exclusive access to a shared device/desktop; this definition
 provides no cross-agent lock.
 
 For case create, start the command once with Codex's host-managed asynchronous
-execution and retain its same process/session handle. Poll only newly available
-output from that same process. Polling is observation, not another command.
-Consume only complete newline-terminated JSONL records; preserve a trailing
-partial line and prepend it to the next read. Ignore a duplicate record already
-consumed, require one coherent Run identity after it becomes known, and accept
-at most one terminal result or error. After process exit, perform a final drain
-and obtain the exit status before interpreting completion. A quiet CLI is not
-permission to submit the task again.
+execution and retain its same process/session handle until it completes.
+Waiting or observing the same process is never another FSQ command and never
+permits resubmission. Wait for completion and obtain the exit status, then
+accept exactly one complete terminal JSON envelope. Validate it as
+`fsq.machine/v1`, with type `result` or `error` and operation `case.create`,
+and interpret it together with the exit status. Missing, malformed, unsupported,
+operation-mismatched, contradictory, or multiple terminal envelopes leave the
+execution outcome unknown; never retry the create command.
 
-Validate every consumed create record as `fsq.machine/v1` with operation
-`case.create`. Missing, malformed, unsupported, operation-mismatched,
-identity-conflicting, contradictory, or multiple terminal records leave the
-remaining execution outcome unknown; never retry the create command.
+Report submission exactly once. While the same host process remains active, at
+host opportunities target one low-noise, user-visible heartbeat about every 20
+seconds, never more frequently. State only that the same host process remains
+active and there is no terminal FSQ result. Respond to user status requests
+immediately with those factual limits; such requests do not change the
+unsolicited heartbeat cadence.
+This cadence is best-effort: do not promise an exact timer or heartbeat support
+when the host provides no recurring model-visible opportunities.
 
-Report submission exactly once. While create remains active, report only safe,
-validated event facts. Never relay hidden reasoning, unrestricted tool
-arguments or output, secrets, or raw UI content. Always coalesce ordinary,
-repeated, or low-value events; report an explicit failure event and the terminal
-record promptly. If the active process has no new complete record, make at most
-one unsolicited "FSQ has no new structured status" report and otherwise wait.
-Silence never proves a stage, UI action, wait condition, percentage, cleanup,
-stall, success, or failure.
-
-If a host does not provide model-visible incremental output from the same
-managed process, use the same JSONL create command as terminal-only execution.
-Apply the same final record validation, but must not claim live progress or
-model-consumed incremental events.
+Do not switch to JSONL, reveal raw machine output, infer an FSQ internal stage,
+action, percentage, stall, result, or other UI activity, or claim real-time
+progress. Host process activity proves none of those facts.
 
 ## Interpret facts, not exit codes alone
 
 For commands other than create, require a complete JSON object with
 schema_version fsq.machine/v1, type result or error, and the operation matching
 the command (doctor, case.format, case.test, runs.show, or runs.logs). For
-create, use the validated JSONL event records and its one accepted terminal
-result or error. Check the structured fields and exit code together. Missing,
-malformed, unsupported, mismatched, identity-conflicting, or contradictory
-output is an integration error; execution may be unknown.
+create, use its one accepted terminal JSON result or error envelope. Check the
+structured fields and exit code together. Missing, malformed, unsupported,
+mismatched, multiple, or contradictory output is an integration error;
+execution may be unknown.
 
 - For create/test, result.status is the execution conclusion. Preserve failed
   and inconclusive outcomes; never turn them into success because a file exists.

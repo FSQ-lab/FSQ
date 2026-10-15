@@ -68,7 +68,6 @@ def test_skill_protocol_contains_confirmed_workflow_boundaries() -> None:
         "FSQ remains a passive CLI/Application",
         "Provider API keys, tokens, and authentication secrets must not enter chat",
         "user's request authorizes one normal Goal run",
-        "FSQ has no new structured status",
         "published_case_path",
         "candidate_case_path",
         "unpublished",
@@ -258,47 +257,56 @@ def test_skill_goal_defaults_only_reduce_authority_and_provider_resume_is_stable
         assert required in skill
 
 
-def test_skill_goal_create_uses_jsonl_incremental_same_process_protocol() -> None:
+def test_skill_goal_create_uses_one_terminal_json_envelope_from_same_process() -> None:
     skill = " ".join(_skill().split())
     goal = _section(_skill(), "## Run the Goal once", "## Interpret and report the terminal result")
 
-    assert "`fsq --output jsonl --non-interactive case create" in skill
-    assert "`fsq --output json --non-interactive case create" not in skill
+    assert "`fsq --output json --non-interactive case create" in skill
+    assert "`fsq --output jsonl --non-interactive case create" not in skill
     for required in (
+        "Start the command once",
+        "same process/session handle",
         "same process",
-        "only newly available",
-        "complete newline-terminated",
-        "trailing partial line",
-        "later read",
-        "duplicate",
-        "one coherent Run identity",
-        "at most one terminal",
-        "final drain",
-        "Missing, malformed, contradictory",
+        "never another FSQ command",
+        "exactly one complete",
+        "`fsq.machine/v1`",
+        "`case.create`",
+        "exit status",
+        "Missing, malformed, multiple, contradictory",
         "unknown",
-        "Never retry",
+        "never retry",
     ):
         assert required in goal
+    for removed in (
+        "newline-terminated JSONL",
+        "trailing partial line",
+        "duplicate record",
+        "final drain",
+        "event facts",
+    ):
+        assert removed not in goal
 
 
-def test_skill_progress_is_safe_coalesced_and_falls_back_honestly() -> None:
+def test_skill_heartbeat_is_host_status_only_best_effort_and_rate_limited() -> None:
     goal = _section(_skill(), "## Run the Goal once", "## Interpret and report the terminal result")
 
     for required in (
         "report submission exactly once",
-        "safe, validated event facts",
-        "hidden reasoning",
-        "unrestricted tool arguments or output",
-        "secrets",
-        "raw UI content",
-        "coalesce",
-        "failure",
-        "terminal",
-        "at most one unsolicited",
-        "Do not invent an action or stage",
-        "model-visible same-process incremental output",
-        "terminal-only",
-        "must not claim live progress",
+        "about every 20 seconds",
+        "never more frequently",
+        "host opportunities",
+        "same host process remains active",
+        "no terminal FSQ result",
+        "immediately",
+        "best-effort",
+        "exact timer",
+        "no recurring model-visible opportunities",
+        "raw machine output",
+        "internal stage",
+        "action",
+        "percentage",
+        "stall",
+        "real-time progress",
     ):
         assert required in goal
 
@@ -357,17 +365,16 @@ def test_skill_behavior_scenarios_follow_confirmed_policy_table() -> None:
             (),
         ),
         (
-            "incremental progress silence",
+            "best-effort host heartbeat",
             (
                 "report submission exactly once",
-                "complete newline-terminated",
-                "trailing partial line",
-                "only newly available",
-                "same process",
-                "at most one unsolicited",
-                "wait silently",
-                "When the user asks for status",
-                "Do not invent an action or stage",
+                "same process/session handle",
+                "about every 20 seconds",
+                "never more frequently",
+                "same host process remains active",
+                "no terminal FSQ result",
+                "user status requests",
+                "best-effort",
             ),
             (),
         ),
@@ -440,8 +447,8 @@ def test_skill_command_surface_excludes_forbidden_operations_and_secret_argument
     assert "fsq --output json --non-interactive doctor" in commands
     assert "fsq --output json --non-interactive providers status" in commands
     assert "fsq init --platform android --app-id <app-id> --update-existing" in commands
-    assert "fsq --output jsonl --non-interactive case create --platform <platform> --goal <confirmed-goal>" in commands
-    assert not any(command.startswith("fsq --output json --non-interactive case create") for command in commands)
+    assert "fsq --output json --non-interactive case create --platform <platform> --goal <confirmed-goal>" in commands
+    assert not any(command.startswith("fsq --output jsonl --non-interactive case create") for command in commands)
     assert "fsq case format <exact-case-path> --check --json" in commands
     assert "fsq --output json --non-interactive case test --platform <platform> <exact-case-path>" in commands
     assert "fsq --output json --non-interactive runs show <run-id> --platform <platform>" in commands

@@ -32,7 +32,6 @@ ROOT = Path(__file__).resolve().parents[1]
 AGENT_PATH = ROOT / "fsq_agent" / "resources" / "codex" / "agents" / "fsq_test_runner.toml"
 CLI_MODULE = "fsq_agent.adapters.cli._main"
 COMMAND_NAMES = ("doctor", "case.format", "case.create", "case.create.named", "case.test", "case.test.suggest", "runs.show", "runs.logs")
-JSONL_COMMANDS = {"case.create", "case.create.named"}
 
 
 @pytest.fixture
@@ -57,7 +56,7 @@ def commands(agent_definition: dict[str, object]) -> dict[str, list[str]]:
             name += ".named"
         if "--suggest" in tokens:
             name += ".suggest"
-        assert output_mode == ("jsonl" if name in JSONL_COMMANDS else "json")
+        assert output_mode == "json"
         assert name not in templates
         templates[name] = tokens[1:]
     assert set(templates) == set(COMMAND_NAMES)
@@ -84,11 +83,6 @@ def _jsonl_records(output: str) -> list[dict[str, object]]:
 
 
 def _terminal_payload(output: str, command_name: str) -> dict[str, object]:
-    if command_name in JSONL_COMMANDS:
-        records = _jsonl_records(output)
-        terminals = [record for record in records if record["type"] in {"result", "error"}]
-        assert len(terminals) == 1
-        return terminals[0]
     payload = json.loads(output)
     assert isinstance(payload, dict)
     return payload
@@ -124,45 +118,53 @@ def test_definition_explicitly_reserves_case_yaml_generation_for_fsq(agent_defin
     assert "ask FSQ to generate" in str(agent_definition["description"])
 
 
-def test_codex_create_polls_one_host_managed_process_and_validates_records(agent_definition: dict[str, object]) -> None:
+def test_codex_create_waits_on_one_host_managed_process_and_validates_terminal_envelope(agent_definition: dict[str, object]) -> None:
     instructions = " ".join(str(agent_definition["developer_instructions"]).split())
 
     for required in (
         "host-managed asynchronous",
         "same process",
         "same process/session handle",
-        "Polling is observation, not another command",
-        "only newly available",
-        "complete newline-terminated",
-        "trailing partial line",
-        "duplicate",
-        "one coherent Run identity",
-        "at most one terminal",
-        "final drain",
-        "terminal-only",
-        "must not claim live progress",
+        "never another FSQ command",
+        "exactly one complete",
+        "fsq.machine/v1",
+        "case.create",
+        "exit status",
+        "Missing, malformed, unsupported, operation-mismatched, contradictory, or multiple",
+        "unknown",
+        "never retry",
     ):
         assert required in instructions
-    assert "shell background" not in instructions
-    assert "create JSONL buffers events until completion" not in instructions
+    for removed in (
+        "newline-terminated JSONL",
+        "trailing partial line",
+        "duplicate record",
+        "final drain",
+        "event facts",
+    ):
+        assert removed not in instructions
 
 
-def test_codex_progress_rules_are_safe_coalesced_and_never_retry(agent_definition: dict[str, object]) -> None:
+def test_codex_heartbeat_is_host_status_only_best_effort_and_rate_limited(agent_definition: dict[str, object]) -> None:
     instructions = " ".join(str(agent_definition["developer_instructions"]).split())
 
     for required in (
         "Report submission exactly once",
-        "safe, validated event facts",
-        "hidden reasoning",
-        "unrestricted tool arguments or output",
-        "secrets",
-        "raw UI content",
-        "coalesce",
-        "explicit failure",
-        "at most one unsolicited",
-        "Silence never proves",
-        "unknown",
-        "never retry",
+        "about every 20 seconds",
+        "never more frequently",
+        "host opportunities",
+        "same host process remains active",
+        "no terminal FSQ result",
+        "immediately",
+        "best-effort",
+        "exact timer",
+        "no recurring model-visible opportunities",
+        "raw machine output",
+        "internal stage",
+        "action",
+        "percentage",
+        "stall",
+        "real-time progress",
     ):
         assert required in instructions
 
@@ -199,11 +201,9 @@ def test_create_template_passes_exact_request_and_published_result(commands, tmp
     monkeypatch.setattr(f"{CLI_MODULE}.create_case", create)
     arguments = _arguments(commands, "case.create.named" if named else "case.create", tmp_path, platform=platform)
     result = CliRunner().invoke(main, arguments)
-    records = _jsonl_records(result.stdout)
     payload = _terminal_payload(result.stdout, "case.create.named" if named else "case.create")
 
     assert result.exit_code == 0, result.output
-    assert [record["type"] for record in records] == ["result"]
     assert len(requests) == 1
     assert requests[0].current_directory == tmp_path
     assert requests[0].platform == platform
@@ -249,7 +249,9 @@ def test_create_jsonl_contains_event_and_single_terminal(commands, tmp_path, mon
         )
 
     monkeypatch.setattr(f"{CLI_MODULE}.create_case", create)
-    result = CliRunner().invoke(main, _arguments(commands, "case.create", tmp_path))
+    arguments = _arguments(commands, "case.create", tmp_path)
+    arguments[arguments.index("json")] = "jsonl"
+    result = CliRunner().invoke(main, arguments)
     records = _jsonl_records(result.stdout)
 
     assert result.exit_code == 0
@@ -257,6 +259,31 @@ def test_create_jsonl_contains_event_and_single_terminal(commands, tmp_path, mon
     assert all(record["schema_version"] == "fsq.machine/v1" for record in records)
     assert all(record["operation"] == "case.create" for record in records)
     assert records[0]["event"]["run_id"] == records[1]["result"]["run_id"] == "run-1"
+
+
+def test_packaged_create_json_contains_exactly_one_terminal_envelope(commands, tmp_path, monkeypatch) -> None:
+    async def create(_request, *, event_sink=None, agent_factory=None):
+        assert event_sink is not None
+        from fsq_agent.models import RunEvent
+
+        event_sink(RunEvent(run_id="run-1", task_id="task-1", type="run_started", title="Started", sequence=1))
+        return CaseCreateResult(
+            run_id="run-1",
+            task_id="task-1",
+            status="success",
+            summary="Execution result.",
+            report_path=tmp_path / "report.md",
+        )
+
+    monkeypatch.setattr(f"{CLI_MODULE}.create_case", create)
+    result = CliRunner().invoke(main, _arguments(commands, "case.create", tmp_path))
+    payload = json.loads(result.stdout)
+
+    assert result.exit_code == 0
+    assert payload["schema_version"] == "fsq.machine/v1"
+    assert payload["type"] == "result"
+    assert payload["operation"] == "case.create"
+    assert payload["result"]["run_id"] == "run-1"
 
 
 @pytest.mark.parametrize("suggest", [False, True])

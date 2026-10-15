@@ -183,10 +183,13 @@ The same delegation works with Chinese instructions, for example:
 ## CLI and result contract
 
 The self-contained definition includes tested command templates. Goal-based
-`case create` uses global `--output jsonl --non-interactive` options; the other
-templates use terminal JSON. It reads `fsq.machine/v1` records, not human log
-wording. Goal text and paths are arguments, never shell code; templates require
-normal host argument escaping when substituted.
+`case create` and the other templates use global
+`--output json --non-interactive` options and accept exactly one terminal
+`fsq.machine/v1` result/error envelope interpreted with the process exit status.
+Goal text and paths are arguments, never shell code; templates require normal
+host argument escaping when substituted. JSONL remains available to independent
+programmatic CLI consumers, but the packaged Coding Agent integrations
+deliberately use terminal JSON.
 
 | Situation | Interpretation |
 |---|---|
@@ -273,11 +276,13 @@ actual Workspace/platform. Keep these checks distinct from automated test result
 
 One delegation runs at most one Case operation. There is no batch runner, daemon,
 MCP server, global device lock, CLI cancellation command, or whole-run deadline.
-For Goal creation, Codex can start the JSONL command once through host-managed
-asynchronous execution and poll newly available complete records from that same
-process/session handle, including a final drain after exit. Polling observes the
-existing process; it does not submit another command. This permits live
-model-visible progress when the host exposes running-process output. A host
-without that capability uses terminal-only execution and must not claim that the
-model consumed live progress. Never claim cancellation or successful cleanup
-solely because the Codex thread stopped.
+For Goal creation, Codex starts the terminal-JSON command once through
+host-managed asynchronous execution and retains that same process/session
+handle until completion; waiting never submits another FSQ command. At recurring
+host opportunities it targets one low-noise heartbeat about every 20 seconds,
+never more frequently, saying only that the host process remains active and no
+terminal FSQ result exists. This is best-effort rather than an exact timer, and
+a host with no recurring model-visible opportunities cannot provide it. The
+agent does not reveal raw machine output, infer an FSQ stage/action/percentage/
+stall/result, or claim real-time progress. Never claim cancellation or
+successful cleanup solely because the Codex thread stopped.

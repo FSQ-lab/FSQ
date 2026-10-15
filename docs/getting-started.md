@@ -93,16 +93,16 @@ test or a successful execution.
 ### Create, review, and optionally replay
 
 After showing the complete confirmed Goal, the Skill may submit one approved
-AI Explore with `fsq --output jsonl --non-interactive case create ...`. It does
-not retry an unknown, interrupted, failed, or contradictory result. Submission
-consumes that confirmation. It reports submission once. When the host exposes
-model-visible output from the running process, the Skill consumes newly
-available complete records from that same process and may summarize validated,
-safe progress. Codex uses its host-managed asynchronous execution and polls the
-same process/session handle rather than submitting another command. A host
-without model-visible running-process output uses terminal-only execution and
-must not claim that the model consumed live progress. Silence may produce one
-unsolicited no-new-structured-status report, but never an invented stage.
+AI Explore with `fsq --output json --non-interactive case create ...`. It starts
+once, retains the same host process/session handle, waits for exactly one
+terminal result/error envelope, and does not retry an unknown, interrupted,
+failed, malformed, multiple, or contradictory result. Submission consumes that
+confirmation and is reported once. At recurring host opportunities, the Skill
+targets a low-noise heartbeat about every 20 seconds, never more frequently,
+stating only that the host process remains active and no terminal FSQ result
+exists. This is best-effort, not an exact timer; hosts without recurring
+model-visible opportunities cannot provide it. The Skill does not expose raw
+machine output, infer FSQ stages or percentages, or claim real-time progress.
 
 The Skill summarizes the authoritative execution result first and maps your
 observable acceptance criteria to supported, unmet, or unknown evidence before

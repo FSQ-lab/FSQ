@@ -68,6 +68,10 @@ rewrites a Case path. A separately confirmed strict replay uses the exact
 unchanged, statically valid canonical Case at most once without `--suggest`;
 dynamic success does not prove replay success. Optional Run reads use only an
 exact returned/error-detail Run ID with `runs show` or bounded `runs logs`.
+The packaged Skill and Codex compatibility agent use terminal
+`--output json` for Goal-based creation and accept one result/error envelope.
+This integration choice does not remove or change the public CLI's JSONL event
+stream for independent programmatic consumers.
 
 Review the installed instructions and use the compatible host's discovery/reload
 flow. Because installation copies package resources, upgrading the package or

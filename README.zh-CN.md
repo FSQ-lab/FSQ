@@ -52,9 +52,9 @@ https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939
 完成重新加载后再继续。
 
 **首次测试。** 将这段提示词复制给你的 Coding Agent：
-> 测试这个用户目标：**[描述期望结果]**。遵循已安装的 FSQ Skill，只询问它无法确定的决定。
+> 使用 FSQ 测试这个用户目标：启动 Microsoft Edge Stable，使用 Bing 搜索 `FSQ GitHub`，然后检查自然搜索结果，并报告 FSQ GitHub 仓库当前所在的位置/排名。选择 Web 平台和 Microsoft Edge Stable。遵循已安装的 FSQ Skill，只询问它无法确定的决定。
 
-例如：**Android：**“未登录用户输入无效信息时会看到清晰错误。” **Web：**“购物者可以筛选结果并打开一个商品。” **Windows：**“用户可以创建并保存草稿。” **macOS：**“用户可以修改偏好设置并看到它保持生效。” 这些只是示例，不是默认值；等 Skill 询问时提供准确目标，不要猜测 ID 或路径。
+平台和准确目标是事实或由用户决定的事项：当 Skill 询问时请明确提供，不要让 Agent 猜测目标 ID 或路径，也不要替换为其他 Edge 渠道。
 
 先审查结果。如果 FSQ 返回了 Case，再原样审查它，然后另行决定是否请求重放。
 

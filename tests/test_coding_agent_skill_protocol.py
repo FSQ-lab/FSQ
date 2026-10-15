@@ -258,6 +258,51 @@ def test_skill_goal_defaults_only_reduce_authority_and_provider_resume_is_stable
         assert required in skill
 
 
+def test_skill_goal_create_uses_jsonl_incremental_same_process_protocol() -> None:
+    skill = " ".join(_skill().split())
+    goal = _section(_skill(), "## Run the Goal once", "## Interpret and report the terminal result")
+
+    assert "`fsq --output jsonl --non-interactive case create" in skill
+    assert "`fsq --output json --non-interactive case create" not in skill
+    for required in (
+        "same process",
+        "only newly available",
+        "complete newline-terminated",
+        "trailing partial line",
+        "later read",
+        "duplicate",
+        "one coherent Run identity",
+        "at most one terminal",
+        "final drain",
+        "Missing, malformed, contradictory",
+        "unknown",
+        "Never retry",
+    ):
+        assert required in goal
+
+
+def test_skill_progress_is_safe_coalesced_and_falls_back_honestly() -> None:
+    goal = _section(_skill(), "## Run the Goal once", "## Interpret and report the terminal result")
+
+    for required in (
+        "report submission exactly once",
+        "safe, validated event facts",
+        "hidden reasoning",
+        "unrestricted tool arguments or output",
+        "secrets",
+        "raw UI content",
+        "coalesce",
+        "failure",
+        "terminal",
+        "at most one unsolicited",
+        "Do not invent an action or stage",
+        "model-visible same-process incremental output",
+        "terminal-only",
+        "must not claim live progress",
+    ):
+        assert required in goal
+
+
 def test_skill_behavior_scenarios_follow_confirmed_policy_table() -> None:
     # Deterministic text checks guard policy wording; they do not prove model compliance.
     skill = " ".join(_skill().split())
@@ -312,9 +357,13 @@ def test_skill_behavior_scenarios_follow_confirmed_policy_table() -> None:
             (),
         ),
         (
-            "buffered progress silence",
+            "incremental progress silence",
             (
-                "Report submission exactly once",
+                "report submission exactly once",
+                "complete newline-terminated",
+                "trailing partial line",
+                "only newly available",
+                "same process",
                 "at most one unsolicited",
                 "wait silently",
                 "When the user asks for status",
@@ -391,7 +440,8 @@ def test_skill_command_surface_excludes_forbidden_operations_and_secret_argument
     assert "fsq --output json --non-interactive doctor" in commands
     assert "fsq --output json --non-interactive providers status" in commands
     assert "fsq init --platform android --app-id <app-id> --update-existing" in commands
-    assert "fsq --output json --non-interactive case create --platform <platform> --goal <confirmed-goal>" in commands
+    assert "fsq --output jsonl --non-interactive case create --platform <platform> --goal <confirmed-goal>" in commands
+    assert not any(command.startswith("fsq --output json --non-interactive case create") for command in commands)
     assert "fsq case format <exact-case-path> --check --json" in commands
     assert "fsq --output json --non-interactive case test --platform <platform> <exact-case-path>" in commands
     assert "fsq --output json --non-interactive runs show <run-id> --platform <platform>" in commands

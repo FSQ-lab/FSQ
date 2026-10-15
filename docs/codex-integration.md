@@ -28,8 +28,8 @@ Provider session, UI execution, verification, recording, and evidence.
 
 The reusable definition is
 [`fsq_test_runner.toml`](../fsq_agent/resources/codex/agents/fsq_test_runner.toml).
-It calls the installed `fsq` JSON CLI. It does not add an MCP server, a new
-Provider, a Python wrapper, or another FSQ execution loop.
+It calls the installed `fsq` machine-output CLI. It does not add an MCP server,
+a new Provider, a Python wrapper, or another FSQ execution loop.
 
 > [!IMPORTANT]
 > **Codex must not generate test Cases or write Case YAML. Use the actual YAML
@@ -182,10 +182,11 @@ The same delegation works with Chinese instructions, for example:
 
 ## CLI and result contract
 
-The self-contained definition includes tested command templates. It uses global
-`--output json --non-interactive` options and reads `fsq.machine/v1` terminal
-records, not human log wording. Goal text and paths are arguments, never shell
-code; templates require normal host argument escaping when substituted.
+The self-contained definition includes tested command templates. Goal-based
+`case create` uses global `--output jsonl --non-interactive` options; the other
+templates use terminal JSON. It reads `fsq.machine/v1` records, not human log
+wording. Goal text and paths are arguments, never shell code; templates require
+normal host argument escaping when substituted.
 
 | Situation | Interpretation |
 |---|---|
@@ -197,7 +198,7 @@ code; templates require normal host argument escaping when substituted.
 | Recording/publication yields no path | Do not claim that a Case was saved, even when execution succeeded. |
 | `runs show` exits `0` | Query succeeded; inspect `result.run.status` for the actual Run conclusion. |
 | `case.suggestion_failed` | Preserve any `error.details.run_id`/report reference, query that completed Run, and report analysis failure separately. Do not rerun. |
-| Missing, malformed, wrong-version, or mismatched JSON | Integration error; do not infer success or guess which Run belongs to this request. |
+| Missing, malformed, wrong-version, or mismatched machine output | Integration error; do not infer success or guess which Run belongs to this request. |
 | Interruption/lost output | Cleanup and terminal state are not guaranteed. Report unknown unless exact identified Run facts establish the result. |
 
 Request/validation errors exit `2`, Workspace/configuration errors `3`, unavailable
@@ -272,7 +273,11 @@ actual Workspace/platform. Keep these checks distinct from automated test result
 
 One delegation runs at most one Case operation. There is no batch runner, daemon,
 MCP server, global device lock, CLI cancellation command, or whole-run deadline.
-The current `case create` JSONL implementation buffers events before printing;
-it is not live progress. If the host yields a long-running process, keep observing
-that same process rather than starting another test. Never claim cancellation or
-successful cleanup solely because the Codex thread stopped.
+For Goal creation, Codex can start the JSONL command once through host-managed
+asynchronous execution and poll newly available complete records from that same
+process/session handle, including a final drain after exit. Polling observes the
+existing process; it does not submit another command. This permits live
+model-visible progress when the host exposes running-process output. A host
+without that capability uses terminal-only execution and must not claim that the
+model consumed live progress. Never claim cancellation or successful cleanup
+solely because the Codex thread stopped.

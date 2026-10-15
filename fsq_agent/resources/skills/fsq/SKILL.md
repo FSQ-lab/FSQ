@@ -178,7 +178,7 @@ Goal run and does not require a separate create or run confirmation. Host,
 operating-system, or Coding Agent approval remains independent. Submit at most
 one:
 
-`fsq --output json --non-interactive case create --platform "<platform>" --goal "<confirmed-goal>"`
+`fsq --output jsonl --non-interactive case create --platform "<platform>" --goal "<confirmed-goal>"`
 
 The request authorizes no retry, suggestion, Provider change, Case edit,
 replay, parallel submission, or second create. In particular, it is not replay
@@ -187,33 +187,60 @@ permission.
 ## Run the Goal once
 
 Maintain only minimal in-session state: operation, complete Goal, whether
-submission began, and exact returned Run ID and Case paths when known. This
-state only prevents duplicate submission and does not provide cross-session
-exactly-once behavior. Never submit the same authorized Goal run twice, even
-after interruption, timeout, lost or malformed output, lost response, failure,
-cancellation, Provider error, publication conflict, or lost session state.
+submission began, the host process identity and incremental output position,
+and exact returned Run ID and Case paths when known. This state only prevents
+duplicate submission and does not provide cross-session exactly-once behavior.
+Never submit the same authorized Goal run twice, even after interruption,
+timeout, lost or malformed output, lost response, failure, cancellation,
+Provider error, publication conflict, or lost session state.
 
-Start the command. Report submission exactly once. Because terminal output can
-remain buffered, report only process state or a new
-structured fact actually exposed by the host or FSQ. Without a user request,
-you may say “FSQ has no new structured status.” at most one unsolicited time;
-then wait silently until the process returns or a new fact appears. When the
-user asks for status, answer with the factual process state and any new
-structured fact, or say there is no new structured status, then continue
-waiting. Do not invent an action or stage, UI activity, wait condition,
-percentage, cleanup, success, failure, or stall from silence.
+Start the command once and report submission exactly once. When the host gives
+model-visible same-process incremental output, retain the same
+process/session handle and observe only newly available bytes from that same
+process. Polling or waiting is observation, never another command submission.
+Consume only complete newline-terminated JSONL records. Preserve a trailing
+partial line until a later read and prepend it to the next bytes; never parse
+or discard it early.
+After process exit, perform a final drain before interpreting completion.
+
+Validate each consumed record as `fsq.machine/v1` for `case.create`. Ignore a
+duplicate record already consumed, require one coherent Run identity after it
+becomes known, and accept at most one terminal `result` or `error`. Missing,
+malformed, contradictory, operation-mismatched, identity-conflicting, or
+additional terminal record leaves the remaining outcome unknown. Never retry.
+
+Report only safe, validated event facts actually exposed by FSQ. Never relay
+hidden reasoning, unrestricted tool arguments or output, secrets, or raw UI
+content. Always coalesce ordinary, repeated, or low-value events. Report an
+explicit failure event and the terminal record promptly rather than delaying
+either behind ordinary progress.
+
+Without a user request, you may say “FSQ has no new structured status.” at most
+one unsolicited time while the process remains active without a new complete
+record; then wait silently. When the user asks for status, answer with the
+factual process state and any new structured fact, or say there is no new
+structured status, then continue waiting. Do not invent an action or stage, UI
+activity, wait condition, percentage, cleanup, success, failure, or stall from
+silence.
+
+If the host does not expose model-visible same-process incremental output, it
+may run the same JSONL command to completion as terminal-only execution. In
+that fallback, wait for completion and perform the same record validation, but
+must not claim live progress or that the model consumed events incrementally.
 
 ## Interpret and report the terminal result
 
-Use the minimum machine contract. Require an `fsq.machine/v1` envelope whose
-operation matches the submitted command, then validate the operation-specific
-result and its consistency with the process exit. Interpret valid structured
-nonzero outcomes by operation rather than treating every nonzero exit as
-malformed: these include unavailable Provider or Doctor results, valid
-noncanonical format checks, failed or inconclusive executions, and successful
-execution with publication conflict. A missing, malformed, contradictory,
-wrong-version, or operation-mismatched terminal result leaves the known facts
-plus an unknown remainder, without retry or optimistic inference.
+Use the minimum machine contract. For Goal creation, require the single
+accepted terminal `fsq.machine/v1` record whose operation matches the submitted
+command; for other commands require their terminal envelope. Validate the
+operation-specific result and its consistency with the process exit. Interpret
+valid structured nonzero outcomes by operation rather than treating every
+nonzero exit as malformed: these include unavailable Provider or Doctor
+results, valid noncanonical format checks, failed or inconclusive executions,
+and successful execution with publication conflict. A missing, malformed,
+contradictory, wrong-version, operation-mismatched, identity-conflicting, or
+multiple terminal result leaves the known facts plus an unknown remainder,
+without retry or optimistic inference.
 
 Report the authoritative execution conclusion and short summary first. Next,
 map every user observable acceptance criterion to supported, unmet, or unknown

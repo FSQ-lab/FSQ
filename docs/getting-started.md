@@ -93,11 +93,16 @@ test or a successful execution.
 ### Create, review, and optionally replay
 
 After showing the complete confirmed Goal, the Skill may submit one approved
-AI Explore with `fsq --output json --non-interactive case create ...`. It does
+AI Explore with `fsq --output jsonl --non-interactive case create ...`. It does
 not retry an unknown, interrupted, failed, or contradictory result. Submission
-consumes that confirmation. It reports submission once, may report no new
-structured status once without being asked, and then waits silently rather than
-inventing live action progress.
+consumes that confirmation. It reports submission once. When the host exposes
+model-visible output from the running process, the Skill consumes newly
+available complete records from that same process and may summarize validated,
+safe progress. Codex uses its host-managed asynchronous execution and polls the
+same process/session handle rather than submitting another command. A host
+without model-visible running-process output uses terminal-only execution and
+must not claim that the model consumed live progress. Silence may produce one
+unsolicited no-new-structured-status report, but never an invented stage.
 
 The Skill summarizes the authoritative execution result first and maps your
 observable acceptance criteria to supported, unmet, or unknown evidence before
@@ -185,7 +190,7 @@ If the save response is lost, the page reports an unknown outcome and re-reads c
 ## Explore and inspect
 
 ```bash
-fsq --output json --non-interactive case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
+fsq --output jsonl --non-interactive case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
 fsq case format "<exact-returned-case-path>" --check --json
 # Only after separate explicit confirmation:
 fsq --output json --non-interactive case test --platform web "<exact-returned-case-path>"

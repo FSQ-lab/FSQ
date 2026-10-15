@@ -52,9 +52,9 @@ Start with the real outcome you want to test. You need Python 3.11+ and the [pre
 Complete that reload before continuing.
 
 **First test.** Copy this prompt into your Coding Agent:
-> Test this user goal with FSQ: **[describe the outcome]**. Follow the installed FSQ Skill and ask only for decisions it cannot establish.
+> Use FSQ to test this user goal: launch Microsoft Edge Stable, use Bing to search for `FSQ GitHub`, then inspect the organic search results and report the current position/ranking of the FSQ GitHub repository. Select the Web platform and Microsoft Edge Stable. Follow the installed FSQ Skill and ask only for decisions it cannot establish.
 
-For example: **Android:** “A signed-out user sees a clear error for invalid sign-in.” **Web:** “A shopper can filter results and open one product.” **Windows:** “A user can create and save a draft.” **macOS:** “A user can change a preference and see it persist.” These are examples, not defaults; provide the exact target when the Skill asks rather than guessing an ID or path.
+Treat the platform and exact target as facts or user-owned decisions: provide them when asked rather than letting the agent guess a target ID or path, and do not substitute a different Edge channel.
 
 Review the result first. If FSQ returns a Case, review it unchanged before deciding whether to request replay separately.
 

@@ -80,10 +80,14 @@ secret 不得进入聊天。Coding Agent 会请你自行打开 `fsq ui`，在 **
 ### 创建、审查并选择是否重放
 
 展示完整且已确认的 Goal 后，Skill 可以用
-`fsq --output json --non-interactive case create ...` 提交一次获准的 AI
+`fsq --output jsonl --non-interactive case create ...` 提交一次获准的 AI
 Explore。提交开始即消耗该确认。对于结果未知、中断、失败或矛盾的执行，它
-不会重试。它只报告一次提交，最多主动报告一次没有新的结构化状态，之后静默
-等待，而不会虚构实时操作进度。
+不会重试。它只报告一次提交。当 host 向模型暴露运行中进程的输出时，Skill
+只消费同一进程中新出现的完整记录，并可概述经过验证的安全进度。Codex 使用
+host 管理的异步执行，轮询同一个进程/session handle，而不是再次提交命令。
+如果 host 不向模型暴露运行中进程的输出，则使用仅终态执行，且不得声称模型
+消费了实时进度。静默时最多可主动报告一次没有新的结构化状态，但绝不能据此
+虚构执行阶段。
 
 Skill 会先总结结果，把每项可观察验收标准映射为有支持、未满足或未知，然后
 分别说明记录、发布和 warning。随后只选择准确返回的 Case 路径：优先
@@ -163,7 +167,7 @@ Kimi API Key 可在[中国区平台](https://platform.kimi.com/console/api-keys)
 ## 探索与检查
 
 ```bash
-fsq --output json --non-interactive case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
+fsq --output jsonl --non-interactive case create --platform web --goal "Open https://example.com and verify the Example Domain heading is visible."
 fsq case format "<exact-returned-case-path>" --check --json
 # 仅在另行明确确认后：
 fsq --output json --non-interactive case test --platform web "<exact-returned-case-path>"

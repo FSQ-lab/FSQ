@@ -33,10 +33,17 @@ def _command_templates(skill: str) -> list[list[str]]:
     return [shlex.split(value) for value in re.findall(r"`(fsq [^`\n]+)`", skill)]
 
 
+def _section(skill: str, heading: str, next_heading: str) -> str:
+    start = skill.index(heading)
+    end = skill.index(next_heading, start)
+    return " ".join(skill[start:end].split())
+
+
 def _parser_arguments(template: list[str], tmp_path: Path) -> list[str]:
     values = {
         "<platform>": "web",
         "<provider>": "openai",
+        "<app-id>": "com.example.app",
         "<confirmed-goal>": "Verify the exact outcome; allow only review; forbid purchases.",
         "<exact-case-path>": str(tmp_path / "case with spaces.fsq.yaml"),
         "<run-id>": "run-exact-1",
@@ -60,7 +67,7 @@ def test_skill_protocol_contains_confirmed_workflow_boundaries() -> None:
         "Coding Agent owns the dialogue and orchestration",
         "FSQ remains a passive CLI/Application",
         "Provider API keys, tokens, and authentication secrets must not enter chat",
-        "confirmation is consumed when submission begins",
+        "user's request authorizes one normal Goal run",
         "FSQ has no new structured status",
         "published_case_path",
         "candidate_case_path",
@@ -73,7 +80,7 @@ def test_skill_protocol_contains_confirmed_workflow_boundaries() -> None:
         assert text in skill
 
     assert skill.index("## Start from the goal and discover before asking") < skill.index("## Recommend setup once")
-    assert skill.index("## Provider handoff") < skill.index("## Confirm and create once")
+    assert skill.index("## Provider handoff") < skill.index("## Run the Goal once")
     assert skill.index("## Interpret and report the terminal result") < skill.index("## Optional exact-Case review")
 
 
@@ -118,10 +125,8 @@ def test_skill_guards_default_workspace_path_state_matrix() -> None:
     assert "Do not prescribe or assume `mkdir` or any shell" in skill
 
 
-def test_skill_requires_one_cohesive_setup_recommendation_and_approval() -> None:
-    skill = " ".join(_skill().split())
-
-    recommendation = skill[skill.index("## Recommend setup once") : skill.index("## Provider handoff")]
+def test_skill_only_confirms_absent_default_directory_creation() -> None:
+    recommendation = _section(_skill(), "## Recommend setup once", "## Provider handoff")
     for required in (
         "exact project root",
         "exact proposed Workspace root",
@@ -133,13 +138,20 @@ def test_skill_requires_one_cohesive_setup_recommendation_and_approval() -> None
         "filesystem",
         "registry",
         "remain unauthorized",
-        "One approval",
-        "exact directory creation",
-        "one initialization",
+        "only FSQ-layer setup confirmation",
+        "absent default path",
+        "refusal means FSQ cannot be used for this request",
+        "existing empty ordinary directory",
+        "without an FSQ-layer confirmation",
         "actual returned Workspace root",
         "Doctor",
     ):
         assert required in recommendation
+    assert "initialization approval" not in recommendation
+    refusal = "Refusal stops the FSQ journey without mutation, fallback search, or a failure-shaped Run result."
+    assert refusal in recommendation
+    assert recommendation.index("refusal means FSQ cannot be used for this request") < recommendation.index(refusal)
+    assert "try another Workspace" not in recommendation
 
 
 def test_skill_keeps_facts_candidates_and_user_decisions_distinct() -> None:
@@ -152,14 +164,80 @@ def test_skill_keeps_facts_candidates_and_user_decisions_distinct() -> None:
         "unverified model candidates",
         "smallest cohesive group of unresolved user-owned decisions",
         "application ID",
-        "browser target",
+        "Browser targets",
         "executable path",
         "bundle ID",
         "device",
         "account",
-        "cannot enter argv",
+        "cannot enter argv unless established",
     ):
         assert required in skill
+
+
+def test_skill_resolves_android_app_id_from_bounded_facts_and_updates_visibly() -> None:
+    skill = " ".join(_skill().split())
+    android = _section(_skill(), "### Resolve an Android application ID", "## Provider handoff")
+
+    for required in (
+        "bounded read-only host and connected-device facts",
+        "normalized and deduplicated by exact application ID",
+        "one reasonable candidate",
+        "select it without confirmation",
+        "multiple reasonable candidates",
+        "one user choice",
+        "request an exact application ID",
+        "model memory",
+        "unrelated existing Workspace target",
+        "report the old and new application IDs",
+        '`fsq init --platform android --app-id "<app-id>" --update-existing`',
+        "without an FSQ-layer confirmation",
+    ):
+        assert required in skill
+    update = '`fsq init --platform android --app-id "<app-id>" --update-existing`'
+    stop = "A failed or uncertain update stops before Run allocation"
+    assert update in android
+    assert stop in android
+    assert android.index(update) < android.index(stop)
+    assert "continue with the Goal after a failed or uncertain update" not in android
+
+
+def test_cleanup_success_excludes_publication_and_routes_review_to_returned_candidate() -> None:
+    terminal = _section(_skill(), "## Interpret and report the terminal result", "## Optional exact-Case review")
+    review = _section(_skill(), "## Optional exact-Case review", "## User-initiated strict replay")
+
+    successful_deletion = "After confirmed successful deletion"
+    not_retained = "the returned publication is not retained"
+    candidate = "exact non-empty returned `candidate_case_path`"
+    assert successful_deletion in terminal
+    assert not_retained in terminal
+    assert candidate in terminal
+    assert terminal.index(successful_deletion) < terminal.index(not_retained) < terminal.index(candidate)
+    assert "must not be selected for review or replay" in terminal
+
+    assert "post-cleanup retained-path state" in review
+    assert "successfully deleted publication must not be selected" in review
+    assert candidate in review
+    assert "identify it as an unpublished candidate" in review
+    assert "use a non-empty returned `published_case_path`; otherwise" not in review
+    assert "Never construct a path" in review
+
+
+def test_cleanup_uncertainty_is_reported_once_without_changing_execution_conclusion() -> None:
+    terminal = _section(_skill(), "## Interpret and report the terminal result", "## Optional exact-Case review")
+
+    uncertainty = "If deletion fails or is uncertain"
+    report = "report that uncertainty"
+    no_retry = "never retry deletion"
+    preserved = "does not change the authoritative execution conclusion"
+    conclusion = "Report the authoritative execution conclusion and short summary first."
+    assert uncertainty in terminal
+    assert report in terminal
+    assert no_retry in terminal
+    assert preserved in terminal
+    assert "do not claim the publication absent" in terminal
+    assert terminal.index(uncertainty) < terminal.index(report) < terminal.index(no_retry)
+    assert terminal.index(conclusion) < terminal.index(uncertainty)
+    assert "treat the publication as absent" not in terminal
 
 
 def test_skill_goal_defaults_only_reduce_authority_and_provider_resume_is_stable() -> None:
@@ -167,11 +245,13 @@ def test_skill_goal_defaults_only_reduce_authority_and_provider_resume_is_stable
 
     for required in (
         "Automatic defaults may only reduce authority or stop on ambiguity",
-        "target, account, recipient, exact content, amount, device, or irreversible action",
+        "account, recipient, exact content, amount, device, or irreversible action",
         "Never expand authority",
         "exact literals and side effects",
         "one complete Goal",
-        "separate create confirmation",
+        "user's request authorizes one normal Goal run",
+        "does not require a separate create or run confirmation",
+        "Host, operating-system, or Coding Agent approval",
         "resume the same Workspace, target, and Goal draft",
         "without repeating settled questions unless facts changed",
     ):
@@ -192,9 +272,9 @@ def test_skill_behavior_scenarios_follow_confirmed_policy_table() -> None:
             (),
         ),
         (
-            "separate mutation boundaries",
+            "FSQ confirmation boundaries",
             (
-                "Initialization, one create submission, and replay are three separate mutation boundaries",
+                "Only creation of the absent default Workspace directory gets an FSQ-layer confirmation",
                 "Do not ask for future replay permission during Explore",
             ),
             (),
@@ -204,7 +284,30 @@ def test_skill_behavior_scenarios_follow_confirmed_policy_table() -> None:
             (
                 "minimal in-session state",
                 "does not provide cross-session exactly-once behavior",
-                "Never submit the same confirmation twice",
+                "Never submit the same authorized Goal run twice",
+            ),
+            (),
+        ),
+        (
+            "conditional publication cleanup",
+            (
+                "publication_outcome=created",
+                "exact non-empty `published_case_path`",
+                "host-native exact-file deletion",
+                "Never derive a deletion path",
+                "never delete the candidate or Run evidence",
+                "Do not delete for `unchanged`, `conflict`, `failed`, or a missing path",
+                "never retry deletion",
+            ),
+            (),
+        ),
+        (
+            "valuable publication and replay boundary",
+            (
+                "every observable acceptance criterion is supported",
+                "replay value",
+                "report the exact returned `published_case_path`",
+                "Never automatically replay",
             ),
             (),
         ),
@@ -287,6 +390,7 @@ def test_skill_command_surface_excludes_forbidden_operations_and_secret_argument
 
     assert "fsq --output json --non-interactive doctor" in commands
     assert "fsq --output json --non-interactive providers status" in commands
+    assert "fsq init --platform android --app-id <app-id> --update-existing" in commands
     assert "fsq --output json --non-interactive case create --platform <platform> --goal <confirmed-goal>" in commands
     assert "fsq case format <exact-case-path> --check --json" in commands
     assert "fsq --output json --non-interactive case test --platform <platform> <exact-case-path>" in commands

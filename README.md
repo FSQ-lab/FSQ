@@ -35,26 +35,28 @@ https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939
 ## How it works
 
 1. **Describe:** You define the platform and target, goal, success criteria, and allowed and forbidden actions.
-2. **Observe** as AI tests the real UI flow and FSQ captures screenshots, interface state, events, and a reviewable test.
-3. **Control** what happens next: inspect the evidence and unchanged generated test, then separately approve any deterministic replay.
+2. **Observe** as AI tests the real UI flow and FSQ captures screenshots, interface state, events, and may produce a reviewable test.
+3. **Control** what happens next: inspect the evidence and, if FSQ returns a test, inspect it unchanged before separately requesting any deterministic replay.
 
-You get an evidence-backed result and a portable, reusable test you can review, keep, and replay without surrendering control.
+You get an evidence-backed result and, when FSQ returns one, a portable, reusable test you can review, keep, and replay without surrendering control.
 
 ## Quick start
 
-You need Python 3.11+ and the [prerequisites for your platform and target](docs/platform-prerequisites.md). Choose one of the two paths below. Enter Provider credentials only in the FSQ UI—not in Coding Agent chat—and review the result and generated Case before separately approving any replay.
+Start with the real outcome you want to test. You need Python 3.11+ and the [prerequisites for your platform and target](docs/platform-prerequisites.md). Choose one of the two paths below. Enter Provider credentials only in the FSQ UI—not in Coding Agent chat. Review the result first and, if FSQ returns a Case, review it unchanged before separately requesting any replay.
 
 ### 1. Coding Agent
 
 **Initial setup.** Open your project in a Coding Agent and paste:
-> The official FSQ project is https://github.com/FSQ-lab/FSQ. Confirm the current project root with me. Following the official instructions, explain the Python-environment and project-file changes and get my approval, then install or upgrade the FSQ CLI and run `fsq init --agent skill` in this project. Verify that `fsq` works and report where the Skill was installed. Next, ask me to open `fsq ui` and configure the FSQ LLM Provider and model in **Settings**; never ask me to put credentials in chat. Do not initialize a Workspace or run a test. When setup is complete, tell me to reload or start a new Coding Agent session, then stop.
+> The official FSQ project is https://github.com/FSQ-lab/FSQ. Establish the exact opened project root. Batch the read-only Python, `fsq`, and Skill-presence checks with their exact working directories, commands, purpose, and effects. Then request one approval for the listed changes, covering only installation or upgrade of `fsq-agent` and one `fsq init --agent skill` in this project; disclose the exact commands and Python-environment and project-file effects before asking. Perform only the approved operations, verify `fsq`, and report the exact installed Skill path. This one-time setup does not initialize a Workspace, configure a Provider, or run a test. Tell me to reload or start a new Coding Agent session, then stop.
 
 Complete that reload before continuing.
 
 **First test.** Copy this prompt into your Coding Agent:
-> Guide me through one FSQ test. Configure or select the Workspace, platform, and exact target with me. Confirm the Goal, observable success criteria, and allowed and forbidden actions. Keep credentials out of chat. Execute only after I approve. Report the result first, then show the exact returned Case unchanged. Do not replay it until I separately and explicitly approve replay.
+> Test this user goal with FSQ: **[describe the outcome]**. Follow the installed FSQ Skill and ask only for decisions it cannot establish.
 
-Review the returned result and unchanged Case before deciding whether to approve replay separately.
+For example: **Android:** “A signed-out user sees a clear error for invalid sign-in.” **Web:** “A shopper can filter results and open one product.” **Windows:** “A user can create and save a draft.” **macOS:** “A user can change a preference and see it persist.” These are examples, not defaults; provide the exact target when the Skill asks rather than guessing an ID or path.
+
+Review the result first. If FSQ returns a Case, review it unchanged before deciding whether to request replay separately.
 
 ### 2. FSQ UI
 
@@ -70,7 +72,7 @@ In **Settings**, configure the FSQ LLM Provider and explicitly select a model.
 **First test.**
 1. Create or select a Workspace, and configure its platform and target as needed.
 2. In **Test Runner**, select the exact target.
-3. Describe a verifiable result, review the test setup, and start the test. Review the result and Case before separately approving any replay.
+3. Describe a verifiable result, review the test setup, and start the test. Review the result first and, if FSQ returns a Case, review it unchanged before separately requesting any replay.
 
 ![FSQ Test Runner for describing a test goal](docs/media/01-describe-goal.png)
 

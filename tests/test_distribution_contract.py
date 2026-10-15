@@ -78,7 +78,7 @@ def test_default_distribution_contract() -> None:
     metadata = project["project"]
 
     assert metadata["name"] == "fsq-agent"
-    assert metadata["version"] == "0.1.9"
+    assert metadata["version"] == "0.2.0"
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
@@ -320,12 +320,12 @@ def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
             "agent": "### 1. Coding Agent",
             "ui": "### 2. FSQ UI",
             "reload": "reload or start a new Coding Agent session",
-            "prompt": "> Guide me through one FSQ test.",
-            "workspace": "Workspace",
-            "platform": "platform",
-            "target": "exact target",
-            "credentials": "credentials",
-            "replay": "separately approving any replay",
+            "prompt": "> Test",
+            "setup_approval": "one approval for the listed changes",
+            "setup_scope": "does not initialize a Workspace, configure a Provider, or run a test",
+            "examples": ("Android", "Web", "Windows", "macOS"),
+            "optional_case": "if FSQ returns a Case",
+            "replay": "separately requesting any replay",
         },
         "zh": {
             "path": ROOT / "README.zh-CN.md",
@@ -333,12 +333,12 @@ def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
             "agent": "### 1. Coding Agent",
             "ui": "### 2. FSQ UI",
             "reload": "重新加载 Coding Agent 或启动新 session",
-            "prompt": "> 引导我完成一个 FSQ 测试。",
-            "workspace": "Workspace",
-            "platform": "平台",
-            "target": "准确目标",
-            "credentials": "凭据",
-            "replay": "另行决定是否批准重放",
+            "prompt": "> 测试",
+            "setup_approval": "一次修改批准请求",
+            "setup_scope": "不会初始化 Workspace、配置 Provider 或运行测试",
+            "examples": ("Android", "Web", "Windows", "macOS"),
+            "optional_case": "如果 FSQ 返回了 Case",
+            "replay": "另行决定是否请求重放",
         },
     }
 
@@ -350,9 +350,16 @@ def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
 
         assert agent_section.index("https://github.com/FSQ-lab/FSQ") < agent_section.index("fsq init --agent skill")
         assert agent_section.index("fsq init --agent skill") < agent_section.index(contract["reload"]) < agent_section.index(contract["prompt"])
-        assert all(value in agent_section for value in (contract["workspace"], contract["platform"], contract["target"], contract["credentials"]))
+        assert contract["setup_approval"] in agent_section
+        assert contract["setup_scope"] in agent_section
+        assert all(value in agent_section for value in contract["examples"])
+        assert "Skill" in agent_section
+        assert contract["optional_case"] in quick_start
         assert contract["replay"] in quick_start
-        assert all(value in ui_section for value in ("python -m pip install --upgrade fsq-agent", "fsq ui", "Settings", contract["workspace"], contract["platform"]))
+        assert "mutation approval" not in agent_section
+        assert "mutation 批准" not in agent_section
+        assert "bootstrap" not in agent_section
+        assert all(value in ui_section for value in ("python -m pip install --upgrade fsq-agent", "fsq ui", "Settings", "Workspace"))
 
 
 def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> None:
@@ -361,11 +368,11 @@ def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> 
             "path": ROOT / "docs" / "getting-started.md",
             "reload": "Reload or start a new Coding Agent session",
             "guided": "## Guided AI Explore",
-            "discovery": "exact current working directory",
+            "discovery": "exact opened project root",
             "doctor_first": "before asking",
             "scope": "platform and exact current target",
-            "workspace": "exact registered Workspace status and root",
-            "goal": "Goal and observable success criteria",
+            "workspace": "exact `<project-root>/fsq_workspace`",
+            "goal": "smallest cohesive group",
             "permissions": "permissions",
             "provider": "Provider handoff",
             "result": "result first",
@@ -379,11 +386,11 @@ def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> 
             "path": ROOT / "docs" / "getting-started.zh-CN.md",
             "reload": "重新加载或启动新的 Coding Agent session",
             "guided": "## 引导式 AI Explore",
-            "discovery": "准确的当前工作目录",
+            "discovery": "准确打开的项目根目录",
             "doctor_first": "先运行 Doctor",
             "scope": "平台和准确的当前目标",
-            "workspace": "准确注册的 Workspace 状态与 root",
-            "goal": "Goal 和可观察的成功标准",
+            "workspace": "准确的 `<project-root>/fsq_workspace`",
+            "goal": "最小且内聚的一组",
             "permissions": "权限",
             "provider": "Provider 交接",
             "result": "先总结结果",
@@ -502,10 +509,10 @@ def test_readme_uses_current_installation_and_cli_contract() -> None:
     assert "### 1. Coding Agent" in readme
     assert "### 2. FSQ UI" in readme
     assert "fsq init --agent skill" in readme
-    assert "configure the FSQ LLM Provider and model in **Settings**" in readme
-    assert "never ask me to put credentials in chat" in readme
-    assert "Workspace, platform, and exact target" in readme
-    assert "separately and explicitly approve replay" in readme
+    assert "does not initialize a Workspace, configure a Provider, or run a test" in readme
+    assert "Test this user goal with FSQ" in readme
+    assert all(platform in readme for platform in ("Android", "Web", "Windows", "macOS"))
+    assert "examples, not defaults" in readme
     assert "README.zh-CN.md" in readme
     assert "docs/getting-started.zh-CN.md" in readme
     assert "![FSQ Test Runner for describing a test goal](docs/media/01-describe-goal.png)" in readme
@@ -541,10 +548,11 @@ def test_chinese_readme_uses_current_installation_and_cli_contract() -> None:
     assert "### 1. Coding Agent" in readme
     assert "### 2. FSQ UI" in readme
     assert "fsq init --agent skill" in readme
-    assert "在 **Settings** 中配置 FSQ 使用的 LLM Provider 和模型" in readme
-    assert "不要要求我在聊天中提供凭据" in readme
-    assert "Workspace、平台和准确目标" in readme
-    assert "另行明确批准重放" in readme
+    assert "不会初始化 Workspace、配置 Provider 或运行测试" in readme
+    assert "测试这个用户目标" in readme
+    assert all(platform in readme for platform in ("Android", "Web", "Windows", "macOS"))
+    assert "只是示例" in readme
+    assert "不是默认值" in readme
     assert "![用于描述测试目标的 FSQ Test Runner](docs/media/01-describe-goal.png)" in readme
     assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
     assert "https://youtu.be/QqCahxGDdS0" in readme

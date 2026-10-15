@@ -15,45 +15,64 @@ AI exploration and suggestion analysis also require OpenAI, DeepSeek, Google Gem
 
 ## Install the CLI and project-local Skill
 
-```bash
-python -m pip install --upgrade fsq-agent
-cd /path/to/your/project
-fsq init --agent skill
-```
+Open the project in your Coding Agent and use this one-time setup:
 
-Run the Skill installation from that exact project root. It installs
-`.agents/skills/fsq/` independently of Workspace initialization. Reload or
-start a new Coding Agent session so the client discovers the installed Skill.
-After a package upgrade, rerun `fsq init --agent skill` and reload again to
-update the copied Skill.
+> The official FSQ project is https://github.com/FSQ-lab/FSQ. Establish the
+> exact opened project root. Batch and disclose read-only Python, `fsq`, and
+> Skill-presence checks. Then request one approval covering only
+> `python -m pip install --upgrade fsq-agent` and one
+> `fsq init --agent skill` from that project root, with exact commands and
+> effects. Perform only approved operations, verify `fsq`, and report the exact
+> installed Skill path. This does not initialize a Workspace, configure a
+> Provider, or run a test. Tell me to reload or start a new Coding Agent
+> session, then stop.
 
-Then paste:
+Reload or start a new Coding Agent session so the client discovers
+`.agents/skills/fsq/`. After a package upgrade, rerun
+`fsq init --agent skill` and reload again to update the copied Skill.
 
-> Guide me through one FSQ test. Discover readiness from my exact current
-> directory before asking me for facts FSQ can provide. Then progressively
-> confirm the Goal and observable success criteria, allowed and forbidden
-> actions, and relevant limits. Keep credentials out of chat. Execute one
-> creation only after I approve its complete Goal, summarize the result first,
-> and wait for me to request any Case review or replay.
+Then state your actual goal concisely:
+
+> Test this user goal with FSQ: **[describe the outcome]**. Follow the installed
+> FSQ Skill and ask only for decisions it cannot establish.
+
+Examples—not defaults—include: Android, “a signed-out user sees a clear error
+for invalid sign-in”; Web, “a shopper can filter results and open one product”;
+Windows, “a user can create and save a draft”; macOS, “a user can change a
+preference and see it persist.” Do not guess a target ID or path.
 
 ## Guided AI Explore
 
 The installed Skill leads the dialogue and uses the public FSQ CLI. It will:
 
-1. Use the exact current working directory as its only initial Workspace
-   candidate and run Doctor before asking for facts that Doctor can provide.
-   It uses the returned platform and exact current target plus the exact
-   registered Workspace status and root.
-2. If that directory is not a Workspace, ask for an exact registered Workspace
-   root or exact initialization directory without searching, scanning, trying
-   guessed roots, or using history/latest inference.
-3. If Workspace initialization is needed, explain the mutation, ask permission,
-   run the matching `fsq init --platform ...` form once, and use the actual
-   returned root.
-4. Progressively resolve the Goal and observable success criteria, allowed and
-   forbidden actions, relevant limits, and permissions only when each decision
-   is needed. Initialization, one creation, and replay have separate
-   confirmations; Explore never asks for future replay permission.
+1. Prefer the exact opened project root established by the host; if ambiguous,
+   treat the current directory only as a candidate and ask you to resolve it.
+   From that root it runs Doctor before asking for facts Doctor can provide,
+   including the platform and exact current target.
+2. Reuse a valid registered Workspace at the project root. Otherwise inspect
+   only the exact `<project-root>/fsq_workspace`: reuse it if it is a valid
+   registered Workspace; initialize an existing empty ordinary directory; or,
+   after approval, create one empty absent directory with the host's native
+   filesystem capability and initialize it.
+3. Block on a symlink, non-directory, unreadable/indeterminate path, or non-empty
+   invalid directory. It never searches broadly, creates a nested Workspace,
+   follows or replaces a symlink, or overwrites, deletes, moves, or migrates
+   content. It does not prescribe `mkdir` or assume a shell.
+4. Before creation or initialization, show one cohesive recommendation with
+   exact project and Workspace roots, platform, exact target, fact sources,
+   candidates, exact existing `fsq init` argv, effects, and unauthorized
+   actions. One approval covers the exact directory creation, when needed, and
+   one initialization. It then verifies the actual returned root with Doctor.
+5. Keep FSQ facts, host facts, user decisions, and unverified model candidates
+   distinct. Candidate app IDs, browser targets, executable paths, bundle IDs,
+   devices, or accounts never enter argv until their exact value is confirmed.
+6. Ask for the smallest cohesive group of unresolved user-owned decisions.
+   It may propose Goal criteria, actions, and restrictions, but automatic
+   defaults only reduce authority or stop on ambiguity. It never silently
+   selects a target, account, recipient, exact content, amount, device, or
+   irreversible action, and shows exact literals and side effects in one
+   complete Goal before a separate create confirmation. Initialization,
+   creation, and replay permissions remain separate.
 
 Related read-only checks use one compact disclosure of their exact working
 directories, commands, purpose, and read-only effect; ordinary read-only
@@ -66,8 +85,10 @@ If AI Explore needs Provider setup, this is a user-controlled handoff. API
 keys, tokens, and authentication secrets must not enter chat. The Coding Agent
 asks you to open `fsq ui` yourself and enter credentials in **Settings**; the
 private interactive `fsq providers configure "<provider>"` command is the
-fallback. After you report completion, it checks Provider status and Doctor
-readiness again. Readiness is not a connection test or a successful execution.
+fallback. After you report completion, it checks Provider status and Doctor readiness
+again, then resumes the same Workspace, target, and Goal draft without
+repeating settled questions unless facts changed. Readiness is not a connection
+test or a successful execution.
 
 ### Create, review, and optionally replay
 

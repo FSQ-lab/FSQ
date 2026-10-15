@@ -72,24 +72,110 @@ def test_skill_protocol_contains_confirmed_workflow_boundaries() -> None:
     ):
         assert text in skill
 
-    assert skill.index("## Discover before asking") < skill.index("## Initialize only with permission")
+    assert skill.index("## Start from the goal and discover before asking") < skill.index("## Recommend setup once")
     assert skill.index("## Provider handoff") < skill.index("## Confirm and create once")
     assert skill.index("## Interpret and report the terminal result") < skill.index("## Optional exact-Case review")
 
 
-def test_skill_discovers_exact_current_candidate_before_initialization() -> None:
+def test_skill_distinguishes_project_root_from_workspace_root() -> None:
     skill = " ".join(_skill().split())
 
     doctor = "`fsq --output json --non-interactive doctor`"
-    unresolved = "ask for either an exact registered Workspace root or an exact directory to initialize"
+    default_root = "exact `<project-root>/fsq_workspace`"
 
-    assert "Use the exact current working directory as the first and only initial Workspace candidate" in skill
-    assert "Before asking for any Workspace, platform, target, or readiness fact Doctor can provide" in skill
-    assert unresolved in skill
-    assert "Do not search parent or sibling directories, scan broadly, or try guessed roots" in skill
-    assert "obtain explicit permission, and initialize exactly once" in skill
+    assert "exact opened Coding Agent project root" in skill
+    assert "current working directory is only a candidate" in skill
+    assert "ask the user to resolve the project-root ambiguity" in skill
+    assert "project root and Workspace root are distinct" in skill
+    assert "Run Doctor from the exact project root first" in skill
+    assert default_root in skill
+    assert "Do not search parent or sibling directories or scan broadly" in skill
     assert "actual returned Workspace root" in skill
-    assert skill.index(doctor) < skill.index(unresolved)
+    assert skill.index(doctor) < skill.index(default_root)
+
+
+def test_skill_guards_default_workspace_path_state_matrix() -> None:
+    skill = " ".join(_skill().split())
+
+    for required in (
+        "valid registered Workspace at the project root",
+        "valid registered Workspace at the default path",
+        "absent",
+        "existing empty ordinary directory",
+        "symlink",
+        "non-directory",
+        "unreadable",
+        "indeterminate",
+        "non-empty",
+        "host-native filesystem capability",
+        "one empty directory",
+    ):
+        assert required in skill
+
+    assert "Never follow or replace a symlink" in skill
+    assert "Never overwrite, delete, move, migrate" in skill
+    assert "nested Workspace" in skill
+    assert "Do not prescribe or assume `mkdir` or any shell" in skill
+
+
+def test_skill_requires_one_cohesive_setup_recommendation_and_approval() -> None:
+    skill = " ".join(_skill().split())
+
+    recommendation = skill[skill.index("## Recommend setup once") : skill.index("## Provider handoff")]
+    for required in (
+        "exact project root",
+        "exact proposed Workspace root",
+        "platform",
+        "exact target",
+        "fact source",
+        "unverified candidate",
+        "exact existing `fsq init` argv",
+        "filesystem",
+        "registry",
+        "remain unauthorized",
+        "One approval",
+        "exact directory creation",
+        "one initialization",
+        "actual returned Workspace root",
+        "Doctor",
+    ):
+        assert required in recommendation
+
+
+def test_skill_keeps_facts_candidates_and_user_decisions_distinct() -> None:
+    skill = " ".join(_skill().split())
+
+    for required in (
+        "FSQ-discovered facts",
+        "host facts",
+        "user decisions",
+        "unverified model candidates",
+        "smallest cohesive group of unresolved user-owned decisions",
+        "application ID",
+        "browser target",
+        "executable path",
+        "bundle ID",
+        "device",
+        "account",
+        "cannot enter argv",
+    ):
+        assert required in skill
+
+
+def test_skill_goal_defaults_only_reduce_authority_and_provider_resume_is_stable() -> None:
+    skill = " ".join(_skill().split())
+
+    for required in (
+        "Automatic defaults may only reduce authority or stop on ambiguity",
+        "target, account, recipient, exact content, amount, device, or irreversible action",
+        "Never expand authority",
+        "exact literals and side effects",
+        "one complete Goal",
+        "separate create confirmation",
+        "resume the same Workspace, target, and Goal draft",
+        "without repeating settled questions unless facts changed",
+    ):
+        assert required in skill
 
 
 def test_skill_behavior_scenarios_follow_confirmed_policy_table() -> None:

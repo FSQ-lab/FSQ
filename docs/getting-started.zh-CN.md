@@ -14,37 +14,55 @@ AI 探索和 suggestion 分析还需要 OpenAI、DeepSeek、Google Gemini、Kimi
 
 ## 安装 CLI 和项目本地 Skill
 
-```bash
-python -m pip install --upgrade fsq-agent
-cd /path/to/your/project
-fsq init --agent skill
-```
+在 Coding Agent 中打开项目，并使用这段一次性设置：
 
-请从这个准确的项目根目录安装 Skill。该命令独立于 Workspace 初始化，把
-Skill 安装到 `.agents/skills/fsq/`。重新加载或启动新的 Coding Agent session，
-让客户端发现已安装的 Skill。升级包后，应再次运行 `fsq init --agent skill`
-并再次重载，以更新已复制的 Skill。
+> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。先确定准确打开的项目
+> 根目录。批量披露 Python、`fsq` 和 Skill 是否存在的只读检查。然后请求一次
+> 批准，且只涵盖 `python -m pip install --upgrade fsq-agent`，以及从该项目
+> 根目录运行一次 `fsq init --agent skill`；列出准确命令和影响。只执行获准
+> 操作，验证 `fsq`，并报告准确的 Skill 安装路径。这不会初始化 Workspace、
+> 配置 Provider 或运行测试。最后让我重新加载或启动新的 Coding Agent
+> session，然后停止。
 
-然后粘贴：
+重新加载或启动新的 Coding Agent session，让客户端发现
+`.agents/skills/fsq/`。升级包后，应再次运行 `fsq init --agent skill` 并再次
+重载，以更新已复制的 Skill。
 
-> 引导我完成一个 FSQ 测试。先从准确的当前目录发现 readiness，再向我询问
-> FSQ 无法提供的事实。然后逐步确认 Goal 和可观察的成功标准、允许和禁止的
-> 操作以及相关限制。不要在聊天中提供凭据。只在我确认完整 Goal 后创建一次；
-> 先总结结果，并等待我主动请求 Case 审查或重放。
+然后简洁描述你的真实目标：
+
+> 测试这个用户目标：**[描述期望结果]**。遵循已安装的 FSQ Skill，只询问它
+> 无法确定的决定。
+
+以下只是示例而非默认值：Android，“未登录用户输入无效信息时会看到清晰
+错误”；Web，“购物者可以筛选结果并打开一个商品”；Windows，“用户可以创建
+并保存草稿”；macOS，“用户可以修改偏好设置并看到它保持生效”。不要猜测目标
+ID 或路径。
 
 ## 引导式 AI Explore
 
 安装后的 Skill 负责对话引导，并使用公开 FSQ CLI。它会：
 
-1. 把准确的当前工作目录作为唯一初始 Workspace 候选，并先运行 Doctor，再
-   询问 Doctor 已能提供的 Workspace、平台和准确的当前目标信息。
-2. 如果该目录不是 Workspace，则要求准确注册的 Workspace 状态与 root，或
-   准确的初始化目录；不会搜索、扫描、尝试猜测 root，也不会根据历史或
-   “latest” 推断。
-3. 如果需要初始化 Workspace，它会解释变更、征得权限，使用匹配的
-   `fsq init --platform ...` 形式执行一次，并采用实际返回的 root。
-4. 逐步确认 Goal 和可观察的成功标准、允许与禁止的操作、相关限制和当下所需
-   权限。初始化、一次创建和重放分别确认；Explore 阶段不请求未来重放权限。
+1. 优先使用 host 确定的准确打开的项目根目录；若有歧义，只把当前目录当作
+   候选并请你解决。它从该 root 先运行 Doctor，再询问 Doctor 无法提供的
+   信息，包括平台和准确的当前目标。
+2. 复用项目 root 上有效注册的 Workspace；否则只检查准确的
+   `<project-root>/fsq_workspace`：若为有效注册 Workspace 则复用；若为现有
+   空普通目录则初始化；若路径不存在，则在批准后用 host 原生文件系统能力
+   创建一个空目录并初始化。
+3. 若该路径是 symlink、非目录、不可读/状态不确定，或非空且无效，则阻止
+   初始化。它不会广泛搜索、创建嵌套 Workspace、跟随或替换 symlink，也不会
+   覆盖、删除、移动或迁移内容；不会规定 `mkdir` 或假设存在 shell。
+4. 创建目录或初始化前，它会提出一次内聚建议，列出准确的项目和 Workspace
+   root、平台、准确目标、事实来源、候选值、现有 `fsq init` 的准确 argv、
+   影响及仍未授权的操作。一次批准覆盖所需的准确目录创建和一次初始化；之后
+   用 Doctor 验证实际返回的 root。
+5. 明确区分 FSQ 事实、host 事实、用户决定和未经验证的模型候选。候选 app
+   ID、浏览器目标、可执行文件路径、bundle ID、设备或账号，必须先确认准确值
+   才能进入 argv。
+6. 只询问最小且内聚的一组尚未解决的用户决定。Skill 可以建议 Goal 标准、
+   操作和限制，但自动默认值只能缩小权限或在歧义时停止；不会静默选择目标、
+   账号、接收者、准确内容、金额、设备或不可逆操作。它会在一次完整 Goal 中
+   展示准确字面量和副作用，再单独请求 create 确认。
 
 相关只读检查会一次紧凑披露准确工作目录、命令、目的和只读影响；普通只读
 命令不需要逐条再次批准。范围不明确或前置条件未满足时会阻止流程，而不是
@@ -55,8 +73,9 @@ Skill 安装到 `.agents/skills/fsq/`。重新加载或启动新的 Coding Agent
 如果 AI Explore 需要设置 Provider，这一步由用户控制。API Key、token 和认证
 secret 不得进入聊天。Coding Agent 会请你自行打开 `fsq ui`，在 **Settings**
 中输入凭据；私下交互式运行 `fsq providers configure "<provider>"` 是后备方式。
-你报告完成后，它会再次检查 Provider status 和 Doctor readiness。readiness
-不等于连接测试或成功执行。
+你报告完成后，它会再次检查 Provider status 和 Doctor readiness，然后恢复
+同一个 Workspace、目标和 Goal 草稿；除非事实变化，否则不会重复已确定的
+问题。readiness 不等于连接测试或成功执行。
 
 ### 创建、审查并选择是否重放
 

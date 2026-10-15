@@ -52,8 +52,10 @@ Otherwise inspect only the exact `<project-root>/fsq_workspace` default path:
 - A valid registered Workspace at the default path is reused unchanged only
   when its returned root equals that exact path.
 - If the path is absent, propose creating exactly one empty directory with the
-  host-native filesystem capability, only after setup approval.
-- An existing empty ordinary directory may be initialized directly.
+  host-native filesystem capability, only after the FSQ-layer confirmation
+  described below.
+- An existing empty ordinary directory is initialized directly after resolving
+  the platform and target, without an FSQ-layer confirmation.
 - A symlink, non-directory, unreadable, indeterminate, or non-empty path that
   is not a valid registered Workspace blocks initialization.
 
@@ -64,8 +66,11 @@ creation. Do not search parent or sibling directories or scan broadly. Never
 use `runs list`, history, ordering, “latest,” a current UI selection, or a name
 to infer a Workspace, target, Run, or Case.
 
-Initialization, one create submission, and replay are three separate mutation
-boundaries. Do not ask for future replay permission during Explore.
+Only creation of the absent default Workspace directory gets an FSQ-layer
+confirmation. Workspace initialization in an existing safe empty directory,
+Android target update, and the one Goal run requested by the user do not.
+Host, operating-system, sandbox, and Coding Agent permission mechanisms remain
+independent. Do not ask for future replay permission during Explore.
 
 ## Recommend setup once
 
@@ -73,10 +78,16 @@ Before directory creation or initialization, present one cohesive setup
 recommendation. Show the exact project root, exact proposed Workspace root,
 platform, exact target, the fact source for each fact, all unverified
 candidates, the exact existing `fsq init` argv, filesystem and registry
-effects, and actions that remain unauthorized. One approval may cover only
-exact directory creation at the absent default path plus one initialization
-from that directory. An existing empty ordinary directory needs only the one
-initialization approval.
+effects, and actions that remain unauthorized.
+
+For an absent default path, request the only FSQ-layer setup confirmation.
+Show its exact absolute path and state that one empty directory will be created
+and initialized without deleting, moving, or overwriting other content. State
+that refusal means FSQ cannot be used for this request. Refusal stops the FSQ
+journey without mutation, fallback search, or a failure-shaped Run result.
+Acceptance covers that exact directory creation and its initialization only.
+For an existing empty ordinary directory, initialize automatically after the
+recommendation, without an FSQ-layer confirmation.
 
 Use only the existing form that matches the user-confirmed platform and exact
 target, for example:
@@ -86,13 +97,40 @@ target, for example:
 - `fsq init --platform windows --app-path /path/to/application`
 - `fsq init --platform macos --bundle-id com.example.app`
 
-These values are examples, not defaults. Candidate application IDs, browser
-targets, executable paths, bundle IDs, devices, accounts, and other target
-values are unverified model candidates: they are not facts and cannot enter
-argv until the user confirms the exact value. Run the approved initialization
-exactly once from the proposed Workspace root. Consume the actual returned
-Workspace root, change to that exact root, and verify it with Doctor before any
-Workspace-scoped command. Never install or repair prerequisites.
+These values are examples, not defaults. Browser targets, executable paths,
+bundle IDs, devices, accounts, and other target values are unverified model
+candidates and cannot enter argv unless established by bounded facts or a user
+decision under these rules. Run initialization exactly once from the proposed
+Workspace root. Consume the actual returned Workspace root, change to that
+exact root, and verify it with Doctor before any Workspace-scoped command.
+Never install or repair prerequisites.
+
+### Resolve an Android application ID
+
+For Android, use only the user's exact application ID or bounded read-only host
+and connected-device facts, including the installed-package inventory, to
+resolve the application named by the user. Do not use model memory or an
+unrelated existing Workspace target as a discovery fact. Candidates are
+normalized and deduplicated by exact application ID while retaining each
+source:
+
+- For one reasonable candidate, select it without confirmation and visibly
+  report the exact ID and source.
+- For multiple reasonable candidates, such as stable and Canary variants,
+  present the exact IDs and sources together and ask for one user choice.
+- With no reasonable candidate, request an exact application ID instead of
+  guessing.
+
+When the resolved ID differs from a registered Workspace Android target,
+report the old and new application IDs and run exactly once from that
+Workspace:
+
+`fsq init --platform android --app-id "<app-id>" --update-existing`
+
+This visible target switch needs no FSQ-layer confirmation. Verify the returned
+Workspace root and target with Doctor before execution. A failed or uncertain
+update stops before Run allocation and does not establish either target as
+active.
 
 ## Provider handoff
 
@@ -120,7 +158,7 @@ successful execution. Re-run Doctor and re-check `case_create` readiness, then
 resume the same Workspace, target, and Goal draft without repeating settled
 questions unless facts changed.
 
-## Resolve and confirm one complete Goal
+## Resolve one complete Goal
 
 Synthesize the intended outcome and propose observable acceptance criteria,
 allowed actions, forbidden actions, and relevant data or environment limits.
@@ -128,29 +166,32 @@ Ask for the smallest cohesive group of unresolved user-owned decisions only
 when discovery and earlier answers cannot establish them.
 
 Automatic defaults may only reduce authority or stop on ambiguity. Never
-silently select a target, account, recipient, exact content, amount, device, or
+silently select an account, recipient, exact content, amount, device, or
 irreversible action. Never expand authority or turn an unverified candidate
-into a fact. Show all proposed criteria, restrictions, exact literals and side
-effects in one complete Goal.
+into a fact. Unresolved high-impact parameters remain questions. Show all
+proposed criteria, restrictions, exact literals and side effects in one
+complete Goal.
 
 Present one complete natural-language Goal as one value, together with the
-selected platform and current target. Obtain a separate create confirmation. A
-material change invalidates it. This confirmation permits at most one:
+selected platform and current target. The user's request authorizes one normal
+Goal run and does not require a separate create or run confirmation. Host,
+operating-system, or Coding Agent approval remains independent. Submit at most
+one:
 
 `fsq --output json --non-interactive case create --platform "<platform>" --goal "<confirmed-goal>"`
 
-It authorizes no retry, suggestion, Provider change, Case edit, replay, parallel
-submission, or second create. In particular, it is not replay permission.
+The request authorizes no retry, suggestion, Provider change, Case edit,
+replay, parallel submission, or second create. In particular, it is not replay
+permission.
 
-## Confirm and create once
+## Run the Goal once
 
-Maintain only minimal in-session state: operation, complete Goal, confirmation,
-whether submission began, and exact returned Run ID and Case path when known.
-This state only prevents duplicate submission and does not provide cross-session
-exactly-once behavior. The confirmation is consumed when submission begins.
-Never submit the same confirmation twice, even after interruption, timeout,
-lost or malformed output, lost response, failure, cancellation, Provider error,
-publication conflict, or lost session state.
+Maintain only minimal in-session state: operation, complete Goal, whether
+submission began, and exact returned Run ID and Case paths when known. This
+state only prevents duplicate submission and does not provide cross-session
+exactly-once behavior. Never submit the same authorized Goal run twice, even
+after interruption, timeout, lost or malformed output, lost response, failure,
+cancellation, Provider error, publication conflict, or lost session state.
 
 Start the command. Report submission exactly once. Because terminal output can
 remain buffered, report only process state or a new
@@ -182,6 +223,38 @@ Command completion, execution success, and user acceptance are distinct. Never
 replace a failed, inconclusive, or cancelled execution with query success or a
 more optimistic summary.
 
+Interpret `candidate_case_path`, `published_case_path`, and
+`publication_outcome` exactly as returned. Do not treat a candidate as
+published or infer a publication path.
+
+If execution succeeds, every observable acceptance criterion is supported,
+and the published Case has bounded replay value for repeatable regression, a
+recurring workflow, release validation, or reproducible diagnosis, retain it.
+Explain that replay value and that later replay can repeat side effects, then
+report the exact returned `published_case_path` and say that a separately
+authorized strict replay can be guided if the user requests it. Never
+automatically replay.
+
+Otherwise, delete the publication only when the same terminal result has
+`publication_outcome=created` and an exact non-empty `published_case_path`.
+This cleanup applies after failure, cancellation, or unknown execution; any
+unmet or unknown acceptance criterion; or no bounded replay value. Use the
+host-native exact-file deletion capability on that exact path. Never derive a
+deletion path from a name, Run ID, directory, candidate path, ordering, or
+history; never delete the candidate or Run evidence. Do not delete for
+`unchanged`, `conflict`, `failed`, or a missing path. Report failed or uncertain
+deletion and preserve the known execution and publication facts.
+
+After confirmed successful deletion, the returned publication is not retained
+and must not be selected for review or replay. If the same result has an exact
+non-empty returned `candidate_case_path`, keep that candidate available as an
+unpublished Case; never derive it from the deleted publication path. If
+deletion fails or is uncertain, report that uncertainty, do not claim the
+publication absent, and never retry deletion. A cleanup attempt does not change
+the authoritative execution conclusion, acceptance-criterion mapping, or Run
+evidence. Deletion is cleanup of a newly created publication, not execution
+failure and not permission to replay.
+
 For optional detail, use only an exact persistent Run ID returned by the
 submitted result or its machine error details:
 
@@ -193,11 +266,17 @@ execution facts. Without an exact returned Run ID, do not query a Run.
 
 ## Optional exact-Case review
 
-Review only when the user asks. Select the exact path mechanically: use a
-non-empty returned `published_case_path`; otherwise use a non-empty returned
-`candidate_case_path` and identify it as an unpublished candidate. If neither
-exists, no Case is available. Never construct a path from a name, Run ID,
-directory, ordering, or history.
+Review only when the user asks. Select from the post-cleanup retained-path
+state, never from returned fields alone. Use an exact non-empty returned
+`published_case_path` only when it remains retained. A successfully deleted
+publication must not be selected for review or replay; instead, use the exact
+non-empty returned `candidate_case_path` when available and identify it as an
+unpublished candidate. If publication deletion failed or is uncertain, do not
+claim that publication present or absent; use the exact returned candidate
+when available, otherwise report that no retained Case path is confirmed. If
+there is no retained publication and no returned candidate, no Case is
+available. Never construct a path from a name, Run ID, directory, ordering, or
+history.
 
 Read and review only the exact returned YAML bytes, read-only and unchanged. Do
 not create, reconstruct, repair, rewrite, copy, format-write, or replace Case

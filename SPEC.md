@@ -245,16 +245,19 @@ The bundled `assets/getting-started.web.fsq.yaml` remains a canonical provider-f
 | control_plane | fsq_agent/control_plane/SPEC.md | Adapts Application to local HTTP/SSE/static delivery, cancellation, persisted Run reports, evidence, and artifact/export delivery. |
 | cli | fsq_agent/cli/SPEC.md | Adapts public commands, persisted Run queries, and offline exports to Application with human/JSON/JSONL output and stable exit categories. |
 | frontend | frontend/SPEC.md | Owns the repository npm/Vite workspace, browser dependency and build policy, generated-asset boundary, and navigation to independently owned frontend application modules. |
+| frontend.website | frontend/website/SPEC.md | Owns the public English FSQ introduction site and its static GitHub Pages entry. |
 
 ## Frontend Build Boundary
 
-- The repository root npm project owns browser-source dependency resolution and Vite compilation for repository web pages. It uses one lock file and a multi-page Vite configuration for the Control Plane entry.
-- `frontend/SPEC.md` owns the frontend workspace contract and links to `frontend/control-plane/SPEC.md` without repeating application behavior; the corresponding Python module owns HTTP contracts and production static serving.
+- The repository root npm project owns browser-source dependency resolution and Vite compilation for repository web pages. It uses one lock file and Vite configurations for the Control Plane and public website entries.
+- `frontend/SPEC.md` owns the frontend workspace contract and links to `frontend/control-plane/SPEC.md` and `frontend/website/SPEC.md` without repeating application behavior. The corresponding Python module owns Control Plane HTTP contracts and production static serving; the public website has no Python runtime dependency.
 - New frontend application modules use Vite, React, and TypeScript/TSX unless their confirmed module SPEC records a concrete exception.
 - `ts-ebml` is an exact npm dependency consumed through an ES module import. Third-party browser bundles and Vite-generated assets are not tracked in Git.
 - Vite-generated Control Plane assets live under `fsq_agent/adapters/control_plane/static`. Its HTML entry point, JavaScript, CSS, entry-asset manifest, and referenced generated assets are included in both wheel and source distribution. Release builds run the npm build before Python distribution construction. An installed distribution is self-contained and does not require Node.js or network access to serve the frontend at runtime.
+- Vite-generated website assets live under the ignored `.frontend-dist/website` staging boundary and are deployment artifacts only. They are not distributed into Control Plane static output or Python packages. The Pages workflow builds and deploys that artifact from the canonical repository without committing generated site files.
 - The npm build generates and distributes frontend assets only; it does not generate, copy, delete, or mutate tracked Python platform presets or reusable skill resources.
 - Frontend development may use the Vite development server with API and streaming requests proxied to the Control Plane Python server. Production and installed-wheel usage serve the generated entry and its APIs from one Python process.
+- The canonical public website origin is `https://fsq-lab.github.io/FSQ/`. Build success, GitHub Pages deployment success, and a successful response from that origin are separate publication states.
 
 ## Architecture Diagram
 
@@ -346,9 +349,12 @@ flowchart TD
     Core --> Capabilities
     Core -->|Runtime and Android discovery compatibility exports| Environments
     Frontend --> FrontendControlPlane[frontend/control-plane]
+    Frontend --> FrontendWebsite[frontend/website]
     FrontendControlPlane --> ControlPlane
     FrontendControlPlane --> ControlPlaneStatic[generated Control Plane static assets]
     ControlPlane --> ControlPlaneStatic
+    FrontendWebsite --> PagesArtifact[generated GitHub Pages artifact]
+    PagesWorkflow[GitHub Pages workflow] --> PagesArtifact
 ```
 
 ## Development Rules

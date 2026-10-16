@@ -183,6 +183,9 @@ jobs:
       - name: Run frontend tests
         run: npm test
 
+      - name: Build Website
+        run: npm run build:website
+
       - name: Build frontend
         run: npm run build
 

@@ -17,5 +17,5 @@
     "jsx": "react-jsx",
     "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"]
   },
-  "include": ["frontend/control-plane/src", "vitest.config.ts"]
+  "include": ["frontend/control-plane/src", "frontend/website/src", "vitest.config.ts"]
 }

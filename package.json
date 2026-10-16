@@ -8,7 +8,9 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:website": "vite --config vite.website.config.js",
     "build": "vite build && node scripts/distribute-frontend-build.mjs",
+    "build:website": "vite build --config vite.website.config.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

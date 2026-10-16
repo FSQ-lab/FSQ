@@ -20,6 +20,7 @@
 </p>
 
 <p align="center">
+  <a href="https://fsq-lab.github.io/FSQ/">Website</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="README.zh-CN.md">中文</a> ·
   <a href="docs/getting-started.md">Guide</a> ·

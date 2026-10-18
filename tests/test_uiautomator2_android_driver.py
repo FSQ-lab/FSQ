@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import builtins
+from asyncio import CancelledError
 from io import BytesIO
 from typing import Any
 from xml.etree import ElementTree
@@ -12,7 +13,7 @@ from fsq_agent.core import AndroidDriverInterface
 from fsq_agent.core.harness._android import AndroidHarness
 from fsq_agent.core.harness._driver_tools import _discover_driver_capability_definitions
 from fsq_agent.core.harness._uiautomator2_driver import UiAutomator2AndroidDriver
-from fsq_agent.models import AndroidAssertWithAIParams, ConfigurationError, HarnessContext, ReplayPolicy
+from fsq_agent.models import AndroidAssertWithAIParams, ConfigurationError, ExecutableStep, HarnessContext, ReplayPolicy
 
 
 class FakeSelector:
@@ -35,11 +36,19 @@ class FakeSelector:
     def long_click(self) -> None:
         self.device.calls.append(("long_click", self.query))
 
-    def set_text(self, text: str) -> None:
+    def set_text(self, text: str) -> bool | None:
         self.device.calls.append(("set_text", self.query, text))
+        if self.device.write_mode == "reject":
+            return False
+        if self.device.write_mode == "error":
+            raise RuntimeError("private backend payload")
+        if self.device.write_mode == "accept":
+            self.device.text = text
+        return None
 
     def clear_text(self) -> None:
         self.device.calls.append(("clear_text", self.query))
+        self.device.text = ""
 
     def get_text(self) -> str:
         self.device.calls.append(("get_text", self.query))
@@ -47,7 +56,10 @@ class FakeSelector:
 
     def info(self) -> dict[str, object]:
         self.device.calls.append(("info", self.query))
-        return dict(self.device.selector_info)
+        info = {"text": self.device.text, **self.device.selector_info}
+        if any(call[0] == "set_text" for call in self.device.calls):
+            info.update(self.device.post_write_info)
+        return info
 
 
 class FakeXPathSelector(FakeSelector):
@@ -73,8 +85,15 @@ class FakeDevice:
         self.wait_result = wait_result
         self.wait_gone_result = wait_gone_result
         self.hierarchy = hierarchy
+        self.write_mode = "accept"
+        self.post_write_info: dict[str, object] = {}
         self.calls: list[tuple[Any, ...]] = []
         self.selector_info: dict[str, object] = {
+            "className": "android.widget.EditText",
+            "password": False,
+            "resourceName": "com.example:id/input",
+            "packageName": "com.example",
+            "bounds": {"left": 0, "top": 0, "right": 100, "bottom": 50},
             "enabled": True,
             "checked": False,
             "selected": False,
@@ -185,12 +204,12 @@ def test_uiautomator2_driver_actions_use_locator_selectors() -> None:
     assert driver.tap_on({"locator": {"resourceId": "login"}})["status"] == "passed"
     assert driver.tap_at({"point": {"x": 100, "y": 200}})["status"] == "passed"
     assert driver.long_press_on({"locator": {"accessibilityId": "Menu"}})["status"] == "passed"
-    assert driver.input_text({"text": "hello", "locator": {"text": "Search"}})["status"] == "passed"
+    assert driver.input_text({"text": "hello", "locator": {"resourceId": "search"}})["status"] == "passed"
     assert driver.press_key({"key": "Back"})["status"] == "passed"
     assert driver.swipe({"direction": "up", "duration": 100})["status"] == "passed"
-    assert driver.assert_state({"element": {"resourceId": "url"}, "text": {"contains": "bing"}})["status"] == "passed"
+    assert driver.assert_state({"element": {"resourceId": "url"}, "text": {"contains": "hello"}})["status"] == "passed"
 
-    assert device.calls[:13] == [
+    assert device.calls[:14] == [
         ("select", {"resourceId": "login"}),
         ("wait", {"resourceId": "login"}, {"exists": True, "timeout": 10.0}),
         ("click", {"resourceId": "login"}),
@@ -198,11 +217,12 @@ def test_uiautomator2_driver_actions_use_locator_selectors() -> None:
         ("select", {"description": "Menu"}),
         ("wait", {"description": "Menu"}, {"exists": True, "timeout": 10.0}),
         ("long_click", {"description": "Menu"}),
-        ("select", {"text": "Search"}),
-        ("wait", {"text": "Search"}, {"exists": True, "timeout": 10.0}),
-        ("click", {"text": "Search"}),
-        ("clear_text", {"text": "Search"}),
-        ("set_text", {"text": "Search"}, "hello"),
+        ("select", {"resourceId": "search"}),
+        ("wait", {"resourceId": "search"}, {"exists": True, "timeout": 10.0}),
+        ("info", {"resourceId": "search"}),
+        ("click", {"resourceId": "search"}),
+        ("set_text", {"resourceId": "search"}, "hello"),
+        ("info", {"resourceId": "search"}),
         ("press", "back"),
     ]
 
@@ -461,7 +481,7 @@ def test_uiautomator2_driver_waits_for_targets_before_actions() -> None:
 
     assert driver.tap_on({"locator": {"resourceId": "login"}})["status"] == "passed"
     assert driver.long_press_on({"locator": {"accessibilityId": "Menu"}})["status"] == "passed"
-    assert driver.input_text({"text": "hello", "locator": {"text": "Search"}})["status"] == "passed"
+    assert driver.input_text({"text": "hello", "locator": {"resourceId": "search"}})["status"] == "passed"
 
     assert device.calls[:6] == [
         ("select", {"resourceId": "login"}),
@@ -471,10 +491,10 @@ def test_uiautomator2_driver_waits_for_targets_before_actions() -> None:
         ("wait", {"description": "Menu"}, {"exists": True, "timeout": 10.0}),
         ("long_click", {"description": "Menu"}),
     ]
-    assert ("wait", {"text": "Search"}, {"exists": True, "timeout": 10.0}) in device.calls
+    assert ("wait", {"resourceId": "search"}, {"exists": True, "timeout": 10.0}) in device.calls
 
 
-def test_uiautomator2_driver_input_text_focuses_clears_and_sets_text() -> None:
+def test_uiautomator2_driver_input_text_focuses_replaces_and_verifies_text() -> None:
     device = FakeDevice()
     driver = UiAutomator2AndroidDriver(app_id="com.example.app", device=device)
 
@@ -484,10 +504,331 @@ def test_uiautomator2_driver_input_text_focuses_clears_and_sets_text() -> None:
     assert device.calls == [
         ("select", {"resourceId": "url_bar"}),
         ("wait", {"resourceId": "url_bar"}, {"exists": True, "timeout": 10.0}),
+        ("info", {"resourceId": "url_bar"}),
         ("click", {"resourceId": "url_bar"}),
-        ("clear_text", {"resourceId": "url_bar"}),
         ("set_text", {"resourceId": "url_bar"}, "machine learning tutorials"),
+        ("info", {"resourceId": "url_bar"}),
     ]
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        {},
+        {"className": "android.widget.FrameLayout", "clickable": True, "focused": True},
+        {"className": "android.inputmethodservice.KeyboardView", "focusable": True},
+        {"className": "custom.ChatInput", "editable": True},
+        {"className": 123},
+        {"className": "android.widget.EditText", "enabled": False, "password": False},
+    ],
+)
+def test_input_text_rejects_unproven_editability_without_side_effects(info: dict[str, object]) -> None:
+    device = FakeDevice()
+    device.selector_info = info
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "submitted-private", "locator": {"resourceId": "input"}})
+
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "target_resolution_error"
+    assert result["metadata"] == {"reason": "invalid_input_target"}
+    assert not any(call[0] in {"click", "clear_text", "set_text"} for call in device.calls)
+    assert "submitted-private" not in str(result)
+
+
+@pytest.mark.parametrize("text", ["", "hello", "中文 café 👩🏽‍💻\n第二行", " existing whitespace "])
+@pytest.mark.parametrize("class_name", ["android.widget.EditText", "android.widget.AutoCompleteTextView", "android.widget.MultiAutoCompleteTextView"])
+def test_input_text_requires_exact_replacement_readback(text: str, class_name: str) -> None:
+    device = FakeDevice(text="previous text")
+    device.selector_info["className"] = class_name
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": text, "locator": {"resourceId": "input"}})
+
+    assert result == {"status": "passed", "output": None}
+    assert device.text == text
+    assert sum(call[0] == "set_text" for call in device.calls) == 1
+    assert device.calls[-1] == ("info", {"resourceId": "input"})
+
+
+@pytest.mark.parametrize(
+    ("mode", "post_info", "reason"),
+    [
+        ("reject", {}, "entry_rejected"),
+        ("noop", {}, "entry_mismatch"),
+        ("accept", {"text": "observed-private"}, "entry_mismatch"),
+        ("accept", {"text": None}, "verification_unavailable"),
+        ("accept", {"text": 123}, "verification_unavailable"),
+        ("accept", {"resourceName": "different"}, "verification_unavailable"),
+        ("accept", {"className": "android.widget.FrameLayout"}, "verification_unavailable"),
+        ("accept", {"password": True}, "verification_unavailable"),
+        ("accept", {"text": "••••"}, "verification_unavailable"),
+    ],
+)
+def test_input_text_backend_outcomes_are_safe_and_never_retried(mode: str, post_info: dict[str, object], reason: str) -> None:
+    device = FakeDevice()
+    device.write_mode = mode
+    device.post_write_info = post_info
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "submitted-private", "locator": {"resourceId": "input"}})
+
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "action_error"
+    assert result["metadata"] == {"reason": reason}
+    assert "submitted-private" not in str(result)
+    assert "observed-private" not in str(result)
+    assert "params" not in str(result)
+    assert sum(call[0] == "set_text" for call in device.calls) == 1
+    assert sum(call[0] == "select" for call in device.calls) == 1
+
+
+@pytest.mark.parametrize("password", [True, None, "false", 0])
+def test_input_text_requires_explicit_unmasked_metadata(password: object) -> None:
+    device = FakeDevice()
+    device.selector_info["password"] = password
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "••••", "locator": {"resourceId": "input"}})
+
+    assert result["status"] == "failed"
+    assert result["metadata"] == {"reason": "verification_unavailable"}
+    assert not any(call[0] in {"click", "clear_text", "set_text"} for call in device.calls)
+
+
+@pytest.mark.parametrize("mask", ["••••", "****", "●●●●"])
+def test_input_text_cannot_pass_by_matching_mask_characters(mask: str) -> None:
+    device = FakeDevice()
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": mask, "locator": {"resourceId": "input"}})
+
+    assert result["status"] == "failed"
+    assert result["metadata"] == {"reason": "verification_unavailable"}
+    assert mask not in str(result)
+
+
+def test_input_text_missing_target_does_not_include_text_or_params() -> None:
+    device = FakeDevice(exists=False, wait_result=False)
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "submitted-private", "target": "target-private"})
+
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "target_resolution_error"
+    assert result["metadata"] == {"reason": "target_missing"}
+    assert "submitted-private" not in str(result)
+    assert "target-private" not in str(result)
+    assert not any(call[0] in {"click", "clear_text", "set_text"} for call in device.calls)
+
+
+@pytest.mark.parametrize(
+    "locator_params",
+    [
+        {"target": "original"},
+        {"locator": {"text": "original"}},
+        {"locator": {"text": "original", "resourceId": "input"}},
+        {"locator": {"xpath": "//android.widget.EditText[@text='original']"}},
+        {"locator": {"xpath": "//*[@*[.='original']]"}},
+    ],
+)
+def test_input_text_does_not_reresolve_mutated_text_locators(locator_params: dict[str, object]) -> None:
+    device = FakeDevice(text="original")
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "replacement", **locator_params})
+
+    assert result["status"] == "failed"
+    assert result["metadata"] == {"reason": "verification_unavailable"}
+    assert device.text == "replacement"
+    assert device.calls[-1][0] == "set_text"
+    assert not any(call[0] == "clear_text" for call in device.calls)
+    assert sum(call[0] == "info" for call in device.calls) == 1
+
+
+@pytest.mark.parametrize("stage", ["select", "wait", "info_before", "click", "set_text", "info_after"])
+def test_input_text_contains_backend_exceptions_without_leaking(stage: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    device = FakeDevice()
+    original_info = FakeSelector.info
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("submitted-private observed-private private backend payload")
+
+    def info(selector: FakeSelector) -> dict[str, object]:
+        after = any(call[0] == "set_text" for call in device.calls)
+        if (stage == "info_after") == after:
+            fail()
+        return original_info(selector)
+
+    if stage == "select":
+        monkeypatch.setattr(FakeDevice, "__call__", fail)
+    elif stage.startswith("info_"):
+        monkeypatch.setattr(FakeSelector, "info", info)
+    else:
+        monkeypatch.setattr(FakeSelector, stage, fail)
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "submitted-private", "locator": {"resourceId": "input"}})
+
+    assert result["status"] == "failed"
+    assert result["metadata"]["reason"] == ("verification_unavailable" if stage == "info_after" else "entry_backend_error")
+    assert all(value not in str(result) for value in ["submitted-private", "observed-private", "private backend payload", "params"])
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit, CancelledError])
+def test_input_text_preserves_process_interrupts(error: type[BaseException], monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupt(_selector: FakeSelector, _text: str) -> None:
+        raise error
+
+    monkeypatch.setattr(FakeSelector, "set_text", interrupt)
+    with pytest.raises(error):
+        UiAutomator2AndroidDriver(app_id="app", device=FakeDevice()).input_text({"text": "private", "locator": {"resourceId": "input"}})
+
+
+def test_input_text_supports_info_property(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(FakeSelector, "info", property(FakeSelector.info))
+    device = FakeDevice()
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "replacement", "locator": {"resourceId": "input"}})
+
+    assert result["status"] == "passed"
+    assert device.calls[-1] == ("info", {"resourceId": "input"})
+
+
+@pytest.mark.parametrize("backend", ["selector", "xpath"])
+@pytest.mark.parametrize("text", ["", "Unicode 中文 👋"])
+def test_input_text_real_uiautomator2_apis_offline(backend: str, text: str) -> None:
+    selectors = pytest.importorskip("uiautomator2._selector")
+    xpath = pytest.importorskip("uiautomator2.xpath")
+
+    class Rpc:
+        def __init__(self, device: FakeDevice) -> None:
+            self.device = device
+
+        def waitForExists(self, *_args: object, **_kwargs: object) -> bool:
+            return True
+
+        def objInfo(self, _selector: object) -> dict[str, object]:
+            # The shipped native ObjInfo DTO does not expose password state.
+            return {"text": self.device.text, **{key: value for key, value in self.device.selector_info.items() if key != "password"}}
+
+        def setText(self, _selector: object, value: str) -> bool:
+            self.device.calls.append(("set_text", value))
+            self.device.text = value
+            return True
+
+        def clearTextField(self, _selector: object) -> bool:
+            self.device.calls.append(("clear_text",))
+            self.device.text = ""
+            return True
+
+    class Device(FakeDevice):
+        wait_timeout = 0.01
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.selector_info["resourceName"] = "input"
+            self.jsonrpc = Rpc(self)
+
+        def __call__(self, **query: object) -> object:
+            return selectors.UiObject(self, selectors.Selector(**query))
+
+        def xpath(self, value: str) -> object:
+            return xpath.XPathEntry(self)(value)
+
+        def dump_hierarchy(self) -> str:
+            root = ElementTree.Element("hierarchy")
+            ElementTree.SubElement(
+                root,
+                "node",
+                {
+                    "class": "android.widget.EditText",
+                    "text": self.text,
+                    "password": "false",
+                    "resource-id": "input",
+                    "package": "com.example",
+                    "bounds": "[0,0][100,50]",
+                },
+            )
+            return ElementTree.tostring(root, encoding="unicode")
+
+        def clear_text(self) -> None:
+            self.calls.append(("clear_text",))
+            self.text = ""
+
+        def send_keys(self, value: str) -> None:
+            self.calls.append(("set_text", value))
+            self.text = value
+
+    device = Device()
+    locator = {"resourceId": "input"} if backend == "selector" else {"xpath": "//android.widget.EditText[@resource-id='input']"}
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": text, "locator": locator})
+
+    assert result == {"status": "passed", "output": None}
+    assert device.text == text
+    assert sum(call[0] == "set_text" or (call[0] == "clear_text" and backend == "selector" and not text) for call in device.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("nodes", "passes"),
+    [
+        ('<node class="android.widget.EditText" resource-id="com.example:id/input" package="com.example" bounds="[0,0][100,50]" text="same" password="false" />', True),
+        ('<node class="android.widget.EditText" resource-id="com.example:id/input" package="com.example" bounds="[0,0][100,50]" text="same" password="true" />', False),
+        ('<node class="android.widget.EditText" resource-id="com.example:id/input" package="com.example" bounds="[0,0][100,50]" text="same" />', False),
+        ('<node class="android.widget.EditText" resource-id="other" package="com.example" bounds="[0,0][100,50]" text="same" password="false" />', False),
+        ('<node class="android.widget.EditText" resource-id="com.example:id/input" package="com.example" bounds="[0,0][100,50]" text="different" password="false" />', False),
+        ("<node", False),
+        ("", False),
+    ],
+)
+def test_input_text_native_password_state_requires_matching_hierarchy(nodes: str, passes: bool) -> None:
+    device = FakeDevice(text="same", hierarchy=f"<hierarchy>{nodes}</hierarchy>")
+    del device.selector_info["password"]
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "same", "locator": {"resourceId": "input"}})
+
+    assert result["status"] == ("passed" if passes else "failed")
+    if not passes:
+        assert not any(call[0] in {"click", "clear_text", "set_text"} for call in device.calls)
+    assert "same" not in str(result)
+
+
+def test_input_text_ambiguous_hierarchy_is_not_proof_of_unmasked_target() -> None:
+    node = '<node class="android.widget.EditText" resource-id="com.example:id/input" package="com.example" bounds="[0,0][100,50]" text="same" password="false" />'
+    device = FakeDevice(text="same", hierarchy=f"<hierarchy>{node}{node}</hierarchy>")
+    del device.selector_info["password"]
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "same", "locator": {"resourceId": "input"}})
+
+    assert result["status"] == "failed"
+    assert result["metadata"] == {"reason": "verification_unavailable"}
+    assert not any(call[0] in {"click", "clear_text", "set_text"} for call in device.calls)
+
+
+@pytest.mark.parametrize("after_write", [False, True])
+def test_input_text_native_hierarchy_read_failure_is_safe(after_write: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    device = FakeDevice()
+    del device.selector_info["password"]
+
+    def hierarchy() -> str:
+        after = any(call[0] == "set_text" for call in device.calls)
+        if not after_write or after:
+            raise RuntimeError("submitted-private observed-private raw hierarchy")
+        return f'<hierarchy><node class="android.widget.EditText" resource-id="com.example:id/input" package="com.example" bounds="[0,0][100,50]" text="{device.text}" password="false" /></hierarchy>'
+
+    monkeypatch.setattr(device, "dump_hierarchy", hierarchy)
+    result = UiAutomator2AndroidDriver(app_id="app", device=device).input_text({"text": "submitted-private", "locator": {"resourceId": "input"}})
+
+    assert result["status"] == "failed"
+    assert result["metadata"] == {"reason": "verification_unavailable" if after_write else "entry_backend_error"}
+    assert all(value not in str(result) for value in ["submitted-private", "observed-private", "raw hierarchy"])
+    assert sum(call[0] == "set_text" for call in device.calls) == int(after_write)
+
+
+@pytest.mark.parametrize(
+    ("mode", "post_info", "reason"),
+    [
+        ("reject", {}, "entry_rejected"),
+        ("noop", {}, "entry_mismatch"),
+        ("accept", {"text": None}, "verification_unavailable"),
+        ("error", {}, "entry_backend_error"),
+    ],
+)
+def test_input_text_failure_propagates_through_android_harness(mode: str, post_info: dict[str, object], reason: str) -> None:
+    device = FakeDevice()
+    device.write_mode = mode
+    device.post_write_info = post_info
+    harness = AndroidHarness(driver=UiAutomator2AndroidDriver(app_id="app", device=device))
+    step = ExecutableStep(step_id="input", kind="action", action_name="inputText", params={"text": "submitted-private", "locator": {"resourceId": "input"}})
+
+    result = harness.invoke_action(step, harness.get_context())
+
+    assert result.status == "failed"
+    assert result.failure_category == "action_error"
+    assert result.metadata == {"reason": reason}
+    assert result.output is None
+    assert all(value not in result.model_dump_json() for value in ["submitted-private", "private backend payload", "params"])
 
 
 def test_uiautomator2_driver_assert_visible_waits_before_missing_target() -> None:

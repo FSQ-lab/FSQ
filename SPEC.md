@@ -143,6 +143,7 @@ Android platform block:
 - Platform id: `android`.
 - Backend: `uiautomator2`.
 - Application identity comes from Workspace target or supported Case metadata fallback. Device serial is transient per-Run selection, not an environment fallback.
+- Android `input_text` reports success only for a demonstrably editable resolved target whose readable text matches the requested replacement after entry. Backend transport completion alone is not success. Unverifiable entry is a safe action failure; the driver does not fall back to untargeted keyboard input.
 - Explicit observation capability: canonical `ui_snapshot` with Android alias `uiTree`. Automatic runner evidence captures `screenshot` plus normalized `ui_snapshot` using compact Android UI hierarchy XML content. Android compact UI snapshots keep the existing `{"xml": ...}` payload shape, may use source-level hierarchy compression when available, remove layout-only/default data, clip long text-like attributes to the first 50 characters, and fall back to raw hierarchy XML if compaction is unavailable or unsafe.
 - Harness skill: `android-harness.md`.
 

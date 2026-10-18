@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import re
 from io import BytesIO
 from typing import Any
 from xml.etree import ElementTree
@@ -30,6 +31,10 @@ from fsq_agent.models import (
 DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS = 10.0
 ANDROID_STATE_ASSERTION_FIELDS = ("enabled", "checked", "selected", "clickable", "focused")
 ANDROID_LOCATOR_FIELDS = ("resourceId", "accessibilityId", "text", "className", "xpath")
+ANDROID_EDITABLE_CLASSES = frozenset({"android.widget.EditText", "android.widget.AutoCompleteTextView", "android.widget.MultiAutoCompleteTextView"})
+ANDROID_INPUT_IDENTITY_FIELDS = ("className", "resourceName", "packageName", "bounds")
+# Only these structural XPath forms are demonstrably independent of the text being replaced.
+ANDROID_TEXT_INDEPENDENT_XPATH = re.compile(r"""(?:/+(?:hierarchy|[A-Za-z_][\w.$]*)(?:\[\d+\]|\[@(?:resource-id|content-desc)=(?:'[^']*'|"[^"]*")\])?)+""")
 ANDROID_UI_SNAPSHOT_TEXT_LIMIT_CHARS = 50
 ANDROID_UI_SNAPSHOT_TEXT_ATTRIBUTES = frozenset({"text", "content-desc", "contentDescription", "hint", "label", "name", "value"})
 ANDROID_UI_SNAPSHOT_LOCATOR_ATTRIBUTES = frozenset({"id", "resource-id", "resourceId", "accessibility-id", "content-desc", "contentDescription"})
@@ -133,21 +138,97 @@ class UiAutomator2AndroidDriver(AIAssertionBackendToolMixin):
         selector.long_click()
         return self._passed()
 
-    @_android_driver_tool("inputText", description="Enter text into a focused Android UI target.")
+    @_android_driver_tool("inputText", description="Replace text in an editable Android UI target and verify the accepted value.")
     def input_text(self, params: AndroidInputTextParams) -> dict[str, object]:
         data = self._param_data(params)
         text = data.get("text")
         if not isinstance(text, str):
             return self._configuration_error("inputText requires a string text parameter.")
-        selector = self._selector(data)
-        if not self._wait_for_exists(selector):
-            return self._target_missing(data)
-        selector.click()
-        clear_text = getattr(selector, "clear_text", None)
-        if callable(clear_text):
-            clear_text()
-        selector.set_text(text)
+        try:
+            selector = self._selector(data)
+            if not self._wait_for_exists(selector):
+                return self._failed("target_resolution_error", "Input target was not found.", metadata={"reason": "target_missing"})
+            before = self._input_target_info(selector)
+        # Optional backend exceptions may contain literal or runtime-secret input/locator data.
+        except Exception:  # noqa: BLE001
+            return self._failed("action_error", "Input target inspection failed.", metadata={"reason": "entry_backend_error"})
+        class_name = before.get("className")
+        if not isinstance(class_name, str) or class_name not in ANDROID_EDITABLE_CLASSES or before.get("enabled") is False:
+            return self._failed("target_resolution_error", "Input target is not demonstrably editable.", metadata={"reason": "invalid_input_target"})
+        if not self._input_text_is_readable(before):
+            return self._failed("action_error", "Input target text cannot be verified.", metadata={"reason": "verification_unavailable"})
+        try:
+            selector.click()
+            # Both UiObject.set_text and XPathSelector.set_text replace the value, including "".
+            # A separate clear would invalidate a text-based locator before its write.
+            accepted = selector.set_text(text)
+        # Contain backend messages locally; BaseException-based cancellation/interrupts still propagate.
+        except Exception:  # noqa: BLE001
+            return self._failed("action_error", "Text entry backend failed; acceptance is unknown.", metadata={"reason": "entry_backend_error"})
+        if accepted is False:
+            return self._failed("action_error", "Text entry was rejected by the backend.", metadata={"reason": "entry_rejected"})
+        if before["text"] != text and not self._input_locator_is_text_independent(data):
+            return self._failed("action_error", "Text entry acceptance cannot be verified on the original target.", metadata={"reason": "verification_unavailable"})
+        try:
+            # A single fresh metadata read supplies text and password state together, not a cached XML node.
+            after = self._input_target_info(selector)
+        # Stale/missing targets and read failures cannot establish either success or a rejected write.
+        except Exception:  # noqa: BLE001
+            return self._failed("action_error", "Text entry acceptance could not be read.", metadata={"reason": "verification_unavailable"})
+        if not self._input_text_is_readable(after) or any(before.get(field) != after.get(field) for field in ANDROID_INPUT_IDENTITY_FIELDS):
+            return self._failed("action_error", "Text entry acceptance cannot be verified on the original target.", metadata={"reason": "verification_unavailable"})
+        if after["text"] != text:
+            return self._failed("action_error", "Text entry did not match the requested replacement.", metadata={"reason": "entry_mismatch"})
         return self._passed()
+
+    def _input_text_is_readable(self, info: dict[str, object]) -> bool:
+        text = info.get("text")
+        # Unknown password state and mask-only readback cannot prove observable acceptance.
+        return info.get("password") is False and isinstance(text, str) and (not text or not set(text) <= {"*", "•", "●"})
+
+    def _input_target_info(self, selector: object) -> dict[str, object]:
+        info = self._selector_info(selector)
+        if "password" in info:
+            return info
+        # Native ObjInfo omits password; XPath info supplies it. Observe the same native
+        # control in fresh XML, never select a different control or assume missing means false.
+        bounds = info.get("bounds")
+        package = info.get("packageName")
+        if not isinstance(bounds, dict) or not isinstance(package, str):
+            return info
+        coordinates = [bounds.get(key) for key in ("left", "top", "right", "bottom")]
+        if not all(type(value) is int for value in coordinates):
+            return info
+        left, top, right, bottom = coordinates
+        expected_bounds = f"[{left},{top}][{right},{bottom}]"
+        source = self.device.dump_hierarchy()
+        if not isinstance(source, str):
+            return info
+        nodes = [
+            node
+            for node in _parse_xml_safely(source).iter("node")
+            if node.get("class") == info.get("className")
+            and node.get("package") == package
+            and node.get("bounds") == expected_bounds
+            and (info.get("resourceName") is None or node.get("resource-id") == info["resourceName"])
+        ]
+        if len(nodes) != 1 or nodes[0].get("text") != info.get("text"):
+            return info
+        password = nodes[0].get("password")
+        if password not in {"true", "false"}:
+            return info
+        return {**info, "password": password == "true"}  # noqa: S105 - Android XML boolean, not a credential.
+
+    def _input_locator_is_text_independent(self, data: dict[str, object]) -> bool:
+        locator = data.get("locator")
+        if isinstance(locator, dict):
+            xpath = locator.get("xpath")
+            if isinstance(xpath, str):
+                return ANDROID_TEXT_INDEPENDENT_XPATH.fullmatch(xpath) is not None
+            query = self._selector_query(locator)
+            if query:
+                return "text" not in query
+        return False
 
     @_android_driver_tool("pressKey", description="Press an Android key.")
     def press_key(self, params: AndroidPressKeyParams) -> dict[str, object]:

@@ -48,10 +48,11 @@ explicit /spec-driven <confirmed-design-document-path | direct-project-change-re
   -> if required: update root/module SPEC.md and get user confirmation
   -> if none: record existing-SPEC and defect evidence
   -> implement against confirmed SPEC.md
-  -> run verification
-  -> run the first complete spec-implementation-audit
+  -> run fast self-checks and freeze the pending-review snapshot
+  -> run verification and the first bidirectional spec-implementation-audit in parallel where safe
+  -> join all results and resolve authority/environment blockers
   -> batch-fix complete finding set
-  -> from round 2, audit only the previous round's finding repairs
+  -> from round 2, freeze repairs and join repair-only audit with affected verification
   -> final report
 ```
 
@@ -65,7 +66,7 @@ If the input resolves to a design document path, require the document to exist a
 docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md
 ```
 
-If the input is not a design document path, treat the complete prompt argument as the direct project change request. Read enough current implementation, tests, and local documentation to remove material ambiguity. Ask focused questions when two materially different implementations remain possible, but do not require a separate design document.
+If the input is not a design document path, treat the complete prompt argument as the direct project change request. Read enough current implementation, tests, and local documentation to remove material ambiguity. Resolve ordinary technical choices through evidence and Tech Lead coordination; ask focused user questions only for unresolved product, scope, risk, or authorization decisions. Do not require a separate design document or infer missing SPEC confirmation.
 
 A design document or direct request is input to the SPEC-delta decision, not final project implementation authority. Project code must be implemented against current confirmed `SPEC.md` files.
 
@@ -220,30 +221,53 @@ After required project SPEC confirmation or a recorded no-SPEC-delta decision:
 4. Keep edits scoped to affected modules and tests.
 5. For behavior changes, write or update tests before production code unless the user explicitly accepts a generated-code or throwaway exception.
 6. For frontend work, follow the confirmed framework/language contract and the staged frontend implementation rules; do not mix a partial migration into an existing exception.
-7. Run the repository's available verification commands and the applicable frontend verification checklist.
+7. Run the agreed fast self-checks before handoff, preserving failures. Schedule remaining required verification with the independent audit under the parallel review lifecycle below; no required check is waived.
 
 ## Agent Team Orchestration
 
 When the workspace agent team is available, Tech Lead is the coordinator for this workflow and uses the shared protocol in root `AGENTS.md`.
 
-1. Give PM the resolved request and authoritative references to clarify scope, non-goals, acceptance criteria, and Ready blockers.
-2. Use Designer only when the change affects user flow, interaction, visual state, accessibility, or user-facing failure handling.
+1. Tech Lead scopes and coordinates the task under the root team protocol; use PM only for unresolved goals, acceptance criteria, or product tradeoffs, not for every substantive change.
+2. Use Designer only for actual interaction or design choices, not merely because existing UI, CLI, accessibility, or failure behavior is touched.
 3. Tech Lead owns the SPEC-delta decision and all user confirmation gates. Read-only team output is advisory until persisted in an authorized authoritative file.
 4. After SPEC confirmation or a recorded no-SPEC-delta decision, give Developer one bounded implementation task at a time with exclusive file ownership and required verification.
-5. After implementation verification, Tech Lead creates and identifies the complete audit artifacts required below. Give Reviewer a fresh, independent task package that directs it to `.github/skills/spec-implementation-audit/SKILL.md`, the relevant SPEC files, and the complete artifact identities.
-6. Return implementation-fixable findings to the original Developer, then use Reviewer for the required repair-only audit. Tech Lead owns integration validation and the final Done decision.
+5. At pending-review, Tech Lead freezes and identifies the complete audit snapshot below. Give Reviewer a fresh, independent task package that directs it to `.github/skills/spec-implementation-audit/SKILL.md`, the confirmed SPEC versions, authorized task scope, assigned review lane, verification plan/status, and complete artifact identities.
+6. Tech Lead runs verification directly or assigns one bounded verification-only task to Developer after its implementation handoff. That task may execute checks but not modify project inputs or start repairs. Review and verification can run concurrently; Developer still handles only one assigned task at a time.
+7. Join all results, resolve decisions and conflicts, and return one implementation repair batch to the original Developer. Use Reviewer for repair-only follow-up in parallel with affected verification. Tech Lead owns integration validation and the final Done decision.
 
 If custom-agent invocation is unavailable, state that limitation and follow the same role separation directly. Do not pretend delegation occurred, and do not weaken the independent audit requirement.
 
 ## Project Audit Lifecycle
 
-After project implementation verification, `spec-driven` starts a complete project audit with `audit_mode=full`. This first pass independently establishes the full applicable-item inventory from the current SPEC inputs and complete current diff, then inspects every item before returning. Finding the first blocker must not end the pass, and implementation repair must not begin while the audit is still in progress.
+After Developer's fast self-checks and pending-review handoff, freeze the snapshot and start required verification alongside `audit_mode=full` where safe. The first audit independently establishes both the applicable SPEC inventory and the actual behavior inventory from confirmed SPEC inputs and the complete diff. It checks SPEC-to-code correctness and code-to-SPEC grounding/scope. Finding the first blocker must not end the pass, and implementation repair must not begin while any review or verification task is still running.
 
-From round 2 onward, use `audit_mode=repair-only`: audit only the repairs for the previous round's findings. Carry unresolved findings forward, retain unaffected passing verdicts with unchanged evidence, and do not rebuild the complete inventory or search for unrelated new issues. The audit skill owns the detailed scope and verdict rules.
+Default scheduling is one combined independent Reviewer using valid existing evidence, with any outstanding verification in parallel where safe. Split into forward and reverse Reviewers only when substantial separate context addresses a concrete SPEC/acceptance-criterion risk that justifies the cost and available agent capabilities permit it. Assign both the same snapshot and explicit complementary coverage. If safe concurrency or agent capacity is unavailable, serialize without dropping a lane or verification obligation, and report the limitation.
+
+From round 2 onward, use `audit_mode=repair-only`: audit the previous round's finding repairs, including reverse grounding of behaviors introduced by the repair delta. Carry unresolved and repair-introduced findings forward, retain unaffected passing verdicts only with unchanged evidence, and do not rebuild the full inventories or search for unrelated new issues. Freeze each repair batch and run its review alongside affected verification. The audit skill owns the detailed scope and verdict rules.
+
+### Verification Scheduling And Join
+
+Local verification targets diff impact: changed behavior, directly affected consumers, and relevant boundary/negative cases. Existing CI owns the full suite and platform matrix; do not routinely duplicate them locally. Map checks to affected SPEC/acceptance criteria and retain every explicitly required verification obligation. Risk follows behavior and boundaries, not line count: a high-risk one-line change can require substantial focused coverage.
+
+Agents may autonomously expand local checks, including a full suite, only with a concrete evidence gap and a recorded reason the expansion closes it. For a local full run, explain why focused checks or CI evidence are insufficient and why the full run helps. "For insurance" or "a shared module changed" alone is not enough. Missing specialized CI coverage calls for the relevant targeted check, not automatically a full suite; changing CI configuration still requires task scope and authorization.
+
+Before launching a needed check, record its unique owner, exact command, working directory, tested inputs/snapshot, relevant environment, coverage, and resource/output isolation. Reuse verifiable raw results when those inputs, environment, and coverage still match; link earlier evidence to the frozen snapshot. A change invalidates affected checks, not unrelated proof. Do not repeat a check because a different role is consuming it. The audit skill owns independent evidence assessment and verdicts.
+
+Use existing runner concurrency only when tests are isolated. Bound workers to available resources. Checks sharing devices, databases, fixed ports, generated files, or output directories must be isolated or serialized. Use check modes, not autofix, source generation, or snapshot-update modes that alter audit inputs. Builds and tests may write declared isolated outputs, not mutate the frozen source/SPEC/configuration inputs. External or device operations still require their own authorization.
+
+Isolate test user configuration without discarding reusable download caches by default. Clean-install contracts require a fresh installation environment and source-free execution where the contract demands it; an empty download cache is a separate requirement, not a synonym for a clean install. Reuse must not mask a stale installation or bypass network/organization policy.
+
+Collect exact commands, exit status, raw output/evidence locations, tested inputs, and `passed|failed|blocked|cancelled` for each check, including matching CI run/commit identity where used. A timeout, missing result, or unavailable environment is not a pass. Reviewers may complete static analysis while checks run; verification-dependent verdicts remain pending until the responsible Reviewer consumes the results.
+
+Wait for all review lanes and verification tasks to finish or explicitly stop them before changing inputs. A blocked/cancelled/incomplete lane prevents a complete aggregate result; restore the missing coverage or report the blocker, rather than issuing a partial repair batch. Completed checks that fail still contribute their full evidence and repairable findings to the aggregate.
+
+Tech Lead then checks snapshot identity agreement, forward and reverse coverage, and all required verification results. Merge duplicate root causes while preserving lane/source finding IDs and affected items. Resolve contradictory reviewer conclusions with the reviewers, not by selecting the more permissive verdict. Classify findings as implementation, SPEC/human decision, or verification environment. Only after this join and prerequisite decisions may the original Developer receive one consolidated repair batch. No passing lane overrides a failed or incomplete one.
 
 ### Audit Artifact And Identity Gate
 
-For the first worktree audit, create the complete tracked diff as a file directly through Git, such as `git diff HEAD --no-ext-diff --binary --output=<artifact>`. For a repair-only pass, create the complete repair delta through Git between the previous audited snapshot and the current snapshot, including new or deleted repair files. Never use terminal-captured stdout or a tool's overflow wrapper as the audit artifact.
+Freeze one review evidence package for the complete change scope: precise confirmed SPEC inputs, actual complete in-scope diff, necessary source context, and verification commands/raw results. Full means the complete change scope, not a repository-wide historical audit. Prefer a complete Git diff or immutable commit range plus a compact identity manifest, not repository copies or repeated semantic reads of unrelated SPEC files.
+
+For the first worktree audit, create the complete in-scope tracked diff as a file directly through Git, such as `git diff HEAD --no-ext-diff --no-textconv --binary --output=<artifact> -- <allowed-paths>`. Include both staged and unstaged changes, declare the base, and account for pre-existing changes without overwriting or silently accepting unrelated user work. For a repair-only pass, create the complete repair delta through Git between the previous audited snapshot and the current snapshot, including new or deleted repair files. Never use terminal-captured stdout or a tool's overflow wrapper as the audit artifact.
 
 Before starting the reviewer:
 
@@ -252,18 +276,19 @@ Before starting the reviewer:
 3. Verify that no in-scope untracked project file is omitted. Include each such file as a separate complete artifact with its path and SHA-256, or stop as `audit-blocked`.
 4. Give the reviewer the artifact identities and require it to validate them before auditing. A missing, truncated, wrapped, mismatched, or unreadable artifact is `audit-blocked`; do not substitute a live diff or an implementation summary.
 5. For repair-only passes, include the previous independent report and snapshot, map the repair delta to its finding IDs, and verify that code and SPEC evidence outside the repair scope is unchanged. Do not require the reviewer to re-audit unchanged content.
+6. Include exact root and relevant module SPEC content identities and confirmation evidence, the authorized scope, and the necessary frozen source context outside the diff. Use immutable Git object/path references for unchanged inputs; capture only necessary non-immutable inputs completely with their identities. All review lanes and verification tasks must name this same snapshot or explicitly link valid reused evidence to it. Independently check that SPEC edits match what the user confirmed; code and SPEC changing together is not confirmation.
 
-Treat the verified artifact identities as the audit snapshot. Do not intentionally edit in-scope project files while the audit is running. After a passing audit and immediately before claiming completion, regenerate the worktree artifacts with the same commands and compare their SHA-256 values and path inventory with the audited snapshot and inherited evidence. A mismatch blocks completion: re-verify and re-audit changed repairs, or ask for a scope decision if the changes are unrelated. Do not automatically restart a full audit. For an audited commit range, record the exact immutable base and head object ids instead of a worktree artifact hash.
+Treat the verified artifact identities as the audit snapshot. Do not intentionally edit its project inputs while any review lane or verification task is running. Use an isolated snapshot only if needed to keep inputs stable, preserving all in-scope tracked/untracked inputs and necessary context; integrity does not require copying the entire repository. After the joined result and immediately before claiming completion, regenerate the worktree artifacts with the same commands and compare their SHA-256 values, path inventory, SPEC identities, and source-context identities with the audited/tested snapshot and inherited evidence. A mismatch blocks completion: re-verify and re-audit affected evidence, or ask for a scope decision if the changes are unrelated. Preserve unaffected coverage; do not automatically restart a full audit. For an audited commit range, record the exact immutable base and head object ids instead of a worktree artifact hash.
 
-Each audit result must declare its mode and contain precise SPEC references, concrete diff evidence, verdicts, repair ownership, complete coverage for that mode's scope, and the full finding status for that scope. A repair-only report accounts for every previous-round finding, including unresolved findings carried from earlier rounds. The only allowed early return is `audit-blocked` when required authority inputs, tools, or artifacts are unavailable. `audit-blocked` is not a passing verdict and does not consume a repair round.
+Each audit result must declare its mode and review lane and contain precise SPEC references (or explicitly absent grounding), concrete diff evidence, verdicts, repair ownership, complete coverage for its assigned scope, and the full finding status for that scope. The aggregate retains both coverage inventories and all verification statuses. A repair-only report accounts for every previous-round finding and repair-introduced findings, including unresolved findings carried from earlier rounds. Missing required authority inputs, tools, or artifacts permit an early `audit-blocked` result, not a passing verdict or a consumed repair round. User pause and safety/authorization stops under root `AGENTS.md` take precedence over completing a pass; report interrupted coverage as incomplete, never passed.
 
 After the complete result returns:
 
 1. Group all open findings by implementation repair, authority/human decision, or verification environment.
 2. Resolve authority/human decisions and verification-environment blockers before starting an implementation repair batch when they can change or prevent that repair.
 3. Repair all in-scope implementation-fixable blocking findings in one batch. Do not trigger another audit after only a partial repair.
-4. Complete the affected verification for the entire repair batch.
-5. Start an independent repair-only audit of the previous findings using their repair delta and relevant SPEC evidence. Do not reopen unrelated passing items or expand the pass into a new full audit.
+4. Freeze the entire repair batch and run affected verification alongside independent repair-only review where safe.
+5. Join both results using the previous aggregate report, repair delta, and relevant SPEC evidence. Reverse-check repair-introduced behaviors; do not reopen unrelated passing items or expand the pass into a new full audit.
 6. Repeat repair-only audit, complete repair, and verification rounds until no unresolved blocking findings remain, subject to the repair limit below.
 
 The implementation agent may explain its repair but may not declare audit findings resolved. Only the independent reviewer determines whether each repair satisfies the previous finding. Supply the previous independent report as the follow-up scope, not a persuasive implementation summary.
@@ -272,18 +297,7 @@ Run at most two automatic repair rounds; switching to repair-only mode does not 
 
 ## Consolidated Project Implementation Audit
 
-For a project change, `spec-implementation-audit` owns the applicable-item inventory, verdict semantics, evidence, and coverage for each audit mode. SPEC/code synchronization is a category in that audit, not a separate scan. Include these checks in the full first pass; in repair-only passes apply only those needed to resolve the previous findings:
-
-- [ ] Root `SPEC.md` module table matches actual modules.
-- [ ] Root `SPEC.md` architecture diagram matches actual project dependencies.
-- [ ] Module `SPEC.md` Public Interface matches exported public symbols.
-- [ ] Module `SPEC.md` Dependencies match actual imports from other project modules.
-- [ ] Module `SPEC.md` Internal Structure lists actual module files.
-- [ ] Python Architecture section matches package layout, import direction, framework boundaries, and model boundaries.
-- [ ] Parent and child frontend SPEC ownership matches the workspace and application directories without duplicated contracts.
-- [ ] Frontend Public Interface, Data And State Flow, Internal Structure, and Frontend Architecture match entries, source, state ownership, transport boundaries, framework, and language.
-- [ ] Frontend manifest, lock file, Vite configuration, generated-output policy, and required browser evidence match the confirmed specs.
-- [ ] SPEC text contains current facts only; design process, historical narrative, target-state wording, future roadmap, and detailed test matrices are absent or moved elsewhere.
+For a project change, `spec-implementation-audit` owns both coverage inventories, risk/domain checks, SPEC/code synchronization, verdict semantics, evidence assessment, and coverage for each audit mode and review lane. Apply its complete change-scope checks in the first pass and its repair/affected-boundary checks in later passes; do not add a separate synchronization scan or duplicate checklist here.
 
 Before claiming project completion, read and run:
 
@@ -306,14 +320,16 @@ If project SPEC itself needs correction, stop project implementation, update and
 Do not claim completion while any blocking finding remains. Completion also requires:
 
 - a complete first audit plus complete repair-only coverage of each previous round's findings;
+- complete forward and reverse coverage, including repair-introduced behaviors, with no unresolved grounding or scope gaps;
+- all review lanes and verification tasks joined against the same frozen snapshot, with no pending verification-dependent verdicts or unresolved reviewer conflicts;
 - a matching post-audit artifact identity check linking the current worktree or immutable commit range to that audit chain;
 - the first pass's complete applicable-item inventory, with unaffected passing evidence unchanged;
 - concrete diff evidence and an initial or repair verdict for every item;
 - no unresolved implementation-fixable blocking finding in the carried-forward finding set;
-- required verification run or unavailable verification reported as blocking;
+- required verification passed; failed, missing, cancelled, or unavailable verification remains blocking;
 - any accepted `needs-human-decision` recorded explicitly.
 
-These gates do not require a new full audit after repairs. Unrelated changes cannot inherit coverage and require a scope decision.
+These gates do not require a new full audit after repairs. Unrelated changes cannot inherit coverage and require a scope decision. They govern Done, not whether Tech Lead can promptly deliver an accurate partial milestone under its role instructions. Pending required CI, review, or external approval remains blocking for the affected completion stage; do not relabel it to ship.
 
 ## Required Final Report
 
@@ -323,5 +339,6 @@ End with:
 - Project specs updated and confirmed, or the no-SPEC-delta decision with precise SPEC and defect evidence.
 - Files implemented.
 - Verification commands run and results.
+- Review-lane assignments, concurrency or serialization used, snapshot-matched verification evidence, and the joined forward/reverse coverage result.
 - Audited SPEC inputs, full and repair-only audit identities or exact commit ranges, post-audit identity result, and cumulative finding status. Distinguish the full first pass from later repair-only passes.
 - Complete current finding status, repair rounds performed, and any accepted human decisions.

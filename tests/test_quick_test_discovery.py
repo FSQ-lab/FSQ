@@ -364,6 +364,95 @@ def test_native_path_references_never_fall_back_to_name_inventory(monkeypatch, t
         assert result.candidates[0].app_path == path
 
 
+@pytest.fixture
+def macos_path_only_fixture(monkeypatch, tmp_path):
+    path = tmp_path / "Selected.app"
+    (path / "Contents").mkdir(parents=True)
+    reference = "/Applications/Selected.app"
+
+    def fixture_path(value):
+        if value != reference:
+            pytest.fail("Unexpected macOS path lookup.")
+        return path
+
+    monkeypatch.setattr("fsq_agent.environments.providers._applications.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("fsq_agent.environments.providers._applications.Path", fixture_path)
+    monkeypatch.setattr("fsq_agent.environments.providers._applications._macos_roots", lambda: pytest.fail("Path references must not scan name metadata"))
+    return path, reference
+
+
+@pytest.mark.parametrize("provenance", ["explicit", "inferred"])
+def test_macos_path_only_accepts_missing_bundle_identifier(macos_path_only_fixture, provenance):
+    from fsq_agent.models import ApplicationLookupHint
+
+    path, value = macos_path_only_fixture
+    (path / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleName": "Selected"}))
+    reference = {"explicit_reference": value} if provenance == "explicit" else {"inferred_hint": ApplicationLookupHint(kind="app_path", value=value)}
+    result = PlatformRuntimeService().lookup_application(platform="macos", name="Selected", **reference)
+    assert result.status == "complete"
+    assert len(result.candidates) == 1
+    assert result.candidates[0].app_path == path
+    assert result.candidates[0].identity == str(path.resolve())
+    assert result.candidates[0].bundle_id is None
+
+
+@pytest.mark.parametrize("provenance", ["explicit", "inferred"])
+@pytest.mark.parametrize("bundle_id", [None, "", False, 7, [], {}, "invalid identifier", "single"])
+def test_macos_path_only_rejects_provided_invalid_bundle_identifier(macos_path_only_fixture, provenance, bundle_id):
+    from fsq_agent.models import ApplicationLookupHint
+
+    path, value = macos_path_only_fixture
+    (path / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleName": "Selected", "CFBundleIdentifier": bundle_id}, fmt=plistlib.FMT_BINARY))
+    reference = {"explicit_reference": value} if provenance == "explicit" else {"inferred_hint": ApplicationLookupHint(kind="app_path", value=value)}
+    result = PlatformRuntimeService().lookup_application(platform="macos", name="Selected", **reference)
+    assert result.status == "failed"
+    assert result.code == "discovery_failed"
+    assert not result.candidates
+
+
+@pytest.mark.parametrize("provenance", ["explicit", "inferred"])
+@pytest.mark.parametrize("contents", [None, b"invalid plist", plistlib.dumps([])])
+def test_macos_path_only_rejects_invalid_metadata(macos_path_only_fixture, provenance, contents):
+    from fsq_agent.models import ApplicationLookupHint
+
+    path, value = macos_path_only_fixture
+    if contents is not None:
+        (path / "Contents/Info.plist").write_bytes(contents)
+    reference = {"explicit_reference": value} if provenance == "explicit" else {"inferred_hint": ApplicationLookupHint(kind="app_path", value=value)}
+    result = PlatformRuntimeService().lookup_application(platform="macos", name="Selected", **reference)
+    assert result.status == "failed"
+    assert result.code == "discovery_failed"
+    assert not result.candidates
+
+
+@pytest.mark.parametrize("provenance", ["explicit", "inferred"])
+@pytest.mark.parametrize("unrelated_id", [None, "com.vendor.other"])
+@pytest.mark.parametrize("matching", [False, True])
+def test_macos_path_only_bundle_lookup_requires_exact_identifier(monkeypatch, tmp_path, provenance, unrelated_id, matching):
+    from fsq_agent.models import ApplicationLookupHint
+
+    metadata = {"CFBundleName": "Selected"}
+    if unrelated_id is not None:
+        metadata["CFBundleIdentifier"] = unrelated_id
+    other = tmp_path / "Other.app/Contents/Info.plist"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(plistlib.dumps(metadata))
+    selected = tmp_path / "Selected.app"
+    if matching:
+        info = selected / "Contents/Info.plist"
+        info.parent.mkdir(parents=True)
+        info.write_bytes(plistlib.dumps({"CFBundleName": "Selected", "CFBundleIdentifier": "com.vendor.selected"}))
+    monkeypatch.setattr("fsq_agent.environments.providers._applications.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("fsq_agent.environments.providers._applications._macos_roots", lambda: (tmp_path,))
+    reference = {"explicit_reference": "com.vendor.selected"} if provenance == "explicit" else {"inferred_hint": ApplicationLookupHint(kind="bundle_id", value="com.vendor.selected")}
+    result = PlatformRuntimeService().lookup_application(platform="macos", name="Selected", **reference)
+    assert result.status == "complete"
+    assert len(result.candidates) == int(matching)
+    if matching:
+        assert result.candidates[0].app_path == selected
+        assert result.candidates[0].bundle_id == "com.vendor.selected"
+
+
 @pytest.mark.parametrize(("status", "code"), [("query_failed", "discovery_failed"), ("timeout", "discovery_timeout"), ("unexpected", "discovery_failed")])
 def test_scoped_package_query_errors_are_not_missing_packages(monkeypatch, status, code):
     from fsq_agent.models import ApplicationLookupHint

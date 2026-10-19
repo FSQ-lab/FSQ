@@ -8,6 +8,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -120,8 +121,11 @@ def _validated_intent(payload, platform, goal):
     if not isinstance(payload, _IntentOutput):
         raise EngineError("invalid_output", "Model returned invalid Quick Test intent output.")
     reference = payload.explicit_reference
-    if reference and not _grounded(reference, goal, explicit=True):
-        raise EngineError("invalid_output", "Model returned an ungrounded explicit application reference.")
+    if reference:
+        is_web_url = platform == "web" and re.match(r"https?://", reference, flags=re.IGNORECASE)
+        grounded = _grounded_http_reference(reference, goal) if is_web_url else _grounded(reference, goal, explicit=True)
+        if not grounded:
+            raise EngineError("invalid_output", "Model returned an ungrounded explicit application reference.")
     name = payload.application_name
     if payload.reason == "web_search" and platform != "web":
         raise EngineError("invalid_output", "Search classification requires Web.")
@@ -134,6 +138,26 @@ def _validated_intent(payload, platform, goal):
     if hint is not None and hint.kind not in allowed_hints.get(platform, set()):
         raise EngineError("invalid_output", "Model returned a lookup hint for the wrong platform.")
     return QuickTestIntent(payload.sufficient, payload.reason, name, reference, ApplicationLookupHint(kind=hint.kind, value=hint.value) if hint else None)
+
+
+def _grounded_http_reference(value: str, goal: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None or "\\" in value or parsed.port == 0:
+            return False
+    except ValueError:
+        return False
+    # Match whole addresses, including path/query/fragment, rather than a URL
+    # substring inside a longer address. Keep the existing Application prose
+    # delimiters without importing that layer or normalizing the returned value.
+    punctuation = ".,;!?\uff0c\u3002\uff1b\uff01\uff1f\u201d\u2019"
+    for match in re.finditer(r"https?://[^\s<>\"'`)\]}]+", goal, flags=re.IGNORECASE):
+        if match.start() and _joined_token(goal[match.start() - 1], value[0], explicit=True):
+            continue
+        supplied = match.group()
+        if value == supplied or value == supplied.rstrip(punctuation):
+            return True
+    return False
 
 
 def _grounded(value: str, goal: str, *, explicit: bool = False) -> bool:

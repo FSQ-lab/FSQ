@@ -6,6 +6,7 @@ from threading import Thread
 from fsq_agent.application import ApplicationError, QuickTestContextRequest, QuickTestPrepareRequest, get_quick_test_context, prepare_quick_test
 from fsq_agent.models import ConfigurationError
 
+from ._evidence import configured_secret_values, safe_text
 from ._execution import ExecutionHandle, prepare_run, start_execution
 from ._readiness import AndroidPreflightError, MacOSPreflightError, diagnosed_readiness
 from ._state import TaskCancelledError
@@ -65,7 +66,8 @@ def _prepare(server, request_id, request):
         prepared.requires_web_search_evidence = result.requires_web_search_evidence
         prepared.goal = request.goal
         state.raise_if_cancelled(request_id)
-        state.bind_preparation(request_id, workspace_name=result.workspace_name, target_id=result.target_id, application=result.application, platform_revision=result.platform_revision)
+        application = safe_text(result.application, secret_values=configured_secret_values(result.settings))
+        state.bind_preparation(request_id, workspace_name=result.workspace_name, target_id=result.target_id, application=application, platform_revision=result.platform_revision)
         state.bind_cases_dir(request_id, result.settings.cases.dir)
         server._handles[request_id] = start_execution(prepared, state)
     except TaskCancelledError:

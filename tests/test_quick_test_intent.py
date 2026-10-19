@@ -179,6 +179,70 @@ def test_explicit_identity_does_not_accept_a_larger_identifier_prefix(actual):
     assert error.value.category == "invalid_output"
 
 
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("punctuation", [".", ",", ";", "!", "?", "\uff0c", "\u3002", "\uff1b", "\uff01", "\uff1f", "\u201d", "\u2019"])
+def test_http_reference_accepts_sentence_punctuation(scheme, punctuation):
+    reference = f"{scheme}://example.com"
+    session = Session(output(application_name=None, explicit_reference=reference))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f"Open {reference}{punctuation} Verify its heading.")
+    assert result.explicit_reference == reference
+    assert len(session.requests) == 1
+    assert session.closed
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "https://example.com",
+        "http://localhost:8080/docs",
+        "HTTPS://example.com/CaseSensitive",
+        "https://example.com/path/a.b?q=one.two&next=%2Fdocs%2F#section-1",
+        "https://example.com/report.",
+        "https://example.com/?q=one;",
+        "https://example.com/#section!",
+    ],
+)
+def test_http_reference_preserves_complete_url(reference):
+    session = Session(output(application_name=None, explicit_reference=reference))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f'Open "{reference}" and verify its heading.')
+    assert result.explicit_reference == reference
+    assert len(session.requests) == 1
+    assert session.closed
+
+
+@pytest.mark.parametrize(
+    ("supplied", "reference"),
+    [
+        ("https://example.com.evil", "https://example.com"),
+        ("https://example.com/path", "https://example.com"),
+        ("https://example.com/?q=one", "https://example.com/"),
+        ("https://example.com?q=one", "https://example.com"),
+        ("https://example.com#section", "https://example.com"),
+        ("https://example.com/path-more", "https://example.com/path"),
+        ("https://example.com/path?q=one", "https://example.com/path"),
+        ("https://example.com/?q=one&next=two", "https://example.com/?q=one"),
+        ("https://example.com/#part&next=two", "https://example.com/#part"),
+        ("https://example.com@other.test/", "https://example.com"),
+        ("https://user@example.com/", "https://user@example.com/"),
+        ("prefixhttps://example.com", "https://example.com"),
+        ("prefix_https://example.com", "https://example.com"),
+        ("prefix-https://example.com", "https://example.com"),
+        ("file:https://example.com", "https://example.com"),
+        ("https://outer.test/?next=https://example.com", "https://example.com"),
+        ("https://outer.test/#https://example.com", "https://example.com"),
+        ("https://outer.test/https://example.com", "https://example.com"),
+        ("https://other.test", "https://example.com"),
+    ],
+)
+def test_http_reference_rejects_partial_or_embedded_url(supplied, reference):
+    session = Session(output(application_name=None, explicit_reference=reference))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f"Open {supplied} and verify its heading.")
+    assert error.value.category == "invalid_output"
+    assert len(session.requests) == 1
+    assert session.closed
+
+
 def test_inferred_hint_is_preserved_separately_from_explicit_provenance():
     hint = {"kind": "app_id", "value": "com.tencent.mm"}
     result = QuickTestIntentAnalyzer(Session(output(application_name="微信", inferred_hint=hint))).analyze(platform="android", goal="用微信搜索联系人张三\uff0c确认出现匹配结果")

@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import json
 import threading
 import time
 from types import SimpleNamespace
@@ -164,6 +165,128 @@ def test_success_bridges_frozen_settings_to_existing_explore_without_reload(monk
     assert seen[0]["settings"].harness.android.serial == "selected"
     assert seen[0]["frozen_revision"] == "validated-revision"
     assert seen[0]["body"]["mode"] == "explore"
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "https://example.test/docs?access_token=URL_PRIVATE",
+        "https://example.test/docs?access%5Ftoken=URL_PRIVATE",
+        "https://example.test/docs#access_token=URL_PRIVATE",
+        "https://example.test/docs?q=FROZEN_PRIVATE",
+        "https://example.test/docs?q=%46%52%4F%5A%45%4E%5F%50%52%49%56%41%54%45",
+        "https://example.test/docs?q=public#section",
+    ],
+)
+def test_application_presentation_is_safe_across_http_projections(monkeypatch, tmp_path, address):
+    from http.client import HTTPConnection
+
+    from fsq_agent.adapters.control_plane._execution import ExecutionHandle
+    from fsq_agent.application import QuickTestPrepareResult
+    from fsq_agent.config import Settings
+    from fsq_agent.models import WebWorkspaceTarget
+
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("fixture")
+    server = ControlPlaneServer(ControlPlaneServerOptions(port=0, static_path=static, user_config_root=tmp_path / "user"))
+    mutable = Settings(harness={"platform": "web"})
+    mutable.harness.web.base_url = address
+    mutable.runtime_secrets.set_values({"FIXTURE_SECRET": "FROZEN_PRIVATE"})
+    frozen = mutable.model_copy(deep=True)
+    result = QuickTestPrepareResult(
+        workspace_name="quick-test",
+        root_path=tmp_path / "quick-test",
+        platform_revision="frozen-revision",
+        target_id="chrome",
+        target=WebWorkspaceTarget(browser_channel="chrome", browser_executable_path=tmp_path / "fixture-browser"),
+        application=address,
+        settings=frozen,
+    )
+    mutable.runtime_secrets.set_values({"FIXTURE_SECRET": "LATER_PRIVATE"})
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.prepare_quick_test", lambda *args, **kwargs: result)
+    monkeypatch.setattr(server, "_load_settings", lambda *args: pytest.fail("Projection must not reread mutable settings"))
+    execution = []
+    entered = threading.Event()
+
+    def preflight(**kwargs):
+        assert kwargs["settings"] is frozen
+        return SimpleNamespace(request_id=kwargs["request_id"], settings=kwargs["settings"].model_copy(deep=True))
+
+    def execute(prepared, state):
+        execution.append(prepared)
+        state.transition(prepared.request_id, "running", summary="Fixture running.")
+        entered.set()
+        return ExecutionHandle(request_id=prepared.request_id)
+
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.prepare_run", preflight)
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.start_execution", execute)
+
+    def request_json(method, path, body=None):
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+        try:
+            connection.request(method, path, body=json.dumps(body) if body is not None else None, headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            assert response.status == (202 if method == "POST" else 200)
+            return json.loads(response.read())
+        finally:
+            connection.close()
+
+    def stream_snapshot(response):
+        lines = [response.readline().decode() for _ in range(4)]
+        assert lines[1] == "event: snapshot\n"
+        assert lines[2].startswith("data: ")
+        return json.loads(lines[2][6:])
+
+    request_id = None
+    stream = None
+    connection = None
+    server.start()
+    try:
+        accepted = request_json("POST", f"{PREFIX}/quick-test/runs", {"platform": "web", "targetId": "chrome", "goal": "Verify the fixture heading."})
+        request_id = accepted["requestId"]
+        assert entered.wait(3)
+        snapshot = request_json("GET", f"{PREFIX}/runs/{request_id}")
+        bootstrap = request_json("GET", f"{PREFIX}/bootstrap")
+        assert bootstrap["activeTask"]["requestId"] == request_id
+        connection = HTTPConnection("127.0.0.1", server.port, timeout=3)
+        connection.request("GET", f"{PREFIX}/runs/{request_id}/stream")
+        stream = connection.getresponse()
+        assert stream.status == 200
+        assert stream.getheader("Content-Type").startswith("text/event-stream")
+        active_stream = stream_snapshot(stream)
+        server.state.finish(request_id, status="success", summary="Fixture completed.")
+        terminal_stream = stream_snapshot(stream)
+        terminal = request_json("GET", f"{PREFIX}/runs/{request_id}")
+        assert not active_stream["terminal"]
+        assert terminal_stream["terminal"]
+        assert terminal["terminal"]
+        public_values = [snapshot, bootstrap, active_stream, terminal_stream, terminal]
+        for public in public_values:
+            serialized = json.dumps(public)
+            assert "URL_PRIVATE" not in serialized
+            assert "FROZEN_PRIVATE" not in serialized
+            assert "%46%52%4F%5A%45%4E%5F%50%52%49%56%41%54%45" not in serialized
+        labels = [snapshot["application"], bootstrap["activeTask"]["application"], active_stream["application"], terminal_stream["application"], terminal["application"]]
+        assert all(label == labels[0] for label in labels)
+        if address.endswith("?q=public#section"):
+            assert labels[0] == address
+        else:
+            assert "redacted" in labels[0].casefold()
+        assert result.application == address
+        assert frozen.harness.web.base_url == address
+        assert frozen.runtime_secrets.private_values() == {"FIXTURE_SECRET": "FROZEN_PRIVATE"}
+        assert execution[0].settings.harness.web.base_url == address
+        assert execution[0].settings.runtime_secrets.private_values() == frozen.runtime_secrets.private_values()
+        assert execution[0].goal == "Verify the fixture heading."
+    finally:
+        if request_id is not None:
+            server.state.finish(request_id, status="cancelled", summary="Fixture cleanup.")
+        if stream is not None:
+            stream.close()
+        if connection is not None:
+            connection.close()
+        server.stop()
 
 
 def test_context_schema_and_unknown_query_rejection(monkeypatch, tmp_path):

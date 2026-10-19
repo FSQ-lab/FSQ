@@ -101,7 +101,7 @@ def _mac_candidate(path: Path) -> ApplicationCandidate:
         raise TypeError("Invalid application metadata.")
     bundle_id = metadata.get("CFBundleIdentifier")
     label = metadata.get("CFBundleDisplayName") or metadata.get("CFBundleName") or path.stem
-    if not isinstance(bundle_id, str) or not _BUNDLE_ID.fullmatch(bundle_id) or not isinstance(label, str):
+    if ("CFBundleIdentifier" in metadata and (not isinstance(bundle_id, str) or not _BUNDLE_ID.fullmatch(bundle_id))) or not isinstance(label, str):
         raise ValueError("Invalid application metadata.")
     return ApplicationCandidate(identity=str(path), label=label, app_path=path, bundle_id=bundle_id)
 

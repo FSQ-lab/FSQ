@@ -9,6 +9,7 @@ afterEach(() => {
 });
 
 const snapshot = (overrides: Partial<RunSnapshot> = {}): RunSnapshot => ({
+  workflow: 'case-manager', application: null, platformRevision: null,
   requestId: 'request-1', runId: 'run-1', workspaceName: 'test', platform: 'web', targetId: 'chrome', mode: 'explore', status: 'running',
   source: { goal: 'Verify' }, startedAt: '', completedAt: null, cancelRequested: false,
   events: [], activeStep: null, result: null, summary: 'Running', screenshotRevision: 0, uiSnapshotRevision: 0,
@@ -28,6 +29,33 @@ class TestEventSource {
     this.listeners.get(type)?.(new MessageEvent(type, { data: JSON.stringify(value) }));
   }
 }
+
+it('streams Quick preparation, allocated execution and terminal error without changing workflow identity', async () => {
+    const original = window.EventSource;
+    Object.defineProperty(window, 'EventSource', { configurable: true, value: TestEventSource });
+    Object.defineProperty(globalThis, 'EventSource', { configurable: true, value: TestEventSource });
+    const preparing = snapshot({ workflow: 'quick-test', application: null, platformRevision: null, platform: 'macos', targetId: null, workspaceName: null, runId: null, status: 'preparing', error: null });
+    const running = { ...preparing, application: 'Notes', workspaceName: 'quick-test', runId: 'run-1', status: 'running' as const };
+    const terminal = { ...running, status: 'error' as const, terminal: true, error: { code: 'execution_error', message: 'The action failed', action: 'Inspect evidence.' } };
+    const load = vi.spyOn(controlPlaneClient, 'runSnapshot').mockResolvedValue(preparing);
+    vi.spyOn(controlPlaneClient, 'streamUrl').mockReturnValue('/stream');
+    const { result, unmount } = renderHook(() => useRunStream('request-1'));
+    try {
+      await waitFor(() => expect(result.current.snapshot?.workspaceName).toBeNull());
+      act(() => TestEventSource.instances.at(-1)?.emit('snapshot', running));
+      expect(result.current.snapshot?.runId).toBe('run-1');
+      load.mockResolvedValue(terminal);
+      act(() => TestEventSource.instances.at(-1)?.emit('snapshot', terminal));
+      await waitFor(() => expect(result.current.connection).toBe('ended'));
+      expect(result.current.snapshot?.workflow).toBe('quick-test');
+      expect(result.current.snapshot?.error?.code).toBe('execution_error');
+      expect(result.current.snapshot?.runId).toBe('run-1');
+    } finally {
+      unmount();
+      Object.defineProperty(window, 'EventSource', { configurable: true, value: original });
+      Object.defineProperty(globalThis, 'EventSource', { configurable: true, value: original });
+    }
+});
 
 it('hydrates terminal stream snapshots so existing events receive step ids', async () => {
   const original = window.EventSource;

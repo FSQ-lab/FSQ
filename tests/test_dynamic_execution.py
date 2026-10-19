@@ -20,7 +20,300 @@ def _settings(root: Path) -> Settings:
     settings.workspace.root_dir = root
     settings.output.runs_dir = root / ".fsq" / "runs" / "web"
     settings.harness.platform = "web"
+    settings.agent_runtime.user_config_root = root / "user"
     return settings
+
+
+class _SearchAgent:
+    """Controlled Core journal facts using the Web driver's actual snapshot shape."""
+
+    def __init__(self, variant="aria", status="success", errors=()):
+        self.variant = variant
+        self.status = status
+        self.errors = errors
+
+    async def run_in_context(self, task, context, event_sink=None, *, evidence_sink, **kwargs):
+        from fsq_agent.core.evidence import ArtifactStore
+        from fsq_agent.models import StepPhaseReport, StepResult
+
+        variant = self.variant
+        step = evidence_sink.allocate_step_identity(ExecutableStep(step_id="browser-fact", action_name="arbitrary_capability", kind="observation", params={}))
+        if variant == "plan":
+            evidence_sink.record_planned_step(step)
+            evidence_sink.write_manifest()
+        elif variant != "model_only":
+            evidence_sink.record_event(
+                RunnerEvent(
+                    run_id=context.run_id,
+                    event_type="step_start",
+                    step_id=step.step_id,
+                    step_execution_id=step.step_execution_id,
+                    source_step_id=step.source_step_id,
+                    invocation_path=step.invocation_path,
+                )
+            )
+            if variant != "no_activity":
+                evidence_sink.record_event(
+                    RunnerEvent(
+                        run_id=context.run_id,
+                        event_type="action_result",
+                        step_id=step.step_id,
+                        step_execution_id=step.step_execution_id,
+                        source_step_id=step.source_step_id,
+                        invocation_path=step.invocation_path,
+                        phase="invoke",
+                        payload={"status": "passed"},
+                    )
+                )
+            payload = {
+                "url": "https://github.com/FSQ-lab/FSQ",
+                "snapshot_type": "aria",
+                "snapshot": '- link "Official website":\n  - /url: https://fsq.test',
+                "coverage": {"status": "complete", "scope": "observed_aria_snapshot"},
+                "truncated": False,
+            }
+            if variant == "text":
+                payload = {
+                    "url": "https://fsq.test",
+                    "snapshot_type": "text",
+                    "title": "FSQ",
+                    "text": "FSQ website discovered via repository link",
+                    "coverage": {"status": "partial", "scope": "visible_body_text"},
+                    "truncated": False,
+                }
+            elif variant == "blank":
+                payload["url"] = "about:blank"
+            elif variant == "empty":
+                payload["snapshot"] = " "
+            elif variant == "wrong_shape":
+                payload = {"url": "https://fsq.test", "content": "invented fixture shape"}
+            ref = ArtifactStore(evidence_sink.output_dir).write_json(kind="ui_snapshot", step_id=step.step_id, phase="finalize", name="after-action", payload=payload)
+            path = evidence_sink.output_dir / ref.path
+            if variant == "missing":
+                path.unlink()
+            elif variant == "corrupt":
+                path.write_text("{}")
+            elif variant == "malformed":
+                ref = ArtifactStore(evidence_sink.output_dir).write_bytes(kind="ui_snapshot", step_id=step.step_id, phase="finalize", name="invalid-json", data=b"{")
+            elif variant == "outside":
+                ref = ref.model_copy(update={"path": Path("../outside.json")})
+            elif variant == "symlink":
+                original = path.read_bytes()
+                outside = evidence_sink.output_dir.parent / "outside.json"
+                outside.write_bytes(original)
+                path.unlink()
+                path.symlink_to(outside)
+            elif variant == "no_digest":
+                ref = ref.model_copy(update={"sha256": None})
+            elif variant == "wrong_size":
+                ref = ref.model_copy(update={"size_bytes": 1})
+            if variant == "unassociated":
+                detached_ref = ref.model_copy(update={"step_id": None, "step_execution_id": None})
+                evidence_sink.record_event(RunnerEvent(run_id=context.run_id, event_type="artifact_captured", payload={"artifact": detached_ref.model_dump(mode="json")}))
+            evidence_sink.record_step_result(
+                RunnerStepResult(
+                    step_id=step.step_id,
+                    step_execution_id=step.step_execution_id,
+                    source_step_id=step.source_step_id,
+                    invocation_path=step.invocation_path,
+                    status="passed",
+                    action_status="passed" if variant != "no_activity" else None,
+                    action_name="arbitrary_capability",
+                    kind="observation",
+                    phase_reports=[] if variant == "unassociated" else [StepPhaseReport(step_id=step.step_id, phase="finalize", status="passed", artifact_refs=[ref])],
+                )
+            )
+        return DynamicAgentOutcome(
+            task=task,
+            steps=[StepResult(step_id=1, actual_outcome="Claimed search", status="success")],
+            verification=VerificationResult(status=self.status, summary="Model claims the official site was found."),
+            errors=list(self.errors),
+        )
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["model_only", "plan", "blank", "empty", "wrong_shape", "missing", "corrupt", "malformed", "outside", "symlink", "no_digest", "wrong_size", "unassociated", "no_activity", "aria", "text"],
+)
+async def test_url_free_search_requires_current_run_browser_facts_before_every_consumer(tmp_path, variant):
+    settings = _settings(tmp_path)
+    coordinated = []
+    result = await DynamicExecutionService(agent=_SearchAgent(variant)).execute(
+        DynamicExecutionRequest(task=Task(description="Find FSQ official site https://not-evidence.test"), settings=settings, requires_web_search_evidence=True, report_coordinator=coordinated.append)
+    )
+    expected = "success" if variant in {"aria", "text"} else "inconclusive"
+    task_result = result.task_result
+    directory = settings.output.runs_dir / task_result.report.run_id
+    frozen = json.loads((directory / "execution-result.json").read_text())
+    for actual in [task_result, *coordinated]:
+        assert actual.status == expected
+        assert actual.verification.status == expected
+    assert frozen["outcome"] == frozen["verification"]["status"] == expected
+    assert load_run_metadata(directory).status == expected
+    assert task_result.report.path.read_text() == task_result.verification.summary
+    if expected == "inconclusive":
+        assert "web_search_evidence_missing" in task_result.verification.diagnostics
+        assert "Model claims" not in task_result.verification.summary
+
+
+@pytest.mark.parametrize("status", ["failed", "inconclusive"])
+@pytest.mark.parametrize("variant", ["model_only", "aria"])
+async def test_search_evidence_gate_preserves_nonpositive_verdicts(tmp_path, status, variant):
+    result = await DynamicExecutionService(agent=_SearchAgent(variant, status=status)).execute(
+        DynamicExecutionRequest(task=Task(description="Search FSQ"), settings=_settings(tmp_path), requires_web_search_evidence=True)
+    )
+    assert result.task_result.status == status
+    assert result.task_result.verification.status == status
+
+
+async def test_search_gate_preserves_fatal_error_precedence(tmp_path):
+    result = await DynamicExecutionService(agent=_SearchAgent("model_only", errors=[{"message": "Fatal fixture"}])).execute(
+        DynamicExecutionRequest(task=Task(description="Search FSQ"), settings=_settings(tmp_path), requires_web_search_evidence=True)
+    )
+    assert result.task_result.status == "error"
+
+
+async def test_search_requirement_rejects_nonweb_before_allocation(tmp_path):
+    from fsq_agent.models import ConfigurationError
+
+    settings = _settings(tmp_path)
+    settings.harness.platform = "android"
+    with pytest.raises(ConfigurationError):
+        await DynamicExecutionService(agent=_SearchAgent()).execute(DynamicExecutionRequest(task=Task(description="Search FSQ"), settings=settings, requires_web_search_evidence=True))
+    assert not settings.output.runs_dir.exists()
+
+
+async def test_default_dynamic_keeps_legitimate_zero_activity_success(tmp_path):
+    result = await DynamicExecutionService(agent=_SearchAgent("model_only")).execute(DynamicExecutionRequest(task=Task(description="No browser work required"), settings=_settings(tmp_path)))
+    assert result.task_result.status == "success"
+
+
+async def test_real_core_runner_observation_associations_qualify_without_named_command_rules(tmp_path):
+    from fsq_agent.core import StepRunner
+    from fsq_agent.core.evidence import ArtifactStore
+    from fsq_agent.models import HarnessActionResult, HarnessArtifactRef, HarnessContext
+
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, *, evidence_sink, **kwargs):
+            store = ArtifactStore(evidence_sink.output_dir)
+
+            class Harness:
+                def get_context(self):
+                    return HarnessContext(platform="web")
+
+                def before_action(self, step, context):
+                    pass
+
+                def after_action(self, step, context, result):
+                    pass
+
+                def invoke_action(self, step, context):
+                    ref = store.write_json(
+                        kind="ui_snapshot",
+                        step_id=step.step_id,
+                        phase="invoke",
+                        name="observed-page",
+                        payload={"url": "https://github.com/FSQ-lab/FSQ", "snapshot_type": "aria", "snapshot": '- link "Official website"'},
+                    )
+                    artifact = HarnessArtifactRef.model_validate(ref.model_dump(exclude={"step_id", "step_execution_id", "phase"}))
+                    return HarnessActionResult(status="passed", action_name=step.action_name, artifact_refs=[artifact])
+
+                def classify_error(self, error, phase, step):
+                    return "harness_error"
+
+            result = StepRunner(Harness(), evidence_sink=evidence_sink).run_step(context.run_id, ExecutableStep(step_id="page", action_name="neutral_browser_fact", kind="observation", params={}))
+            assert result.status == "passed"
+            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status="success", summary="Observed source satisfies the goal."))
+
+    result = await DynamicExecutionService(agent=Agent()).execute(
+        DynamicExecutionRequest(task=Task(description="Find FSQ official site"), settings=_settings(tmp_path), requires_web_search_evidence=True)
+    )
+    assert result.task_result.status == "success"
+
+
+@pytest.mark.parametrize(
+    ("required", "model_status", "status", "verification_status", "action_status"),
+    [
+        (False, "success", "error", "success", "passed"),
+        (True, "success", "error", "inconclusive", "passed"),
+        (True, "failed", "failed", "failed", "passed"),
+        (True, "inconclusive", "inconclusive", "inconclusive", "passed"),
+        (True, "success", "cancelled", "inconclusive", "cancelled"),
+        (True, "success", "inconclusive", "inconclusive", "incomplete"),
+    ],
+)
+async def test_real_core_capture_failure_retains_precedence_through_terminal(tmp_path, monkeypatch, required, model_status, status, verification_status, action_status):
+    from dataclasses import replace
+
+    from fsq_agent._capability_bootstrap import build_capability_registry
+    from fsq_agent.adapters.control_plane._execution import PreparedRun, _run_explore
+    from fsq_agent.adapters.control_plane._state import ControlPlaneState
+    from fsq_agent.core import StepRunner
+    from fsq_agent.models import HarnessActionResult, HarnessContext
+
+    class Harness:
+        def get_context(self):
+            return HarnessContext(platform="web")
+
+        def before_action(self, step, context):
+            pass
+
+        def invoke_action(self, step, context):
+            return HarnessActionResult(status=action_status, action_name=step.action_name)
+
+        def after_action(self, step, context, result):
+            pass
+
+        def capture_artifact(self, **kwargs):
+            raise RuntimeError("Required browser observation capture failed.")
+
+        def classify_error(self, error, phase, step):
+            return "observation_error"
+
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, *, evidence_sink, **kwargs):
+            runner = StepRunner(Harness(), capability_registry=build_capability_registry(platform="web"), evidence_sink=evidence_sink)
+            result = runner.run_step(context.run_id, ExecutableStep(step_id="navigate", kind="action", action_name="navigate_to", params={"url": "https://example.test"}))
+            assert result.action_status == action_status
+            if action_status == "passed":
+                assert result.failure_category == "artifact_error"
+            else:
+                assert result.status == action_status
+            assert result.evidence_errors
+            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status=model_status, summary="Model verification fixture"))
+
+    settings = _settings(tmp_path)
+    state = ControlPlaneState()
+    request_id = state.reserve(workspace_name="quick-test", platform="web", target_id="chrome", mode="explore", source={"goal": "Search FSQ"})
+    prepared = PreparedRun(request_id, settings, "quick-test", "revision", "explore", "chrome", goal="Search FSQ", requires_web_search_evidence=required)
+    returned = []
+    coordinated = []
+    execute = DynamicExecutionService.execute
+
+    async def observed_execute(self, request):
+        result = await execute(self, replace(request, report_coordinator=coordinated.append))
+        returned.append(result.task_result)
+        return result
+
+    monkeypatch.setattr(DynamicExecutionService, "execute", observed_execute)
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.FsqAgent.from_settings", lambda *args: Agent())
+    await _run_explore(prepared, state)
+    snapshot = state.snapshot(request_id)
+    assert snapshot["status"] == status
+    assert snapshot["result"]["status"] == status
+    assert len(returned) == len(coordinated) == 1
+    for result in [*returned, *coordinated]:
+        assert result.status == status
+        assert result.verification.status == verification_status
+    result = returned[0]
+    directory = settings.output.runs_dir / result.report.run_id
+    frozen = json.loads((directory / "execution-result.json").read_text())
+    assert frozen["outcome"] == load_run_metadata(directory).status == status
+    assert frozen["verification"]["status"] == verification_status
+    assert result.report.path.read_text() == result.verification.summary == snapshot["summary"]
+    if required and model_status == "success":
+        assert "web_search_evidence_missing" in result.verification.diagnostics
+        assert "Model verification fixture" not in snapshot["summary"]
 
 
 @pytest.fixture(autouse=True)
@@ -128,12 +421,13 @@ async def test_report_callback_cannot_mutate_authoritative_result(tmp_path: Path
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-async def test_execution_finalizes_agent_error_or_cancellation_and_preserves_exception(tmp_path: Path, cancelled: bool) -> None:
+@pytest.mark.parametrize("requires_web_search_evidence", [False, True])
+async def test_execution_finalizes_agent_error_or_cancellation_and_preserves_exception(tmp_path: Path, cancelled: bool, requires_web_search_evidence: bool) -> None:
     settings = _settings(tmp_path)
     error = asyncio.CancelledError() if cancelled else RuntimeError("primary failure")
     agent = _Agent(settings, error=error)
     with pytest.raises(asyncio.CancelledError if cancelled else ToolExecutionError) as failure:
-        await DynamicExecutionService(agent=agent).execute(DynamicExecutionRequest(task=Task(description="Task"), settings=settings))
+        await DynamicExecutionService(agent=agent).execute(DynamicExecutionRequest(task=Task(description="Task"), settings=settings, requires_web_search_evidence=requires_web_search_evidence))
     assert (failure.value if cancelled else failure.value.__cause__) is error
     assert load_run_metadata(settings.output.runs_dir / agent.run_ids[0]).status == ("cancelled" if cancelled else "error")
 

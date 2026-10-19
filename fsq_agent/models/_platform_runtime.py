@@ -65,7 +65,7 @@ class PlatformPrerequisiteCheck(BaseModel):
     identifier: str
     code: str | None = None
     target_id: str | None = Field(default=None, min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_.:@-]+$")
-    status: Literal["ready", "unavailable", "error", "not_applicable"]
+    status: Literal["ready", "unavailable", "error", "not_applicable", "pending"]
     message: str
     action: str | None = None
     commands: tuple[Annotated[str, Field(min_length=1, max_length=2000)], ...] = Field(default=(), max_length=5)

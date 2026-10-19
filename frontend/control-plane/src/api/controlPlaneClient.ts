@@ -1,4 +1,5 @@
 import type {
+  QuickTestContext, QuickTestPayload, QuickDiagnostics,
   HistoryResponse, RunReportResponse, ReportExportResponse, ReportFormat,
   ApiErrorBody,
   AzureConfigPayload,
@@ -78,12 +79,19 @@ export class ControlPlaneApiError extends Error {
 }
 
 async function responseError(response: Response): Promise<ControlPlaneApiError> {
-  const candidate = await response.json().catch(() => null) as Partial<ApiErrorBody> | null;
+  const candidate: unknown = await response.json().catch(() => null);
+  if (!record(candidate) || !string(candidate.code) || !string(candidate.message) || !string(candidate.action)) {
+    return new ControlPlaneApiError(response.status, {
+      code: 'invalid_error_response',
+      message: 'The Control Plane server returned an invalid error response.',
+      action: 'Recheck the server task state before retrying.',
+    });
+  }
   return new ControlPlaneApiError(response.status, {
-    code: candidate?.code ?? 'request_failed',
-    message: candidate?.message ?? `Request failed (${response.status}).`,
-    action: candidate?.action ?? 'Retry the request.',
-    details: candidate?.details,
+    code: candidate.code,
+    message: candidate.message,
+    action: candidate.action,
+    details: candidate.details,
   });
 }
 
@@ -116,8 +124,50 @@ function hasNoUnknownKeys(value: Record<string, unknown>, keys: readonly string[
 }
 
 function activeTask(value: unknown): boolean {
-  return record(value) && string(value.requestId) && nullableString(value.runId) && string(value.workspaceName) && platform(value.platform)
-    && string(value.targetId) && string(value.mode) && modes.has(value.mode) && string(value.status) && statuses.has(value.status);
+  if (!record(value) || !string(value.requestId) || !nullableString(value.runId) || !platform(value.platform)
+    || !string(value.mode) || !modes.has(value.mode) || !string(value.status) || !statuses.has(value.status)) return false;
+  if (value.workflow !== 'quick-test' && value.workflow !== 'case-manager') return false;
+  if (!nullableString(value.application) || !nullableString(value.platformRevision)) return false;
+  if (value.workflow === 'quick-test') {
+    return value.mode === 'explore' && nullableString(value.workspaceName) && nullableString(value.targetId)
+      && (value.runId === null || (string(value.workspaceName) && value.workspaceName.length > 0))
+      && ((value.platform === 'windows' || value.platform === 'macos') || string(value.targetId));
+  }
+  return string(value.workspaceName) && string(value.targetId);
+}
+
+const diagnosticStatuses = new Set(['ready', 'unavailable', 'error', 'not_applicable', 'pending']);
+function diagnosticDetail(value: unknown, nullableText = false): boolean {
+  return record(value) && string(value.status) && diagnosticStatuses.has(value.status) && nullableString(value.code)
+    && (nullableText ? nullableString(value.message) && nullableString(value.action) : string(value.message) && string(value.action));
+}
+function quickDiagnostics(value: unknown): value is QuickDiagnostics {
+  if (!record(value) || value.workspaceName !== null || !platform(value.platformId)
+    || !['workspace', 'platform', 'provider', 'target', 'strict'].every(key => diagnosticDetail(value[key]))
+    || !arrayOf(value.prerequisites, item => record(item) && string(item.identifier) && nullableString(item.code)
+      && string(item.status) && diagnosticStatuses.has(item.status) && string(item.message) && nullableString(item.action) && arrayOf(item.commands, string))
+    || !record(value.commands) || !hasOnlyKeys(value.commands, ['caseCreate', 'caseTest', 'caseTestSuggest', 'prepare'])
+    || !Object.values(value.commands).every(item => diagnosticDetail(item))
+    || !record(value.checks) || !hasOnlyKeys(value.checks, ['configuration', 'runtime', 'target_configuration', 'target_availability', 'strict_core', 'provider', 'suggestion_analyzer', 'dynamic_agent'])
+    || !Object.values(value.checks).every(item => diagnosticDetail(item, true))
+    || !string(value.status) || !['ready', 'partial', 'unavailable', 'pending'].includes(value.status)
+    || !string(value.checkedAt) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value.checkedAt)
+    || !Number.isFinite(Date.parse(value.checkedAt))
+    || ('targetId' in value && (value.platformId !== 'android' || !nullableString(value.targetId)))) return false;
+  return true;
+}
+function quickTestContext(value: unknown): value is QuickTestContext {
+  if (!record(value) || !platform(value.platform) || !nullableString(value.targetId) || !bool(value.canStart)
+    || !arrayOf(value.choices, item => record(item) && string(item.id) && string(item.label) && bool(item.selectable) && string(item.status) && readinessStatuses.has(item.status))
+    || !arrayOf(value.checks, item => record(item) && string(item.id) && string(item.message) && string(item.action) && string(item.status) && diagnosticStatuses.has(item.status))) return false;
+  if (value.diagnostics === null) return true;
+  return quickDiagnostics(value.diagnostics) && value.diagnostics.platformId === value.platform
+    && (value.diagnostics.targetId === undefined || value.diagnostics.targetId === value.targetId)
+    && value.canStart === (value.diagnostics.commands.prepare.status === 'ready');
+}
+function validateQuickTestContext(value: unknown): QuickTestContext {
+  if (!quickTestContext(value)) invalidResponse('quick-test context', 'Invalid choices, checks or context-bound diagnostics.');
+  return value;
 }
 function readinessRecord(value: unknown): boolean {
   return record(value) && string(value.status) && readinessStatuses.has(value.status) && string(value.message) && string(value.action);
@@ -148,6 +198,7 @@ export function validateRunSnapshot(value: unknown, path = 'run snapshot'): RunS
     || (value.recordingDraft !== undefined && value.recordingDraft !== null && !bool(value.recordingDraft))) {
     invalidResponse(path, 'Invalid run snapshot fields.');
   }
+  if (value.error !== undefined && value.error !== null && (!record(value.error) || !string(value.error.code) || !string(value.error.message) || !string(value.error.action))) invalidResponse(path, 'Invalid preparation error.');
   return value as unknown as RunSnapshot;
 }
 
@@ -496,6 +547,12 @@ export const controlPlaneClient = {
     return response.text();
   },
   bootstrap: (signal?: AbortSignal) => jsonRequest('/bootstrap', validateBootstrap, { signal }),
+  quickTestContext: (platform: PlatformId, targetId?: string, signal?: AbortSignal) => {
+    const params = new URLSearchParams({ platform });
+    if ((platform === 'android' || platform === 'web') && targetId) params.set('targetId', targetId);
+    return jsonRequest(`/quick-test/context?${params}`, validateQuickTestContext, { signal });
+  },
+  startQuickTest: (payload: QuickTestPayload) => jsonRequest('/quick-test/runs', validateStart, { method: 'POST', body: JSON.stringify(payload) }),
   readiness: (workspaceName: string, platform: PlatformId, signal?: AbortSignal, targetId?: string | null) =>
     platform === 'android' ? jsonRequest('/readiness', validateReadiness, { method: 'POST', body: JSON.stringify({workspaceName, platform, targetId: targetId || null}), signal })
       : jsonRequest(`/readiness?workspace=${encodeURIComponent(workspaceName)}&platform=${encodeURIComponent(platform)}`, validateReadiness, { signal }),

@@ -30,19 +30,7 @@ def readiness(workspace_name: str, platform: str, user_config_root: Path | None 
     if platform in {"macos", "android"}:
         result = diagnose_registered_platform(RegisteredPlatformDoctorRequest(workspace_name=workspace_name, platform=platform, user_config_root=user_config_root, target_id=target_id))
         diagnosis = result.platforms[0]
-        checks = diagnosis.checks
-        target = next((item for item in (checks.runtime, checks.target_configuration, checks.target_availability) if item.status != "ready"), checks.target_availability)
-        payload = _readiness_payload(
-            result.workspace.name,
-            platform,
-            _record("ready", "Workspace identity is valid.", ""),
-            _doctor_record(checks.configuration),
-            _doctor_record(checks.provider),
-            _doctor_record(target),
-            _doctor_record(checks.strict_core),
-        )
-        payload.update(diagnosis_projection(diagnosis))
-        return payload
+        return diagnosed_readiness(diagnosis, workspace_name=result.workspace.name, workspace=_record("ready", "Workspace identity is valid.", ""))
     try:
         workspace_status = inspect_registered_workspace(workspace_name, user_config_root)
     except Exception as exc:  # noqa: BLE001
@@ -87,7 +75,7 @@ def readiness(workspace_name: str, platform: str, user_config_root: Path | None 
 
 
 def _readiness_payload(
-    workspace_name: str,
+    workspace_name: str | None,
     platform_id: str,
     workspace: dict[str, str],
     platform: dict[str, str],
@@ -127,16 +115,43 @@ def _record(status: str, message: str, action: str) -> dict[str, str]:
     return {"status": status, "message": message, "action": action}
 
 
-def _doctor_record(detail) -> dict[str, str]:
-    return _record(detail.status if detail.status != "not_applicable" else "unavailable", detail.message or "", detail.action or "")
+def _doctor_record(detail, *, include_context: bool = False) -> dict[str, Any]:
+    result = _record(detail.status if include_context or detail.status != "not_applicable" else "unavailable", detail.message or "", detail.action or "")
+    if include_context:
+        result["code"] = detail.code
+    return result
 
 
-def diagnosis_projection(diagnosis) -> dict[str, Any]:
+def diagnosed_readiness(diagnosis, *, workspace_name: str | None, workspace=None, include_context: bool = False) -> dict[str, Any]:
+    checks = diagnosis.checks
+    targets = (checks.runtime, checks.target_configuration, checks.target_availability)
+    target = next((item for item in targets if item.status in {"unavailable", "error"}), None) if include_context else None
+    target = target or next((item for item in targets if item.status != "ready"), checks.target_availability)
+    payload = _readiness_payload(
+        workspace_name,
+        diagnosis.platform,
+        workspace if workspace is not None else _doctor_record(checks.configuration, include_context=include_context),
+        _doctor_record(checks.configuration, include_context=include_context),
+        _doctor_record(checks.provider, include_context=include_context),
+        _doctor_record(target, include_context=include_context),
+        _doctor_record(checks.strict_core, include_context=include_context),
+    )
+    payload.update(diagnosis_projection(diagnosis, include_context=include_context))
+    return payload
+
+
+def diagnosis_projection(diagnosis, *, include_context: bool = False) -> dict[str, Any]:
     payload = {
         "prerequisites": [item.model_dump(mode="json") for item in diagnosis.prerequisites],
-        "commands": {key: _doctor_record(value) for key, value in (("caseCreate", diagnosis.commands.case_create), ("caseTest", diagnosis.commands.case_test))},
-        "checkedAt": datetime.now(UTC).isoformat(),
+        "commands": {key: _doctor_record(value, include_context=include_context) for key, value in (("caseCreate", diagnosis.commands.case_create), ("caseTest", diagnosis.commands.case_test))},
+        "checkedAt": getattr(diagnosis, "checked_at", None) or datetime.now(UTC).isoformat(),
     }
+    if include_context:
+        payload["checks"] = diagnosis.checks.model_dump(mode="json")
+        payload["status"] = diagnosis.status
+        payload["commands"]["caseTestSuggest"] = _doctor_record(diagnosis.commands.case_test_suggest, include_context=True)
+        if diagnosis.preparation is not None:
+            payload["commands"]["prepare"] = _doctor_record(diagnosis.preparation, include_context=True)
     if diagnosis.platform == "android":
         payload["targetId"] = diagnosis.target_id
     return payload

@@ -217,12 +217,12 @@ def _register_workspace(entry: WorkspaceRegistryEntry, user_config_root: str | P
         if any(existing.name.casefold() == normalized_name for existing in config.workspaces):
             raise ConfigurationError(
                 "A workspace with this name is already registered.",
-                context={"name": entry.name},
+                context={"name": entry.name, "workspace_failure": "identity_conflict"},
             )
         if any(os.path.normcase(str(existing.root_path.resolve())) == normalized_root for existing in config.workspaces):
             raise ConfigurationError(
                 "This workspace path is already registered.",
-                context={"root_path": str(entry.root_path)},
+                context={"root_path": str(entry.root_path), "workspace_failure": "identity_conflict"},
             )
         updated = config.model_copy(update={"workspaces": [*config.workspaces, entry]})
         try:

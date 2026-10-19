@@ -23,9 +23,13 @@ export interface PlatformOption { id: PlatformId; label: string }
 export interface ActiveTaskSummary {
   requestId: string;
   runId: string | null;
-  workspaceName: string;
+  workspaceName: string | null;
   platform: PlatformId;
-  targetId: string;
+  targetId: string | null;
+  /** Transport requires explicit provenance; absent local state never implies Quick Test. */
+  workflow?: 'quick-test' | 'case-manager';
+  application?: string | null;
+  platformRevision?: string | null;
   mode: RunMode;
   status: TaskStatus;
 }
@@ -37,8 +41,26 @@ export interface BootstrapResponse {
 }
 
 export type ReadinessStatus = 'ready' | 'unavailable' | 'error';
+export type DiagnosticStatus = ReadinessStatus | 'not_applicable' | 'pending';
 export interface ReadinessRecord { status: ReadinessStatus; message: string; action: string }
-export interface PrerequisiteRecord { identifier: string; code?: string | null; status: ReadinessStatus | 'not_applicable'; message: string; action?: string | null; commands: string[] }
+export interface PrerequisiteRecord { identifier: string; code?: string | null; status: DiagnosticStatus; message: string; action?: string | null; commands: string[] }
+export interface DiagnosticDetail { status: DiagnosticStatus; code: string | null; message: string; action: string }
+export interface RawDiagnosticDetail { status: DiagnosticStatus; code: string | null; message: string | null; action: string | null }
+export interface QuickDiagnostics {
+  workspaceName: null;
+  platformId: PlatformId;
+  workspace: DiagnosticDetail;
+  platform: DiagnosticDetail;
+  provider: DiagnosticDetail;
+  target: DiagnosticDetail;
+  strict: DiagnosticDetail;
+  prerequisites: (PrerequisiteRecord & { code: string | null; action: string | null })[];
+  commands: Record<'caseCreate' | 'caseTest' | 'caseTestSuggest' | 'prepare', DiagnosticDetail>;
+  checks: Record<'configuration' | 'runtime' | 'target_configuration' | 'target_availability' | 'strict_core' | 'provider' | 'suggestion_analyzer' | 'dynamic_agent', RawDiagnosticDetail>;
+  status: 'ready' | 'partial' | 'unavailable' | 'pending';
+  checkedAt: string;
+  targetId?: string | null;
+}
 export interface ReadinessResponse {
   workspaceName: string;
   platformId: PlatformId;
@@ -115,6 +137,7 @@ export interface StrictCaseStep {
   message?: string | null;
 }
 export interface RunSnapshot extends ActiveTaskSummary {
+  error?: ApiErrorBody | null;
   suggestedCaseName?: string | null;
   recordingDraft?: boolean | null;
   source: { goal?: string; casePath?: string; caseContent?: string; caseSteps?: StrictCaseStep[] };
@@ -135,6 +158,17 @@ export type StartRunPayload =
   | { mode: 'explore'; workspaceName: string; platform: PlatformId; targetId: string; goal: string }
   | { mode: 'strict'; workspaceName: string; platform: PlatformId; targetId: string; casePath: string };
 export interface StartRunResponse { requestId: string }
+export type QuickTestPayload =
+  | { platform: 'android' | 'web'; targetId: string; goal: string }
+  | { platform: 'windows' | 'macos'; goal: string };
+export interface QuickTestContext {
+  platform: PlatformId;
+  targetId: string | null;
+  canStart: boolean;
+  choices: { id: string; label: string; selectable: boolean; status: ReadinessStatus }[];
+  checks: { id: string; status: DiagnosticStatus; message: string; action: string }[];
+  diagnostics: QuickDiagnostics | null;
+}
 export interface UiSnapshotResponse {
   revision: number;
   timestamp: string | null;

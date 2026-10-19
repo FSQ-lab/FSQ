@@ -9,6 +9,7 @@ import { useDeviceWorkspace, type DevicesLaunchIntent } from './hooks/useDeviceW
 export type { DevicesLaunchIntent } from './hooks/useDeviceWorkspace';
 
 interface DevicesPageProps {
+  active?: boolean;
   workspaces: readonly WorkspaceRegistryEntry[];
   workspaceRegistryReady: boolean;
   selectedWorkspaceName: string | null;
@@ -23,12 +24,13 @@ interface DevicesPageProps {
 
 const platformLabels: Record<PlatformId, string> = { android: 'Android', web: 'Web', windows: 'Windows', macos: 'macOS' };
 
-export function DevicesPage({ workspaces, workspaceRegistryReady, selectedWorkspaceName, onWorkspaceChange, launchIntent, onLaunchIntentConsumed, onRepairTarget, onStartPendingChange, onOpenReport, renderShell }: DevicesPageProps) {
+export function DevicesPage({ active = true, workspaces, workspaceRegistryReady, selectedWorkspaceName, onWorkspaceChange, launchIntent, onLaunchIntentConsumed, onRepairTarget, onStartPendingChange, onOpenReport, renderShell }: DevicesPageProps) {
   const selectedWorkspace = workspaces.find((item) => item.name === selectedWorkspaceName) ?? null;
   const platforms = useMemo<PlatformOption[]>(() => (selectedWorkspace?.platforms ?? [])
     .filter((item) => item.status === 'available' || item.platform==='macos' && item.diagnosticAvailable)
     .map((item) => ({ id: item.platform, label: platformLabels[item.platform] })), [selectedWorkspace]);
   const workspace = useDeviceWorkspace({
+    active,
     workspaceName: selectedWorkspaceName,
     platforms,
     platformsReady: workspaceRegistryReady,
@@ -51,7 +53,7 @@ export function DevicesPage({ workspaces, workspaceRegistryReady, selectedWorksp
   const setupHint = !selectedWorkspaceName ? 'Select a Workspace to continue.' : !workspace.platform ? 'Select a platform to check its environment.' : undefined;
   const toolbar = <TargetToolbar
     workspaces={workspaces} workspaceName={selectedWorkspaceName ?? ''} platforms={platforms} platform={workspace.platform} targetId={workspace.targetId} targets={workspace.targets.data}
-    locked={workspace.controlsLocked} loading={workspace.targets.state === 'loading'||workspace.readiness.state==='loading'} connectionLabel={setupHint ? 'Not checked' : workspace.connectionLabel}
+    locked={workspace.controlsLocked || !workspaceRegistryReady} loading={!workspaceRegistryReady || workspace.targets.state === 'loading'||workspace.readiness.state==='loading'} connectionLabel={setupHint ? 'Not checked' : workspace.connectionLabel}
     onWorkspaceChange={(name) => onWorkspaceChange(name || null)} onPlatformChange={workspace.setPlatform} onTargetChange={workspace.setTargetId} onRefresh={workspace.refresh}
   />;
   const content = <div className="devices-page">
@@ -59,7 +61,7 @@ export function DevicesPage({ workspaces, workspaceRegistryReady, selectedWorksp
       {workspace.startError ? workspace.startError.message : terminal ? `Run ${workspace.snapshot?.status}: ${workspace.snapshot?.summary}` : hasRun ? `Run ${workspace.snapshot?.status ?? 'preparing'}. ${workspace.snapshot?.summary ?? ''} ${workspace.connectionLabel}.` : (setupHint ?? `${workspace.connectionLabel}.`)}
     </div>
     {!hasRun && <><header className="devices-intro"><h1>What do you want to test?</h1><p>Choose a target and describe the outcome.</p></header>{toolbar}</>}
-    {hasRun && <div className="run-context-bar"><div aria-label="Run context"><span className={'status-badge status-badge--' + (workspace.snapshot?.status ?? 'preparing')}>{workspace.snapshot?.status ?? 'preparing'}</span><strong>{workspace.snapshot?.workspaceName ?? selectedWorkspaceName}</strong><span>{workspace.snapshot?.platform ?? workspace.platform} · {workspace.selectedTarget?.label ?? workspace.targetId}</span><small>{workspace.snapshot?.mode === 'strict' ? 'Strict Replay' : 'Explore'}</small>{terminal && workspace.snapshot?.runId && <span className="run-context-id">Run ID: {workspace.snapshot.runId}</span>}{!terminal && <span className="run-connection" role="status">{workspace.connectionLabel}</span>}</div><div className="run-context-actions" ref={setRunActions}>{terminal && workspace.snapshot?.runId && onOpenReport && <button className="button" type="button" onClick={() => onOpenReport(workspace.snapshot!.workspaceName, workspace.snapshot!.platform, workspace.snapshot!.runId!)}>Open report</button>}</div></div>}
+    {hasRun && <div className="run-context-bar"><div aria-label="Run context"><span className={'status-badge status-badge--' + (workspace.snapshot?.status ?? 'preparing')}>{workspace.snapshot?.status ?? 'preparing'}</span><strong>{workspace.snapshot?.workspaceName ?? selectedWorkspaceName}</strong><span>{workspace.snapshot?.platform ?? workspace.platform} · {workspace.selectedTarget?.label ?? workspace.targetId}</span><small>{workspace.snapshot?.mode === 'strict' ? 'Strict Replay' : 'Explore'}</small>{terminal && workspace.snapshot?.runId && <span className="run-context-id">Run ID: {workspace.snapshot.runId}</span>}{!terminal && <span className="run-connection" role="status">{workspace.connectionLabel}</span>}</div><div className="run-context-actions" ref={setRunActions}>{terminal && workspace.snapshot?.runId && workspace.snapshot.workspaceName && onOpenReport && <button className="button" type="button" onClick={() => { const s = workspace.snapshot; if (s?.workspaceName && s.runId) onOpenReport(s.workspaceName, s.platform, s.runId); }}>Open report</button>}</div></div>}
     {pageError && <div className="page-notice" role="alert">
       <strong>{pageError.message}</strong>
       <span>{pageError.action}</span>

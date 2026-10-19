@@ -56,6 +56,7 @@ class PreparedRun:
     lifecycle_cases: list[tuple[Path, FsqCase]] = field(default_factory=list)
     resolved_steps_by_path: dict[Path, list[ExecutableStep]] = field(default_factory=dict)
     requires_ai_assertion: bool = False
+    requires_web_search_evidence: bool = False
 
 
 @dataclass
@@ -79,7 +80,7 @@ class ExecutionHandle:
             loop.call_soon_threadsafe(task.cancel)
 
 
-def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any]) -> PreparedRun:
+def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], frozen_revision: str | None = None) -> PreparedRun:
     mode = body.get("mode")
     workspace_name = body.get("workspaceName")
     platform = body.get("platform")
@@ -98,7 +99,7 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any]) ->
     config_path = settings.workspace.config_path
     if not isinstance(config_path, Path):
         raise TypeError("Selected workspace platform configuration is unavailable.")
-    platform_revision = workspace_revision(config_path)
+    platform_revision = frozen_revision if frozen_revision is not None else workspace_revision(config_path)
     if platform not in {"macos", "android"}:
         validate_target(settings, target_id)
     elif platform == "macos" and target_id != "macos-app":
@@ -223,6 +224,7 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
                 event_sink=projection.project_run_event,
                 record=True,
                 allow_recording_failure=True,
+                requires_web_search_evidence=prepared.requires_web_search_evidence,
                 cancellation_check=lambda: state.raise_if_cancelled(request_id),
                 recording_error_sink=lambda exc: state.add_event(
                     request_id,

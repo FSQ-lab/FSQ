@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from fsq_agent.application._quick_test import get_quick_test_context, prepare_quick_test
 from fsq_agent.application._workspace_init import (
     add_workspace_platform as _add_workspace_platform,
 )
@@ -20,6 +21,12 @@ from fsq_agent.application.contracts import (
     ApplicationError,
     ApplicationErrorCategory,
     ApplicationErrorCode,
+    QuickTestCheck,
+    QuickTestChoice,
+    QuickTestContextRequest,
+    QuickTestContextResult,
+    QuickTestPrepareRequest,
+    QuickTestPrepareResult,
     WorkspaceInitializeRequest,
     WorkspaceInitializeResult,
     WorkspaceRequest,
@@ -84,9 +91,17 @@ def update_workspace_platform(**kwargs):
 
 
 __all__ = [
+    "QuickTestCheck",
+    "QuickTestChoice",
+    "QuickTestContextRequest",
+    "QuickTestContextResult",
+    "QuickTestPrepareRequest",
+    "QuickTestPrepareResult",
     "add_workspace_platform",
     "create_workspace",
+    "get_quick_test_context",
     "initialize_workspace",
+    "prepare_quick_test",
     "require_initialized_workspace",
     "resolve_workspace_target",
     "update_workspace_platform",

@@ -68,6 +68,13 @@ def test_doctor_reports_configured_platforms_in_canonical_order(tmp_path: Path, 
     assert all(item.commands.case_test.status == "ready" for item in result.platforms)
 
 
+def test_configured_diagnosis_keeps_original_serialized_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _base(monkeypatch, tmp_path, [_platform("web", tmp_path)])
+    platform = diagnose_workspace(DoctorRequest(current_directory=tmp_path)).platforms[0]
+    assert platform.commands.case_create.status == "ready"
+    assert set(platform.model_dump(mode="json")) == {"platform", "target_id", "status", "prerequisites", "checks", "commands"}
+
+
 def test_doctor_reads_valid_registry_when_writable_lock_access_is_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace_root = tmp_path / "checkout"
     workspace_root.mkdir()

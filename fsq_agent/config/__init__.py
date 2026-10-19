@@ -29,6 +29,7 @@ from fsq_agent.config._user_provider import (
 from fsq_agent.config._workspace import (
     add_workspace_platform,
     create_workspace,
+    create_workspace_at_root,
     inspect_registered_workspace,
     load_registered_workspace,
     update_workspace_platform,
@@ -64,6 +65,7 @@ __all__ = [
     "activate_github_copilot_provider",
     "add_workspace_platform",
     "create_workspace",
+    "create_workspace_at_root",
     "inspect_registered_workspace",
     "list_workspace_registry",
     "load_platform_settings",

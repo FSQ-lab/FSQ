@@ -141,12 +141,12 @@ fsq providers status
 
 也可以运行 `fsq providers configure openai` 连接 OpenAI 官方 API，运行 `fsq providers configure deepseek` 连接 DeepSeek 官方 Responses API，运行 `fsq providers configure kimi` 连接中国区或国际区 Kimi 官方 API，或运行 `fsq providers configure azure_openai` 连接 Azure 部署。配置保存在用户级 `~/.fsq` 下，由 CLI 和 Control Plane 共享。API Key Provider 会隐藏 Key 输入并提供可选模型；即使只有一个模型也需要显式选择。
 
-浏览器配置流程：运行 `fsq ui`，打开 **Settings**。
+浏览器配置流程：运行 `fsq ui`，选择 **Quick Test** 或 **FSQ Case Manager**，打开两者共用的 **Settings**。
 
 1. 点击 **Add configuration** 或 **Change provider**，选择 **OpenAI**、**DeepSeek**、**Google Gemini** 或 **Kimi**。
 2. 使用 Kimi 时先显式选择 **China** 或 **Global**。输入 API Key，点击 **Load models**，选择模型，再点击 **Save changes**。
 3. 点击 **Test connection**，使用已保存配置发送最小请求。
-4. 回到 **Home** 查看 Provider 摘要，再到 **Test Runner** 选择 Workspace、平台和目标，显式启动 Explore。
+4. 在 **Quick Test** 中回到目标表单并显式开始测试。在 **FSQ Case Manager** 中回到 **Home** 查看 Provider 摘要，再到 **Test Runner** 选择 Workspace、平台和目标，显式启动 Explore。
 
 OpenAI 固定使用 `https://api.openai.com/v1/` 和 Responses API，不支持自定义端点。模型列表仅展示 GPT 主版本 5 或更高的通用模型，排除 mini、nano、Codex、embedding、audio、realtime、image、search、transcription、TTS 等变体。空列表不能保存；修改 Key 后必须重新加载并选择模型。Azure 则需要资源端点、**deployment name（部署名，不一定是 OpenAI model id）** 和 API Key。
 
@@ -194,6 +194,16 @@ fsq ui
 ```
 
 安装后的前端默认在本地 `127.0.0.1:8879` 提供服务。
+
+选择 **Quick Test**，无需手动设置 Workspace 即可进行探索测试。先在 **Settings** 配置共享 Provider，选择平台及适用的设备或浏览器，再描述应用或搜索对象、操作和预期结果。Web 既支持提供网址，例如 `打开 https://example.com，确认页面标题为 Example Domain`，也支持不提供网址的明确搜索目标，例如 `搜索 FSQ github，并且帮我找到 FSQ 的官网地址`。
+
+无网址的 Web 搜索复用现有空白页启动和 Agent 导航，不增加搜索引擎设置，也不沿用上一次测试的网站。Agent 按目标搜索并查看页面；用户提供的畸形或不支持的导航地址仍会报错，不会转成搜索来绕过校验。此类搜索必须有实际浏览器操作及可用的 HTTP(S) 页面观察证据，才能判定成功；仅凭模型回答或只启动空白浏览器不够。页面或链接证据仍需支持请求的结果，包括“所发现网址是官网”的判断。
+
+**Start Quick Test** 会在 `~/.fsq/quick-test/` 准备专用注册 Workspace，只有输入、具体目标和运行环境检查全部通过才进入探索。所有 Quick Test 共用此 Workspace，每次运行冻结自己的目标。模型可根据应用名称推理 package ID、bundle ID 或可执行文件路径；也可在同一个 prompt 中直接写明这些标识。FSQ 通过所选平台验证解析出的标识，不要求额外取得本地化应用名称映射。它不会穷举排除所有同名应用，目标存在且可运行也不等于模型已正确理解你的意图。意图不足或不明确、具体目标查询零匹配或多匹配、发现或模型调用失败均直接终止，不补问、不自动重试。请自行修改 prompt 或修复环境后显式重新开始。
+
+结果复用现有时间线和证据视图。**Open report** 打开持久报告，**New test** 回到目标输入。Quick Test 不提供保存 Case 或 Strict Replay。离开或刷新页面不会取消服务端活动任务；同一个本地服务仍在运行时，返回页面可恢复活动 Quick Test。重启服务不会续跑。
+
+选择 **FSQ Case Manager**，使用本指南其他部分介绍的完整 Workspace、Case、历史和严格回放工作流。专用 Quick Test Workspace 也会显示在其中。现有 Run 报告链接仍直接打开对应报告。
 
 ## 下一步
 

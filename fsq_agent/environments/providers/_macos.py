@@ -30,7 +30,7 @@ def _prerequisite(identifier: str, ready: bool, message: str, action: str | None
     return PlatformPrerequisiteCheck(identifier=identifier, status="ready" if ready else "unavailable", message=message, action=None if ready else action)
 
 
-def _macos_prerequisites(settings) -> tuple[PlatformPrerequisiteCheck, ...]:
+def _macos_prerequisites(settings, *, application_pending: bool = False) -> tuple[PlatformPrerequisiteCheck, ...]:
     if platform.system() != "Darwin":
         return tuple(
             PlatformPrerequisiteCheck(identifier=name, status="not_applicable", message="macOS prerequisite checks require a macOS host.", action="Run macOS platform tests on a macOS host.")
@@ -54,8 +54,8 @@ def _macos_prerequisites(settings) -> tuple[PlatformPrerequisiteCheck, ...]:
     developer_ready = bool(developer and probe("xcode_developer_directory", lambda: _developer_directory_is_full_xcode(developer)))
     xcode = developer.parent.parent if developer is not None and developer_ready else probe("xcode_installation", _full_xcode_path)
     appium = probe("appium_cli", lambda: shutil.which("appium"))
-    app_path = Path(settings.app_path) if settings.app_path is not None else None
-    bundle_id = (settings.bundle_id or "").strip()
+    app_path = Path(settings.app_path) if settings.app_path is not None and not application_pending else None
+    bundle_id = (settings.bundle_id or "").strip() if not application_pending else ""
     app_ready = bool(app_path and probe("application_path", lambda: _macos_application_path_available(app_path)))
     bundle_ready = bool(bundle_id and probe("bundle_identifier", lambda: _macos_bundle_matches_target(bundle_id, app_path)))
     checks = [
@@ -123,6 +123,13 @@ def _macos_prerequisites(settings) -> tuple[PlatformPrerequisiteCheck, ...]:
         if bundle_id
         else PlatformPrerequisiteCheck(identifier="bundle_identifier", status="not_applicable", message="No bundle identifier is configured; application path identity is used.")
     )
+    if application_pending:
+        checks = [
+            PlatformPrerequisiteCheck(identifier=check.identifier, status="pending", code="environment.application_pending", message="Application identity validation awaits identification.")
+            if check.identifier in {"application_path", "bundle_identifier"}
+            else check
+            for check in checks
+        ]
     commands = {
         "appium_cli": ("npm install -g appium",),
         "appium_mac2_driver": ("appium driver install mac2", "appium driver doctor mac2"),

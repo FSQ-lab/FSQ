@@ -420,6 +420,7 @@ class RunLifecycleService:
         fatal_errors=(),
         secret_values: tuple[str, ...] = (),
         duration_ms: int | None = None,
+        preserve_evidence_error: bool = False,
     ):
         from fsq_agent.models import RunExecutionResult
 
@@ -451,7 +452,8 @@ class RunLifecycleService:
         counted = RunStepCounts(total=len(leaves), attempt_count=attempts, **counts)
         first = next((step for step in leaves.values() if step["status"] == "failed" or (step["status"] == "skipped" and (step.get("failure_category") or step.get("step_execution_id")))), None)
         evidence_errors = [error for step in step_values for error in step.get("evidence_errors", [])]
-        evidence_failed = bool(evidence_errors) or any(step.get("failure_category") == "artifact_error" for step in step_values)
+        capture_failed = bool(evidence_errors) or any(step.get("failure_category") == "artifact_error" for step in step_values)
+        evidence_failed = capture_failed
         evidence_failed = evidence_failed or bundle.completeness in {"partial", "unavailable"} or any(ref.availability not in {"available", "not_applicable"} for ref in bundle.artifacts)
         for step in bundle.steps:
             policy = step.metadata.get("evidence_policy") or {}
@@ -467,6 +469,7 @@ class RunLifecycleService:
                         for ref in refs
                     ):
                         evidence_failed = True
+                        capture_failed = True
                         evidence_errors.append({"step_id": step.step_id, "phase": phase, "kind": kind, "reason": "required_capture_missing"})
         evidence = {"status": "partial" if evidence_failed else "complete" if step_values else "not_applicable", "errors": evidence_errors, "warnings": bundle.warnings}
         verdict = verification.model_dump(mode="json") if hasattr(verification, "model_dump") else dict(verification or {"status": "not_requested"})
@@ -483,7 +486,11 @@ class RunLifecycleService:
             outcome = "error"
         elif (counts["incomplete"] and outcome == "success") or (not attempts and verdict.get("status") not in {"success", "passed"} and outcome == "success"):
             outcome = "inconclusive"
-        if evidence_failed and outcome == "success":
+        # A search evidence gap can lower a positive verifier conclusion, but
+        # must not erase an error that recorded required-capture failures would
+        # have produced. Mere partial/missing observations are still inconclusive.
+        downgraded_capture_error = preserve_evidence_error and capture_failed and outcome == "inconclusive" and not counts["incomplete"]
+        if evidence_failed and (outcome == "success" or downgraded_capture_error):
             outcome = "error"
         if outcome not in {"success", "failed", "inconclusive", "cancelled", "error"}:
             outcome = "inconclusive"
@@ -661,15 +668,26 @@ def _safe_source_text(text: str, secret_values: tuple[str, ...] = ()) -> str:
 def _safe_urls(text):
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+    def safe_parameters(value):
+        parameters = parse_qsl(value, keep_blank_values=True)
+        if not any(_credential_key(key) or key.casefold() in {"signature", "sig"} for key, _ in parameters):
+            return value
+        return urlencode([(key, "[REDACTED]" if _credential_key(key) or key.casefold() in {"signature", "sig"} else item) for key, item in parameters])
+
     def replace(match):
         raw = match.group(0)
         try:
             parsed = urlsplit(raw)
-            query = parse_qsl(parsed.query, keep_blank_values=True)
-            if "@" not in parsed.netloc and not any(_credential_key(key) or key.casefold() in {"signature", "sig"} for key, _ in query):
+            safe_query = safe_parameters(parsed.query)
+            safe_fragment = parsed.fragment
+            if "=" in parsed.fragment:
+                # A '?' before the first assignment separates a route query;
+                # after an assignment it may be part of the credential value.
+                route, separator, parameters = parsed.fragment.partition("?")
+                safe_fragment = route + separator + safe_parameters(parameters) if separator and "=" not in route else safe_parameters(parsed.fragment)
+            if "@" not in parsed.netloc and safe_query == parsed.query and safe_fragment == parsed.fragment:
                 return raw
-            safe_query = urlencode([(key, "[REDACTED]" if _credential_key(key) or key.casefold() in {"signature", "sig"} else value) for key, value in query])
-            return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, safe_query, parsed.fragment))
+            return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, safe_query, safe_fragment))
         except ValueError:
             return "[REDACTED_URL]"
 

@@ -1,4 +1,5 @@
 import { ContentTabs } from '../../../shared/ContentTabs';
+import { useId } from 'react';
 import type { EvidenceTab, PlatformId, RunSnapshot } from '../../../api/types';
 import { RunLogsView } from './RunLogsView';
 import { ReplayVideoView } from './ReplayVideoView';
@@ -21,12 +22,13 @@ interface LiveEvidencePanelProps {
 }
 
 export function LiveEvidencePanel({ tab, snapshot, selectedStepId = null, platform, targetLabel, onTabChange, onClearStep = () => undefined }: LiveEvidencePanelProps) {
-  return <section className="evidence-card" aria-labelledby="live-evidence-title">
-    <header className="card-header evidence-header"><div><h2 id="live-evidence-title">Live evidence</h2><p>{platform ?? 'No platform'} · {selectedStepId ? `Action ${selectedStepId}` : targetLabel || 'No target selected'}</p></div>
+  const id = useId();
+  return <section className="evidence-card" aria-labelledby={`${id}-live-evidence-title`}>
+    <header className="card-header evidence-header"><div><h2 id={`${id}-live-evidence-title`}>Live evidence</h2><p>{platform ?? 'No platform'} · {selectedStepId ? `Action ${selectedStepId}` : targetLabel || 'No target selected'}</p></div>
       {selectedStepId && <button className="button evidence-replay-button" type="button" onClick={onClearStep}>Show run replay</button>}
-      <ContentTabs label="Live evidence views" value={tab} onChange={onTabChange} className="evidence-tabs" items={tabs.map(item=>({id:item.id,label:item.label,tabId:'evidence-tab-'+item.id,panelId:'evidence-panel-'+item.id}))}/>
+      <ContentTabs label="Live evidence views" value={tab} onChange={onTabChange} className="evidence-tabs" items={tabs.map(item=>({id:item.id,label:item.label,tabId:`${id}-evidence-tab-${item.id}`,panelId:`${id}-evidence-panel-${item.id}`}))}/>
     </header>
-    <div className="evidence-surface" id={`evidence-panel-${tab}`} role="tabpanel" aria-labelledby={`evidence-tab-${tab}`}>
+    <div className="evidence-surface" id={`${id}-evidence-panel-${tab}`} role="tabpanel" aria-labelledby={`${id}-evidence-tab-${tab}`}>
       {tab === 'screen' && (snapshot?.terminal
         ? selectedStepId ? <StepEvidenceView requestId={snapshot.requestId} stepId={selectedStepId} kind="screen" platform={platform} targetLabel={targetLabel} /> : <ReplayVideoView requestId={snapshot.requestId} />
         : <ScreenView requestId={snapshot?.requestId ?? null} revision={snapshot?.screenshotRevision ?? 0} platform={platform} targetLabel={targetLabel} />)}

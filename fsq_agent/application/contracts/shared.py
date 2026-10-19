@@ -7,6 +7,16 @@ from typing import Any
 
 
 class ApplicationErrorCode(StrEnum):
+    QUICK_TEST_INSUFFICIENT = "quick_test.insufficient"
+    QUICK_TEST_APPLICATION_MISSING = "quick_test.application_missing"
+    QUICK_TEST_APPLICATION_NOT_FOUND = "quick_test.application_not_found"
+    QUICK_TEST_APPLICATION_AMBIGUOUS = "quick_test.application_ambiguous"
+    QUICK_TEST_INVALID_WEB_ADDRESS = "quick_test.invalid_web_address"
+    QUICK_TEST_DISCOVERY_FAILED = "quick_test.discovery_failed"
+    QUICK_TEST_INFERENCE_FAILED = "quick_test.inference_failed"
+    QUICK_TEST_PREREQUISITES = "quick_test.prerequisites"
+    QUICK_TEST_WORKSPACE_CONFLICT = "quick_test.workspace_conflict"
+    QUICK_TEST_PERSISTENCE_FAILED = "quick_test.persistence_failed"
     WORKSPACE_NOT_INITIALIZED = "workspace.not_initialized"
     CASE_GOAL_INVALID = "case.goal_invalid"
     CASE_NOT_FOUND = "case.not_found"

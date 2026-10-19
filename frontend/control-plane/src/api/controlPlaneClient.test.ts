@@ -394,5 +394,5 @@ it('accepts unknown historical status and completed tool transport facts', async
 
 it('accepts backend recording warning with nullable live timestamp', () => {
   const value={requestId:'r',runId:'run',workspaceName:'w',platform:'web',targetId:'chrome',mode:'explore',status:'failed',source:{goal:'g'},startedAt:'2026-09-08T00:00:00Z',completedAt:null,cancelRequested:false,events:[{sequence:1,time:null,phase:'finalizing',label:'Dynamic recording',status:'failed',message:'Recording unavailable'}],activeStep:null,result:null,summary:'failed',screenshotRevision:0,uiSnapshotRevision:0,evidenceAvailable:false,reportAvailable:false,terminal:true};
-  expect(validateRunSnapshot(value).events[0].time).toBeNull();
+  expect(validateRunSnapshot({ ...value, workflow: 'case-manager', application: null, platformRevision: null }).events[0].time).toBeNull();
 });

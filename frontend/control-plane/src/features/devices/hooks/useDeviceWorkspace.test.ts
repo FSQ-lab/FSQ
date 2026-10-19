@@ -26,6 +26,66 @@ const runSnapshot = (requestId = 'request-1', platform: 'android' | 'web' = 'and
 const platforms = bootstrap.platforms;
 const deviceContext = { workspaceName: 'test', platforms, onWorkspaceChange: vi.fn() };
 
+it('retains unverified platform, target and Case intent while registry authority is temporarily absent', async () => {
+  const client = {
+    bootstrap: vi.fn().mockResolvedValue(bootstrap), readiness: vi.fn().mockResolvedValue(readiness('web')),
+    targets: vi.fn().mockResolvedValue({ ...targets('web'), targets: [...targets('web').targets, { ...targets('web').targets[0], id: 'other', isDefault: false }] }),
+    cases: vi.fn().mockResolvedValue(cases('web')),
+  } as unknown as ControlPlaneClient;
+  const initial: Parameters<typeof useDeviceWorkspace>[0] = { ...deviceContext, platformsReady: true };
+  const { result, rerender } = renderHook(context => useDeviceWorkspace(context, client), { initialProps: initial });
+  act(() => { result.current.setPlatform('web'); result.current.setGoal('Keep goal'); result.current.setMode('strict'); });
+  await waitFor(() => expect(result.current.cases.state).toBe('ready'));
+  act(() => { result.current.setTargetId('other'); result.current.setCasePath('web.fsq.yaml'); });
+  expect(result.current.canStart).toBe(true);
+  rerender({ ...initial, workspaceName: null, platforms: [], platformsReady: false });
+  expect(result.current.canStart).toBe(false);
+  expect(result.current.platform).toBe('web');
+  expect(result.current.targetId).toBe('other');
+  expect(result.current.casePath).toBe('web.fsq.yaml');
+  rerender({ ...initial, platforms: [...platforms] });
+  await waitFor(() => expect(result.current.canStart).toBe(true));
+  expect(result.current.targetId).toBe('other');
+  expect(result.current.casePath).toBe('web.fsq.yaml');
+  expect(result.current.goal).toBe('Keep goal');
+});
+
+it.each(['activation', 'refresh'])('F004: reconciles foreign Quick busy on %s without adoption or a POST', async trigger => {
+  const onWorkspaceChange = vi.fn();
+  const quick = { ...runSnapshot(), workflow: 'quick-test', workspaceName: null, targetId: null, platform: 'macos', application: null, platformRevision: null };
+  const client = {
+    bootstrap: vi.fn().mockResolvedValue({ ...bootstrap, busy: true, activeTask: quick }),
+    readiness: vi.fn().mockResolvedValue(readiness('web')), targets: vi.fn().mockResolvedValue(targets('web')),
+    cases: vi.fn().mockResolvedValue(cases('web')), runSnapshot: vi.fn(), startRun: vi.fn(),
+  } as unknown as ControlPlaneClient;
+  const { result, rerender } = renderHook(({ active }) => useDeviceWorkspace({ ...deviceContext, active, onWorkspaceChange }, client), { initialProps: { active: true } });
+  await waitFor(() => expect(result.current.bootstrap.state).toBe('ready'));
+  act(() => { result.current.setPlatform('web'); result.current.setGoal('Verify'); });
+  await waitFor(() => expect(result.current.readiness.state).toBe('ready'));
+  expect(result.current.canStart).toBe(false);
+  vi.mocked(client.bootstrap).mockResolvedValue(bootstrap);
+  if (trigger === 'activation') { rerender({ active: false }); rerender({ active: true }); }
+  else act(() => result.current.refresh());
+  await waitFor(() => expect(result.current.canStart).toBe(true));
+  expect(result.current.platform).toBe('web');
+  expect(result.current.goal).toBe('Verify');
+  expect(onWorkspaceChange).not.toHaveBeenCalled();
+  expect(client.runSnapshot).not.toHaveBeenCalled();
+  expect(client.startRun).not.toHaveBeenCalled();
+});
+
+it('treats Quick preparation as shared busy without replacing Manager workspace or adopting its task', async () => {
+  const onWorkspaceChange = vi.fn();
+  const quick = { ...runSnapshot(), workflow: 'quick-test', workspaceName: null, targetId: null, platform: 'macos', application: null, platformRevision: null };
+  const client = { bootstrap: vi.fn().mockResolvedValue({ ...bootstrap, busy: true, activeTask: quick }), runSnapshot: vi.fn(), readiness: vi.fn(), targets: vi.fn(), cases: vi.fn() } as unknown as ControlPlaneClient;
+  const { result } = renderHook(() => useDeviceWorkspace({ ...deviceContext, onWorkspaceChange }, client));
+  await waitFor(() => expect(result.current.bootstrap.state).toBe('ready'));
+  expect(onWorkspaceChange).not.toHaveBeenCalled();
+  expect(result.current.requestId).toBeNull();
+  expect(result.current.canStart).toBe(false);
+  expect(client.runSnapshot).not.toHaveBeenCalled();
+});
+
 it('uses shared Gemini readiness for Explore and AI Strict without submitting provider credentials', async () => {
   const ready = { ...readiness('web'), provider: { status: 'ready' as const, message: 'Google Gemini is ready.', action: '' } };
   const inventory = cases('web');

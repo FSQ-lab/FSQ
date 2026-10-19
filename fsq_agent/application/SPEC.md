@@ -12,7 +12,7 @@ Application may consume public APIs from `models`, `config`, `providers`, `ai_se
 
 The package exports transport-neutral operations and their Request, Result, Event, and Error contracts through `__init__.py`. The same symbols are available from their canonical resource modules so callers may depend on the narrow boundary they use. Operations are organized by resource domain rather than exposed through one generic `execute(command)` facade:
 
-- Workspace operations support the shared workspace precondition, platform target resolution, read-only runtime readiness coordination, and workspace initialization needed by adapters.
+- Workspace operations support the shared workspace precondition, platform target resolution, read-only runtime readiness coordination, workspace initialization, and Quick Test context/preparation needed by adapters.
 - Coding Agent operations support project-local installation of the package-owned host-neutral FSQ Agent Skill or the existing Codex custom-agent compatibility integration without requiring a registered Workspace.
 - Case operations support creating a Case from a Goal, testing an existing Case with optional suggestions, static formatting, and saving generated recordings.
 - Run operations support Workspace-scoped listing, stable detail, safe logs, historical inference, public evidence projection/comparison, artifact resolution, and offline exports.
@@ -54,11 +54,11 @@ Relationships require validated source identity, lineage, and digests, not order
 Application owns cross-module orchestration, shared request validation, workspace enforcement, operation-level event production, and consistent results/errors for all adapters. It delegates authoritative behavior to existing modules:
 
 - `agent` owns AI planning, model/tool orchestration, and dynamic verification.
-- `ai_services` owns visual assertion and read-only Case suggestion policy, service factories, and suggestion readiness; Application composes these services without SDK/model protocol knowledge.
+- `ai_services` owns visual assertion, read-only Case suggestion, and Quick Test intent analysis policy, service factories, and suggestion readiness; Application composes these services without SDK/model protocol knowledge.
 - `providers` owns supplier authentication/configured access and readiness; it does not own assertion or suggestion business logic.
 - `execution` owns complete dynamic/deterministic run coordination, Case lifecycle semantics, cancellation/teardown ordering, and candidate Case recording.
 - `case_dsl` owns Case parsing, static validation, normalization, canonical serialization, and deterministic-step adaptation.
-- `environments` owns host support, read-only runtime readiness, and Web executable discovery.
+- `environments` owns host support, read-only runtime readiness, bounded application discovery, and Web executable discovery.
 - `core` owns capability execution, runtime-secret handling, evidence policy, and Harness/Driver routing.
 - `report` owns transformation of persisted execution facts into reports and failure analysis.
 - concrete drivers own platform automation and backend-error normalization.
@@ -112,6 +112,32 @@ For Android and macOS, Doctor projects Environments-owned prerequisite facts wit
 
 Doctor requests Config inspection with target-path validation deferred to Environments. A missing or unusable application does not prevent independent host prerequisites from being reported; malformed or identity-mismatched platform documents remain configuration errors and cannot authorize target inspection.
 
+### Quick Test Context And Preparation
+
+Quick Test operations belong to the public Workspace resource boundary and canonical Workspace contracts. Context discovery accepts the selected platform and optional device/browser identity without requiring a registered Workspace or application target. It coordinates existing Provider readiness and platform runtime discovery without inference, mutation, installation, or Driver construction. Application-dependent checks remain explicitly pending identification rather than ready or failed; platform/device/Provider failures retain their own facts.
+
+Quick Test context reuses the shared Doctor/platform-diagnosis coordination and Environments prerequisite authorities consumed by Case Manager. Its result preserves applicable prerequisite identities, status/message/action, safe commands, command-readiness facts, and check time for the existing frontend preflight components. Target-independent operation is an explicit shared diagnostic context, not a second Quick Test diagnostic engine or a fabricated runnable target. Only checks that depend on the unresolved application or unprepared dedicated Workspace are pending; unrelated `not_applicable`, unavailable, and error facts keep their original meanings. Start eligibility uses these shared applicable prerequisites while allowing the pending identification/preparation steps to run. Configured-target Case Manager diagnosis and final execution preflight retain their existing requirements.
+
+Preparation accepts the current goal, selected platform, applicable device/browser identity, and trusted user-config-root context. It resolves Provider access and selected-platform policy without a dummy target or runnable Workspace, invokes the public AI Services intent analyzer, and validates the required runtime target through Environments. Analysis identifies the requested application, supplied site, or Web search subject and whether the goal supplies enough intent for actions and a checkable outcome; it is not an execution plan or evidence of success. Empty or insufficient input, unresolved required scope, zero/multiple matches within a required target lookup, failed discovery, and invalid/unavailable model output are distinct terminal failures. No application launch, Driver construction, UI action, or dynamic Run allocation occurs before intent and applicable target/runtime checks succeed; an accepted address-free search does not require its result website to be known first.
+
+Android binds package existence and runtime validation to the selected online authorized device. Web independently validates the selected browser channel and executable. Address analysis distinguishes valid explicit HTTP(S) addresses, an address-free goal, and malformed or unsupported supplied navigation addresses. Invalid supplied addresses fail before inference or execution and cannot be converted into a search fallback. For an explicit-address goal, the existing URL, provenance, and multi-address selection rules apply; multiple navigation addresses within a clear single-site test do not by themselves imply multiple application targets. A named application or site alone does not authorize inventing its domain.
+
+An address-free Web goal is accepted only when the existing intent analysis identifies a clear search/discovery objective with a named search subject and a checkable result. Application preserves the original goal, validates the browser through the existing runtime service, and explicitly sets both preparation and frozen `harness.web.base_url` to `None`. It does not inherit a prior Workspace/preset URL, choose a fixed search engine, insert a guessed website, or disguise a system-selected URL as an explicit reference. The existing Agent owns search navigation after execution begins. A goal with a valid supplied address is not changed into an address-free request.
+
+`QuickTestPrepareResult` carries a transport-neutral `requires_web_search_evidence` flag, true only for the accepted URL-free Web search path and false otherwise. This requirement is forwarded into the shared Execution request, not exposed as a browser-selectable mode or bypass. The safe application summary identifies the search subject or Web search context, not a fabricated site URL. The discovered website address remains a result of execution rather than a replacement Workspace/browser target.
+
+Native lookup accepts an explicit identity/path or the model's typed inferred identity for the application named in the current prompt. Both scope concrete validation to that reference while retaining distinct explicit/inferred provenance. When neither supplies a concrete identity, existing bounded local name discovery may resolve one; no result or multiple results terminate the request.
+
+An inferred Android package may be validated directly against installed packages without a resolved/localized application label. An inferred macOS bundle/path or Windows executable path is likewise checked through existing platform identity and availability rules. Quick Test does not require a complete installed-name catalog or independently prove the model's application-name mapping. Ambiguity reported by intent analysis still fails, and multiple candidates actually returned for the scoped identity/reference cannot be narrowed by choosing the first or requesting a replacement inference. Missing, invalid, unavailable, or failed validation never falls back to another identity. Successful installation/readiness checks are not evidence that the semantic interpretation was correct.
+
+Only a fully validated target may initialize, add, or update the selected platform of the dedicated Workspace named `quick-test` at `<user-config-root>/quick-test`. An existing entry must match both the case-insensitive name and exact normalized root. A conflicting name/root, unrelated nonempty directory, unsafe path, unavailable registered identity, or unwritable location fails without adoption, replacement, numeric renaming, nested-root creation, or fallback to another Workspace. The user configuration root itself is never a Workspace root.
+
+Application uses Config's ordinary registered layout, complete target validation, revision-checked platform update, and persistence/rollback authority. It preserves the selected platform's private env and all unrelated platform files, Cases, knowledge, history, and Provider configuration; it never implements an independent YAML writer. First use creates only the selected platform after readiness succeeds. A later valid goal may update that platform's target, with no change to other registered Workspaces. An invalid goal or failed target resolution cannot fall back to the prior target or use prior prompts as missing current intent.
+
+The preparation result supplies validated registered identity, exact platform revision, selected target, safe application summary, and resolved settings for existing Explore preparation. Execution consumes a frozen copy; later platform edits or prompts cannot retarget an active task. Preparation and start are serialized by the adapter's existing single-task reservation, not an Application-owned queue. Concurrent workspace mutations retain Config's revision-conflict behavior and process-local workspace transaction limits; cross-process execution coordination is not supplied by Quick Test.
+
+Application delegates prompt interpretation to AI Services, local candidate facts to Environments, persistence to Config, and real testing to Execution/Agent. It does not import an adapter runtime, add a model/tool loop, expose installed-app inventories to browser clients, or send unrestricted local inventories to inference. Local filtering precedes any use of necessary candidate metadata.
+
 ### Registered-platform diagnosis
 
 `diagnose_registered_platform` and its immutable `RegisteredPlatformDoctorRequest` are public Application exports for explicitly selected registered Workspace diagnosis. The request supplies a Workspace name and platform; an optional user-config root is a trusted composition input and is not accepted from browser requests. Application resolves the registered root through Config and returns a `DoctorResult` containing only the requested platform. It shares component checks, ordered prerequisite facts, command dependency rules, and safe errors with CLI Doctor. CLI Doctor retains its exact-current-root, all-configured-platform behavior.
@@ -139,7 +165,8 @@ Control Plane startup diagnoses the exact Android settings copy after applying t
 
 - `__init__.py`: Complete convenience exports for the public Application API.
 - `contracts/`: Canonical transport-neutral Request, Result, Event, Error, summary, and machine-record contracts grouped by resource concern.
-- `workspace.py`: Public Workspace operation boundary and private Workspace orchestration helpers.
+- `workspace.py`: Public Workspace and Quick Test context/preparation boundary and private orchestration helpers.
+- `_quick_test.py`: implementation of exported `get_quick_test_context` and `prepare_quick_test`; canonical `contracts/workspace.py` supplies `QuickTestContextRequest`, `QuickTestContextResult`, `QuickTestPrepareRequest`, `QuickTestPrepareResult`, `QuickTestCheck`, and `QuickTestChoice`.
 - `coding_agents.py`: Public project-local Coding Agent integration installation boundary and explicit integration-kind dispatch.
 - `_coding_skill_install.py`: Private host-neutral Agent Skill resource validation and guarded project-local installation.
 - `_codex_install.py`: Private Codex compatibility resource rendering, validation, managed-block merge, and guarded file replacement helpers.
@@ -149,11 +176,14 @@ Control Plane startup diagnoses the exact Android settings copy after applying t
 - `providers.py`: Public Provider operation boundary.
 - `environments.py`: Public Environment operation boundary.
 - `doctor.py`: Public Workspace Doctor operation and aggregation boundary.
+- `contracts/doctor.py`: also exports `PlatformDiagnosticContext`; shared platform diagnosis carries context-only identification/preparation verdicts and check time, omitted from default configured-target serialization.
 - Private `_*.py` files may support these public modules but are not imported across package boundaries.
 
 ## Error Handling
 
 Application normalizes expected operation failures into stable application Errors and preserves safe structured details. It never exposes secrets, hidden model reasoning, backend objects, transport status codes, or tracebacks. Adapters map Application Errors to exit codes, HTTP statuses, and presentation text.
+
+Quick Test failures distinguish insufficient prompt, missing/ambiguous application, invalid Web address, discovery unavailable/error, intent inference failure, environment failure, Workspace conflict, and persistence failure. A failed query is not a successful empty inventory, and a malformed model response is not an insufficient-prompt verdict. No failure requests clarification, substitutes an application, silently retries execution, or reports a test verdict before testing.
 
 Provider configuration/status results expose optional Kimi region only when the active/configured Provider is Kimi. Region is safe identity; API keys, endpoints, and discovery payloads are not Application result facts.
 

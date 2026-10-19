@@ -1,7 +1,29 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PreflightStatus } from './PreflightStatus';
 import type { ReadinessResponse } from '../../../api/types';
+import { quickDiagnostics } from '../../../test/quickTestFixtures';
+
+it('scopes heading relationships across mounted Manager and Quick preflights', () => {
+  const { container } = render(<>
+    <div hidden inert><PreflightStatus macos mode="explore" loading={false} diagnostics={mac} /></div>
+    <PreflightStatus mode="explore" loading={false} pendingContext={{ platform: 'macos', diagnostics: quickDiagnostics() }} />
+  </>);
+  const ids = [...container.querySelectorAll('[id]')].map(element => element.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  const visible = screen.getByRole('region', { name: 'macOS environment' });
+  expect(visible.getAttribute('aria-labelledby')).toBe(within(visible).getByRole('heading', { name: 'macOS environment' }).id);
+});
+it('keeps pending Quick context neutral without changing configured Manager readiness', () => {
+  const diagnostics = quickDiagnostics();
+  const { rerender } = render(<PreflightStatus mode="explore" loading={false} pendingContext={{ platform: 'macos', diagnostics }} />);
+  expect(screen.getByText('Awaiting application identification')).toBeVisible();
+  expect(screen.queryByText('macOS needs attention')).not.toBeInTheDocument();
+  expect(screen.getByText('Not applicable')).toBeVisible();
+  rerender(<PreflightStatus macos mode="explore" loading={false} diagnostics={mac} />);
+  expect(screen.getByText('macOS is ready')).toBeVisible();
+  expect(screen.queryByText('Awaiting application identification')).not.toBeInTheDocument();
+});
 
 const ok={status:'ready' as const,message:'Ready',action:''};
 const mac:ReadinessResponse={workspaceName:'test',platformId:'macos',workspace:ok,platform:ok,provider:ok,target:ok,strict:ok,prerequisites:[],commands:{caseCreate:ok,caseTest:ok},checkedAt:'2026-09-07T00:00:00Z'};

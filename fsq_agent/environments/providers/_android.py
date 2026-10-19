@@ -44,9 +44,9 @@ def blocked(identifier, dependency):
     return fact(identifier, "not_applicable", f"Check blocked by {dependency}.", "android.dependency_unavailable", "Resolve the preceding requirement and recheck.")
 
 
-def _selection(devices, serial):
+def _selection(devices, serial, *, require_explicit_selection=False):
     online = [d for d in devices if d.state == "device"]
-    selected = next((d for d in devices if d.serial == serial), None) if serial else online[0] if len(online) == 1 else None
+    selected = next((d for d in devices if d.serial == serial), None) if serial else online[0] if len(online) == 1 and not require_explicit_selection else None
     connection = fact("device_connection", message="An online authorized device is connected.")
     selection = fact("device_selection", message="The exact device selection is available.", target_id=selected.serial if selected else serial or None)
     if serial and selected is None:
@@ -70,7 +70,7 @@ def _selection(devices, serial):
         selection = fact(
             "device_selection",
             "unavailable",
-            "Multiple online Android devices require explicit selection.",
+            "Select an online Android device explicitly." if require_explicit_selection else "Multiple online Android devices require explicit selection.",
             "android.selection_required",
             "Select a device in Control Plane, or make the connection unambiguous before running CLI Doctor.",
         )
@@ -98,7 +98,7 @@ def _installation(serial, app_id):
     )
 
 
-def android_prerequisites(settings):
+def android_prerequisites(settings, *, application_pending=False, require_explicit_selection=False):
     adb = fact("adb_cli", message="ADB is available on PATH.") if shutil.which("adb") else fact("adb_cli", "unavailable", ERRORS["adb_missing"][0], "android.adb_missing", ERRORS["adb_missing"][1])
     try:
         runtime = ANDROID_RUNTIME_PROVIDER.check()
@@ -119,6 +119,8 @@ def android_prerequisites(settings):
             "application_identifier", "error", "The Android application ID is invalid.", "android.application_identifier_invalid", "Edit the Android target configuration with a valid package ID."
         )
     )
+    if application_pending:
+        app = fact("application_identifier", "pending", "Application identification is pending.", "environment.application_pending")
     discovery = discover_android_devices()
     if discovery.error_code:
         code = discovery.error_code
@@ -131,6 +133,8 @@ def android_prerequisites(settings):
         )
         return (adb, dependency, server, blocked("device_connection", "ADB server"), blocked("device_selection", "device discovery"), app, blocked("application_installation", "device selection"))
     server = fact("adb_server", message="Existing ADB server answered without auto-start.")
-    selected, connection, selection = _selection(discovery.devices, settings.serial or "")
+    selected, connection, selection = _selection(discovery.devices, settings.serial or "", require_explicit_selection=require_explicit_selection)
     installation = _installation(selected.serial, app_id) if selection.status == "ready" and app.status == "ready" else blocked("application_installation", "device selection or application ID")
+    if application_pending and selection.status == "ready":
+        installation = fact("application_installation", "pending", "Application installation validation awaits identification.", "environment.application_pending")
     return (adb, dependency, server, connection, selection, app, installation)

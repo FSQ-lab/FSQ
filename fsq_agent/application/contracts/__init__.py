@@ -23,6 +23,7 @@ from fsq_agent.application.contracts.doctor import (
     DoctorResult,
     DoctorStatusDetail,
     DoctorWorkspaceSummary,
+    PlatformDiagnosticContext,
     RegisteredPlatformDoctorRequest,
 )
 from fsq_agent.application.contracts.environments import EnvironmentSummary
@@ -53,7 +54,18 @@ from fsq_agent.application.contracts.runs import (
     ShowRunResult,
 )
 from fsq_agent.application.contracts.shared import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode, ApplicationRecordType, event_record, result_record
-from fsq_agent.application.contracts.workspace import WorkspaceInitializeRequest, WorkspaceInitializeResult, WorkspaceRequest, WorkspaceResult
+from fsq_agent.application.contracts.workspace import (
+    QuickTestCheck,
+    QuickTestChoice,
+    QuickTestContextRequest,
+    QuickTestContextResult,
+    QuickTestPrepareRequest,
+    QuickTestPrepareResult,
+    WorkspaceInitializeRequest,
+    WorkspaceInitializeResult,
+    WorkspaceRequest,
+    WorkspaceResult,
+)
 
 __all__ = [
     "ApplicationError",
@@ -90,8 +102,15 @@ __all__ = [
     "GetRunReportResult",
     "ListRunsRequest",
     "ListRunsResult",
+    "PlatformDiagnosticContext",
     "ProviderConfigurationResult",
     "ProviderStatusResult",
+    "QuickTestCheck",
+    "QuickTestChoice",
+    "QuickTestContextRequest",
+    "QuickTestContextResult",
+    "QuickTestPrepareRequest",
+    "QuickTestPrepareResult",
     "ReadRunLogsRequest",
     "ReadRunLogsResult",
     "RegisteredPlatformDoctorRequest",

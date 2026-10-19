@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from fsq_agent.ai_services._ai_assertion import AIAssertionEvaluator
 from fsq_agent.ai_services._case_suggestion import CaseSuggestionAnalyzer
+from fsq_agent.ai_services._quick_test import QuickTestIntentAnalyzer
 from fsq_agent.providers import build_model_provider_session
 
 if TYPE_CHECKING:
@@ -19,6 +20,10 @@ def build_ai_assertion_evaluator(settings: Settings) -> AIAssertionEvaluator:
 
 def build_case_suggestion_analyzer(settings: Settings) -> CaseSuggestionAnalyzer:
     return CaseSuggestionAnalyzer(build_model_provider_session(settings), reasoning_effort=settings.agent_runtime.reasoning_effort)
+
+
+def build_quick_test_intent_analyzer(settings: Settings) -> QuickTestIntentAnalyzer:
+    return QuickTestIntentAnalyzer(build_model_provider_session(settings), reasoning_effort=settings.agent_runtime.reasoning_effort)
 
 
 def check_case_suggestion_readiness(settings: Settings) -> tuple[bool, str, str]:

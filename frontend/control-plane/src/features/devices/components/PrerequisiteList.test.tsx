@@ -2,6 +2,18 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PrerequisiteList } from './PrerequisiteList';
 
+it('renders pending context separately from failed and not-applicable prerequisite facts', () => {
+  render(<PrerequisiteList items={[
+    { identifier: 'application_installation', status: 'pending', message: 'Application pending', commands: [] },
+    { identifier: 'appium_mac2_driver', status: 'not_applicable', message: 'Driver check blocked', commands: [] },
+    { identifier: 'appium_cli', status: 'error', message: 'CLI check failed', commands: [] },
+  ]} />);
+  expect(screen.getByText('Pending')).toBeVisible();
+  expect(screen.getByText('Not applicable')).toBeVisible();
+  expect(screen.getByText('Check failed')).toBeVisible();
+  expect(screen.getByText('Application pending').closest('li')).toHaveClass('prerequisite-row--pending');
+});
+
 it('shows failures, distinguishes blocked checks, and collapses passed checks', async () => {
   const copy = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText:copy}});

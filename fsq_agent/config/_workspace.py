@@ -123,7 +123,7 @@ def _find_registry_entry(name: str, user_config_root: str | Path | None = None) 
         None,
     )
     if entry is None:
-        raise ConfigurationError("Workspace is not registered.", context={"name": name})
+        raise ConfigurationError("Workspace is not registered.", context={"name": name, "workspace_failure": "identity_unavailable"})
     return entry
 
 
@@ -236,10 +236,10 @@ def _load_registered_workspace_snapshot(
     except ConfigurationError as exc:
         raise ConfigurationError(
             "Workspace platform is unavailable.",
-            context={"name": entry.name, "platform": platform},
+            context={"name": entry.name, "platform": platform, "workspace_failure": "configuration_conflict"},
         ) from exc
     if workspace_root != entry.root_path.resolve() or config.name != entry.name:
-        raise ConfigurationError("Registered workspace identity does not match its configuration.", context={"name": entry.name})
+        raise ConfigurationError("Registered workspace identity does not match its configuration.", context={"name": entry.name, "workspace_failure": "identity_conflict"})
     if not (allow_unavailable_target and platform == "macos"):
         _validate_target_paths(config)
     return config, revision
@@ -257,17 +257,17 @@ def _select_workspace_root(selected: Path, name: str) -> tuple[Path, bool]:
     if not selected_is_empty and (final_root.exists() or final_root.is_symlink()):
         raise ConfigurationError(
             "Workspace final path already exists.",
-            context={"root_path": str(final_root)},
+            context={"root_path": str(final_root), "workspace_failure": "identity_conflict"},
         )
     return final_root, selected_is_empty
 
 
 def _require_unregistered_workspace(name: str, root: Path, registered: Sequence[WorkspaceRegistryEntry]) -> None:
     if any(entry.name.casefold() == name.casefold() for entry in registered):
-        raise ConfigurationError("A workspace with this name is already registered.", context={"name": name})
+        raise ConfigurationError("A workspace with this name is already registered.", context={"name": name, "workspace_failure": "identity_conflict"})
     normalized_root = os.path.normcase(str(root.resolve()))
     if any(os.path.normcase(str(entry.root_path.resolve())) == normalized_root for entry in registered):
-        raise ConfigurationError("This workspace path is already registered.", context={"root_path": str(root)})
+        raise ConfigurationError("This workspace path is already registered.", context={"root_path": str(root), "workspace_failure": "identity_conflict"})
 
 
 def create_workspace(
@@ -277,13 +277,24 @@ def create_workspace(
     platforms: Sequence[WorkspacePlatformCreateInput],
     user_config_root: str | Path | None = None,
 ) -> WorkspaceStatus:
+    return _create_workspace(selected_path=selected_path, name=name, platforms=platforms, user_config_root=user_config_root)
+
+
+def _create_workspace(
+    *,
+    selected_path: Path,
+    name: str,
+    platforms: Sequence[WorkspacePlatformCreateInput],
+    user_config_root: str | Path | None = None,
+    exact_root: bool = False,
+) -> WorkspaceStatus:
     if not platforms:
         raise ConfigurationError("Workspace requires at least one platform configuration.")
     if len({platform.platform for platform in platforms}) != len(platforms):
         raise ConfigurationError("Workspace platform configurations must be unique.")
     selected = selected_path.expanduser()
     if not selected.is_absolute() or selected.is_symlink() or not selected.is_dir():
-        raise ConfigurationError("Workspace selected path must be an existing directory.", context={"selected_path": str(selected)})
+        raise ConfigurationError("Workspace selected path must be an existing directory.", context={"selected_path": str(selected), "workspace_failure": "unsafe_root"})
     selected = selected.resolve()
     try:
         validation_configs = [
@@ -306,6 +317,8 @@ def create_workspace(
     created_paths: list[Path] = []
     with _WRITE_LOCK:
         try:
+            if exact_root and next(selected.iterdir(), None) is not None:
+                raise ConfigurationError("The exact workspace root must be empty.", context={"workspace_failure": "identity_conflict"})  # noqa: TRY301 -- ordinary transaction rollback.
             final_root, selected_is_empty = _select_workspace_root(selected, normalized_name)
             registered = list_workspace_registry(user_config_root)
             _require_unregistered_workspace(normalized_name, final_root, registered)
@@ -340,6 +353,33 @@ def create_workspace(
     return inspect_registered_workspace(normalized_name, user_config_root)
 
 
+def create_workspace_at_root(
+    *,
+    root_path: Path,
+    name: str,
+    platforms: Sequence[WorkspacePlatformCreateInput],
+    user_config_root: str | Path | None = None,
+) -> WorkspaceStatus:
+    """Create at exactly an absent or empty root, under the ordinary transaction."""
+    root = root_path.expanduser()
+    if not root.is_absolute() or any(parent.is_symlink() for parent in (root, *root.parents)) or not root.parent.is_dir():
+        raise ConfigurationError("The exact workspace root is unsafe or unavailable.", context={"workspace_failure": "unsafe_root"})
+    with _WRITE_LOCK:
+        created = False
+        try:
+            if not root.exists():
+                root.mkdir()
+                created = True
+            return _create_workspace(selected_path=root, name=name, platforms=platforms, user_config_root=user_config_root, exact_root=True)
+        except Exception:
+            if created:
+                try:
+                    root.rmdir()
+                except OSError:
+                    pass
+            raise
+
+
 def add_workspace_platform(
     *,
     name: str,
@@ -355,10 +395,10 @@ def add_workspace_platform(
         if config_path.exists() or config_path.is_symlink():
             raise ConfigurationError(
                 "Workspace platform configuration already exists.",
-                context={"name": entry.name, "platform": platform},
+                context={"name": entry.name, "platform": platform, "workspace_failure": "identity_conflict"},
             )
         if entry.root_path.is_symlink() or not entry.root_path.is_dir() or config_directory.is_symlink():
-            raise ConfigurationError("Workspace root is unavailable.", context={"name": entry.name})
+            raise ConfigurationError("Workspace root is unavailable.", context={"name": entry.name, "workspace_failure": "identity_unavailable"})
         try:
             candidate = WorkspaceConfig.model_validate(
                 {
@@ -464,21 +504,21 @@ def _validate_target_paths(config: WorkspaceConfig) -> None:
         return
     normalized = path.expanduser().resolve()
     if not normalized.exists():
-        raise ConfigurationError(f"{description} does not exist.", context={"path": str(normalized)})
+        raise ConfigurationError(f"{description} does not exist.", context={"path": str(normalized), "workspace_failure": "configuration_conflict"})
     if isinstance(target, (WebWorkspaceTarget, WindowsWorkspaceTarget)) and not normalized.is_file():
-        raise ConfigurationError(f"{description} must be a file.", context={"path": str(normalized)})
+        raise ConfigurationError(f"{description} must be a file.", context={"path": str(normalized), "workspace_failure": "configuration_conflict"})
     if isinstance(target, MacOSWorkspaceTarget) and not _is_macos_app_bundle_or_executable(normalized):
         raise ConfigurationError(
             "macOS application path must identify an existing app bundle or executable.",
-            context={"path": str(normalized)},
+            context={"path": str(normalized), "workspace_failure": "configuration_conflict"},
         )
     if isinstance(target, WebWorkspaceTarget) and not web_executable_matches_channel(target.browser_channel, normalized):
         raise ConfigurationError(
             "Web browser executable path does not match the configured Web preset channel.",
-            context={"path": str(normalized), "channel": target.browser_channel},
+            context={"path": str(normalized), "channel": target.browser_channel, "workspace_failure": "configuration_conflict"},
         )
     if isinstance(target, WebWorkspaceTarget) and os.name != "nt" and not os.access(normalized, os.X_OK):
-        raise ConfigurationError(f"{description} must be executable.", context={"path": str(normalized)})
+        raise ConfigurationError(f"{description} must be executable.", context={"path": str(normalized), "workspace_failure": "configuration_conflict"})
 
 
 def _restrict_workspace_config_permissions(path: Path) -> None:
@@ -489,11 +529,11 @@ def _restrict_workspace_config_permissions(path: Path) -> None:
 def _ensure_managed_directory(root: Path, directory: Path, created_paths: list[Path]) -> None:
     current = root
     if current.is_symlink() or not current.is_dir():
-        raise ConfigurationError("Workspace root is unavailable.", context={"root_path": str(root)})
+        raise ConfigurationError("Workspace root is unavailable.", context={"root_path": str(root), "workspace_failure": "identity_unavailable"})
     for part in directory.relative_to(root).parts:
         current /= part
         if current.is_symlink() or (current.exists() and not current.is_dir()):
-            raise ConfigurationError("Workspace managed directory is unavailable.", context={"path": str(current)})
+            raise ConfigurationError("Workspace managed directory is unavailable.", context={"path": str(current), "workspace_failure": "configuration_conflict"})
         if not current.exists():
             current.mkdir()
             created_paths.append(current)

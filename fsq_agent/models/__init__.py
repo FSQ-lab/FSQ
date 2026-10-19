@@ -9,6 +9,7 @@ from fsq_agent.models._agent_io import (
     ToolCallRecord,
 )
 from fsq_agent.models._ai_assertion import AIAssertionRequest, AIAssertionResult
+from fsq_agent.models._application_lookup import ApplicationCandidate, ApplicationLookupHint, ApplicationLookupResult
 from fsq_agent.models._core import (
     ANDROID_ACTION_DEFINITIONS,
     ANDROID_ACTION_DEFINITIONS_BY_NAME,
@@ -256,6 +257,9 @@ __all__ = [
     "AndroidTextAssertion",
     "AndroidUiTreeParams",
     "AndroidWorkspaceTarget",
+    "ApplicationCandidate",
+    "ApplicationLookupHint",
+    "ApplicationLookupResult",
     "CapabilityDefinition",
     "CapabilityExecutionResult",
     "CapabilityExecutorKind",

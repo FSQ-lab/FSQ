@@ -1,0 +1,14 @@
+.entry-chooser { max-width: 960px; margin: 0 auto; padding: clamp(24px, 8vw, 100px) 24px; }
+.entry-chooser h1 { margin: 0; font-size: var(--cp-type-page); line-height: var(--cp-leading-page); font-weight: 600; }
+.entry-chooser h2 { margin: 0; font-size: var(--cp-type-dialog); line-height: var(--cp-leading-dialog); font-weight: 600; }
+.entry-chooser p { color: var(--cp-muted); line-height: var(--cp-leading-body); }
+.entry-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; margin-top: 32px; }
+.entry-card { display: flex; flex-direction: column; align-items: start; gap: 12px; padding: 28px; border: 1px solid var(--cp-border); border-radius: var(--cp-card-radius); background: var(--cp-surface); }
+.entry-card p { flex: 1; margin: 0; }
+.entry-card .button { margin-top: 12px; width: 100%; }
+.cp-back-to-start { margin-left: auto; flex-shrink: 0; color: var(--cp-muted); font-size: var(--cp-type-label); padding: 8px; }
+.cp-titlebar:has(.cp-back-to-start) { flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .entry-cards { grid-template-columns: minmax(0, 1fr); }
+  .entry-card { padding: 20px; }
+}

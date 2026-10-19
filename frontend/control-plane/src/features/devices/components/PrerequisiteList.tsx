@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, TriangleAlert, Minus } from 'lucide-react';
+import { Check, Copy, TriangleAlert, Minus, Ellipsis } from 'lucide-react';
 import type { PrerequisiteRecord } from '../../../api/types';
 
 const labels: Record<string,string> = {adb_cli:'ADB CLI',uiautomator2_runtime:'uiautomator2 dependency',adb_server:'Existing ADB server',device_connection:'Device connection and authorization',device_selection:'Device selection',application_identifier:'Application ID',application_installation:'Application installation',xcode_installation:'Full Xcode',xcode_developer_directory:'Xcode developer directory',appium_cli:'Appium CLI',appium_mac2_driver:'Appium Mac2 driver',appium_endpoint:'Appium endpoint',application_path:'Application path',bundle_identifier:'Bundle identifier'};
@@ -49,7 +49,7 @@ export function PrerequisiteList({items}: {items: readonly PrerequisiteRecord[]}
   const passed = items.filter(item=>item.status==='ready');
   const remaining = items.filter(item=>item.status!=='ready');
   const rows = (values:readonly PrerequisiteRecord[]) => <ul className="prerequisite-list">{values.map(item=><li key={item.identifier} className={'prerequisite-row prerequisite-row--'+item.status}>
-    <div className="prerequisite-heading"><strong>{labels[item.identifier] || item.identifier.replaceAll('_',' ')}</strong><span>{item.status==='ready'?<Check aria-hidden="true"/>:item.status==='not_applicable'?<Minus aria-hidden="true"/>:<TriangleAlert aria-hidden="true"/>}{item.status==='not_applicable'?'Not applicable':item.status==='ready'?'Ready':item.status==='error'?'Check failed':'Needs attention'}</span></div>
+    <div className="prerequisite-heading"><strong>{labels[item.identifier] || item.identifier.replaceAll('_',' ')}</strong><span>{item.status==='ready'?<Check aria-hidden="true"/>:item.status==='pending'?<Ellipsis aria-hidden="true"/>:item.status==='not_applicable'?<Minus aria-hidden="true"/>:<TriangleAlert aria-hidden="true"/>}{item.status==='pending'?'Pending':item.status==='not_applicable'?'Not applicable':item.status==='ready'?'Ready':item.status==='error'?'Check failed':'Needs attention'}</span></div>
     <p>{item.message}</p>{item.status!=='ready' && item.action && <p>{item.action}</p>}
     {item.commands.map(command=><div className="prerequisite-command" key={command}><code>{command}</code><CommandCopyButton command={command} /></div>)}
   </li>)}</ul>;

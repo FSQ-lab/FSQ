@@ -4,6 +4,16 @@ import userEvent from '@testing-library/user-event';
 import { controlPlaneClient } from '../api/controlPlaneClient';
 import { ControlPlaneApp } from './ControlPlaneApp';
 
+it('unmounts inactive Manager Settings so the other entry owns the single visible Provider form', async () => {
+  const { rerender } = render(<ControlPlaneApp />);
+  await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
+  expect(screen.getByText('Config content')).toBeVisible();
+  rerender(<ControlPlaneApp active={false} />);
+  expect(screen.queryByText('Config content')).not.toBeInTheDocument();
+  rerender(<ControlPlaneApp active />);
+  expect(screen.getByText('Config content')).toBeVisible();
+});
+
 vi.mock('../api/controlPlaneClient', () => ({
   controlPlaneClient: { workspaces: vi.fn().mockResolvedValue({ workspaces: [] }), config: vi.fn().mockResolvedValue({ configured: false, provider: null }), configStatus: vi.fn().mockResolvedValue({ configured: false, provider: null, modelName: null, sessionStatus: 'not_configured', authenticated: false, message: 'Not configured.' }) },
   toApiError: vi.fn((error) => error),

@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from fsq_agent.execution import RunLifecycleService
 from fsq_agent.models import ReportGenerationError
@@ -28,6 +28,7 @@ _REPLAY_TOTAL_LIMIT_BYTES = 64 * 1024 * 1024
 _SECRET_PATTERN = re.compile(r"(?i)((?:bearer|basic)\s+|(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|id[_ -]?token|client[_ -]?secret|token)[=:]\s*)[^\s,;]+")
 _WINDOWS_PATH_PATTERN = re.compile(r"(?i)(?<![\w])(?:[a-z]:[\\/]|\\\\)[^\r\n\t\"'<>|]+")
 _POSIX_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^/\s]+/)+[^\s,;:)\]}]*")
+_HTTP_URL_PATTERN = re.compile(r"(?i)(?<![\w+./\\-])https?://[^\s<>\"'`]*")
 
 
 def configured_secret_values(settings: Any | None) -> tuple[str, ...]:
@@ -46,9 +47,34 @@ def safe_text(value: object, *, secret_values: tuple[str, ...] = (), limit: int 
     text = _SECRET_PATTERN.sub(lambda match: f"{match.group(1)}[redacted]", text)
     for secret in sorted({item for item in secret_values if item}, key=len, reverse=True):
         text = text.replace(secret, "[redacted]")
+    # Keep URL spans separate: filesystem patterns also match URL slashes.
+    # Credential masking precedes extraction so URL-shaped secrets cannot escape.
+    parts = []
+    previous = 0
+    for match in _HTTP_URL_PATTERN.finditer(text):
+        parts.append(_mask_local_paths(text[previous : match.start()]))
+        url = match.group()
+        safe_url = "[redacted URL]"
+        try:
+            parsed = urlsplit(url)
+            valid = parsed.hostname and parsed.port != 0 and "\\" not in url and not any(ord(char) < 32 or ord(char) == 127 for char in url)
+            decoded_url = unquote(url)
+            if valid and not any(secret and secret in decoded_url and secret not in url for secret in secret_values):
+                # Reuse the public redactor for userinfo and sensitive query keys,
+                # including encoded keys; do not import another module's helpers.
+                safe_url = RunLifecycleService.safe_text(url, secret_values)
+        except ValueError:
+            pass  # Invalid address text receives no path-redaction exemption.
+        parts.append(safe_url)
+        previous = match.end()
+    parts.append(_mask_local_paths(text[previous:]))
+    return "".join(parts)[:limit]
+
+
+def _mask_local_paths(text: str) -> str:
     text = _WINDOWS_PATH_PATTERN.sub("[local path]", text)
     text = _POSIX_PATH_PATTERN.sub("[local path]", text)
-    return text[:limit]
+    return text
 
 
 def safe_exception_message(exc: BaseException, *, settings: Any | None = None, unexpected: bool = False, limit: int = 500) -> str:

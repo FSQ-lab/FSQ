@@ -33,11 +33,15 @@ def _now() -> str:
 @dataclass
 class TaskRecord:
     request_id: str
-    workspace_name: str
+    workspace_name: str | None
     platform: str
-    target_id: str
+    target_id: str | None
     mode: str
     source: dict[str, Any]
+    workflow: Literal["case-manager", "quick-test"] = "case-manager"
+    application: str | None = None
+    platform_revision: str | None = None
+    error: dict[str, Any] | None = None
     status: TaskStatus = "preparing"
     started_at: str = field(default_factory=_now)
     completed_at: str | None = None
@@ -64,7 +68,7 @@ class ControlPlaneState:
         self._current_request_id: str | None = None
         self._tasks: dict[str, TaskRecord] = {}
 
-    def reserve(self, *, workspace_name: str, platform: str, target_id: str, mode: str, source: dict[str, Any]) -> str:
+    def reserve(self, *, workspace_name: str | None, platform: str, target_id: str | None, mode: str, source: dict[str, Any], workflow: Literal["case-manager", "quick-test"] = "case-manager") -> str:
         with self._condition:
             if self._current_request_id is not None:
                 raise BusyError("Another Control Plane task is active.")
@@ -76,10 +80,20 @@ class ControlPlaneState:
                 target_id=target_id,
                 mode=mode,
                 source=dict(source),
+                workflow=workflow,
             )
             self._current_request_id = request_id
             self._notify()
             return request_id
+
+    def bind_preparation(self, request_id: str, *, workspace_name: str, target_id: str, application: str, platform_revision: str) -> None:
+        with self._condition:
+            task = self._require(request_id)
+            task.workspace_name = workspace_name
+            task.target_id = target_id
+            task.application = application
+            task.platform_revision = platform_revision
+            self._notify()
 
     def update_source(self, request_id: str, values: dict[str, Any]) -> None:
         with self._condition:
@@ -186,12 +200,13 @@ class ControlPlaneState:
             task.evidence_available = True
             self._notify()
 
-    def finish(self, request_id: str, *, status: TaskStatus, summary: str, result: dict[str, Any] | None = None, report_available: bool = False) -> None:
+    def finish(self, request_id: str, *, status: TaskStatus, summary: str, result: dict[str, Any] | None = None, report_available: bool = False, error: dict[str, Any] | None = None) -> None:
         with self._condition:
             task = self._require(request_id)
             if task.status in _TERMINAL_STATUSES:
                 return
             task.result = result
+            task.error = dict(error) if error else None
             task.report_available = report_available
             self._mark_unfinished_strict_steps_incomplete(task)
             task.status = status
@@ -274,6 +289,7 @@ class ControlPlaneState:
             "events": [dict(event) for event in task.events if event["sequence"] > events_after],
             "activeStep": dict(task.active_step) if task.active_step else None,
             "result": dict(task.result) if task.result else None,
+            "error": dict(task.error) if task.error else None,
             "suggestedCaseName": (task.result or {}).get("suggestedCaseName"),
             "recordingDraft": (task.result or {}).get("recordingDraft"),
             "summary": task.summary,
@@ -287,6 +303,9 @@ class ControlPlaneState:
     def _summary(self, task: TaskRecord) -> dict[str, Any]:
         return {
             "requestId": task.request_id,
+            "workflow": task.workflow,
+            "application": task.application,
+            "platformRevision": task.platform_revision,
             "runId": task.run_id,
             "workspaceName": task.workspace_name,
             "platform": task.platform,

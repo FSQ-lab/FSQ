@@ -2,9 +2,13 @@
 # Licensed under the MIT License.
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from fsq_agent.application.contracts.doctor import DoctorPlatformResult
+from fsq_agent.config import Settings
+from fsq_agent.models import AndroidDevice, AndroidWorkspaceTarget, MacOSWorkspaceTarget, WebWorkspaceTarget, WindowsWorkspaceTarget
 
 
 class WorkspaceRequest(BaseModel):
@@ -43,3 +47,77 @@ class WorkspaceInitializeResult(BaseModel):
     platform: Literal["android", "web", "windows", "macos"]
     driver_status: Literal["ready"]
     browser_executable_path: Path | None = None
+
+
+class QuickTestContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    platform: Literal["android", "web", "windows", "macos"]
+    target_id: str | None = Field(default=None, strict=True, min_length=1, max_length=256)
+    user_config_root: Path | None = None
+
+    @model_validator(mode="after")
+    def applicable_selection(self):
+        if self.target_id is not None:
+            if self.platform == "android":
+                AndroidDevice(serial=self.target_id, state="device")
+            elif self.platform == "web":
+                if self.target_id not in get_args(WebWorkspaceTarget.model_fields["browser_channel"].annotation):
+                    raise ValueError("Unsupported browser channel.")
+            else:
+                raise ValueError("Desktop application identity comes only from the goal.")
+        return self
+
+
+class QuickTestPrepareRequest(QuickTestContextRequest):
+    goal: str = Field(strict=True, min_length=1, max_length=16000)
+
+    @field_validator("goal")
+    @classmethod
+    def nonblank_goal(cls, value):
+        if not value.strip() or any(ord(char) < 32 and char not in "\r\n\t" for char in value):
+            raise ValueError("A current goal is required.")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def explicit_selection(self):
+        if self.platform in {"android", "web"} and self.target_id is None:
+            raise ValueError("Explicit device or browser selection is required.")
+        return self
+
+
+class QuickTestCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str
+    status: Literal["ready", "unavailable", "error", "pending", "not_applicable"]
+    message: str
+    action: str = ""
+
+
+class QuickTestChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str
+    label: str
+    selectable: bool
+    status: Literal["ready", "unavailable", "error"]
+
+
+class QuickTestContextResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    platform: Literal["android", "web", "windows", "macos"]
+    target_id: str | None
+    can_start: bool
+    choices: tuple[QuickTestChoice, ...]
+    checks: tuple[QuickTestCheck, ...]
+    diagnosis: DoctorPlatformResult | None = None
+
+
+class QuickTestPrepareResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    workspace_name: str
+    root_path: Path
+    platform_revision: str
+    target_id: str
+    target: AndroidWorkspaceTarget | WebWorkspaceTarget | WindowsWorkspaceTarget | MacOSWorkspaceTarget
+    application: str
+    settings: Settings = Field(exclude=True, repr=False)
+    requires_web_search_evidence: bool = False

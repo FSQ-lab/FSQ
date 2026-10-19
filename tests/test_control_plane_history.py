@@ -4,7 +4,176 @@
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
+
 from fsq_agent.control_plane import ControlPlaneServer, ControlPlaneServerOptions
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "access%5F%74oken=AUDIT_SENTINEL",
+        "access%5F%74oken=AUDIT_SENTINEL?part=private",
+        "client%5Fsecret=AUDIT_SENTINEL&state=public",
+        "/callback?access%5F%74oken=AUDIT_SENTINEL&state=public",
+        "/callback?access%5F%74oken=AUDIT_SENTINEL&token=SECOND_PRIVATE",
+        "/route?sig=AUDIT_SENTINEL",
+    ],
+)
+def test_public_redaction_boundary_masks_encoded_fragment_credentials(fragment):
+    from fsq_agent.execution import RunLifecycleService
+
+    url = f"https://example.test/callback?q=FSQ%20github#{fragment}"
+    for redact in (RunLifecycleService.safe_text, RunLifecycleService.safe_value, RunLifecycleService.safe_source_text):
+        result = redact(url)
+        assert "AUDIT_SENTINEL" not in result
+        assert "SECOND_PRIVATE" not in result
+        assert "https://example.test/callback?q=FSQ%20github#" in result
+
+
+@pytest.mark.parametrize("fragment", ["installation", "access_token", "token", "/docs/getting-started?tab=python", "section=public&tab=examples", "section%20one"])
+def test_public_redaction_boundary_preserves_benign_fragments(fragment):
+    from fsq_agent.execution import RunLifecycleService
+
+    url = f"https://example.test/docs?q=FSQ%20github#{fragment}"
+    assert RunLifecycleService.safe_text(url) == url
+
+
+@pytest.mark.parametrize("fragment", ["access%5F%74oken=AUDIT_SENTINEL", "/callback?access%5F%74oken=AUDIT_SENTINEL&state=public"])
+async def test_control_plane_event_and_terminal_redact_unknown_fragment_credentials(tmp_path, monkeypatch, fragment):
+    import json
+
+    from fsq_agent.adapters.control_plane._execution import PreparedRun, _run_explore
+    from fsq_agent.adapters.control_plane._state import ControlPlaneState
+    from fsq_agent.config import Settings
+    from fsq_agent.models import DynamicAgentOutcome, RunEvent, VerificationResult
+
+    url = f"https://example.test/callback#{fragment}"
+
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, **kwargs):
+            event_sink(RunEvent(run_id=context.run_id, task_id=task.id, type="run_started", title="Browser result", message=url))
+            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status="success", summary=url))
+
+    settings = Settings(harness={"platform": "web"})
+    settings.workspace.root_dir = tmp_path
+    settings.output.runs_dir = tmp_path / ".fsq/runs/web"
+    settings.agent_runtime.user_config_root = tmp_path / "user"
+    state = ControlPlaneState()
+    request_id = state.reserve(workspace_name="quick-test", platform="web", target_id="chrome", mode="explore", source={"goal": "Search FSQ"})
+    prepared = PreparedRun(request_id, settings, "quick-test", "revision", "explore", "chrome", goal="Search FSQ")
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.FsqAgent.from_settings", lambda *args: Agent())
+    await _run_explore(prepared, state)
+    snapshot = state.snapshot(request_id)
+    assert snapshot["status"] == "success"
+    assert snapshot["terminal"]
+    assert snapshot["summary"].startswith("https://example.test/callback#")
+    assert "AUDIT_SENTINEL" not in json.dumps(snapshot)
+    assert any(event["message"].startswith("https://example.test/callback#") for event in snapshot["events"])
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Found https://fsq-lab.github.io/FSQ/",
+        "Source: https://github.com/FSQ-lab/FSQ",
+        "Official site: (https://fsq-lab.github.io/FSQ/).",
+        "See https://example.test/a-/b.c/(d)/?q=FSQ%20github&lang=zh-CN#links.",
+        "http://localhost:8080/search?q=FSQ&next=%2Fdocs%2F",
+        "https://[::1]:8443/path/",
+    ],
+)
+def test_safe_text_preserves_normal_http_urls_and_punctuation(message):
+    from fsq_agent.adapters.control_plane._evidence import safe_text
+
+    assert safe_text(message) == message
+
+
+@pytest.mark.parametrize("path", ["/Users/alice/private/run.json", r"C:\Users\alice\private\run.json", r"\\host\private\run.json"])
+@pytest.mark.parametrize("url_first", [False, True])
+def test_safe_text_preserves_url_but_masks_local_paths_in_same_message(path, url_first):
+    from fsq_agent.adapters.control_plane._evidence import safe_text
+
+    url = "https://github.com/FSQ-lab/FSQ"
+    message = f"Found {url}; saved {path}" if url_first else f"Saved {path}; found {url}"
+    result = safe_text(message)
+    assert url in result
+    assert "[local path]" in result
+    assert "alice" not in result
+    assert "private" not in result
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:URL_PRIVATE@example.test/docs/",
+        "https://example.test/docs/?password=URL_PRIVATE",
+        "https://example.test/docs/?access_token=URL_PRIVATE",
+        "https://example.test/docs/?access%5Ftoken=URL_PRIVATE",
+        "https://example.test/docs/?signature=URL_PRIVATE",
+        "https://example.test/docs/?cookie=URL_PRIVATE",
+        "https://example.test/docs/#access_token=URL_PRIVATE",
+    ],
+)
+def test_safe_text_does_not_expose_url_credentials_or_sensitive_values(url):
+    from fsq_agent.adapters.control_plane._evidence import safe_text
+
+    result = safe_text(f"Found {url}")
+    assert "URL_PRIVATE" not in result
+    assert "user:" not in result
+    assert "https://example.test/docs/" in result
+
+
+def test_safe_text_keeps_private_values_and_header_redaction_with_urls():
+    from fsq_agent.adapters.control_plane._evidence import safe_text
+
+    result = safe_text(
+        "Found https://fsq-lab.github.io/FSQ/\nPrivate https://example.test/PRIVATE_VALUE/path\nAuthorization: Bearer HEADER_PRIVATE\nCookie: session=COOKIE_PRIVATE\nOther api_key=KEY_PRIVATE",
+        secret_values=("PRIVATE_VALUE",),
+    )
+    assert "https://fsq-lab.github.io/FSQ/" in result
+    for secret in ("PRIVATE_VALUE", "HEADER_PRIVATE", "COOKIE_PRIVATE", "KEY_PRIVATE"):
+        assert secret not in result
+    assert "[redacted]" in result
+
+
+@pytest.mark.parametrize("prefix", ["api_key=", "access_token=", "Bearer ", "Basic "])
+def test_safe_text_masks_credentials_even_when_the_value_is_a_url(prefix):
+    from fsq_agent.adapters.control_plane._evidence import safe_text
+
+    assert "private.example" not in safe_text(prefix + "https://private.example/secret/")
+
+
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    [
+        ("private https://example.test/secret/", "private https://example.test/secret/"),
+        ("https://example.test/PRIVATE%20VALUE/", "PRIVATE VALUE"),
+    ],
+)
+def test_safe_text_does_not_leak_private_values_across_url_boundaries(message, secret):
+    from fsq_agent.adapters.control_plane._evidence import safe_text
+
+    result = safe_text(message, secret_values=(secret,))
+    assert "example.test" not in result
+    assert "PRIVATE%20VALUE" not in result
+
+
+@pytest.mark.parametrize("url", ["https://", "https://[broken/path/", "https://example.test:bad/path/", r"https://example.test\private\path"])
+def test_safe_text_does_not_exempt_invalid_http_addresses_from_redaction(url):
+    from fsq_agent.adapters.control_plane._evidence import safe_text
+
+    result = safe_text(url)
+    assert result != url
+
+
+@pytest.mark.parametrize("value", ["file:///Users/alice/private/run.json", "ftp://host/private/run.json", r"file:C:\Users\alice\private\run.json"])
+def test_safe_text_does_not_exempt_unsupported_schemes_from_path_masking(value):
+    from fsq_agent.adapters.control_plane._evidence import safe_text
+
+    result = safe_text(value)
+    assert "[local path]" in result
+    assert "private" not in result
 
 
 def test_history_requires_local_access_before_application_calls(monkeypatch):
@@ -331,7 +500,7 @@ def test_explore_failure_before_first_event_preserves_allocated_identity(tmp_pat
 
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.FsqAgent.from_settings", lambda *a, **kw: object())
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.DynamicExecutionService.execute", fail)
-    asyncio.run(_run_explore(SimpleNamespace(settings=settings, request_id=request, goal="g"), state))
+    asyncio.run(_run_explore(SimpleNamespace(settings=settings, request_id=request, goal="g", requires_web_search_evidence=False), state))
     assert state.snapshot(request)["runId"] == metadata.run_id
     assert state.snapshot(request)["status"] == "error"
 
@@ -370,7 +539,7 @@ def test_explore_processing_failure_keeps_frozen_outcome_and_report_action(tmp_p
 
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.FsqAgent.from_settings", lambda *a, **kw: object())
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.DynamicExecutionService.execute", fail)
-    asyncio.run(_run_explore(SimpleNamespace(settings=settings, request_id=request, goal="g"), state))
+    asyncio.run(_run_explore(SimpleNamespace(settings=settings, request_id=request, goal="g", requires_web_search_evidence=False), state))
     snapshot = state.snapshot(request)
     assert snapshot["runId"] == metadata.run_id
     assert snapshot["status"] == "success"

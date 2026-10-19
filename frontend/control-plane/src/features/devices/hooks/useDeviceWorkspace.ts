@@ -20,6 +20,7 @@ const emptyResource = <T,>(): RequestResource<T> => ({ state: 'idle', data: null
 const loadingResource = <T,>(previous: T | null = null): RequestResource<T> => ({ state: 'loading', data: previous, error: null });
 
 interface DeviceWorkspaceContext {
+  active?: boolean;
   workspaceName: string | null;
   platforms: readonly PlatformOption[];
   platformsReady?: boolean;
@@ -35,7 +36,7 @@ export type DevicesLaunchIntent =
   | { id: number; mode: 'diagnostic'; workspaceName: string; platform:'macos' };
 
 export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: ControlPlaneClient = controlPlaneClient) {
-  const { workspaceName, platforms, platformsReady = true, onWorkspaceChange, launchIntent, onLaunchIntentConsumed, onStartPendingChange } = context;
+  const { active: entryActive = true, workspaceName, platforms, platformsReady = true, onWorkspaceChange, launchIntent, onLaunchIntentConsumed, onStartPendingChange } = context;
   const [bootstrap, setBootstrap] = useState<RequestResource<BootstrapResponse>>(emptyResource);
   const [platform, setPlatformState] = useState<PlatformId | ''>('');
   const [targetId, setTargetId] = useState('');
@@ -58,10 +59,12 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const generationRef = useRef(0);
   const previousWorkspaceRef = useRef<string | null>(workspaceName);
+  const previousPlatformRef = useRef<PlatformId | ''>('');
   const discoveryControllerRef = useRef<AbortController | null>(null);
   const pendingCasePathRef = useRef<string | null>(null);
   const pendingDiagnosticWorkspaceRef = useRef<string | null>(null);
   const consumedLaunchIntentRef = useRef<number | null>(null);
+  const bootstrapController = useRef<AbortController | null>(null);
   const { snapshot, connection, error: streamError } = useRunStream(requestId, client);
 
   const loadAndroidDiagnosis = useCallback((selectedWorkspace: string, selectedTarget: string) => {
@@ -122,12 +125,15 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
     }).catch((error) => { if (applies()) setCases({ state: 'error', data: null, error: toApiError(error) }); });
   }, [client, loadAndroidDiagnosis]);
 
-  useEffect(() => {
+  const reconcileBootstrap = useCallback(() => {
+    bootstrapController.current?.abort();
     const controller = new AbortController();
-    setBootstrap(loadingResource());
-    void client.bootstrap(controller.signal).then((data) => {
+    bootstrapController.current = controller;
+    setBootstrap(previous => loadingResource(previous.data));
+    return client.bootstrap(controller.signal).then((data) => {
+      if (controller.signal.aborted) return;
       setBootstrap({ state: 'ready', data, error: null });
-      if (data.activeTask) {
+      if (data.activeTask && data.activeTask.workflow !== 'quick-test' && data.activeTask.workspaceName !== null && data.activeTask.targetId !== null) {
         onWorkspaceChange(data.activeTask.workspaceName);
         setPlatformState(data.activeTask.platform);
         setTargetId(data.activeTask.targetId);
@@ -135,8 +141,11 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
         setRequestId(data.activeTask.requestId);
       }
     }).catch((error) => { if (!controller.signal.aborted) setBootstrap({ state: 'error', data: null, error: toApiError(error) }); });
-    return () => controller.abort();
   }, [client, onWorkspaceChange]);
+  useEffect(() => {
+    if (entryActive) void reconcileBootstrap();
+    return () => bootstrapController.current?.abort();
+  }, [entryActive, reconcileBootstrap]);
 
   useEffect(() => {
     if (!launchIntent || bootstrap.state !== 'ready' || consumedLaunchIntentRef.current === launchIntent.id) return;
@@ -165,36 +174,44 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
     setPlatformState('');
   }, [bootstrap.data?.activeTask, bootstrap.state, launchIntent, onLaunchIntentConsumed, platforms, platformsReady, workspaceName]);
 
+  const managerTask = bootstrap.data?.activeTask?.workflow === 'quick-test' ? null : bootstrap.data?.activeTask;
   useEffect(() => {
-    const workspaceChanged = previousWorkspaceRef.current !== workspaceName;
-    previousWorkspaceRef.current = workspaceName;
     discoveryControllerRef.current?.abort();
     generationRef.current += 1;
-    setTargetId('');
-    setCasePath('');
+    diagnosisController.current?.abort();
+    diagnosisGeneration.current += 1;
     setReadiness(emptyResource());
     setTargets(emptyResource());
     setCases(emptyResource());
     setStartError(null);
+    // A missing authoritative projection during registry loading is not a removal.
+    // Keep only selection intent, never its prior readiness or discovery facts.
+    if (!platformsReady) return;
+    const workspaceChanged = previousWorkspaceRef.current !== workspaceName;
+    const platformChanged = previousPlatformRef.current !== platform;
+    previousWorkspaceRef.current = workspaceName;
+    previousPlatformRef.current = platform;
+    const clearSelection = () => { targetRef.current = ''; setTargetId(''); setCasePath(''); };
     if (workspaceChanged) pendingCasePathRef.current = null;
-    const activeTask = bootstrap.data?.activeTask;
+    const activeTask = managerTask;
     const restoringActiveTask = activeTask?.workspaceName === workspaceName && activeTask.platform === platform;
     const platformAvailable = Boolean(platform && platforms.some((item) => item.id === platform));
     const explicitDiagnosis = pendingDiagnosticWorkspaceRef.current === workspaceName && platforms.some(item=>item.id==='macos');
     if (!workspaceName || (workspaceChanged && !restoringActiveTask && !explicitDiagnosis) || (platform && !platformAvailable && !explicitDiagnosis)) {
       pendingDiagnosticWorkspaceRef.current=null;
+      clearSelection();
       setPlatformState('');
       return;
     }
     if (explicitDiagnosis && platform !== 'macos') {setPlatformState('macos');return;}
     pendingDiagnosticWorkspaceRef.current=null;
-    if (!platform) return;
-    loadDiscovery(workspaceName, platform, true);
+    if (!platform) { clearSelection(); return; }
+    loadDiscovery(workspaceName, platform, workspaceChanged || platformChanged);
     return () => discoveryControllerRef.current?.abort();
-  }, [bootstrap.data?.activeTask, loadDiscovery, platform, platforms, workspaceName]);
+  }, [managerTask?.requestId, loadDiscovery, platform, platforms, platformsReady, workspaceName]);
 
   useEffect(() => {
-    if (!snapshot) return;
+    if (!snapshot || snapshot.workflow === 'quick-test' || snapshot.workspaceName === null || snapshot.targetId === null) return;
     pendingCasePathRef.current = null;
     onWorkspaceChange(snapshot.workspaceName);
     setPlatformState(snapshot.platform);
@@ -210,7 +227,7 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
     setStartError(streamError);
     void client.bootstrap().then((data) => {
       setBootstrap({ state: 'ready', data, error: null });
-      if (data.activeTask) {
+      if (data.activeTask && data.activeTask.workflow !== 'quick-test' && data.activeTask.workspaceName !== null && data.activeTask.targetId !== null) {
         onWorkspaceChange(data.activeTask.workspaceName);
         setPlatformState(data.activeTask.platform);
         setTargetId(data.activeTask.targetId);
@@ -224,7 +241,7 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
   const controlsLocked = active || starting;
   const selectedTarget = targets.data?.targets.find((target) => target.id === targetId) ?? null;
   const selectedCase: CaseRecord | null = cases.data?.cases.find((item) => item.path === casePath) ?? null;
-  const commonReady = readiness.state === 'ready' && targets.state === 'ready'
+  const commonReady = platformsReady && readiness.state === 'ready' && targets.state === 'ready'
     && Boolean(workspaceName && platform)
     && readiness.data?.workspace.status === 'ready'
     && readiness.data?.platform.status === 'ready'
@@ -271,7 +288,14 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
     setTargetId(next);
     if (platform==='android' && workspaceName) loadAndroidDiagnosis(workspaceName,next);
   };
-  const refresh = () => { if (!controlsLocked && readiness.state!=='loading' && workspaceName && platform) {setStartError(null);loadDiscovery(workspaceName, platform, false);} };
+  const refresh = () => {
+    if (controlsLocked || !platformsReady) return;
+    void reconcileBootstrap();
+    if (readiness.state !== 'loading' && workspaceName && platform) {
+      setStartError(null);
+      loadDiscovery(workspaceName, platform, false);
+    }
+  };
   const start = async () => {
     if (!canStart || startPendingRef.current || !selectedTarget || !workspaceName || !platform) return;
     startPendingRef.current=true;
@@ -302,7 +326,7 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
     setSelectedStepId(null);
     return client.bootstrap().then((data) => {
       setBootstrap({ state: 'ready', data, error: null });
-      if (data.activeTask) {
+      if (data.activeTask && data.activeTask.workflow !== 'quick-test' && data.activeTask.workspaceName !== null && data.activeTask.targetId !== null) {
         onWorkspaceChange(data.activeTask.workspaceName);
         setPlatformState(data.activeTask.platform);
         setTargetId(data.activeTask.targetId);

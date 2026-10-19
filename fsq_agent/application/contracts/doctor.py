@@ -6,8 +6,32 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-DetailStatus = Literal["ready", "unavailable", "error", "not_applicable"]
-SummaryStatus = Literal["ready", "partial", "unavailable"]
+DetailStatus = Literal["ready", "unavailable", "error", "not_applicable", "pending"]
+SummaryStatus = Literal["ready", "partial", "unavailable", "pending"]
+
+
+class PlatformDiagnosticContext(BaseModel):
+    """Explicit unresolved dependencies for shared, target-independent diagnosis."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    platform: Literal["android", "web", "windows", "macos"]
+    application_pending: bool = False
+    workspace_pending: bool = False
+    require_explicit_selection: bool = False
+    target_id: str | None = Field(
+        default=None,
+        strict=True,
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9_.:@-]+$",
+        description="Requested Android selection scope, not proof of device availability.",
+    )
+
+    @model_validator(mode="after")
+    def _android_scope_only(self):
+        if self.target_id is not None and self.platform != "android":
+            raise ValueError("target_id is Android-only.")
+        return self
 
 
 class DoctorRequest(BaseModel):
@@ -74,6 +98,9 @@ class DoctorPlatformResult(BaseModel):
     prerequisites: tuple[DoctorPrerequisite, ...] = ()
     checks: DoctorChecks
     commands: DoctorCommands
+    identification: DoctorStatusDetail | None = Field(default=None, exclude_if=lambda value: value is None)
+    preparation: DoctorStatusDetail | None = Field(default=None, exclude_if=lambda value: value is None)
+    checked_at: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class DoctorWorkspaceSummary(BaseModel):

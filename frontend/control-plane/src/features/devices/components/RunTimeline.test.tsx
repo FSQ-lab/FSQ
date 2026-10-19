@@ -4,6 +4,20 @@ import userEvent from '@testing-library/user-event';
 import type { RunSnapshot } from '../../../api/types';
 import { RunTimeline } from './RunTimeline';
 
+it('shares expandable pending source without inventing a snapshot or changing default pre-allocation rendering', async () => {
+  const props = { snapshot: null, connection: 'idle', selectedStepId: null, resultHeadingRef: createRef<HTMLHeadingElement>(), onSelectStep: vi.fn(), onCancel: vi.fn(), onNewRun: vi.fn() };
+  const { rerender } = render(<RunTimeline {...props} />);
+  expect(screen.getByText('Preparing run details…')).toBeInTheDocument();
+  expect(screen.queryByText('Run source · Explore')).not.toBeInTheDocument();
+  const goal = 'Submitted goal with enough text to use the existing source disclosure. '.repeat(4).trim();
+  rerender(<RunTimeline {...props} variant="quick-test" pendingGoal={goal} />);
+  expect(screen.getByText(goal).closest('.run-source-summary')).not.toBeNull();
+  await userEvent.click(screen.getByRole('button', { name: 'Expand run source' }));
+  expect(screen.getByText(goal).closest('.run-source-summary')).toHaveClass('run-source-summary--expanded');
+  expect(screen.queryByRole('button', { name: /Cancel|New test|Save yaml/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('list')).not.toBeInTheDocument();
+});
+
 it('keeps truthful terminal timeline, separates terminal actions, and selects actions', async () => {
   const onSelectStep = vi.fn();
   const message = 'Navigation complete with enough detail to require the disclosure control. '.repeat(4);

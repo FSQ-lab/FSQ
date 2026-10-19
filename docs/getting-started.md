@@ -164,12 +164,12 @@ fsq providers status
 
 Alternatively run `fsq providers configure openai` for the official OpenAI API, `fsq providers configure deepseek` for the official DeepSeek Responses API, `fsq providers configure kimi` for the official China or Global Kimi API, or `fsq providers configure azure_openai` for an Azure deployment. Provider configuration is user-level, stored below `~/.fsq`, and shared with the local Control Plane. API-key Providers prompt privately for a key and offer eligible models; even a single model requires explicit selection.
 
-For browser configuration, run `fsq ui` and open **Settings**:
+For browser configuration, run `fsq ui`, choose **Quick Test** or **FSQ Case Manager**, and open their shared **Settings**:
 
 1. Choose **Add configuration** or **Change provider**, then **OpenAI**, **DeepSeek**, **Google Gemini**, or **Kimi**.
 2. For Kimi, explicitly choose **China** or **Global**. Enter an API key and select **Load models**. Select one offered model, then **Save changes**.
 3. Select **Test connection** to send a minimal request using the saved configuration.
-4. Return to **Home** to see the Provider summary, then open **Test Runner**, choose a Workspace/platform/target, and start an Explore task explicitly.
+4. In **Quick Test**, return to the goal form and explicitly start a test. In **FSQ Case Manager**, return to **Home** to see the Provider summary, then open **Test Runner**, choose a Workspace/platform/target, and start an Explore task explicitly.
 
 OpenAI always uses `https://api.openai.com/v1/` and the Responses API. Its picker offers general-purpose GPT major version 5 or later, excluding mini, nano, Codex, embedding, audio, realtime, image, search, transcription, and TTS variants. An empty list cannot be saved. Changing the key invalidates the list and selection; reload before saving. Azure instead requires a resource endpoint, **deployment name** (not necessarily an OpenAI model id), and API key.
 
@@ -218,6 +218,16 @@ fsq ui
 ```
 
 The installed frontend is served locally on `127.0.0.1:8879` by default.
+
+Choose **Quick Test** for exploration without Workspace setup. Configure the shared Provider in **Settings**, select a platform and the applicable device/browser, and describe the application or search subject, actions, and expected result. Web supports both a supplied URL, such as `Open https://example.com and verify that its heading is Example Domain`, and a clear address-free search goal, such as `Search FSQ on GitHub and find its official website`.
+
+Address-free Web searches reuse the existing blank-page browser startup and Agent navigation. FSQ does not add a search-engine setting or assume the website found by a previous test. The Agent follows your goal to search and inspect pages; supplied malformed or unsupported navigation addresses are rejected rather than turned into searches. Before an address-free search can be reported as successful, it must have actual browser activity and usable HTTP(S) page observations. A model-only answer or blank-browser startup is insufficient. Page/link evidence still needs to support the requested result, including any claim that a discovered URL is official.
+
+**Start Quick Test** prepares a dedicated registered Workspace at `~/.fsq/quick-test/` and starts exploration only after input, concrete target, and runtime checks pass. All Quick Tests share this Workspace; each run freezes its own target. The model can infer the named application's package ID, bundle ID, or executable path; explicit identifiers can also be written in the same prompt. FSQ validates that resolved identity through the selected platform without requiring a separate localized application-name mapping. It does not exhaustively rule out all same-named installed apps, and availability does not prove that the model understood your intended application correctly. Insufficient or ambiguous intent, zero/multiple results within the resolved target lookup, and discovery or model failures stop the request without clarification or automatic retry. Correct the prompt or environment and start again explicitly.
+
+Results use the existing timeline and evidence views. **Open report** opens the persistent report, and **New test** returns to the prompt. Quick Test has no Save Case action or Strict Replay mode. Leaving or refreshing the page does not cancel an active server task, and returning recovers the active Quick Test while the same local service is running. Restarting the service does not resume execution.
+
+Choose **FSQ Case Manager** for the complete Workspace, Case, history, and strict-replay workflows described elsewhere in this guide. The dedicated Quick Test Workspace is visible there. Existing Run report links still open the corresponding report directly.
 
 ## Next steps
 

@@ -1,4 +1,4 @@
-export type ControlPlanePageId = 'overview' | 'workspace' | 'devices' | 'runs' | 'config' | 'settings';
+export type ControlPlanePageId = 'overview' | 'workspace' | 'devices' | 'runs' | 'config' | 'settings' | 'quick-test';
 export type NavigationIcon = 'overview' | 'workspace' | 'devices' | 'runs' | 'config' | 'settings';
 
 export interface NavigationItem {
@@ -16,6 +16,11 @@ export const CONTROL_PLANE_NAVIGATION: readonly NavigationItem[] = [
   { id: 'workspace', label: 'Workspaces', icon: 'workspace', available: true, section: 'primary' },
   { id: 'config', label: 'Settings', icon: 'config', available: true, section: 'footer' },
 ] as const;
+
+export const QUICK_TEST_NAVIGATION: readonly NavigationItem[] = [
+  { id: 'quick-test', label: 'Quick Test', icon: 'devices', available: true, section: 'primary' },
+  { id: 'config', label: 'Settings', icon: 'config', available: true, section: 'footer' },
+];
 
 export interface WorkspaceNavigationItem {
   id: string;

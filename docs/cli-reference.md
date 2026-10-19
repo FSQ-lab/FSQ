@@ -21,9 +21,11 @@ FSQ installs `fsq` and the compatibility alias `fsq-agent`. Both invoke the same
 | `fsq case test --suggest` | Execute once, then analyze persisted facts. | Yes |
 | `fsq runs list/show/logs` | Query Workspace Run history without execution readiness. | Yes |
 | `fsq runs export RUN_ID` | Export JSON, JUnit, standalone HTML, or an evidence bundle. | Yes |
-| `fsq ui` | Start the local Control Plane. | No |
+| `fsq ui` | Start the local browser entry for Quick Test or FSQ Case Manager. | No |
 
 Except when creating an unregistered Workspace, Workspace commands use the exact current directory. They do not search ancestors or accept an alternate Workspace flag.
+
+`fsq ui` can start from any directory. Choose **Quick Test** in the browser for exploration using the automatically prepared `~/.fsq/quick-test/` Workspace, or **FSQ Case Manager** for the complete existing workflows. Both use the same **Settings**. Entry selection does not itself start a test, and there is no separate Quick Test CLI command. See [the browser workflow](getting-started.md#open-the-control-plane).
 
 Human output is for terminals. JSON produces one structured result. JSONL emits documented events and a terminal result where streaming applies. Invalid command requests use exit code 2; consume stable machine fields rather than human wording.
 

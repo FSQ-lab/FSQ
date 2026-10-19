@@ -127,7 +127,7 @@ def load_platform_settings(
             "Platform configuration does not match requested platform.",
             context={"platform": platform_id, "configured_platform": settings.harness.platform},
         )
-    return settings
+    return _apply_operator_environment(settings, platform_id)
 
 
 def load_workspace_platform_settings(

@@ -68,12 +68,12 @@ python -m pip install --upgrade fsq-agent
 fsq ui
 ```
 
-In **Settings**, configure the FSQ LLM Provider and explicitly select a model.
+Choose **Quick Test** for exploration using the automatic `~/.fsq/quick-test/` Workspace, or **FSQ Case Manager** for Workspace/Case management, history, and Strict Replay. Both share **Settings**, where you configure the FSQ LLM Provider and explicitly select a model.
 
-**First test.**
-1. Create or select a Workspace, and configure its platform and target as needed.
-2. In **Test Runner**, select the exact target.
-3. Describe a verifiable result, review the test setup, and start the test. Review the result first and, if FSQ returns a Case, review it unchanged before separately requesting any replay.
+1. Select the platform and, where applicable, the device or browser.
+2. Describe what to do and verify. For Web, provide a URL or a clear search goal, for example: `Search FSQ on GitHub and find its official website.` You do not need to know the result URL beforehand.
+3. Select **Start Quick Test**. The model identifies the application; FSQ validates the resolved target and environment before exploration. Unresolved intent, zero/multiple lookup results, and preparation failures stop the request without a follow-up dialogue. Target availability does not prove the model understood the application correctly.
+4. Review the result and evidence using **Open report**, or choose **New test**. Quick Test does not save Cases; in Case Manager, review any generated Case unchanged before separately requesting replay.
 
 ![FSQ Test Runner for describing a test goal](docs/media/01-describe-goal.png)
 

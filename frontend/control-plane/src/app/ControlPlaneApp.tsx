@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { ControlPlaneShell } from './shell/ControlPlaneShell';
 import type { ControlPlanePageId, WorkspaceNavigationItem } from './shell/navigation';
 import { controlPlaneClient, toApiError } from '../api/controlPlaneClient';
@@ -14,7 +14,11 @@ type DevicesLaunchRequest =
   | Omit<Extract<DevicesLaunchIntent, { mode: 'explore' }>, 'id'>
   | Omit<Extract<DevicesLaunchIntent, { mode: 'strict' }>, 'id'>;
 
-export function ControlPlaneApp() {
+export function ControlPlaneApp({ active = true, entryGuard, onBackToStart }: { active?: boolean; entryGuard?: MutableRefObject<() => boolean>; onBackToStart?: () => void } = {}) {
+  const activeRef = useRef(active);
+  const wasActive = useRef(active);
+  activeRef.current = active;
+  const [discardVersion, setDiscardVersion] = useState(0);
   const [activePage, setActivePageState] = useState<'overview' | 'workspace' | 'devices' | 'runs' | 'config'>(() => parseRunRoute(window.location.hash) ? 'runs' : 'overview');
   const [runRoute, setRunRoute] = useState<RunRoute>(() => parseRunRoute(window.location.hash) ?? {});
   const [configDirty, setConfigDirty] = useState(false);
@@ -112,11 +116,12 @@ export function ControlPlaneApp() {
   };
 
   useEffect(() => {
+    if (!active) return;
     const controller = new AbortController();
     void refreshWorkspaces(controller.signal);
     void refreshOverviewProvider(controller.signal);
     return () => controller.abort();
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     if (!focusCreatedWorkspace.current || !selectedWorkspaceName || !selectedWorkspace) return;
@@ -135,23 +140,43 @@ export function ControlPlaneApp() {
     if (current.activePage === 'workspace' && current.workspaceDirty && !window.confirm('Discard unsaved workspace changes?')) return false;
     return true;
   };
+  if (entryGuard) entryGuard.current = () => {
+    if (!canDiscardDraft('quick-test')) return false;
+    if (navigationGuard.current.configDirty || navigationGuard.current.workspaceDirty || navigationGuard.current.configUncertain) setDiscardVersion(value => value + 1);
+    setConfigDirty(false); setConfigUncertain(false); setWorkspaceDirty(false);
+    return true;
+  };
+  useEffect(() => {
+    const reactivating = active && !wasActive.current;
+    wasActive.current = active;
+    if (!active) return;
+    const route = parseRunRoute(window.location.hash);
+    const savedPage: unknown = reactivating ? window.history.state?.cpPage : undefined;
+    const page = route ? 'runs' : savedPage === 'overview' || savedPage === 'workspace' || savedPage === 'devices' || savedPage === 'config'
+      ? savedPage : acceptedNavigation.current.page;
+    if (route) setRunRoute(route);
+    setActivePageState(page);
+    acceptedNavigation.current = { href: window.location.href, index: Number(window.history.state?.cpIndex ?? acceptedNavigation.current.index), page };
+  }, [active]);
   const setActivePage = (page: typeof activePage, route?: RunRoute) => {
     const url = page === 'runs' ? runHash(route ?? runRoute) : window.location.pathname + window.location.search;
     const index = acceptedNavigation.current.index + 1;
-    window.history.pushState({ cpIndex: index, cpPage: page }, '', url);
+    window.history.pushState({ cpEntry: 'case-manager', cpIndex: index, cpPage: page }, '', url);
     acceptedNavigation.current = { href: window.location.href, index, page };
     setActivePageState(page);
   };
   useEffect(() => {
-    window.history.replaceState({ ...window.history.state, cpIndex: acceptedNavigation.current.index, cpPage: acceptedNavigation.current.page }, '', window.location.href);
+    window.history.replaceState({ ...window.history.state, cpEntry: 'case-manager', cpIndex: acceptedNavigation.current.index, cpPage: acceptedNavigation.current.page }, '', window.location.href);
     const onLocationChange = () => {
+      if (!activeRef.current || ['#start', '#quick-test', '#quick-test/settings'].includes(window.location.hash)) return;
+      if (entryGuard && !window.location.hash && window.history.state?.cpEntry !== 'case-manager') return;
       if (window.location.href === acceptedNavigation.current.href && window.history.state?.cpPage === acceptedNavigation.current.page) return;
       const route = parseRunRoute(window.location.hash);
       const savedPage = window.history.state?.cpPage;
       const destination = route ? 'runs' : ['overview', 'workspace', 'devices', 'config'].includes(savedPage) ? savedPage : 'overview';
       if (!canDiscardDraft(destination)) {
         const old = acceptedNavigation.current;
-        window.history.replaceState({ cpIndex: old.index, cpPage: old.page }, '', old.href);
+        window.history.replaceState({ cpEntry: 'case-manager', cpIndex: old.index, cpPage: old.page }, '', old.href);
         return;
       }
       setConfigDirty(false); setWorkspaceDirty(false);
@@ -268,6 +293,7 @@ export function ControlPlaneApp() {
     message: workspace.status === 'unavailable' ? `${workspace.message} ${workspace.action}` : undefined,
   }));
   const shellWorkspaceProps = {
+    onBackToStart,
     interactionLocked: startPending || workspacePending || configPending,
     workspaces: workspaceNavigation,
     selectedWorkspaceId: selectedWorkspace?.name ?? null,
@@ -308,7 +334,7 @@ export function ControlPlaneApp() {
     outletPresentation={workspaceOutletPresentation}
     titleContent={selectedWorkspace && !createRequested ? <WorkspaceTitlebar workspace={selectedWorkspace} onRecordCase={() => launchDevices({mode:'explore',workspaceName:selectedWorkspace.name})} recordDisabled={workspacePending || !selectedWorkspace.platforms.some(p=>p.status==='available')} recordDisabledReason={workspacePending ? 'Wait for the Workspace configuration to finish saving.' : undefined} /> : undefined}
     onNavigate={navigate} {...shellWorkspaceProps}
-  ><WorkspacePage
+  ><WorkspacePage key={discardVersion}
       selectedName={diagnosticWorkspace?.name ?? selectedWorkspace?.name ?? null}
       repairContext={Boolean(diagnosticWorkspaceName)}
       createRequested={createRequested}
@@ -329,11 +355,11 @@ export function ControlPlaneApp() {
   if (activePage === 'config') return <ControlPlaneShell
     activePage="config" title="Settings" description="Manage the active model provider used by the next complete FSQ task."
     onNavigate={navigate} {...shellWorkspaceProps}
-  ><ConfigPage onDirtyChange={setConfigDirty} onSavePendingChange={setConfigPending} onSaveUncertainChange={setConfigUncertain} /></ControlPlaneShell>;
+  >{active && <ConfigPage key={discardVersion} onDirtyChange={setConfigDirty} onSavePendingChange={setConfigPending} onSaveUncertainChange={setConfigUncertain} />}</ControlPlaneShell>;
 
   if (activePage === 'runs') return <ControlPlaneShell activePage="runs" title="Runs" description="Inspect persisted execution, verification, and evidence." onNavigate={navigate} {...shellWorkspaceProps}><RunsPage key={[runRoute.workspace,runRoute.platform,runRoute.run].join(':')} route={runRoute} workspaces={authoritativeWorkspaces} registryStatus={workspaceRegistryLoading ? 'loading' : workspaceRegistryError ? 'error' : 'ready'} registryError={workspaceRegistryError?.message} onRetryRegistry={() => { void refreshWorkspaces(); }} onNavigate={navigateRuns} /></ControlPlaneShell>;
 
-  return <DevicesPage workspaces={authoritativeWorkspaces} workspaceRegistryReady={workspaceRegistryReady} selectedWorkspaceName={diagnosticWorkspace?.name ?? selectedWorkspace?.name ?? null} onWorkspaceChange={selectDeviceWorkspace}
+  return <DevicesPage active={active} workspaces={authoritativeWorkspaces} workspaceRegistryReady={workspaceRegistryReady} selectedWorkspaceName={diagnosticWorkspace?.name ?? selectedWorkspace?.name ?? null} onWorkspaceChange={selectDeviceWorkspace}
     onOpenReport={(workspace, platform, run) => navigateRuns({ workspace, platform, run })}
     onStartPendingChange={handleStartPendingChange}
     onRepairTarget={(name,platform)=>{if(startPendingRef.current)return;if(platform==='android'){setDiagnosticWorkspaceName(null);setSelectedWorkspaceName(name);}else{setDiagnosticWorkspaceName(name);setSelectedWorkspaceName(null);}setWorkspaceConfigurationOpen(true);setCreateRequested(false);setWorkspaceOutletPresentation('default');setActivePage('workspace');}}

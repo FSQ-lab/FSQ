@@ -1,0 +1,18 @@
+.quick-test-outlet { height: 100%; min-height: 0; }
+.quick-test-setup .operation-card { min-height: 0; }
+.quick-test-fields { padding: 24px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.quick-test-fields :is(select, textarea) { width: 100%; min-width: 0; min-height: var(--cp-control-height); padding: 8px 10px; border: 1px solid var(--cp-border-strong); border-radius: var(--cp-radius); background: var(--cp-surface); font-weight: var(--cp-weight-body); }
+.quick-test-fields label { font-size: var(--cp-type-label); font-weight: var(--cp-weight-control); line-height: var(--cp-leading-label); }
+.quick-test-fields textarea { resize: vertical; }
+.quick-test-fields p { margin: 0; color: var(--cp-muted); overflow-wrap: anywhere; }
+.quick-test-page { height: auto; overflow-wrap: anywhere; }
+.quick-test-page--workbench { height: 100%; }
+@media (pointer: coarse) {
+  .quick-test-fields :is(select, textarea) { min-height: 44px; }
+}
+@media (max-width: 760px) {
+  .quick-test-fields { padding: 16px; }
+}
+@media (max-width: 1180px) {
+  .quick-test-outlet, .quick-test-page--workbench { height: auto; }
+}

@@ -258,6 +258,8 @@ macOS contracts:
 - `_events.py`: Live run event model and event sink type alias.
 - `_runs.py`: shared Run metadata, frozen result, safe context, dynamic outcome, and provenance values.
 - `_platform_runtime.py`: Shared `PlatformRuntimeCheck` boundary model, its status/readiness invariants, and the pure Web executable product/channel identity contract. It does not discover installed browsers, inspect filesystem existence or permissions, install runtimes, or own host-specific candidate paths.
+- `_platform_runtime.py` also carries `PlatformPrerequisiteCheck` values, including explicit unresolved-context `pending` facts used by shared Application diagnosis.
+- `_application_lookup.py`: exported immutable `ApplicationCandidate`, `ApplicationLookupHint`, and `ApplicationLookupResult` boundary values for the confirmed Environments application lookup contract.
 - `_fsq.py`: FSQ AI Test DSL case metadata, reusable lifecycle hook models, config lifecycle hook settings, and case models.
 - `_tools.py`: Unified capability metadata, replay policy, invocation/result contracts, registry snapshot models, AgentTool definition/call/result models, and temporary backward-compatible diagnostic aliases.
 - `_ai_assertion.py`: Provider-backed platform AI assertion request/result models.

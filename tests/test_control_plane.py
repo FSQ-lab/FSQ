@@ -567,7 +567,7 @@ async def test_explore_execution_delegates_to_agent_and_records_without_changing
     settings = _settings(tmp_path)
     state = ControlPlaneState()
     request_id = state.reserve(workspace_name="checkout", platform="android", target_id="device", mode="explore", source={"goal": "Verify it"})
-    prepared = type("Prepared", (), {"settings": settings, "request_id": request_id, "goal": "Verify it"})()
+    prepared = type("Prepared", (), {"settings": settings, "request_id": request_id, "goal": "Verify it", "requires_web_search_evidence": False})()
     captured: dict[str, object] = {}
 
     class FakeAgent:

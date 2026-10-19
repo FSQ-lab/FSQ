@@ -67,12 +67,12 @@ python -m pip install --upgrade fsq-agent
 fsq ui
 ```
 
-在 **Settings** 中配置 FSQ LLM Provider，并显式选择模型。
+选择 **Quick Test**，自动使用 `~/.fsq/quick-test/` Workspace 进行探索；或选择 **FSQ Case Manager** 管理 Workspace、Case、历史运行及 Strict Replay。两个入口共用 **Settings**，在其中配置 FSQ LLM Provider 并显式选择模型。
 
-**首次测试。**
-1. 创建或选择 Workspace，并按需配置其平台和目标。
-2. 在 **Test Runner** 中选择准确目标。
-3. 描述可验证的结果，审查测试设置，然后开始测试。先审查结果；如果 FSQ 返回了 Case，再原样审查它，然后另行决定是否请求重放。
+1. 选择平台，以及适用的设备或浏览器。
+2. 描述要执行的操作和预期结果。Web 可以提供网址，也可以描述明确的搜索目标，例如：`搜索 FSQ github，并且帮我找到 FSQ 的官网地址。` 无需预先知道要找到的网址。
+3. 点击 **Start Quick Test**。模型识别应用，FSQ 验证解析出的目标和环境后才开始探索。意图不明确、目标查询零匹配或多匹配、准备失败时直接终止，不补问；目标可运行不等于已证明模型理解正确。
+4. 通过 **Open report** 审查结果和证据，或选择 **New test**。Quick Test 不保存 Case；在 Case Manager 中应先原样审查生成的 Case，再另行决定是否重放。
 
 ![用于描述测试目标的 FSQ Test Runner](docs/media/01-describe-goal.png)
 

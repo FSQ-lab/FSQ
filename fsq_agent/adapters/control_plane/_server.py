@@ -255,6 +255,12 @@ class ControlPlaneServer:
         self._thread.start()
 
     def stop(self) -> None:
+        active = self.state.bootstrap()["activeTask"]
+        if active is not None and active.get("workflow") == "quick-test":
+            self.state.request_cancel(active["requestId"])
+            handle = self._handles.get(active["requestId"])
+            if handle is not None:
+                handle.cancel()
         self._directory_picker.shutdown()
         self._provider_auth.shutdown()
         httpd = self._httpd
@@ -270,6 +276,14 @@ class ControlPlaneServer:
     def handle_get(self, path: str, query: dict[str, list[str]] | None = None, *, peer_host: str | None = "127.0.0.1") -> tuple[int, Any, dict[str, str]]:
         query = query or {}
         try:
+            if path == f"{_API_PREFIX}/quick-test/context":
+                from ._quick_test import context
+
+                self._require_config_access(peer_host)
+                try:
+                    return 200, context(query, self.options.user_config_root), {**_JSON_HEADERS, "X-Content-Type-Options": "nosniff"}
+                except (TypeError, ValueError):
+                    return 400, _error("invalid_quick_test", "Invalid Quick Test context fields.", "Select a supported platform and applicable device or browser."), dict(_JSON_HEADERS)
             if path == _HISTORY_PREFIX or path.startswith(_HISTORY_PREFIX + "/"):
                 self._require_config_access(peer_host)
                 if path == _HISTORY_PREFIX:
@@ -344,6 +358,7 @@ class ControlPlaneServer:
                 )
                 return 200, discover_cases(settings), dict(_JSON_HEADERS)
             request_id, suffix = _run_route(path)
+            self._require_quick_task_access(request_id, peer_host)
             if suffix == "":
                 if self.state.snapshot(request_id).get("terminal"):
                     self._hydrate_evidence(request_id)
@@ -436,6 +451,19 @@ class ControlPlaneServer:
         origin: str | None = None,
         host: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
+        if path == f"{_API_PREFIX}/quick-test/runs":
+            from ._quick_test import start
+
+            try:
+                self._require_config_access(peer_host)
+                require_same_origin_write(origin, host)
+                return 202, start(self, body)
+            except ConfigAPIError as exc:
+                return exc.status, _error(exc.code, exc.message, exc.action)
+            except BusyError:
+                return 409, _error("busy", "Another Control Plane task is active.", "Wait for the active task or cancel it.")
+            except (TypeError, ValueError):
+                return 400, _error("invalid_quick_test", "Invalid Quick Test start fields.", "Supply a goal, platform, and applicable device or browser only.")
         if path.startswith(_HISTORY_PREFIX + "/"):
             try:
                 self._require_config_access(peer_host)
@@ -474,6 +502,8 @@ class ControlPlaneServer:
             return self._start_run(body)
         try:
             request_id, suffix = _run_route(path)
+            if self._require_quick_task_access(request_id, peer_host):
+                require_same_origin_write(origin, host)
             if suffix == "/replay-video":
                 stored = store_replay_video(self._terminal_run_dir(request_id), body.get("mimeType"), body.get("videoBase64"))
                 return 200, {**stored, "videoUrl": f"{_API_PREFIX}/runs/{request_id}/replay-video/file"}
@@ -485,6 +515,8 @@ class ControlPlaneServer:
             handle = self._handles.get(request_id)
             if handle is not None:
                 handle.cancel()
+        except ConfigAPIError as exc:
+            return exc.status, _error(exc.code, exc.message, exc.action)
         except RequestNotFoundError:
             return 404, _error("request_not_found", "Run request not found.", "Reload Control Plane to find the active request.")
         except FileExistsError as exc:
@@ -701,6 +733,15 @@ class ControlPlaneServer:
             return 404, b"Control Plane frontend build not found. Run npm ci and npm run build.", "text/plain; charset=utf-8"
         return 200, entry.read_bytes(), "text/html; charset=utf-8"
 
+    def _require_quick_task_access(self, request_id: str, peer_host: str | None) -> bool:
+        try:
+            quick_test = self.state.snapshot(request_id)["workflow"] == "quick-test"
+        except RequestNotFoundError:
+            return False
+        if quick_test:
+            self._require_config_access(peer_host)
+        return quick_test
+
     def _start_run(self, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         workspace_name = body.get("workspaceName")
         platform = body.get("platform")
@@ -867,6 +908,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query, keep_blank_values=True)
         if parsed.path.startswith(_API_PREFIX):
             request_id, suffix = _run_route_or_empty(parsed.path)
+            if request_id:
+                try:
+                    self.server.control_plane._require_quick_task_access(request_id, self.client_address[0])
+                except ConfigAPIError as exc:
+                    self._send(exc.status, _error(exc.code, exc.message, exc.action), _JSON_HEADERS)
+                    return
+                except RequestNotFoundError:
+                    self._send(404, _error("request_not_found", "Run request not found.", "Reload Control Plane."), _JSON_HEADERS)
+                    return
             if request_id and suffix == "/stream":
                 self._send_sse(request_id, query)
                 return
@@ -900,7 +950,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length > _MAX_BODY_BYTES:
+            limit = 128 * 1024 if parsed.path == f"{_API_PREFIX}/quick-test/runs" else _MAX_BODY_BYTES
+            if length < 0:
+                raise ValueError("Invalid body length.")  # noqa: TRY301 -- handled as invalid JSON at the HTTP boundary.
+            if length > limit:
                 self._send(413, _error("body_too_large", "Request body is too large.", "Send a smaller JSON request."), _JSON_HEADERS)
                 return
             body = _decode_json_body(self.rfile.read(length))

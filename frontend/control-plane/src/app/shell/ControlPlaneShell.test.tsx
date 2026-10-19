@@ -3,6 +3,17 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ControlPlaneShell } from './ControlPlaneShell';
 
+it('scopes shell landmark and drawer ids when both entries are mounted', () => {
+  render(<>
+    <ControlPlaneShell activePage="devices" title="Manager" description=""><div>Manager</div></ControlPlaneShell>
+    <ControlPlaneShell variant="quick-test" activePage="quick-test" title="Quick" description=""><div>Quick</div></ControlPlaneShell>
+  </>);
+  const mains = screen.getAllByRole('main');
+  expect(mains[0].id).not.toBe(mains[1].id);
+  const menus = screen.getAllByRole('button', { name: 'Open navigation' });
+  expect(menus[0].getAttribute('aria-controls')).not.toBe(menus[1].getAttribute('aria-controls'));
+});
+
 it('renders the specified navigation with one Settings entry and available Runs', () => {
   render(<ControlPlaneShell activePage="devices" title="Test Runner" description="Independent outlet"><div>Arbitrary page outlet</div></ControlPlaneShell>);
   const sidebar=screen.getByLabelText('Control Plane sidebar');

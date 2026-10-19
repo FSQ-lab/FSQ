@@ -64,12 +64,14 @@
 .preflight-icon { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: var(--cp-surface-soft); color: var(--cp-warning); font-weight: 600; }
 .preflight-item--ready .preflight-icon { background: var(--cp-success-soft); color: var(--cp-success); }
 .preflight-item--error .preflight-icon, .preflight-item--unavailable .preflight-icon { color: var(--cp-danger); }
+.preflight-item--pending .preflight-icon, .preflight-item--not_applicable .preflight-icon { color: var(--cp-muted); }
 .preflight-action { font-weight: 600; }
 .composer-inputs { border:0; margin:0; padding:0; min-width:0; }
 .preflight-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
 .preflight-heading h3 { margin:0; }
 .preflight-summary { padding:12px; border:1px solid var(--cp-border); border-radius:8px; background:var(--cp-accent-soft); }
 .preflight-summary--ready { background: var(--cp-success-soft); }
+.preflight-summary--pending { background: var(--cp-surface-soft); }
 .preflight-summary p, .prerequisite-row p { margin:5px 0; font-size: var(--cp-type-meta); color:var(--cp-muted); overflow-wrap:anywhere;  line-height: var(--cp-leading-meta); }
 .preflight .prerequisite-list { display:block; }
 .prerequisite-row { padding:13px 0; border-bottom:1px solid var(--cp-border); }
@@ -78,6 +80,7 @@
 .prerequisite-heading svg, .prerequisite-command svg { width:16px; height:16px; flex-shrink:0; }
 .prerequisite-row--ready .prerequisite-heading span { color:var(--cp-success); }
 .prerequisite-row--not_applicable .prerequisite-heading span { color:var(--cp-muted); }
+.prerequisite-row--pending .prerequisite-heading span { color:var(--cp-muted); }
 .prerequisite-command { display:flex; gap:8px; align-items:start; padding:9px; background:var(--cp-surface-soft); border-radius:6px; margin-top:8px; }
 .prerequisite-command code { min-width:0; flex:1; white-space:pre-wrap; overflow-wrap:anywhere; font-size: var(--cp-type-meta); user-select:text;  line-height: var(--cp-leading-meta); }
 .prerequisite-command button { border:0; background:none; min-width:28px; min-height:28px; display:grid; place-items:center; }

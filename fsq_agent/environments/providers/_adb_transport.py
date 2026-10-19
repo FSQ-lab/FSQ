@@ -103,6 +103,37 @@ def valid_package(value):
     return isinstance(value, str) and 0 < len(value) <= 255 and PACKAGE.fullmatch(value) is not None
 
 
+def package_inventory(serial: str, deadline: float) -> set[str]:
+    """Read package identities using only an already-running ADB server."""
+    if not SERIAL.fullmatch(serial):
+        raise ValueError("adb_failed")
+    with connection(deadline) as wire:
+        request(wire, f"host:transport:{serial}", deadline)
+        request(wire, "shell,v2,raw:cmd package list packages", deadline)
+        output = bytearray()
+        received = 0
+        while True:
+            channel, size = struct.unpack("<BI", read(wire, 5, deadline))
+            received += size + 5
+            if received > MAX_BYTES:
+                raise ValueError("adb_failed")
+            data = read(wire, size, deadline)
+            if channel == 1:
+                output.extend(data)
+            elif channel == 2 and not data:
+                continue
+            elif channel == 3 and data == b"\x00":
+                break
+            else:
+                raise ValueError("adb_failed")
+    packages = set()
+    for line in output.decode("utf-8").splitlines():
+        if not line.startswith("package:") or not valid_package(line[8:]):
+            raise ValueError("adb_failed")
+        packages.add(line[8:])
+    return packages
+
+
 def package_status(serial: str, app_id: str, timeout_seconds: float = 5.0) -> str:
     if not SERIAL.fullmatch(serial) or not valid_package(app_id):
         return "query_failed"

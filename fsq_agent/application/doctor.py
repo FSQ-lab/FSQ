@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fsq_agent.agent import check_dynamic_agent_readiness
@@ -18,6 +19,7 @@ from fsq_agent.application.contracts import (
     DoctorResult,
     DoctorStatusDetail,
     DoctorWorkspaceSummary,
+    PlatformDiagnosticContext,
     RegisteredPlatformDoctorRequest,
 )
 from fsq_agent.config import inspect_registered_workspace, list_workspace_registry, load_workspace_platform_settings, validate_strict_core_settings
@@ -113,21 +115,47 @@ def _diagnose_platform(platform: str, root: Path, workspace_platform, user_confi
     return diagnose_platform_settings(settings)
 
 
-def diagnose_platform_settings(settings) -> DoctorPlatformResult:
+def diagnose_platform_settings(settings, *, context: PlatformDiagnosticContext | None = None) -> DoctorPlatformResult:
+    if settings is None:
+        if context is None:
+            raise ValueError("A platform diagnostic context is required when settings are unavailable.")
+        unavailable = DoctorStatusDetail(
+            status="error", code="doctor.configuration_invalid", message="Platform configuration could not be loaded.", action="Check the saved Provider and platform installation."
+        )
+        checks = DoctorChecks(configuration=unavailable, **{name: _blocked("configuration") for name in _CHECK_ORDER[1:]})
+        return DoctorPlatformResult(
+            platform=context.platform,
+            target_id=context.target_id,
+            status="unavailable",
+            checks=checks,
+            commands=_commands(checks),
+            identification=_pending("application") if context.application_pending else None,
+            preparation=unavailable,
+            checked_at=datetime.now(UTC).isoformat(),
+        )
     platform = settings.harness.platform
+    if context is not None and platform != context.platform:
+        raise ValueError("Diagnostic context does not match the selected platform.")
     environment = PlatformRuntimeService()
-    prerequisite_facts = _safe_prerequisites(environment, settings)
+    prerequisite_facts = _safe_prerequisites(environment, settings, context)
     prerequisites = tuple(DoctorPrerequisite.model_validate(item.model_dump(exclude={"target_id"})) for item in prerequisite_facts)
     runtime_check = _safe_check("runtime", lambda: _runtime(environment, platform))
-    target_configuration = _configuration_check("target_configuration", lambda: environment.check_target_configuration(settings))
-    target_availability = _safe_check("target_availability", lambda: environment.check_target_availability(settings, prerequisite_facts))
+    configuration = _pending("workspace") if context is not None and context.workspace_pending else _ready("Platform configuration is ready.")
+    unresolved_native = context is not None and context.application_pending and platform != "web"
+    if unresolved_native:
+        target_configuration = _pending("application")
+        failed = next((item for item in prerequisite_facts if item.status in {"unavailable", "error"}), None)
+        target_availability = DoctorStatusDetail(status=failed.status, code=failed.code, message=failed.message, action=failed.action) if failed else _pending("application")
+    else:
+        target_configuration = _configuration_check("target_configuration", lambda: environment.check_target_configuration(settings))
+        target_availability = _safe_check("target_availability", lambda: environment.check_target_availability(settings, prerequisite_facts))
     foundation = (runtime_check, target_configuration, target_availability)
-    strict_core = _dependent_check("strict_core", foundation, lambda: _strict(settings))
+    strict_core = _dependent_check("strict_core", (configuration, *foundation), lambda: _strict(settings))
     provider = _safe_check("provider", lambda: _provider_readiness(settings))
     suggestion = _safe_check("suggestion_analyzer", lambda: check_case_suggestion_readiness(settings))
     dynamic = _dependent_check("dynamic_agent", (*foundation, strict_core, provider), lambda: check_dynamic_agent_readiness(settings))
     checks = DoctorChecks(
-        configuration=_ready("Platform configuration is ready."),
+        configuration=configuration,
         runtime=runtime_check,
         target_configuration=target_configuration,
         target_availability=target_availability,
@@ -146,6 +174,9 @@ def diagnose_platform_settings(settings) -> DoctorPlatformResult:
         prerequisites=prerequisites,
         checks=checks,
         commands=commands,
+        identification=_pending("application") if context is not None and context.application_pending else None,
+        preparation=_preparation(checks, prerequisites) if context is not None else None,
+        checked_at=datetime.now(UTC).isoformat() if context is not None else None,
     )
 
 
@@ -154,8 +185,10 @@ def _runtime(environment: PlatformRuntimeService, platform: str) -> tuple[bool, 
     return result.ready, result.message, result.action or ""
 
 
-def _safe_prerequisites(environment: PlatformRuntimeService, settings):
+def _safe_prerequisites(environment: PlatformRuntimeService, settings, context: PlatformDiagnosticContext | None = None):
     try:
+        if context is not None and (context.application_pending or context.require_explicit_selection):
+            return environment.check_prerequisites(settings, application_pending=context.application_pending, require_explicit_selection=context.require_explicit_selection)
         return environment.check_prerequisites(settings)
     except Exception:  # noqa: BLE001 - diagnostic isolation returns one safe prerequisite fact.
         from fsq_agent.models import PlatformPrerequisiteCheck
@@ -208,9 +241,9 @@ def _configuration_check(name: str, operation: Callable[[], tuple[bool, str, str
 
 
 def _dependent_check(name: str, dependencies: tuple[DoctorStatusDetail, ...], operation: Callable[[], tuple[bool, str, str]]) -> DoctorStatusDetail:
-    failed = next((detail for detail in dependencies if detail.status != "ready"), None)
+    failed = _first_unready(dependencies)
     if failed is not None:
-        return DoctorStatusDetail(status="unavailable", code=failed.code, message=failed.message, action=failed.action)
+        return DoctorStatusDetail(status="pending" if failed.status == "pending" else "unavailable", code=failed.code, message=failed.message, action=failed.action)
     return _safe_check(name, operation)
 
 
@@ -218,8 +251,12 @@ def _commands(checks: DoctorChecks) -> DoctorCommands:
     values = checks.model_dump()
     results = {}
     for command, dependencies in _COMMAND_DEPENDENCIES.items():
-        failed = next((DoctorStatusDetail.model_validate(values[name]) for name in dependencies if values[name]["status"] != "ready"), None)
-        results[command] = _ready("Command prerequisites are ready.") if failed is None else DoctorStatusDetail(status="unavailable", code=failed.code, message=failed.message, action=failed.action)
+        failed = _first_unready(tuple(DoctorStatusDetail.model_validate(values[name]) for name in dependencies))
+        results[command] = (
+            _ready("Command prerequisites are ready.")
+            if failed is None
+            else DoctorStatusDetail(status="pending" if failed.status == "pending" else "unavailable", code=failed.code, message=failed.message, action=failed.action)
+        )
     return DoctorCommands.model_validate(results)
 
 
@@ -227,11 +264,39 @@ def _summary_status(statuses: list[str]) -> str:
     ready = statuses.count("ready")
     if ready == len(statuses):
         return "ready"
+    if all(status in {"ready", "pending"} for status in statuses):
+        return "partial" if ready else "pending"
     return "partial" if ready else "unavailable"
 
 
 def _ready(message: str) -> DoctorStatusDetail:
     return DoctorStatusDetail(status="ready", message=message)
+
+
+def _pending(dependency: str) -> DoctorStatusDetail:
+    return DoctorStatusDetail(
+        status="pending",
+        code=f"doctor.{dependency}_pending",
+        message="Application identification is pending." if dependency == "application" else "Workspace preparation awaits application identification.",
+    )
+
+
+def _first_unready(details: tuple[DoctorStatusDetail, ...]) -> DoctorStatusDetail | None:
+    if any(item.status == "pending" for item in details):
+        failed = next((item for item in details if item.status in {"unavailable", "error"}), None)
+        return failed or next((item for item in details if item.status == "pending"), None)
+    return next((item for item in details if item.status != "ready"), None)
+
+
+def _preparation(checks: DoctorChecks, prerequisites: tuple[DoctorPrerequisite, ...]) -> DoctorStatusDetail:
+    # Identification may run while its own downstream dependencies are pending.
+    # Unrelated failures retain their original facts; suggestion-only readiness
+    # is not an Explore dependency, just as in the configured command graph.
+    details = [*(getattr(checks, name) for name in _COMMAND_DEPENDENCIES["case_create"]), *prerequisites]
+    failed = next((item for item in details if item.status in {"unavailable", "error"}), None)
+    if failed is not None:
+        return DoctorStatusDetail(status="unavailable", code=failed.code, message=failed.message, action=failed.action)
+    return _ready("Prerequisites for application identification and preparation are ready.")
 
 
 def _blocked(dependency: str) -> DoctorStatusDetail:

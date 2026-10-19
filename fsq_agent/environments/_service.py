@@ -16,6 +16,7 @@ from fsq_agent.models import PlatformPrerequisiteCheck, PlatformRuntimeCheck, we
 
 if TYPE_CHECKING:
     from fsq_agent.environments.providers._runtime import RuntimeProvider
+    from fsq_agent.models import ApplicationLookupHint
 
 Platform = Literal["android", "web", "windows", "macos"]
 _PROVIDERS: dict[Platform, RuntimeProvider] = {
@@ -31,6 +32,11 @@ def _web_candidate_paths(channel: str) -> list[Path]:
 
 
 class PlatformRuntimeService:
+    def lookup_application(self, *, platform: str, name: str, explicit_reference: str | None = None, target_id: str | None = None, inferred_hint: ApplicationLookupHint | None = None):
+        from fsq_agent.environments._applications import lookup_application
+
+        return lookup_application(platform=platform, name=name, explicit_reference=explicit_reference, target_id=target_id, inferred_hint=inferred_hint)
+
     def check(self, platform: Platform) -> PlatformRuntimeCheck:
         return _PROVIDERS[platform].check()
 
@@ -81,11 +87,15 @@ class PlatformRuntimeService:
             return True, "Configured macOS host prerequisites and application Target are available.", ""
         return False, "Unsupported platform target.", "Select a supported platform."
 
-    def check_prerequisites(self, settings) -> tuple[PlatformPrerequisiteCheck, ...]:
+    def check_prerequisites(self, settings, *, application_pending: bool = False, require_explicit_selection: bool = False) -> tuple[PlatformPrerequisiteCheck, ...]:
         if settings.harness.platform == "android":
+            if application_pending or require_explicit_selection:
+                return android_prerequisites(settings.harness.android, application_pending=application_pending, require_explicit_selection=require_explicit_selection)
             return android_prerequisites(settings.harness.android)
         if settings.harness.platform != "macos":
             return ()
+        if application_pending:
+            return _macos_prerequisites(settings.harness.macos, application_pending=True)
         return _macos_prerequisites(settings.harness.macos)
 
 

@@ -8,8 +8,10 @@ const LONG_MESSAGE_LENGTH = 140;
 const FOLLOW_THRESHOLD = 32;
 
 interface RunTimelineProps {
+  variant?: 'case-manager' | 'quick-test';
   actionContainer?: HTMLElement | null;
   snapshot: RunSnapshot | null;
+  pendingGoal?: string;
   connection: string;
   selectedStepId: string | null;
   resultHeadingRef: RefObject<HTMLHeadingElement | null>;
@@ -142,7 +144,7 @@ function invalidCaseName(caseName: string) {
   return null;
 }
 
-export function RunTimeline({ actionContainer, snapshot, connection, selectedStepId, onSelectStep, onCancel, onSaveYaml = () => undefined, onNewRun, saveYamlState = emptySaveYamlState }: RunTimelineProps) {
+export function RunTimeline({ variant = 'case-manager', actionContainer, snapshot, pendingGoal, connection, selectedStepId, onSelectStep, onCancel, onSaveYaml = () => undefined, onNewRun, saveYamlState = emptySaveYamlState }: RunTimelineProps) {
   const events = useMemo(() => [...(snapshot?.events ?? [])].sort((left, right) => left.sequence - right.sequence), [snapshot?.events]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const previousLastSequence = useRef(0);
@@ -160,7 +162,7 @@ export function RunTimeline({ actionContainer, snapshot, connection, selectedSte
   const [saveResultOpen, setSaveResultOpen] = useState(false);
   const [caseName, setCaseName] = useState('');
   const lastSequence = snapshot?.events.at(-1)?.sequence ?? 0;
-  const source = snapshot?.mode === 'explore' ? snapshot.source.goal : snapshot?.source.caseContent ?? snapshot?.source.casePath;
+  const source = snapshot ? (snapshot.mode === 'explore' ? snapshot.source.goal : snapshot.source.caseContent ?? snapshot.source.casePath) : pendingGoal;
   const saveNameError = invalidCaseName(caseName);
   const savePathPreview = snapshot ? `cases/${snapshot.platform}/${caseName.trim() || defaultCaseName(snapshot)}${FSQ_CASE_SUFFIX}` : '';
   const openSaveDialog = () => {
@@ -264,7 +266,9 @@ export function RunTimeline({ actionContainer, snapshot, connection, selectedSte
     observer?.observe(element);
     return () => { cancelAnimationFrame(frame); observer?.disconnect(); };
   }, [source, sourceExpanded]);
-  if (!snapshot) return <div className="run-loading" role="status"><span className="spinner" aria-hidden="true" />Preparing run details…</div>;
+  const sourceSummary = <div className={`run-source-summary${sourceExpanded ? ' run-source-summary--expanded' : ''}`}><strong>Run source · {snapshot?.mode === 'strict' ? 'Strict Replay' : 'Explore'}</strong><span className="run-source-line"><small ref={sourceRef}>{source ?? 'Source unavailable'}</small>{sourceOverflowing && <button className="message-disclosure run-source-disclosure" type="button" aria-label={sourceExpanded ? 'Collapse run source' : 'Expand run source'} aria-expanded={sourceExpanded} onClick={() => setSourceExpanded((value) => !value)}>{sourceExpanded ? <ChevronUp aria-hidden="true"/> : <ChevronDown aria-hidden="true"/>}</button>}</span></div>;
+  const loading = <div className="run-loading" role="status"><span className="spinner" aria-hidden="true" />Preparing run details…</div>;
+  if (!snapshot) return pendingGoal !== undefined ? <div className="run-timeline">{sourceSummary}{loading}</div> : loading;
   const screenshotStepIds = stepIdsWithScreenshotEvidence(events);
   const activeStepId = !snapshot.terminal ? snapshot.activeStep?.stepId : null;
   let latestActiveStepSequence: number | null = null;
@@ -298,12 +302,12 @@ export function RunTimeline({ actionContainer, snapshot, connection, selectedSte
   const actions = <>
     {!snapshot.terminal && cancellable.has(snapshot.status) && <button className="button button--danger cancel-button" type="button" disabled={snapshot.cancelRequested} onClick={onCancel}>{snapshot.cancelRequested ? 'Cancellation requested…' : 'Cancel run'}</button>}
     {snapshot.terminal && <div className="terminal-actions" aria-label="Completed run actions">
-      {snapshot.mode === 'explore' && <button ref={saveButtonRef} className="button" type="button" disabled={saveYamlState.state === 'loading'} onClick={openSaveDialog}>{saveYamlState.state === 'loading' ? 'Saving yaml…' : 'Save yaml'}</button>}
-      <button className="button button--primary" type="button" onClick={onNewRun}>New run</button>
+      {variant === 'case-manager' && snapshot.mode === 'explore' && <button ref={saveButtonRef} className="button" type="button" disabled={saveYamlState.state === 'loading'} onClick={openSaveDialog}>{saveYamlState.state === 'loading' ? 'Saving yaml…' : 'Save yaml'}</button>}
+      <button className="button button--primary" type="button" onClick={onNewRun}>{variant === 'quick-test' ? 'New test' : 'New run'}</button>
     </div>}
   </>;
   return <div className={`run-timeline${snapshot.mode === 'strict' ? ' run-timeline--strict' : ''}`}>
-    <div className={`run-source-summary${sourceExpanded ? ' run-source-summary--expanded' : ''}`}><strong>Run source · {snapshot.mode === 'explore' ? 'Explore' : 'Strict Replay'}</strong><span className="run-source-line"><small ref={sourceRef}>{source ?? 'Source unavailable'}</small>{sourceOverflowing && <button className="message-disclosure run-source-disclosure" type="button" aria-label={sourceExpanded ? 'Collapse run source' : 'Expand run source'} aria-expanded={sourceExpanded} onClick={() => setSourceExpanded((value) => !value)}>{sourceExpanded ? <ChevronUp aria-hidden="true"/> : <ChevronDown aria-hidden="true"/>}</button>}</span></div>
+    {sourceSummary}
     <StrictActionSummary snapshot={snapshot} events={events} selectedStepId={selectedStepId} onSelectStep={onSelectStep} />
     {snapshot.mode === 'explore' && <div className="timeline-history">
       <div className="timeline-scroll" ref={scrollRef} onScroll={onTimelineScroll} data-following={following} tabIndex={-1} aria-label="Run timeline history">

@@ -1,8 +1,33 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useState } from 'react';
 import userEvent from '@testing-library/user-event';
 import { ControlPlaneApiError, controlPlaneClient } from '../../../api/controlPlaneClient';
-import type { RunSnapshot } from '../../../api/types';
+import type { EvidenceTab, RunSnapshot } from '../../../api/types';
 import { LiveEvidencePanel } from './LiveEvidencePanel';
+
+it('F003: hidden Manager evidence cannot capture Quick tab focus or ARIA references', async () => {
+  function Panel() {
+    const [tab, setTab] = useState<EvidenceTab>('screen');
+    return <LiveEvidencePanel tab={tab} onTabChange={setTab} snapshot={null} platform="web" targetLabel="Chrome" />;
+  }
+  const { container } = render(<><div hidden inert><Panel /></div><Panel /></>);
+  const ids = [...container.querySelectorAll('[id]')].map(element => element.id);
+  expect(new Set(ids).size).toBe(ids.length);
+  const panel = screen.getByRole('region', { name: 'Live evidence' });
+  const tabs = within(panel).getByRole('tablist', { name: 'Live evidence views' });
+  const screenTab = within(tabs).getByRole('tab', { name: 'Screen' });
+  screenTab.focus();
+  for (const [key, label] of [['{ArrowRight}', 'UI Tree'], ['{End}', 'Logs'], ['{Home}', 'Screen']] as const) {
+    await userEvent.keyboard(key);
+    const selected = within(tabs).getByRole('tab', { name: label });
+    expect(selected).toHaveFocus();
+    expect(selected).toHaveAttribute('aria-selected', 'true');
+    const surface = within(panel).getByRole('tabpanel');
+    expect(selected.getAttribute('aria-controls')).toBe(surface.id);
+    expect(surface.getAttribute('aria-labelledby')).toBe(selected.id);
+  }
+  expect(within(tabs).getByRole('tab', { name: 'Screen' }).id).toBe(screenTab.id);
+});
 
 const snapshot: RunSnapshot = {
   requestId: 'request', runId: 'run', workspaceName: 'test', platform: 'web', targetId: 'chrome', mode: 'explore', status: 'running',

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 import time
@@ -11,11 +13,24 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import urlsplit
 
 from fsq_agent.config import list_workspace_registry
 from fsq_agent.core.evidence import EvidenceRecorder
-from fsq_agent.models import ConfigurationError, DynamicAgentOutcome, EvidenceBundle, ReportArtifact, RunExecutionContext, RunnerEvent, RunRuntime, RunSource, TaskResult, ToolExecutionError
-from fsq_agent.report import ReportGenerator
+from fsq_agent.models import (
+    ConfigurationError,
+    DynamicAgentOutcome,
+    EvidenceBundle,
+    ReportArtifact,
+    ReportGenerationError,
+    RunExecutionContext,
+    RunnerEvent,
+    RunRuntime,
+    RunSource,
+    TaskResult,
+    ToolExecutionError,
+)
+from fsq_agent.report import ReportGenerator, RunReportService
 
 from .recording import RecordingResult, RecordingService
 from .runs import RunLifecycleService, allocate_run, transition_run
@@ -24,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from fsq_agent.config import Settings
-    from fsq_agent.models import RunEventSink, Task
+    from fsq_agent.models import EvidenceArtifactRef, RunEventSink, Task
 
 
 class DynamicAgent(Protocol):
@@ -43,6 +58,7 @@ class DynamicExecutionRequest:
     cancellation_check: Callable[[], None] | None = None
     report_coordinator: Callable[[TaskResult], None] | None = None
     recording_error_sink: Callable[[Exception], None] | None = None
+    requires_web_search_evidence: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,6 +78,8 @@ class DynamicExecutionService:
         if not callable(getattr(self._agent, "run_in_context", None)):
             raise ConfigurationError("Dynamic execution requires a run_in_context collaborator before actions.")
         settings = request.settings
+        if request.requires_web_search_evidence and settings.harness.platform != "web":
+            raise ConfigurationError("Web search evidence requires Web execution settings before actions.")
         started = time.perf_counter()
         lifecycle = RunLifecycleService()
         secret_values = tuple(sorted(set(settings.runtime_secrets.private_values().values()), key=len, reverse=True))
@@ -115,6 +133,20 @@ class DynamicExecutionService:
                     recorder.record_event(RunnerEvent(run_id=metadata.run_id, event_type="session_finish", payload={"capability_execution": "not_requested"}))
                     recorder.write_manifest()
                     bundle = lifecycle.read_evidence(run_dir)
+            web_evidence_gap = request.requires_web_search_evidence and outcome.verification.status == "success" and not _has_web_search_evidence(bundle, run_dir)
+            if web_evidence_gap:
+                outcome = outcome.model_copy(
+                    update={
+                        "verification": outcome.verification.model_copy(
+                            update={
+                                "status": "inconclusive",
+                                "summary": "Web search could not be confirmed: recorded browser activity with usable nonblank HTTP(S) page observations is missing.",
+                                "satisfied_criteria": [],
+                                "diagnostics": [*outcome.verification.diagnostics, "web_search_evidence_missing"],
+                            }
+                        )
+                    }
+                )
             frozen = lifecycle.freeze(
                 run_dir,
                 metadata,
@@ -122,6 +154,7 @@ class DynamicExecutionService:
                 verification=outcome.verification.model_copy(update={"summary": _redact_metadata_text(outcome.verification.summary, secret_values, root)}),
                 summary=_redact_metadata_text(outcome.verification.summary, secret_values, root),
                 fatal_errors=outcome.errors,
+                preserve_evidence_error=web_evidence_gap,
                 secret_values=secret_values,
                 duration_ms=int((time.perf_counter() - started) * 1000),
             )
@@ -225,6 +258,64 @@ class DynamicExecutionService:
 def _validate_outcome_identity(outcome: DynamicAgentOutcome, task: Task) -> None:
     if outcome.task.id != task.id:
         raise ValueError("Agent task identity does not match the allocated Run task.")
+
+
+def _has_web_search_evidence(bundle: EvidenceBundle, run_dir: Path) -> bool:
+    """Minimum observed browser support, not a semantic verdict about a site."""
+    if bundle.run_id != run_dir.name:
+        return False
+    activities = {
+        event.step_execution_id
+        for event in bundle.events
+        if event.run_id == bundle.run_id and event.event_type == "action_result" and event.phase == "invoke" and event.payload.get("status") == "passed" and event.step_execution_id
+    }
+    artifacts = {ref.artifact_id: ref for ref in bundle.artifacts}
+    for step in bundle.steps:
+        identity = step.step_execution_id
+        if identity not in activities or step.action_status != "passed":
+            continue
+        for phase in step.phase_reports:
+            for ref in phase.artifact_refs:
+                if (
+                    ref.kind == "ui_snapshot"
+                    and ref.availability == "available"
+                    and ref.step_id == ref.step_execution_id == identity
+                    and ref.phase == phase.phase
+                    and artifacts.get(ref.artifact_id) == ref
+                    and _usable_web_observation(ref, run_dir)
+                ):
+                    return True
+    return False
+
+
+def _usable_web_observation(ref: EvidenceArtifactRef, run_dir: Path) -> bool:
+    relative = ref.path
+    if relative is None or relative.is_absolute() or ".." in relative.parts or ref.size_bytes is None or not ref.sha256 or run_dir.is_symlink():
+        return False
+    root = run_dir.resolve()
+    path = root / relative
+    try:
+        if not path.resolve().is_relative_to(root) or any(item.is_symlink() for item in (path, *path.parents) if item != root and item.is_relative_to(root)):
+            return False
+        data = RunReportService.read_fact_bytes(path)
+        if len(data) != ref.size_bytes or hashlib.sha256(data).hexdigest() != ref.sha256:
+            return False
+        observation = json.loads(data)
+        if not isinstance(observation, dict):
+            return False
+        url = observation.get("url")
+        if not isinstance(url, str) or any(char.isspace() or ord(char) < 32 for char in url) or "\\" in url:
+            return False
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.port == 0:
+            return False
+        # These are the two WebUI snapshot layouts captured by the Web harness.
+        # A URL, screenshot or title alone does not supply usable page content.
+        kind = observation.get("snapshot_type")
+        content = observation.get("snapshot") if kind == "aria" else observation.get("text") if kind == "text" else None
+        return isinstance(content, str) and bool(content.strip())
+    except (OSError, ValueError, ReportGenerationError):
+        return False
 
 
 def _redact_metadata_text(text: str, private_values: tuple[str, ...], workspace: Path) -> str:

@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Menu, X } from 'lucide-react';
 import { ControlPlaneSidebar } from './ControlPlaneSidebar';
-import { CONTROL_PLANE_NAVIGATION, type ControlPlanePageId, type WorkspaceNavigationItem } from './navigation';
+import { CONTROL_PLANE_NAVIGATION, QUICK_TEST_NAVIGATION, type ControlPlanePageId, type WorkspaceNavigationItem } from './navigation';
 import './shell.css';
 
 interface ControlPlaneShellProps {
+  variant?: 'case-manager' | 'quick-test';
+  onBackToStart?: () => void;
   activePage: ControlPlanePageId;
   title: string;
   description: string;
@@ -24,8 +26,9 @@ interface ControlPlaneShellProps {
   interactionLocked?: boolean;
 }
 
-export function ControlPlaneShell({ activePage, title, description, outletPresentation = 'default', titleContent, titleActions, children, workspaces, selectedWorkspaceId, workspaceRegistryStatus, workspaceRegistryError, onNavigate, onRetryWorkspaces, onCreateWorkspace, onSelectWorkspace, onDiagnoseWorkspace, interactionLocked }: ControlPlaneShellProps) {
+export function ControlPlaneShell({ variant = 'case-manager', onBackToStart, activePage, title, description, outletPresentation = 'default', titleContent, titleActions, children, workspaces, selectedWorkspaceId, workspaceRegistryStatus, workspaceRegistryError, onNavigate, onRetryWorkspaces, onCreateWorkspace, onSelectWorkspace, onDiagnoseWorkspace, interactionLocked }: ControlPlaneShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const sidebarId = useId();
   const [narrow, setNarrow] = useState(false);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
@@ -87,16 +90,16 @@ export function ControlPlaneShell({ activePage, title, description, outletPresen
         type="button"
         aria-label="Open navigation"
         aria-expanded={drawerOpen}
-        aria-controls="control-plane-sidebar"
+        aria-controls={sidebarId}
         onClick={() => setDrawerOpen(true)}
       ><Menu aria-hidden="true"/></button>
       {drawerOpen && <button className="cp-drawer-scrim" type="button" aria-label="Dismiss navigation overlay" onClick={closeDrawer} />}
-      <aside ref={drawerRef} id="control-plane-sidebar" className={`cp-sidebar${drawerOpen ? ' cp-sidebar--open' : ''}`} aria-label="Control Plane sidebar" aria-hidden={narrow && !drawerOpen ? true : undefined} inert={narrow && !drawerOpen ? true : undefined}>
+      <aside ref={drawerRef} id={sidebarId} className={`cp-sidebar${drawerOpen ? ' cp-sidebar--open' : ''}`} aria-label="Control Plane sidebar" aria-hidden={narrow && !drawerOpen ? true : undefined} inert={narrow && !drawerOpen ? true : undefined}>
         <button className="cp-drawer-close" type="button" aria-label="Close navigation" onClick={closeDrawer}><X aria-hidden="true"/></button>
         <ControlPlaneSidebar
           interactionLocked={interactionLocked}
           activePage={activePage}
-          navigation={CONTROL_PLANE_NAVIGATION}
+          navigation={variant === 'quick-test' ? QUICK_TEST_NAVIGATION : CONTROL_PLANE_NAVIGATION}
           workspaces={workspaces}
           selectedWorkspaceId={selectedWorkspaceId}
           workspaceRegistryStatus={workspaceRegistryStatus}
@@ -112,8 +115,9 @@ export function ControlPlaneShell({ activePage, title, description, outletPresen
         <header className="cp-titlebar">
           {titleContent ?? <div className="cp-title-context"><strong>{title}</strong><small>{description}</small></div>}
           {titleActions && <div className="cp-title-actions">{titleActions}</div>}
+          {onBackToStart && <a className="cp-back-to-start" href="#start" onClick={event => { event.preventDefault(); onBackToStart(); }}>Back to start</a>}
         </header>
-        <main className={`cp-page-outlet${outletPresentation === 'full-bleed' ? ' cp-page-outlet--full-bleed' : ''}`} id="main-content">{children}</main>
+        <main className={`cp-page-outlet${outletPresentation === 'full-bleed' ? ' cp-page-outlet--full-bleed' : ''}`} id={`${sidebarId}-main`}>{children}</main>
       </div>
     </div>
   );

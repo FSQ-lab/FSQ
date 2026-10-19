@@ -344,7 +344,19 @@ def test_native_path_references_never_fall_back_to_name_inventory(monkeypatch, t
     monkeypatch.setattr("fsq_agent.environments.providers._applications.platform.system", lambda: "Windows" if platform == "windows" else "Darwin")
     monkeypatch.setattr("fsq_agent.environments.providers._applications._macos_roots", lambda: pytest.fail("Path references must not scan name metadata"))
     monkeypatch.setitem(sys.modules, "winreg", None)
-    reference = {"explicit_reference": str(path)} if provenance == "explicit" else {"inferred_hint": ApplicationLookupHint(kind="app_path", value=str(path))}
+    reference_value = str(path)
+    if platform == "macos":
+        # Keep macOS reference syntax independent of the runner's filesystem.
+        # Only this exact reference maps to the real, host-native fixture.
+        reference_value = "/Applications/Selected.app"
+
+        def fixture_path(value):
+            if value != reference_value:
+                pytest.fail("Unexpected macOS path lookup.")
+            return path
+
+        monkeypatch.setattr("fsq_agent.environments.providers._applications.Path", fixture_path)
+    reference = {"explicit_reference": reference_value} if provenance == "explicit" else {"inferred_hint": ApplicationLookupHint(kind="app_path", value=reference_value)}
     result = PlatformRuntimeService().lookup_application(platform=platform, name="WeChat", **reference)
     assert result.status == "complete"
     assert len(result.candidates) == int(exists)

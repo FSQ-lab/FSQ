@@ -31,8 +31,6 @@
 
 https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f
 
-[![Android Quick Test cover showing a real device browser and FSQ execution evidence](docs/media/quick-test-poster.png)](https://youtu.be/f1sobvVHNg0)
-
 [Watch on YouTube](https://youtu.be/f1sobvVHNg0) · [English captions](docs/media/quick-test.en.srt) · [Media sources and review status](docs/media/quick-test-demo-provenance.md)
 
 The video shows one real Android Quick Test: find the FSQ repository, follow its About website link, and verify both homepage headlines. You can start with Web; platform setup and execution differ, and search results and outcomes can vary.

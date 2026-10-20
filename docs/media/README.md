@@ -14,7 +14,7 @@ The current promotional demonstration is **Android Quick Test**: find the FSQ-la
 - [Observed acceptance and pending verification](media-acceptance.md)
 - [Current sequence](demo-storyboard.md)
 
-The READMEs link the GitHub attachment and matching cover; the Website and [standalone demo](../demo.html) activate native playback only on a click. Both retain explicit GitHub and YouTube viewing links. The Website bundles captions and images on the Pages origin. No large video is committed.
+The READMEs embed the GitHub attachment and retain textual YouTube, caption, and provenance links; the Website and [standalone demo](../demo.html) activate native playback only on a click. Both retain explicit GitHub and YouTube viewing links. The Website bundles captions and images on the Pages origin. No large video is committed.
 
 The share image `../assets/social-preview.png` uses the same white/green identity and the headline “Describe a goal. Test the real app.”. Its byte-identical Website publication copy is `frontend/website/public/social-preview.png`; the stable social metadata URL is `https://fsq-lab.github.io/FSQ/social-preview.png`.
 

@@ -19,7 +19,7 @@ GETTING_STARTED_DATA_URL = (
     "Strict%20Replay%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3Ch1%3EFSQ%20Web"
     "%20Strict%20Replay%3C%2Fh1%3E%3C%2Fbody%3E%3C%2Fhtml%3E"
 )
-SKILL_DESCRIPTION = "Guide FSQ UI testing when users want to explore an app, test a UI, verify a workflow, or create an FSQ Case from a Goal, with readiness discovery and user-confirmed execution."
+SKILL_DESCRIPTION = "Guide FSQ Quick Test UI verification from a natural-language goal, with readiness discovery, evidence, and explicit Case creation or replay when requested."
 
 
 def _web_registry():

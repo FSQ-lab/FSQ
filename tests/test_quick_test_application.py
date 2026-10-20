@@ -692,3 +692,179 @@ def test_web_requires_explicit_single_site_before_persistence(ready, monkeypatch
         prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=ready))
     assert error.value.code.value == "quick_test.invalid_web_address"
     assert not (ready / "quick-test").exists()
+
+
+@pytest.fixture
+def web_boundary(ready, monkeypatch):
+    browser = ready / "Google Chrome" / "chrome"
+    browser.parent.mkdir()
+    browser.write_text("controlled browser fixture")
+    browser.chmod(0o755)
+    monkeypatch.setattr(PlatformRuntimeService, "discover_web_executables", lambda self, channel: [browser] if channel == "chrome" else [])
+    monkeypatch.setattr("fsq_agent.core.HarnessFactory.create_harness", lambda *args, **kwargs: pytest.fail("No real browser or UI actions"))
+    sessions = []
+
+    def reply(reference, *, search=False):
+        requests = []
+        payload = json.dumps({"sufficient": True, "reason": "web_search" if search else "sufficient", "application_name": "FSQ", "explicit_reference": reference, "inferred_hint": None})
+        session = SimpleNamespace(requests=requests, closed=False)
+
+        def complete(request):
+            requests.append(request)
+            return ModelResult(text=payload, parsed_output=request.output.parse(payload))
+
+        session.complete_sync = complete
+        session.close_sync = lambda: setattr(session, "closed", True)
+        sessions.append(session)
+        monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: QuickTestIntentAnalyzer(session))
+        return session
+
+    return ready, reply, sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("goal", "reference"),
+    [
+        ("打开https://example.test/docs\uff0c确认标题", "https://example.test/docs"),
+        ("Open “HTTPS://Example.TEST:443/a(b(c))?q=%2f#片段!” and verify", "HTTPS://Example.TEST:443/a(b(c))?q=%2f#片段!"),
+        ("Open `https://example.test/路径?q=值\uff0c。` and verify", "https://example.test/路径?q=值\uff0c。"),
+        ("Open <https://[2001:db8::1]:8443/a(b)?#> and verify", "https://[2001:db8::1]:8443/a(b)?#"),
+        ("Open [site](https://example.test/report. 'title') and verify", "https://example.test/report."),
+        ("Open https://example.test? and verify", "https://example.test?"),
+        ("Open https://example.test/?q=one; and verify", "https://example.test/?q=one;"),
+        ("Open https://example.test/#part!, and verify", "https://example.test/#part!,"),
+        ("Open <https://example.test/a'b\"c?x=%2F> and verify", "https://example.test/a'b\"c?x=%2F"),
+        ("Open <https://outer.test/?next=//☃.test&redirect=//😀.test> and verify", "https://outer.test/?next=//☃.test&redirect=//😀.test"),
+        ("First https://first.test then https://second.test/path and verify", "https://second.test/path"),
+        ("Open https://example.test/a\nVerify the heading", "https://example.test/a"),
+        ("Open https://example.test/a\tVerify the heading", "https://example.test/a"),
+        ("Open (https://[::1]:8443/a(b)) and verify", "https://[::1]:8443/a(b)"),
+        (r'Open [https://label.test](<HTTPS://Example.TEST/a%2Fb?!> "say \"hello\" https://title.test") and verify', "HTTPS://Example.TEST/a%2Fb?!"),
+    ],
+)
+async def test_exact_selected_address_reaches_shared_execution(web_boundary, monkeypatch, goal, reference):
+    from fsq_agent.application import run_quick_test
+    from fsq_agent.config import load_platform_settings
+    from fsq_agent.execution import DynamicExecutionService
+    from fsq_agent.models import DynamicAgentOutcome, VerificationResult
+
+    root, reply, _ = web_boundary
+    session = reply(reference)
+    seen = []
+    initial = []
+    original_execute = DynamicExecutionService.execute
+
+    def load(*args, **kwargs):
+        settings = load_platform_settings(*args, **kwargs)
+        initial.append(settings)
+        return settings
+
+    async def execute(self, request):
+        seen.append(request)
+        return await original_execute(self, request)
+
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, **kwargs):
+            assert task.description == task.planning_reference_text == goal
+            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status="inconclusive", summary="Controlled execution boundary"))
+
+    monkeypatch.setattr(DynamicExecutionService, "execute", execute)
+    monkeypatch.setattr("fsq_agent.application._quick_test.load_platform_settings", load)
+    result = await run_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=root), agent_factory=lambda settings: Agent())
+    assert len(seen) == 1
+    assert seen[0].settings.harness.web.base_url == reference
+    assert initial[0].harness.web.base_url == reference
+    assert seen[0].task.description == seen[0].task.planning_reference_text == goal
+    assert not seen[0].requires_web_search_evidence
+    assert result.application == reference
+    assert len(session.requests) == 1
+    assert session.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "address",
+    [
+        "https://example.test/a(b",
+        "https://example.test:0/a",
+        "https://[::1]extra/a",
+        "https://example.test/%GG",
+        "https://user@example.test/a",
+        "https://example.test/a\\b",
+        '"https://example.test/a\tb"',
+        '"https://example.test/a\nb"',
+        "https://example.test/a\u200bb",
+        "https://[::1]]?x=1",
+        "https://example.test/a)?x=1",
+        "https://example.test/a]#part",
+        *[
+            template.format(f"//{host}")
+            for host in ["example.test", "例子.test", "☃.test", "😀.test", "\u0301.test", "_.test", "%41.test", ").test", ">.test"]
+            for template in ["{}", '"{}"', "<{}>", "`{}`", "[site]({})"]
+        ],
+        "https://example.test/path,then",
+        '"https://example.test/a',
+        "prefixhttps://example.test",
+        "ftp://example.test",
+    ],
+)
+async def test_invalid_syntax_stops_before_model_persistence_or_execution(web_boundary, monkeypatch, address):
+    from fsq_agent.application import run_quick_test
+    from fsq_agent.execution import DynamicExecutionService
+
+    root, reply, _ = web_boundary
+    session = reply(None, search=True)
+    before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    monkeypatch.setattr(DynamicExecutionService, "execute", lambda *args: pytest.fail("Invalid input reached execution"))
+    with pytest.raises(ApplicationError) as error:
+        await run_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=f"Search FSQ {address} and verify", user_config_root=root), agent_factory=lambda settings: object())
+    assert error.value.code.value == "quick_test.invalid_web_address"
+    assert session.requests == []
+    assert {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+def test_nul_in_address_fails_at_public_request_boundary(web_boundary):
+    from pydantic import ValidationError
+
+    root, reply, _ = web_boundary
+    session = reply(None, search=True)
+    with pytest.raises(ValidationError, match="A current goal is required"):
+        prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal="Open https://example.test/a\x00b and verify", user_config_root=root))
+    assert session.requests == []
+    assert not (root / "quick-test").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize(
+    "reference",
+    [
+        None,
+        "https://Example.TEST:443/a%2Fb?x=1#part",
+        "https://example.test:443/a%2Fb?x=1#part!",
+        "https://Example.TEST:443/a%2fb?x=1#part!",
+        "https://Example.TEST/a%2Fb?x=1#part!",
+        "https://Example.TEST:443/a%2Fb?x=1",
+        "https://Example.TEST",
+        "https://inner.test",
+        "\nhttps://Example.TEST:443/a%2Fb?x=1#part!\n",
+    ],
+)
+async def test_invalid_model_provenance_stops_before_persistence_or_execution(web_boundary, monkeypatch, reference, multiple):
+    from fsq_agent.application import run_quick_test
+    from fsq_agent.execution import DynamicExecutionService
+
+    root, reply, _ = web_boundary
+    session = reply(reference)
+    monkeypatch.setattr(DynamicExecutionService, "execute", lambda *args: pytest.fail("Invalid provenance reached execution"))
+    goal = "Open <https://Example.TEST:443/a%2Fb?x=1#part!>"
+    if multiple:
+        goal += " then <https://outer.test/?next=https://inner.test>"
+    goal += " and verify"
+    with pytest.raises(ApplicationError) as error:
+        await run_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=root), agent_factory=lambda settings: object())
+    assert error.value.code.value == "quick_test.inference_failed"
+    assert len(session.requests) == 1
+    assert session.closed
+    assert not (root / "quick-test").exists()

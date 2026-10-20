@@ -95,6 +95,7 @@ def test_case_manager_in_dedicated_workspace_is_not_quick_test(tmp_path):
         {"platform": "macos", "goal": "a" * 16001},
         {"platform": "web", "goal": "Search FSQ", "targetId": "chrome", "requires_web_search_evidence": False},
         {"platform": "web", "goal": "Search FSQ", "targetId": "chrome", "requiresWebSearchEvidence": True},
+        {"platform": "web", "goal": "Verify heading", "targetId": "chrome", "url": "https://example.test"},
     ],
 )
 def test_invalid_transport_fields_never_reserve(body, tmp_path):

@@ -3,12 +3,10 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
-from urllib.parse import urlsplit
 
-from fsq_agent.ai_services import build_quick_test_intent_analyzer
+from fsq_agent.ai_services import QuickTestWebAddressParser, build_quick_test_intent_analyzer
 from fsq_agent.application.contracts.shared import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode
 from fsq_agent.application.contracts.workspace import QuickTestCheck, QuickTestChoice, QuickTestContextRequest, QuickTestContextResult, QuickTestPrepareRequest, QuickTestPrepareResult
 from fsq_agent.application.doctor import PlatformDiagnosticContext, diagnose_platform_settings
@@ -124,6 +122,14 @@ def _context(request: QuickTestContextRequest, settings: Settings | None) -> Qui
 def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Callable[[], None] | None = None) -> QuickTestPrepareResult:
     cancel = check_cancelled or (lambda: None)
     cancel()
+    address = None
+    addresses = ()
+    if request.platform == "web":
+        if request.url is not None:
+            try:
+                address = QuickTestWebAddressParser().validate(request.url)
+            except ValueError:
+                raise _error("invalid_web_address") from None
     try:
         settings = load_platform_settings(request.platform, user_config_root=request.user_config_root)
         context = _context(request, settings)
@@ -132,10 +138,11 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     if not context.can_start:
         raise _error("prerequisites")
     cancel()
-    # Validate explicit URL provenance before inference as well as after it.
-    addresses = _web_addresses(request.goal) if request.platform == "web" else ()
+    if request.platform == "web" and request.url is None:
+        addresses = _web_addresses(request.goal)
     try:
-        intent = build_quick_test_intent_analyzer(settings).analyze(platform=request.platform, goal=request.goal)
+        options = {"url": request.url} if request.url is not None else {}
+        intent = build_quick_test_intent_analyzer(settings).analyze(platform=request.platform, goal=request.goal, **options)
     except Exception:  # noqa: BLE001 -- preserve failure, never return raw provider/model output.
         raise _error("inference_failed") from None
     cancel()
@@ -144,10 +151,12 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     runtime = PlatformRuntimeService()
     requires_web_search_evidence = False
     if request.platform == "web":
-        if len(addresses) > 1 and intent.explicit_reference not in addresses:
-            raise _error("invalid_web_address")
-        if addresses:
-            address = intent.explicit_reference if intent.explicit_reference in addresses else addresses[0]
+        if request.url is not None:
+            application = address
+        elif addresses:
+            if intent.explicit_reference not in addresses:
+                raise _error("invalid_web_address")
+            address = intent.explicit_reference
             application = address
         else:
             if intent.reason != "web_search" or not intent.application_name or intent.explicit_reference is not None or intent.inferred_hint is not None:
@@ -212,29 +221,9 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
 
 def _web_addresses(goal: str) -> tuple[str, ...]:
     try:
-        return _parse_web_addresses(goal)
+        return QuickTestWebAddressParser().extract(goal)
     except ValueError:
         raise _error("invalid_web_address") from None
-
-
-def _parse_web_addresses(goal: str) -> tuple[str, ...]:
-    punctuation = ".,;!?\uff0c\u3002\uff1b\uff01\uff1f\u201d\u2019"
-    pattern = r"https?://[^\s<>\"'`)\]}]+"
-    addresses = tuple(dict.fromkeys(value.rstrip(punctuation) for value in re.findall(pattern, goal, flags=re.IGNORECASE)))
-    for value in addresses:
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None or "\\" in value or any(ord(char) < 32 for char in value):
-            raise ValueError
-        if parsed.port is not None and parsed.port == 0:
-            raise ValueError
-    # Classify supplied navigation syntax independently of the semantic model.
-    # Ordinary prose labels ("Goal:") are not schemes. Remove validated URLs
-    # before looking for malformed or unsupported URI syntax. Dotted subject
-    # text is ambiguous, not by itself a supplied navigation address.
-    remainder = re.sub(pattern, " ", goal, flags=re.IGNORECASE)
-    if re.search(r"(?:https?|ftp|ftps|file|javascript|data|about|mailto|ws|wss):|[a-z][a-z0-9+.-]*://|//[a-z0-9]", remainder, flags=re.IGNORECASE):
-        raise ValueError
-    return addresses
 
 
 def _bind_target(settings, target, target_id):

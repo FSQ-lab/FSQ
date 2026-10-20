@@ -312,6 +312,116 @@ def _test_request(runtime: DefaultCodingAgentRuntime, run_id: str = "") -> Agent
     return runtime._build_request(name="test", instructions="instructions", model_input="test", tools=[], output_type=AgentFinalOutput, run_id=run_id)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "HTTPS://Example.TEST:443/report?q=%2f&next=%2Fdocs#part!",
+        "https://[::1]:8443/a(b)?#",
+        "https://例子.test/路径\uff08说明\uff09?q=中文\uff0c值#片段\uff01",
+        "https://example.test/report?token=runtime-private-start#part",
+    ],
+)
+async def test_runtime_supplies_exact_starting_url_to_planning_and_navigation(tmp_path, monkeypatch, url):
+    from fsq_agent.core.evidence import ArtifactStore
+    from fsq_agent.drivers.web._playwright import PlaywrightWebDriver
+    from fsq_agent.harnesses._web import WebHarness
+
+    _patch_runtime_engine(monkeypatch)
+    goal = "Verify the heading; then visit https://later.test and check its form."
+    task = Task(id="exact-start", name=goal, description=goal, planning_reference_text=goal)
+    original_task = task.model_dump()
+    navigations = []
+    requests = []
+    events = []
+
+    class Page:
+        url = "about:blank"
+        viewport_size: ClassVar[dict[str, int]] = {"width": 800, "height": 600}
+
+        def goto(self, target, **kwargs):
+            navigations.append(target)
+            self.url = target
+
+        def close(self):
+            return None
+
+        def screenshot(self, **kwargs):
+            return b"controlled screenshot"
+
+        def aria_snapshot(self, **kwargs):
+            return '- heading "Example Domain" [level=1]'
+
+    class Engine(_FakeEngine):
+        async def run(self, model, request, *, on_event=None):
+            requests.append(request)
+            if request.output.name == "GoalPrePlan":
+                return await super().run(model, request, on_event=on_event)
+            context = json.loads(request.input.rsplit("Authoritative Web starting-address context:\n", 1)[1])
+            navigate = next(tool for tool in request.tools if tool.name == "navigate_to")
+            arguments = {"url": context["initial_url"], "waitUntil": None}
+            assert arguments["url"] == url
+            await on_event(AgentEvent(kind="tool_called", tool_name=navigate.name, arguments=arguments, call_id="start-navigation"))
+            output = json.loads(await navigate.invoke(ToolCall(name=navigate.name, arguments=arguments, call_id="start-navigation")))
+            assert output["status"] == "passed", output
+            await on_event(AgentEvent(kind="tool_output", tool_name=navigate.name, output=json.dumps(output), call_id="start-navigation"))
+            return AgentResult(final_output=AgentFinalOutput(status="success", summary="Heading checked."))
+
+    settings = Settings(harness={"platform": "web", "web": {"base_url": url}}, agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    settings.execution.post_action_delay_seconds = 0
+    settings.runtime_secrets.set_values({"START_TOKEN": "runtime-private-start"})
+    browser = tmp_path / "Google Chrome" / "chrome"
+    browser.parent.mkdir()
+    browser.write_text("Controlled browser executable fixture")
+    browser.chmod(0o755)
+    settings.harness.web.browser_executable_path = browser
+    driver = PlaywrightWebDriver(base_url=url, page=Page())
+    runtime = DefaultCodingAgentRuntime(
+        settings, _EmptyToolFactory(), lambda _: WebHarness(driver, artifact_store=ArtifactStore(run_dir=tmp_path / "exact-start-run", secret_values=("runtime-private-start",))), engine=Engine()
+    )
+    await runtime.run_pre_plan(goal, KnowledgeBundle(), [], "exact-start-run", event_sink=events.append)
+    assert url in requests[0].input
+    result = await _run_in_context(runtime, task, KnowledgeBundle(), [], "exact-start-run", event_sink=events.append)
+
+    assert len(requests) == 2
+    for request in requests:
+        source, context_text = request.input.rsplit("Authoritative Web starting-address context:\n", 1)
+        context = json.loads(context_text)
+        assert context["initial_url"] == url
+        instruction = context["navigation_instruction"]
+        assert "first navigation" in instruction
+        assert "exact absolute" in instruction
+        assert "path, query, and fragment" in instruction
+        assert "relative" in instruction
+        assert goal in source
+    assert json.loads(requests[0].input.split("\n\nAuthoritative Web starting-address context:\n", 1)[0])["reference_text"] == goal
+    assert task.model_dump() == original_task
+    assert navigations == [url]
+    assert result[-1].status == "success", result[-1].model_dump()
+    assert "runtime-private-start" not in json.dumps([event.model_dump(mode="json") for event in events])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform,url", [("web", None), ("android", "https://ignored.test/path?q=one#part")])
+async def test_runtime_omits_starting_address_context_without_web_target(tmp_path, monkeypatch, platform, url):
+    _patch_runtime_engine(monkeypatch)
+    settings = Settings(harness={"platform": platform, "web": {"base_url": url}}, agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    browser = tmp_path / "Google Chrome" / "chrome"
+    browser.parent.mkdir()
+    browser.write_text("Controlled browser executable fixture")
+    browser.chmod(0o755)
+    settings.harness.web.browser_executable_path = browser
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory)
+    goal = "Search for FSQ and verify its official heading."
+    task = Task(id="no-start-target", name=goal, description=goal)
+    await runtime.run_pre_plan(goal, KnowledgeBundle(), [], "no-start-run")
+    await _run_in_context(runtime, task, KnowledgeBundle(), [], "no-start-run")
+    assert len(_FakeEngine.requests) == 2
+    assert all("Authoritative Web starting-address context" not in request.input for request in _FakeEngine.requests)
+
+
 def _azure_openai_settings(*, api_key: str = "dummy") -> AgentRuntimeSettings:
     settings = AgentRuntimeSettings(provider="azure_openai")
     settings.base_url = "https://edgeqa-resource.cognitiveservices.azure.com/openai/v1/"

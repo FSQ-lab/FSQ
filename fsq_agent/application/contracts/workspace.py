@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from fsq_agent.application.contracts.doctor import DoctorPlatformResult
 from fsq_agent.config import Settings
-from fsq_agent.models import AndroidDevice, AndroidWorkspaceTarget, MacOSWorkspaceTarget, WebWorkspaceTarget, WindowsWorkspaceTarget
+from fsq_agent.models import AndroidDevice, AndroidWorkspaceTarget, MacOSWorkspaceTarget, VerificationResult, WebWorkspaceTarget, WindowsWorkspaceTarget
 
 
 class WorkspaceRequest(BaseModel):
@@ -70,6 +70,7 @@ class QuickTestContextRequest(BaseModel):
 
 class QuickTestPrepareRequest(QuickTestContextRequest):
     goal: str = Field(strict=True, min_length=1, max_length=16000)
+    url: str | None = Field(default=None, strict=True, min_length=1)
 
     @field_validator("goal")
     @classmethod
@@ -80,6 +81,8 @@ class QuickTestPrepareRequest(QuickTestContextRequest):
 
     @model_validator(mode="after")
     def explicit_selection(self):
+        if self.url is not None and self.platform != "web":
+            raise ValueError("An explicit starting URL is supported only for Web.")
         if self.platform in {"android", "web"} and self.target_id is None:
             raise ValueError("Explicit device or browser selection is required.")
         return self
@@ -121,3 +124,26 @@ class QuickTestPrepareResult(BaseModel):
     application: str
     settings: Settings = Field(exclude=True, repr=False)
     requires_web_search_evidence: bool = False
+
+
+class QuickTestRunResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    workspace_name: str
+    root_path: Path
+    platform: Literal["android", "web", "windows", "macos"]
+    platform_revision: str
+    target_id: str
+    target: AndroidWorkspaceTarget | WebWorkspaceTarget | WindowsWorkspaceTarget | MacOSWorkspaceTarget
+    application: str
+    run_id: str | None = None
+    status: Literal["success", "failed", "inconclusive", "cancelled", "error"]
+    summary: str
+    verification: VerificationResult | None = None
+    duration_ms: int | None = None
+    report_path: Path | None = None
+    execution_result_path: Path | None = None
+    evidence_manifest_path: Path | None = None
+    candidate_case_path: Path | None = None
+    case_name: str | None = None
+    recording_draft: bool | None = None
+    warnings: list[str] = Field(default_factory=list)

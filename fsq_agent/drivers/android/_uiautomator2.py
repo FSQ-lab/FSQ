@@ -32,7 +32,7 @@ DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS = 10.0
 ANDROID_STATE_ASSERTION_FIELDS = ("enabled", "checked", "selected", "clickable", "focused")
 ANDROID_LOCATOR_FIELDS = ("resourceId", "accessibilityId", "text", "className", "xpath")
 ANDROID_EDITABLE_CLASSES = frozenset({"android.widget.EditText", "android.widget.AutoCompleteTextView", "android.widget.MultiAutoCompleteTextView"})
-ANDROID_INPUT_IDENTITY_FIELDS = ("className", "resourceName", "packageName", "bounds")
+ANDROID_INPUT_IDENTITY_FIELDS = ("className", "resourceName", "packageName")
 # Only these structural XPath forms are demonstrably independent of the text being replaced.
 ANDROID_TEXT_INDEPENDENT_XPATH = re.compile(r"""(?:/+(?:hierarchy|[A-Za-z_][\w.$]*)(?:\[\d+\]|\[@(?:resource-id|content-desc)=(?:'[^']*'|"[^"]*")\])?)+""")
 ANDROID_UI_SNAPSHOT_TEXT_LIMIT_CHARS = 50
@@ -155,7 +155,7 @@ class UiAutomator2AndroidDriver(AIAssertionBackendToolMixin):
         class_name = before.get("className")
         if not isinstance(class_name, str) or class_name not in ANDROID_EDITABLE_CLASSES or before.get("enabled") is False:
             return self._failed("target_resolution_error", "Input target is not demonstrably editable.", metadata={"reason": "invalid_input_target"})
-        if not self._input_text_is_readable(before):
+        if not self._input_text_is_readable(before) or not isinstance(before.get("packageName"), str) or not before["packageName"].strip():
             return self._failed("action_error", "Input target text cannot be verified.", metadata={"reason": "verification_unavailable"})
         try:
             selector.click()
@@ -175,11 +175,29 @@ class UiAutomator2AndroidDriver(AIAssertionBackendToolMixin):
         # Stale/missing targets and read failures cannot establish either success or a rejected write.
         except Exception:  # noqa: BLE001
             return self._failed("action_error", "Text entry acceptance could not be read.", metadata={"reason": "verification_unavailable"})
-        if not self._input_text_is_readable(after) or any(before.get(field) != after.get(field) for field in ANDROID_INPUT_IDENTITY_FIELDS):
+        # Focus, keyboard visibility, and field icons may move or resize the same input.
+        # Only a resource-bound unique locator can tolerate geometry changes; a
+        # positional XPath singleton may otherwise silently resolve another input.
+        if (
+            not self._input_text_is_readable(after)
+            or after.get("enabled") is False
+            or any(before.get(field) != after.get(field) for field in ANDROID_INPUT_IDENTITY_FIELDS)
+            or (before.get("bounds") != after.get("bounds") and not self._input_locator_binds_resource(data, before.get("resourceName")))
+        ):
             return self._failed("action_error", "Text entry acceptance cannot be verified on the original target.", metadata={"reason": "verification_unavailable"})
         if after["text"] != text:
             return self._failed("action_error", "Text entry did not match the requested replacement.", metadata={"reason": "entry_mismatch"})
         return self._passed()
+
+    def _input_locator_binds_resource(self, data: dict[str, object], resource_name: object) -> bool:
+        locator = data.get("locator")
+        if not isinstance(resource_name, str) or not resource_name.strip() or not isinstance(locator, dict):
+            return False
+        xpath = locator.get("xpath")
+        if isinstance(xpath, str):
+            # The predicate must bind the final control, rather than an ancestor.
+            return ANDROID_TEXT_INDEPENDENT_XPATH.fullmatch(xpath) is not None and any(xpath.endswith(f"[@resource-id={quote}{resource_name}{quote}]") for quote in ("'", '"'))
+        return locator.get("resourceId") == resource_name
 
     def _input_text_is_readable(self, info: dict[str, object]) -> bool:
         text = info.get("text")
@@ -187,7 +205,19 @@ class UiAutomator2AndroidDriver(AIAssertionBackendToolMixin):
         return info.get("password") is False and isinstance(text, str) and (not text or not set(text) <= {"*", "•", "●"})
 
     def _input_target_info(self, selector: object) -> dict[str, object]:
-        info = self._selector_info(selector)
+        all_matches = getattr(selector, "all", None)
+        if callable(all_matches):
+            # XPath selector.info otherwise silently reads the first matching control.
+            # Read uniqueness and metadata together from one fresh hierarchy snapshot.
+            matches = all_matches()
+            if not isinstance(matches, list) or len(matches) != 1:
+                return {}
+            info = self._selector_info(matches[0])
+        else:
+            count = getattr(selector, "count", None)
+            if type(count) is not int or count != 1:
+                return {}
+            info = self._selector_info(selector)
         if "password" in info:
             return info
         # Native ObjInfo omits password; XPath info supplies it. Observe the same native

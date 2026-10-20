@@ -1,22 +1,23 @@
-# Release Media
+# Public demonstration media
 
-This directory owns the public demo media, product screenshots, subtitles, naming rules, privacy review, and new-user acceptance.
+The current promotional demonstration is **Android Quick Test**: find the FSQ-lab/FSQ repository, follow its About website link, and verify both homepage headlines. It shows goal entry, real-app execution, verification, and evidence review. It does not demonstrate a guaranteed Case publication or Strict Replay.
 
-The README first screen uses `fsq-control-plane-demo.gif`, a 20-second silent tour captured from the current Control Plane UI. It shows the real `Goal → Evidence → Candidate YAML → Strict Replay → Runs report → Portable HTML` workflow. The existing v0.1.0 full demo remains available through GitHub media attachment and YouTube.
+- [GitHub-hosted video](https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f)
+- [YouTube video](https://youtu.be/f1sobvVHNg0)
+- `quick-test-poster.png`: full-frame recorded execution cover, 1920×1080.
+- `quick-test-task.png`: editorial task explanation containing a real goal-input crop, 1800×1040.
+- `quick-test-execution.png`: real execution crop, 1593×705.
+- `quick-test-result.png`: editorial explanation pairing real captured page and Run-report crops, 1800×1040.
+- `quick-test.en.srt`: English captions supplied with the new edit.
+- `quick-test.en.vtt`: the same cues converted to WebVTT for the native browser player; old subtitle files are not used for this edit.
+- [Source identities and known/unknown provenance](quick-test-demo-provenance.md)
+- [Observed acceptance and pending verification](media-acceptance.md)
+- [Current sequence](demo-storyboard.md)
 
-The current-UI tour is delivered as a lightweight GIF. A separate live-demo video can be recorded and hosted later without committing large video files to Git history. Original local captures are intentionally not committed.
+The READMEs link the GitHub attachment and matching cover; the Website and [standalone demo](../demo.html) activate native playback only on a click. Both retain explicit GitHub and YouTube viewing links. The Website bundles captions and images on the Pages origin. No large video is committed.
 
-## Naming
+The share image `../assets/social-preview.png` uses the same white/green identity and the headline “Describe a goal. Test the real app.”. Its byte-identical Website publication copy is `frontend/website/public/social-preview.png`; the stable social metadata URL is `https://fsq-lab.github.io/FSQ/social-preview.png`.
 
-- `fsq-v0.1.0-demo-thumbnail.png` — linked video thumbnail;
-- `fsq-v0.1.0-android-demo-preview.gif` — lightweight README animation built from approved product screenshots;
-- `fsq-control-plane-demo.gif` — current Control Plane README first-screen tour;
-- `https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939` — GitHub README media preview;
-- `01-describe-goal.png` — goal entry and setup;
-- `02-execute-workflow.png` — execution timeline;
-- `03-capture-evidence.png` — captured evidence;
-- `04-generate-candidate.png` — Run-local candidate Case;
-- `05-inspect-run.png` — static report inspection;
-- `demo.en.srt` and `demo.zh-CN.srt` — subtitles.
+## Historical assets
 
-Do not commit empty placeholder media files. README references are added only when the corresponding approved artifact exists. Large video files stay outside Git history; the GIF is a short preview, not the canonical full demo.
+The versioned thumbnail and Android GIF, `fsq-control-plane-demo.gif`, its [provenance](fsq-control-plane-demo-provenance.md), numbered screenshots `01-describe-goal.png` through `05-inspect-run.png`, and `demo.en.srt` / `demo.zh-CN.srt` remain historical evidence for existing release references. They are not the current promotional demonstration. Retaining them does not validate them against current runtime behavior.

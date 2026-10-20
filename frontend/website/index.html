@@ -6,19 +6,19 @@
     <meta name="theme-color" content="#fafbf8" />
     <meta
       name="description"
-      content="FSQ is open-source alpha software for goal-driven testing of real user interfaces with inspectable evidence."
+      content="Describe a test goal. Let AI operate the real app and verify the outcome with FSQ, an open-source alpha tool with inspectable evidence."
     />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="FSQ" />
     <meta property="og:title" content="FSQ — Describe a goal. Test the real app." />
     <meta
       property="og:description"
-      content="Goal-driven real-UI testing with inspectable evidence and human-controlled replay."
+      content="Describe what to do and what should happen. Inspect screenshots, actions, and results from real-app testing."
     />
     <meta property="og:url" content="https://fsq-lab.github.io/FSQ/" />
-    <meta property="og:image" content="../../docs/assets/social-preview.png" />
+    <meta property="og:image" content="https://fsq-lab.github.io/FSQ/social-preview.png" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:image" content="../../docs/assets/social-preview.png" />
+    <meta name="twitter:image" content="https://fsq-lab.github.io/FSQ/social-preview.png" />
     <link rel="canonical" href="https://fsq-lab.github.io/FSQ/" />
     <link rel="icon" href="../../docs/assets/logo-light.svg" type="image/svg+xml" />
     <title>FSQ — Describe a goal. Test the real app.</title>
@@ -35,17 +35,22 @@
           records screenshots, interface state, and events so you can inspect the evidence. A run
           may return a Case; review it before making the separate choice to replay it.
         </p>
-        <h2>Choose either setup path</h2>
+        <h2>Choose either Quick Test path</h2>
+        <p>Python 3.11+, a supported configured Provider and selected model, and <a href="https://github.com/FSQ-lab/FSQ/blob/main/docs/platform-prerequisites.md">platform prerequisites</a> are required. Quick Test needs no manual project Workspace and does not save a formal Case or perform Strict Replay.</p>
         <section>
           <h3>Coding Agent</h3>
-          <p>Use the approval-aware local workflow. Never paste Provider credentials into Coding Agent chat.</p>
-          <p><a href="https://github.com/FSQ-lab/FSQ#1-coding-agent">Open Coding Agent setup</a></p>
+          <p>Add the FSQ Skill, reload the Coding Agent, and ask it to run your Quick Test goal. Never paste Provider credentials into Coding Agent chat.</p>
+          <p><a href="https://github.com/FSQ-lab/FSQ/blob/main/docs/getting-started.md#coding-agent">Open Coding Agent setup</a></p>
         </section>
         <section>
           <h3>FSQ UI</h3>
-          <p>Configure your Provider and model privately in the local FSQ UI.</p>
-          <p><a href="https://github.com/FSQ-lab/FSQ#2-fsq-ui">Open FSQ UI setup</a></p>
+          <p>Install fsq-agent, run fsq ui, and choose Quick Test. Configure your Provider and model privately in Settings.</p>
+          <p><a href="https://github.com/FSQ-lab/FSQ/blob/main/docs/getting-started.md#fsq-ui">Open FSQ UI setup</a></p>
         </section>
+        <h2>Try a complete user journey</h2>
+        <p>In a selected Web browser, search for the FSQ-lab/FSQ GitHub repository, follow the website link in About, and verify both “Describe a goal.” and “Test the real app.” on the destination page. Only browse public pages; do not sign in or submit forms. Inspect the result and captured page evidence.</p>
+        <p>The recorded demonstration uses Android: <a href="https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f">Open GitHub video</a> · <a href="https://youtu.be/f1sobvVHNg0">Watch on YouTube</a>.</p>
+        <p><a href="https://github.com/FSQ-lab/FSQ/blob/main/docs/getting-started.zh-CN.md">中文快速开始</a></p>
         <p>
           <strong>Alpha and privacy:</strong> Evidence is stored locally and may contain private app
           data. Review it before sharing. Web, Android, Windows, and macOS require platform-specific

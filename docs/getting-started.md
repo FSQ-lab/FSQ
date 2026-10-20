@@ -1,132 +1,58 @@
 # Getting Started
 
-This guide uses the package-owned Skill for a guided, platform-neutral AI
-Explore, with optional review and user-initiated deterministic replay. FSQ is alpha
-software; review [support and stability](support-and-stability.md) before
-production adoption.
+Describe a goal, let FSQ Quick Test operate the real app and verify the outcome, then inspect the evidence. **Coding Agent** and **FSQ UI** are equal alternatives. FSQ is alpha software; read [support and stability](support-and-stability.md).
 
 ## Prerequisites
 
-- Python 3.11 or newer.
-- The prerequisites for the platform and target you want to test.
-- A directory you can open as the exact local Coding Agent project root.
+- Python 3.11+ and [prerequisites for the chosen platform and target](platform-prerequisites.md).
+- A supported configured Provider (OpenAI, DeepSeek, Google Gemini, Kimi, GitHub Copilot, or Azure OpenAI) and explicitly selected model.
+- For Coding Agent setup, an exact project root in which to install the Skill.
 
-AI exploration and suggestion analysis also require OpenAI, DeepSeek, Google Gemini, Kimi, GitHub Copilot, or Azure OpenAI. Deterministic Case replay does not require a planning LLM unless the authored Case contains an AI assertion.
+Quick Test prepares the user-level `~/.fsq/quick-test/` Workspace automatically. No registered project Workspace, manual project initialization, or project Doctor is required. It does not inherit the opened project's knowledge, private environment, or credentials; put necessary non-secret project facts in the goal. It does not save a formal Case or automatically replay one.
 
-## Install the CLI and project-local Skill
+## Coding Agent
 
-Open the project in your Coding Agent and use this one-time setup:
+Open your project in the Coding Agent and use this one-time setup:
 
-> The official FSQ project is https://github.com/FSQ-lab/FSQ. Establish the
-> exact opened project root. Batch and disclose read-only Python, `fsq`, and
-> Skill-presence checks. Then request one approval covering only
-> `python -m pip install --upgrade fsq-agent` and one
-> `fsq init --agent skill` from that project root, with exact commands and
-> effects. Perform only approved operations, verify `fsq`, and report the exact
-> installed Skill path. This does not initialize a Workspace, configure a
-> Provider, or run a test. Tell me to reload or start a new Coding Agent
-> session, then stop.
+> The official FSQ project is https://github.com/FSQ-lab/FSQ. Establish the exact opened project root. Batch and disclose read-only Python, fsq, and Skill-presence checks with their working directories, commands, purpose, and effects. Request one approval covering only installation or upgrade of fsq-agent and one fsq init --agent skill in this project; show exact commands and Python-environment and project-file effects first. Perform only approved operations, verify fsq, and report the installed Skill path. This setup does not initialize a Workspace, configure a Provider, or run a test. Ask me to reload or start a new Coding Agent session, then stop.
 
-Reload or start a new Coding Agent session so the client discovers
-`.agents/skills/fsq/`. After a package upgrade, rerun
-`fsq init --agent skill` and reload again to update the copied Skill.
+Reload or start a new session so the client discovers `.agents/skills/fsq/`. After upgrading the package, rerun `fsq init --agent skill` and reload to update the copied Skill.
 
-Then state your actual goal concisely:
+Then ask: “Use FSQ Quick Test for the goal below, with Web and my confirmed available browser. Follow the installed FSQ Skill and ask only for decisions it cannot establish.” Include the complete goal below.
 
-> Test this user goal with FSQ: **[describe the outcome]**. Follow the installed
-> FSQ Skill and ask only for decisions it cannot establish.
+The Skill discloses one batch of read-only discovery and uses `quick-test context` to inspect the platform, device or browser, and prerequisites. It preserves confirmed exact targets without guessing or substituting browser channels, device IDs, or paths. It asks only for unresolved decisions that affect execution. Your test request authorizes one normal Quick Test without another FSQ-layer run confirmation; host and operating-system approvals remain independent.
 
-Examples—not defaults—include: Android, “a signed-out user sees a clear error
-for invalid sign-in”; Web, “a shopper can filter results and open one product”;
-Windows, “a user can create and save a draft”; macOS, “a user can change a
-preference and see it persist.” Do not guess a target ID or path.
+If Provider setup is needed, open `fsq ui` yourself and enter credentials privately in **Settings**, selecting a model, or use private interactive Provider configuration. Never put keys, tokens, or secrets in chat, visible command arguments, goals, or Cases. After you report completion, the Skill checks safe status and refreshes context for the same target. Readiness is not a connection test or successful execution.
 
-## Guided AI Explore
+The Skill submits one `quick-test run`, consumes actual JSONL progress and a terminal result, and retains the same process. It never automatically resubmits after failure, timeout, interruption, lost output, or malformed output. It reports authoritative execution status, whole-goal verification, actual target, and available evidence. Mapping individual criteria to supported, unmet, or unknown is the Coding Agent's interpretation, not multiple independent FSQ verdicts.
 
-The installed Skill leads the dialogue and uses the public FSQ CLI. It will:
-
-1. Prefer the exact opened project root established by the host; if ambiguous,
-   treat the current directory only as a candidate and ask you to resolve it.
-   From that root it runs Doctor before asking for facts Doctor can provide,
-   including the platform and exact current target.
-2. Reuse a valid registered Workspace at the project root. Otherwise inspect
-   only the exact `<project-root>/fsq_workspace`: reuse it if it is a valid
-   registered Workspace; initialize an existing empty ordinary directory; or,
-   after approval, create one empty absent directory with the host's native
-   filesystem capability and initialize it.
-3. Block on a symlink, non-directory, unreadable/indeterminate path, or non-empty
-   invalid directory. It never searches broadly, creates a nested Workspace,
-   follows or replaces a symlink, or overwrites, deletes, moves, or migrates
-   content. It does not prescribe `mkdir` or assume a shell.
-4. Before creation or initialization, show one cohesive recommendation with
-   exact project and Workspace roots, platform, exact target, fact sources,
-   candidates, exact existing `fsq init` argv, effects, and unauthorized
-   actions. One approval covers the exact directory creation, when needed, and
-   one initialization. It then verifies the actual returned root with Doctor.
-5. Keep FSQ facts, host facts, user decisions, and unverified model candidates
-   distinct. Candidate app IDs, browser targets, executable paths, bundle IDs,
-   devices, or accounts never enter argv until their exact value is confirmed.
-6. Ask for the smallest cohesive group of unresolved user-owned decisions.
-   It may propose Goal criteria, actions, and restrictions, but automatic
-   defaults only reduce authority or stop on ambiguity. It never silently
-   selects a target, account, recipient, exact content, amount, device, or
-   irreversible action, and shows exact literals and side effects in one
-   complete Goal before a separate create confirmation. Initialization,
-   creation, and replay permissions remain separate.
-
-Related read-only checks use one compact disclosure of their exact working
-directories, commands, purpose, and read-only effect; ordinary read-only
-commands do not each require another approval. Ambiguous scope or an unmet
-prerequisite blocks rather than being silently defaulted.
-
-### Provider handoff
-
-If AI Explore needs Provider setup, this is a user-controlled handoff. API
-keys, tokens, and authentication secrets must not enter chat. The Coding Agent
-asks you to open `fsq ui` yourself and enter credentials in **Settings**; the
-private interactive `fsq providers configure "<provider>"` command is the
-fallback. After you report completion, it checks Provider status and Doctor readiness
-again, then resumes the same Workspace, target, and Goal draft without
-repeating settled questions unless facts changed. Readiness is not a connection
-test or a successful execution.
-
-### Create, review, and optionally replay
-
-After showing the complete confirmed Goal, the Skill may submit one approved
-AI Explore with `fsq --output json --non-interactive case create ...`. It starts
-once, retains the same host process/session handle, waits for exactly one
-terminal result/error envelope, and does not retry an unknown, interrupted,
-failed, malformed, multiple, or contradictory result. Submission consumes that
-confirmation and is reported once. At recurring host opportunities, the Skill
-targets a low-noise heartbeat about every 20 seconds, never more frequently,
-stating only that the host process remains active and no terminal FSQ result
-exists. This is best-effort, not an exact timer; hosts without recurring
-model-visible opportunities cannot provide it. The Skill does not expose raw
-machine output, infer FSQ stages or percentages, or claim real-time progress.
-
-The Skill summarizes the authoritative execution result first and maps your
-observable acceptance criteria to supported, unmet, or unknown evidence before
-separately reporting recording, publication, and warnings. It selects only the
-exact returned Case path: `published_case_path`, or otherwise
-`candidate_case_path` marked as unpublished.
-
-It reviews that exact returned Case, unchanged and read-only, only if you ask.
-Replay is also initiated only by your request. After that request, it runs
-read-only Doctor and static prechecks, including:
+## FSQ UI
 
 ```bash
-fsq case format "<exact-case-path>" --check --json
+python -m pip install --upgrade fsq-agent
+fsq ui
 ```
 
-It then shows the exact path and target and strongly warns that replay is a new
-target operation that may repeat side effects. Known failure/recovery or
-repeated corrective mutation is included as risk, but does not automatically
-rewrite or refuse replay. If you still want replay after that warning, the
-Skill restates the residual risk and requires a second explicit confirmation.
-Only after that confirmation may it submit the unchanged Case once with
-`fsq --output json --non-interactive case test --platform "<platform>"
-"<exact-case-path>"`, without suggestions. Creating a Case never pre-approves
-replay, and Explore success does not prove deterministic replay success.
+1. Choose **Quick Test**.
+2. Configure a Provider and explicitly select a model in shared **Settings**.
+3. Select Web and an available browser, paste the goal below, and choose **Start Quick Test**. You do not need to know the website URL the search will discover.
+4. Use **Open report** to inspect the result and evidence, or choose **New test**. Unresolved intent, zero or multiple target matches, and preparation failures stop without follow-up dialogue. Target availability does not prove the model understood the intended app.
+
+## Complete first test
+
+Web is an accessible starting option; the [current video](https://youtu.be/f1sobvVHNg0) shows Android. Setup and execution differ, and search results and outcomes can vary.
+
+```text
+Use the selected browser to search for the FSQ-lab/FSQ GitHub repository. Open that repository, follow the website link in its About section, and verify that the destination page displays both “Describe a goal.” and “Test the real app.” Report the outcome with the captured page evidence. Only browse public pages. Do not sign in, change repository content, or submit forms. Stop and report a blocker if the repository or About website link cannot be identified.
+```
+
+## Review results before choosing advanced workflows
+
+Inspect actual status, captured page evidence, Run ID, Workspace, and available report paths. Preparation failure may have no Run; missing evidence remains unknown. Any Quick Test recording remains Run-local and unpublished; Quick Test does not save a formal Case.
+
+For reusable Cases, separately choose **FSQ Case Manager** or explicitly request Case creation. This is another UI execution with registered Workspace and Doctor checks, not saving the completed Quick Test. Reviewable content exists only when a candidate is actually generated.
+
+For replay, first inspect the exact returned Case unchanged, then request replay separately. The Skill performs static and Doctor checks and discloses the exact Case, target, and repeated side effects. Only your explicit confirmation after that disclosure authorizes one Strict Replay. Quick Test success does not prove replay success; the Skill does not automatically rewrite Cases or retry.
 
 ## Provider-free Web troubleshooting fallback
 

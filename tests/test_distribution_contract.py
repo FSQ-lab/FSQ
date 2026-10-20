@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -290,170 +291,167 @@ def test_canonical_skill_resources_are_checked_out_with_lf() -> None:
         assert attributes[(resource, "eol")] == "lf"
 
 
-def test_concise_readmes_cover_the_same_install_and_ui_contract() -> None:
-    readmes = {
-        "en": (ROOT / "README.md").read_text(encoding="utf-8"),
-        "zh": (ROOT / "README.zh-CN.md").read_text(encoding="utf-8"),
-    }
+def _markdown_section(document: str, heading: str) -> str:
+    start = re.search(rf"(?m)^{re.escape(heading)}$", document)
+    assert start is not None, heading
+    level = len(heading.split(" ", 1)[0])
+    rest = document[start.end() :]
+    end = re.search(rf"(?m)^#{{1,{level}}} ", rest)
+    return rest[: end.start()] if end else rest
 
-    for language, readme in readmes.items():
-        assert len(readme.splitlines()) <= 105
-        for required in (
-            "https://github.com/FSQ-lab/FSQ",
-            "python -m pip install --upgrade fsq-agent",
-            "fsq ui",
-            "docs/media/01-describe-goal.png",
-            "aa9d0a12-2f93-4894-8349-52a013424939",
-            "QqCahxGDdS0",
-        ):
-            assert required in readme
+
+def test_readmes_share_current_media_and_resolvable_local_destinations() -> None:
+    current_video = "https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f"
+    current_youtube = "https://youtu.be/f1sobvVHNg0"
+    expected_images = {f"docs/media/quick-test-{name}.png" for name in ("poster", "task", "execution", "result")}
+    for name in ("README.md", "README.zh-CN.md"):
+        path = ROOT / name
+        readme = path.read_text(encoding="utf-8")
+        assert current_video in readme
+        assert current_youtube in readme
+        assert "aa9d0a12-2f93-4894-8349-52a013424939" not in readme
+        assert "QqCahxGDdS0" not in readme
+        images = re.findall(r"!\[([^\]]+)\]\((docs/media/[^)]+)\)", readme)
+        assert {target for _, target in images} == expected_images
+        for alt, target in images:
+            assert alt.strip()
+            assert (ROOT / target).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        assert "docs/media/quick-test.en.srt" in readme
+        assert "docs/media/quick-test-demo-provenance.md" in readme
+        assert "https://fsq-lab.github.io/FSQ/" in readme
+        assert "Web" in readme
+        assert "Android" in readme
         assert readme.index("FSQ Lab") < readme.index("##")
-        documentation_heading = {"en": "## Documentation", "zh": "## 文档"}[language]
-        assert readme.index("> [!IMPORTANT]") < readme.index(documentation_heading)
+        assert "> [!IMPORTANT]" in readme
+
+        # Check actual linked files and heading fragments, not just expected strings.
+        targets = re.findall(r'\]\(([^)\s]+)\)|(?:href|src|srcset)="([^"]+)"', readme)
+        assert targets
+        for markdown_target, html_target in targets:
+            target = markdown_target or html_target
+            if target.startswith(("https://", "http://")):
+                continue
+            local, _, fragment = target.partition("#")
+            destination = path.parent / local if local else path
+            assert destination.is_file(), target
+            if fragment:
+                headings = re.findall(r"(?m)^#{1,6} (.+)$", destination.read_text(encoding="utf-8"))
+                anchors = {re.sub(r"[^\w\s-]", "", heading).lower().replace(" ", "-") for heading in headings}
+                assert fragment in anchors, target
+
+    srt = (ROOT / "docs/media/quick-test.en.srt").read_text(encoding="utf-8")
+    assert re.search(r"\d{2}:\d{2}:\d{2},\d{3} --> ", srt)
+    expected_vtt = "WEBVTT\n\n" + re.sub(r"(\d{2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", srt)
+    assert (ROOT / "docs/media/quick-test.en.vtt").read_text(encoding="utf-8") == expected_vtt
 
 
 def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
-    contracts = {
-        "en": {
-            "path": ROOT / "README.md",
-            "quick_start": "## Quick start",
-            "agent": "### 1. Coding Agent",
-            "ui": "### 2. FSQ UI",
-            "reload": "reload or start a new Coding Agent session",
-            "prompt": "> Use FSQ to test this user goal",
-            "setup_approval": "one approval for the listed changes",
-            "setup_scope": "does not initialize a Workspace, configure a Provider, or run a test",
-            "first_test": ("Microsoft Edge Stable", "Bing", "`FSQ GitHub`", "organic search results", "current position/ranking"),
-            "target_guidance": "facts or user-owned decisions",
-            "optional_case": "if FSQ returns a Case",
-            "replay": "separately requesting any replay",
-        },
-        "zh": {
-            "path": ROOT / "README.zh-CN.md",
-            "quick_start": "## 快速开始",
-            "agent": "### 1. Coding Agent",
-            "ui": "### 2. FSQ UI",
-            "reload": "重新加载 Coding Agent 或启动新 session",
-            "prompt": "> 使用 FSQ 测试这个用户目标",
-            "setup_approval": "一次修改批准请求",
-            "setup_scope": "不会初始化 Workspace、配置 Provider 或运行测试",
-            "first_test": ("Microsoft Edge Stable", "Bing", "`FSQ GitHub`", "自然搜索结果", "当前所在的位置/排名"),
-            "target_guidance": "事实或由用户决定的事项",
-            "optional_case": "如果 FSQ 返回了 Case",
-            "replay": "另行决定是否请求重放",
-        },
-    }
+    contracts = (
+        ("README.md", "## Quick start", "reload or start a new Coding Agent session", "one approval", "does not initialize a Workspace, configure a Provider, or run a test"),
+        ("README.zh-CN.md", "## 快速开始", "重新加载 Coding Agent 或启动新 session", "一次批准请求", "不初始化 Workspace、不配置 Provider、不运行测试"),
+    )
+    for name, heading, reload, approval, setup_boundary in contracts:
+        readme = (ROOT / name).read_text(encoding="utf-8")
+        quick_start = _markdown_section(readme, heading)
+        assert not re.search(r"(?m)^### \d+[.)]\s*(?:Coding Agent|FSQ UI)", quick_start)
+        sections = {title: _markdown_section(quick_start, f"### {title}") for title in ("Coding Agent", "FSQ UI")}
+        for title, section in sections.items():
+            details = re.findall(r"<details>\s*<summary>[^<]+</summary>(.*?)</details>", section, re.DOTALL)
+            assert len(details) == 1
+            assert section[: section.index("<details>")].strip(), "Keep a concise entry before setup details"
+            assert "Quick Test" in section
+            anchor = "coding-agent" if title == "Coding Agent" else "fsq-ui"
+            assert re.search(rf"\]\(docs/getting-started(?:\.zh-CN)?\.md#{anchor}\)", section)
+        agent = sections["Coding Agent"]
+        assert agent.index("https://github.com/FSQ-lab/FSQ") < agent.index("fsq init --agent skill") < agent.index(reload)
+        assert approval in agent
+        assert setup_boundary in agent
+        assert "Skill" in agent
+        assert "Web" in agent
+        ui = sections["FSQ UI"]
+        ui_details = re.search(r"<details>(.*?)</details>", ui, re.DOTALL)
+        assert ui_details is not None
+        assert "python -m pip install --upgrade fsq-agent" in ui_details[1]
+        assert "fsq ui" in ui_details[1]
+        assert all(marker in ui_details[1] for marker in ("Settings", "Provider", "Web", "Start Quick Test", "Open report"))
 
-    for contract in contracts.values():
-        readme = contract["path"].read_text(encoding="utf-8")
-        quick_start = readme[readme.index(contract["quick_start"]) :]
-        agent_section = quick_start[quick_start.index(contract["agent"]) : quick_start.index(contract["ui"])]
-        ui_section = quick_start[quick_start.index(contract["ui"]) :]
-
-        assert agent_section.index("https://github.com/FSQ-lab/FSQ") < agent_section.index("fsq init --agent skill")
-        assert agent_section.index("fsq init --agent skill") < agent_section.index(contract["reload"]) < agent_section.index(contract["prompt"])
-        assert contract["setup_approval"] in agent_section
-        assert contract["setup_scope"] in agent_section
-        assert all(value in agent_section for value in contract["first_test"])
-        assert contract["target_guidance"] in agent_section
-        assert "[describe the outcome]" not in agent_section
-        assert "[描述期望结果]" not in agent_section
-        assert "Skill" in agent_section
-        assert contract["optional_case"] in quick_start
-        assert contract["replay"] in quick_start
-        assert "mutation approval" not in agent_section
-        assert "mutation 批准" not in agent_section
-        assert "bootstrap" not in agent_section
-        assert all(value in ui_section for value in ("python -m pip install --upgrade fsq-agent", "fsq ui", "Settings", "Workspace"))
+        goals = re.findall(r"```text\n(.*?)\n```", quick_start, re.DOTALL)
+        assert len(goals) == 1
+        goal = goals[0]
+        assert goal.index("FSQ-lab/FSQ") < goal.index("About") < goal.index("Describe a goal.") < goal.index("Test the real app.")
+        assert "[describe the outcome]" not in goal
+        assert "[描述期望结果]" not in goal
+        if name == "README.md":
+            assert all(
+                marker in goal
+                for marker in ("search", "selected browser", "website link", "captured page evidence", "Only browse public pages", "Do not sign in", "submit forms", "Stop and report a blocker")
+            )
+        else:
+            assert all(marker in goal for marker in ("搜索", "已选择的浏览器", "官网链接", "页面证据", "只浏览公开页面", "不登录", "不提交表单", "停止并报告阻碍"))
+        guide_name = "getting-started.zh-CN.md" if "zh-CN" in name else "getting-started.md"
+        guide = (ROOT / "docs" / guide_name).read_text(encoding="utf-8")
+        assert goal in guide, "README and detailed guide must share the complete first goal"
 
 
 def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> None:
-    contracts = {
-        "en": {
-            "path": ROOT / "docs" / "getting-started.md",
-            "reload": "Reload or start a new Coding Agent session",
-            "guided": "## Guided AI Explore",
-            "discovery": "exact opened project root",
-            "doctor_first": "before asking",
-            "scope": "platform and exact current target",
-            "workspace": "exact `<project-root>/fsq_workspace`",
-            "goal": "smallest cohesive group",
-            "permissions": "permissions",
-            "provider": "Provider handoff",
-            "result": "result first",
-            "returned": "exact returned Case",
-            "optional_review": "only if you ask",
-            "static": "fsq case format",
-            "confirmation": "second explicit confirmation",
-            "fallback": "Provider-free Web troubleshooting fallback",
-        },
-        "zh": {
-            "path": ROOT / "docs" / "getting-started.zh-CN.md",
-            "reload": "重新加载或启动新的 Coding Agent session",
-            "guided": "## 引导式 AI Explore",
-            "discovery": "准确打开的项目根目录",
-            "doctor_first": "先运行 Doctor",
-            "scope": "平台和准确的当前目标",
-            "workspace": "准确的 `<project-root>/fsq_workspace`",
-            "goal": "最小且内聚的一组",
-            "permissions": "权限",
-            "provider": "Provider 交接",
-            "result": "先总结结果",
-            "returned": "准确返回的 Case",
-            "optional_review": "仅在你提出请求时",
-            "static": "fsq case format",
-            "confirmation": "第二次明确确认",
-            "fallback": "无需 Provider 的 Web 故障排查后备流程",
-        },
-    }
-
-    for contract in contracts.values():
-        guide = " ".join(contract["path"].read_text(encoding="utf-8").split())
-        install_markers = (
-            "python -m pip install --upgrade fsq-agent",
-            "fsq init --agent skill",
-            contract["reload"],
-        )
-        install_positions = [guide.index(marker) for marker in install_markers]
-        assert install_positions == sorted(install_positions)
-
-        protocol = guide[guide.index(contract["guided"]) :]
-        assert protocol.index(contract["discovery"]) < protocol.index(contract["doctor_first"])
-        assert protocol.index(contract["doctor_first"]) < protocol.index(contract["scope"])
-        scope_markers = (
-            contract["scope"],
-            contract["workspace"],
-            contract["goal"],
-            contract["permissions"],
-        )
-        scope_positions = [protocol.index(marker) for marker in scope_markers]
-        ordered_markers = (
-            contract["provider"],
-            "case create",
-            contract["result"],
-            contract["returned"],
-            contract["optional_review"],
-            contract["static"],
-            contract["confirmation"],
-            "case test",
-            contract["fallback"],
-        )
-        positions = [protocol.index(marker) for marker in ordered_markers]
-        assert positions == sorted(positions)
-        assert max(scope_positions) < positions[0]
-        assert "assets/getting-started.web.fsq.yaml" in protocol[positions[-1] :]
-
-        for obsolete_claim in (
-            "installed Skill cannot",
-            "Skill cannot configure",
-            "cannot run Explore",
-            "relative Control Plane route",
-            "安装后的 Skill 不可以",
-            "Skill 也不能配置",
-            "运行 Explore/suggestion",
-            "相对 Control Plane 路由",
-        ):
-            assert obsolete_claim not in guide
+    contracts = (
+        (
+            "getting-started.md",
+            "## Review results before choosing advanced workflows",
+            "## Provider-free Web troubleshooting fallback",
+            "No registered project Workspace, manual project initialization, or project Doctor is required",
+            "authorizes one normal Quick Test without another FSQ-layer run confirmation",
+            "never automatically resubmits",
+            "Only your explicit confirmation after that disclosure",
+            "not the primary experience or a prerequisite",
+        ),
+        (
+            "getting-started.zh-CN.md",
+            "## 检查结果\uff0c再选择进阶操作",
+            "## 无需 Provider 的 Web 故障排查后备流程",
+            "无需注册或初始化项目 Workspace\uff0c也无需先运行项目 Doctor",
+            "授权一次正常 Quick Test\uff0c无需另一层 FSQ 执行确认",
+            "不会自动重提",
+            "你明确确认后才执行一次 Strict Replay",
+            "不是主要体验\uff0c也不是用户 Goal 的前置步骤",
+        ),
+    )
+    for name, review_heading, fallback_heading, no_project_setup, one_request, no_retry, replay_confirmation, fallback_boundary in contracts:
+        guide = (ROOT / "docs" / name).read_text(encoding="utf-8")
+        first_use = guide[: guide.index(review_heading)]
+        assert "~/.fsq/quick-test/" in first_use
+        assert no_project_setup in first_use
+        assert "<project-root>/fsq_workspace" not in first_use
+        agent = _markdown_section(guide, "## Coding Agent")
+        assert agent.index("fsq init --agent skill") < agent.index(".agents/skills/fsq/")
+        assert agent.index("quick-test context") < agent.index("quick-test run")
+        assert one_request in agent
+        assert no_retry in agent
+        assert all(marker in agent for marker in ("JSONL", "Settings", "Provider"))
+        assert "case create" not in agent
+        assert "case test" not in agent
+        if name == "getting-started.md":
+            assert all(
+                marker in agent
+                for marker in (
+                    "Never put keys, tokens, or secrets in chat",
+                    "failure, timeout, interruption, lost output, or malformed output",
+                    "authoritative execution status",
+                    "whole-goal verification",
+                )
+            )
+        else:
+            assert all(marker in agent for marker in ("不要将 Key、token 或 secret 放进聊天", "失败、超时、中断、输出丢失或格式错误", "权威执行状态", "整体验证结论"))
+        ui = _markdown_section(guide, "## FSQ UI")
+        assert all(marker in ui for marker in ("python -m pip install --upgrade fsq-agent", "fsq ui", "Quick Test", "Settings", "Start Quick Test", "Open report"))
+        advanced = _markdown_section(guide, review_heading)
+        assert "FSQ Case Manager" in advanced
+        assert "Doctor" in advanced
+        assert replay_confirmation in advanced
+        fallback = " ".join(_markdown_section(guide, fallback_heading).split())
+        assert "assets/getting-started.web.fsq.yaml" in fallback
+        assert fallback_boundary in fallback
+        assert guide.index(review_heading) < guide.index(fallback_heading) < guide.index("case create")
 
 
 def test_changelog_keeps_released_skill_behavior_historical() -> None:
@@ -504,68 +502,76 @@ def test_ci_verifies_all_runtime_package_resources() -> None:
     assert "uv run --no-sync python -m pytest" in workflow
 
 
-def test_readme_uses_current_installation_and_cli_contract() -> None:
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-
-    headline = "Describe what to test. Let AI help to test the user flow."
+@pytest.mark.parametrize(
+    ("name", "headline", "quick_heading", "advanced_heading", "feedback_heading", "safety_markers"),
+    [
+        (
+            "README.md",
+            "Describe a goal. Test the real app.",
+            "## Quick start",
+            "## Go further when you need to",
+            "## Help shape FSQ",
+            (
+                "supported configured Provider and explicitly selected model",
+                "never paste them into Coding Agent chat",
+                "no manual project Workspace setup",
+                "does not save a formal Case",
+                "does not perform Strict Replay",
+                "Evidence is stored locally",
+                "may contain private app data",
+                "review it before sharing",
+                "alpha",
+            ),
+        ),
+        (
+            "README.zh-CN.md",
+            "描述测试目标\uff0c让 AI 测试真实应用。",
+            "## 快速开始",
+            "## 需要时再进阶",
+            "## 一起完善 FSQ",
+            (
+                "已配置的受支持 Provider 与明确选择的模型",
+                "不要发送到 Coding Agent 聊天",
+                "无需手动初始化项目 Workspace",
+                "不保存正式 Case",
+                "不执行 Strict Replay",
+                "证据保存在本地",
+                "可能包含私有应用数据",
+                "审查",
+                "Alpha",
+            ),
+        ),
+    ],
+    ids=("english", "chinese"),
+)
+def test_readme_uses_current_installation_and_cli_contract(name: str, headline: str, quick_heading: str, advanced_heading: str, feedback_heading: str, safety_markers: tuple[str, ...]) -> None:
+    readme = (ROOT / name).read_text(encoding="utf-8")
     assert readme.index(headline) < readme.index("FSQ Lab")
-    assert "python -m pip install --upgrade fsq-agent" in readme
-    assert "## Quick start" in readme
-    assert "### 1. Coding Agent" in readme
-    assert "### 2. FSQ UI" in readme
-    assert "fsq init --agent skill" in readme
-    assert "does not initialize a Workspace, configure a Provider, or run a test" in readme
-    assert "Use FSQ to test this user goal" in readme
-    assert all(detail in readme for detail in ("Microsoft Edge Stable", "Bing", "`FSQ GitHub`", "organic search results", "current position/ranking"))
-    assert "facts or user-owned decisions" in readme
-    assert "[describe the outcome]" not in readme
-    assert "README.zh-CN.md" in readme
-    assert "docs/getting-started.zh-CN.md" in readme
-    assert "![FSQ Test Runner for describing a test goal](docs/media/01-describe-goal.png)" in readme
-    assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
-    assert "https://youtu.be/QqCahxGDdS0" in readme
-    assert "Autoplay demo page" not in readme
-    assert "English captions" not in readme
-    assert "docs/demo.html" not in readme
-    assert "Bilibili" not in readme
-    assert "fsq ui" in readme
-    for obsolete in (
-        "fsq-agent run",
-        "run --strict",
-        "fsq-agent control-plane",
-        "fsq-agent report",
-        "fsq-agent playground",
-        "init --name",
-        "fsq-agent[web]",
-        "fsq-agent[android]",
-        "fsq-agent[windows]",
-        "fsq-agent[macos]",
+    assert "Python 3.11+" in _markdown_section(readme, quick_heading)
+    assert all(marker in readme for marker in safety_markers)
+    advanced = _markdown_section(readme, advanced_heading)
+    assert "FSQ Case Manager" in advanced
+    assert "Strict Replay" in advanced
+    if name == "README.md":
+        assert "A run may produce a Case" in advanced
+        assert "separately request Strict Replay" in advanced
+        assert "Quick Test never runs it automatically" in advanced
+    else:
+        assert "Run 可能产生 Case" in advanced
+        assert "单独请求 Strict Replay" in advanced
+        assert "Quick Test 不会自动重放" in advanced
+    assert readme.index(quick_heading) < readme.index(advanced_heading) < readme.index(feedback_heading)
+    assert "https://github.com/FSQ-lab/FSQ/issues/new/choose" in _markdown_section(readme, feedback_heading)
+    for link in (
+        "README.md" if "zh-CN" in name else "README.zh-CN.md",
+        "docs/getting-started.zh-CN.md",
+        "docs/platform-prerequisites.md",
+        "docs/support-and-stability.md",
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+        "LICENSE",
     ):
-        assert obsolete not in readme
-
-
-def test_chinese_readme_uses_current_installation_and_cli_contract() -> None:
-    readme = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
-
-    headline = "描述你要测试什么\uff0c让 AI 帮你测试用户流程。"
-    assert readme.index(headline) < readme.index("FSQ Lab")
-    assert "python -m pip install --upgrade fsq-agent" in readme
-    assert "## 快速开始" in readme
-    assert "### 1. Coding Agent" in readme
-    assert "### 2. FSQ UI" in readme
-    assert "fsq init --agent skill" in readme
-    assert "不会初始化 Workspace、配置 Provider 或运行测试" in readme
-    assert "测试这个用户目标" in readme
-    assert all(detail in readme for detail in ("Microsoft Edge Stable", "Bing", "`FSQ GitHub`", "自然搜索结果", "当前所在的位置/排名"))
-    assert "事实或由用户决定的事项" in readme
-    assert "[描述期望结果]" not in readme
-    assert "![用于描述测试目标的 FSQ Test Runner](docs/media/01-describe-goal.png)" in readme
-    assert "https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939" in readme
-    assert "https://youtu.be/QqCahxGDdS0" in readme
-    assert "自动播放演示页" not in readme
-    assert "中文字幕" not in readme
-    assert "Bilibili" not in readme
-    assert "fsq ui" in readme
+        assert re.search(rf"(?:\]\(|href=\"){re.escape(link)}(?:\)|\")", readme)
     for obsolete in (
         "fsq-agent run",
         "run --strict",

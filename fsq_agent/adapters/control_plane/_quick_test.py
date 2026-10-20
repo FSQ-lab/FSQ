@@ -64,6 +64,7 @@ def _prepare(server, request_id, request):
             frozen_revision=result.platform_revision,
         )
         prepared.requires_web_search_evidence = result.requires_web_search_evidence
+        prepared.quick_test_preparation = result
         prepared.goal = request.goal
         state.raise_if_cancelled(request_id)
         application = safe_text(result.application, secret_values=configured_secret_values(result.settings))

@@ -596,14 +596,16 @@ class DefaultCodingAgentRuntime:
                 instructions=self.policy.pre_plan_instructions,
                 tools=self._build_pre_plan_tools(),
                 output_type=GoalPrePlan,
-                model_input=self.policy.build_pre_plan_input(
-                    reference_text,
-                    knowledge,
-                    skills,
-                    reference_type=reference_type,
-                    available_platform_tools=self._pre_plan_tool_summary(),
-                    runtime_secret_names=list(self._runtime_secret_store().available_names()),
-                    runtime_secret_warnings=list(self._runtime_secret_store().warnings()),
+                model_input=self._with_web_starting_address(
+                    self.policy.build_pre_plan_input(
+                        reference_text,
+                        knowledge,
+                        skills,
+                        reference_type=reference_type,
+                        available_platform_tools=self._pre_plan_tool_summary(),
+                        runtime_secret_names=list(self._runtime_secret_store().available_names()),
+                        runtime_secret_warnings=list(self._runtime_secret_store().warnings()),
+                    )
                 ),
                 run_id=run_id,
             )
@@ -1166,13 +1168,29 @@ class DefaultCodingAgentRuntime:
     def _build_task_input(self, task: Task, runtime_policy: list[str] | None = None) -> str:
         prompt = self.settings.agent_runtime.prompt
         store = self._runtime_secret_store()
-        return self.policy.build_task_prompt(
-            prompt,
-            task,
-            runtime_policy,
-            list(store.available_names()),
-            list(store.warnings()),
+        return self._with_web_starting_address(
+            self.policy.build_task_prompt(
+                prompt,
+                task,
+                runtime_policy,
+                list(store.available_names()),
+                list(store.warnings()),
+            )
         )
+
+    def _with_web_starting_address(self, model_input: str) -> str:
+        initial_url = self.settings.harness.web.base_url
+        if self.settings.harness.platform != "web" or not initial_url:
+            return model_input
+        context = {
+            "initial_url": initial_url,
+            "navigation_instruction": (
+                "This frozen starting address is authoritative. Plan and execute the first navigation with navigateTo using initial_url as the exact absolute URL, "
+                "including its original case, escapes, port, path, query, and fragment. Do not substitute another starting address, reconstruct it from the goal, "
+                "or use relative base resolution. Subsequent navigation follows the goal."
+            ),
+        }
+        return model_input + "\n\nAuthoritative Web starting-address context:\n" + json.dumps(context, ensure_ascii=False)
 
     def _runtime_secret_store(self) -> RuntimeSecretStore:
         return RuntimeSecretStore.from_settings(self.settings.runtime_secrets)

@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 from fsq_agent.application._quick_test import get_quick_test_context, prepare_quick_test
+from fsq_agent.application._quick_test_execution import execute_prepared_quick_test, run_quick_test
 from fsq_agent.application._workspace_init import (
     add_workspace_platform as _add_workspace_platform,
 )
@@ -27,6 +28,7 @@ from fsq_agent.application.contracts import (
     QuickTestContextResult,
     QuickTestPrepareRequest,
     QuickTestPrepareResult,
+    QuickTestRunResult,
     WorkspaceInitializeRequest,
     WorkspaceInitializeResult,
     WorkspaceRequest,
@@ -97,12 +99,15 @@ __all__ = [
     "QuickTestContextResult",
     "QuickTestPrepareRequest",
     "QuickTestPrepareResult",
+    "QuickTestRunResult",
     "add_workspace_platform",
     "create_workspace",
+    "execute_prepared_quick_test",
     "get_quick_test_context",
     "initialize_workspace",
     "prepare_quick_test",
     "require_initialized_workspace",
     "resolve_workspace_target",
+    "run_quick_test",
     "update_workspace_platform",
 ]

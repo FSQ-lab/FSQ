@@ -14,6 +14,7 @@ from fsq_agent._capability_bootstrap import steps_require_provider
 from fsq_agent.adapters.coding_agent import create_coding_agent_runtime
 from fsq_agent.agent import FsqAgent
 from fsq_agent.ai_services import build_ai_assertion_evaluator
+from fsq_agent.application import ApplicationError, QuickTestPrepareResult, execute_prepared_quick_test
 from fsq_agent.case_dsl import FsqCaseLoader, FsqExecutableStepAdapter
 from fsq_agent.config import Settings, validate_runtime_settings, validate_strict_core_settings, workspace_revision
 from fsq_agent.core import ArtifactStore, EvidenceRecorder, HarnessFactory, RuntimeSecretStore
@@ -31,10 +32,10 @@ from fsq_agent.execution import (
     run_strict_lifecycle_case,
     transition_run,
 )
-from fsq_agent.models import EvidenceBundle, ExecutableStep, FsqCase, RunnerEvent, RunnerStepResult, Task
+from fsq_agent.models import EvidenceBundle, ExecutableStep, FsqCase, RunEvent, RunnerEvent, RunnerStepResult, Task
 
 from ._cases import build_strict_registry_context, resolve_case
-from ._evidence import EvidenceProjection, configured_secret_values, safe_exception_message
+from ._evidence import EvidenceProjection, _safe_details, configured_secret_values, safe_exception_message
 from ._readiness import require_android_preflight, require_macos_preflight, require_provider
 from ._state import ControlPlaneState, TaskCancelledError
 from ._targets import validate_target
@@ -57,6 +58,7 @@ class PreparedRun:
     resolved_steps_by_path: dict[Path, list[ExecutableStep]] = field(default_factory=dict)
     requires_ai_assertion: bool = False
     requires_web_search_evidence: bool = False
+    quick_test_preparation: QuickTestPrepareResult | None = None
 
 
 @dataclass
@@ -213,6 +215,35 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
     try:
         state.raise_if_cancelled(request_id)
         state.transition(request_id, "running", summary="Explore run is executing.")
+        if getattr(prepared, "quick_test_preparation", None) is not None:
+
+            async def progress(event):
+                if event.get("type"):
+                    projection.project_run_event(RunEvent.model_validate(event))
+                elif event.get("phase") == "finalizing":
+                    state.transition(request_id, "finalizing", summary=event["message"])
+
+            result = await execute_prepared_quick_test(
+                prepared.quick_test_preparation,
+                prepared.goal or "",
+                agent_factory=lambda frozen: FsqAgent.from_settings(frozen, create_coding_agent_runtime),
+                event_sink=progress,
+                check_cancelled=lambda: state.raise_if_cancelled(request_id),
+            )
+            if result.run_id:
+                projection.bind_run(result.run_id)
+                projection.load_persisted_manifest()
+                projection.load_persisted_step_ids()
+            for warning in result.warnings:
+                state.add_event(request_id, {"phase": "finalizing", "label": "Quick Test processing", "level": "warning", "message": projection.safe_text(warning)})
+            state.finish(
+                request_id,
+                status=result.status,
+                summary=projection.safe_text(result.summary),
+                result={"status": result.status, "durationMs": result.duration_ms, "suggestedCaseName": result.case_name, "recordingDraft": result.recording_draft},
+                report_available=result.report_path is not None or result.execution_result_path is not None,
+            )
+            return
         task = _task_from_goal(prepared.goal or "", request_id)
         execution = await DynamicExecutionService(
             agent=FsqAgent.from_settings(settings, create_coding_agent_runtime),
@@ -267,7 +298,7 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
 
 
 def _finish_explore_error(prepared, state: ControlPlaneState, projection: EvidenceProjection, exc: BaseException, *, cancelled: bool = False) -> None:
-    context = getattr(exc, "context", {})
+    context = exc.details if isinstance(exc, ApplicationError) else getattr(exc, "context", {})
     context = context if isinstance(context, dict) else {}
     run_id = context.get("run_id") or getattr(exc, "run_id", None)
     platform = context.get("platform") or getattr(exc, "platform", None)
@@ -281,11 +312,21 @@ def _finish_explore_error(prepared, state: ControlPlaneState, projection: Eviden
             except (OSError, ValueError):
                 pass
             else:
+                verification = context.get("verification") if isinstance(exc, ApplicationError) else None
+                if not isinstance(verification, dict):
+                    verification = frozen.verification
+                verification = _safe_details(RunLifecycleService.safe_value(verification, configured_secret_values(prepared.settings)), projection.safe_text)
                 state.finish(
                     prepared.request_id,
-                    status=frozen.outcome,
+                    status="error" if isinstance(exc, ApplicationError) else frozen.outcome,
                     summary=projection.safe_text(frozen.summary),
-                    result={"status": frozen.outcome, "processingError": "Execution processing stopped."},
+                    result={
+                        "status": "error" if isinstance(exc, ApplicationError) else frozen.outcome,
+                        "executionStatus": frozen.outcome,
+                        "verification": verification,
+                        "durationMs": frozen.duration_ms,
+                        "processingError": "Execution processing stopped.",
+                    },
                     report_available=True,
                 )
                 return

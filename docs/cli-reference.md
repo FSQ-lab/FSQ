@@ -16,6 +16,8 @@ FSQ installs `fsq` and the compatibility alias `fsq-agent`. Both invoke the same
 | `fsq init` | Initialize a Workspace platform, a project-local Coding Agent integration, or both. | No |
 | `fsq doctor` | Diagnose configured platforms without mutation. | Yes |
 | `fsq providers configure/status` | Configure or inspect the user-level Provider. | No |
+| `fsq quick-test context` | Discover platform readiness and device/browser choices without execution. | No project Workspace |
+| `fsq quick-test run` | Execute one standalone Explore goal in the dedicated Quick Test Workspace. | No project Workspace |
 | `fsq case create` | Execute one AI-driven goal. | Yes |
 | `fsq case test` | Execute an existing Case exactly once. | Yes |
 | `fsq case test --suggest` | Execute once, then analyze persisted facts. | Yes |
@@ -25,9 +27,25 @@ FSQ installs `fsq` and the compatibility alias `fsq-agent`. Both invoke the same
 
 Except when creating an unregistered Workspace, Workspace commands use the exact current directory. They do not search ancestors or accept an alternate Workspace flag.
 
-`fsq ui` can start from any directory. Choose **Quick Test** in the browser for exploration using the automatically prepared `~/.fsq/quick-test/` Workspace, or **FSQ Case Manager** for the complete existing workflows. Both use the same **Settings**. Entry selection does not itself start a test, and there is no separate Quick Test CLI command. See [the browser workflow](getting-started.md#open-the-control-plane).
+`fsq ui` can start from any directory. Choose **Quick Test** in the browser for exploration using the automatically prepared `~/.fsq/quick-test/` Workspace, or **FSQ Case Manager** for the complete existing workflows. Both use the same **Settings**. Entry selection does not itself start a test. Standalone CLI Quick Test uses the same preparation/execution contracts without starting the HTTP service. See [the browser workflow](getting-started.md#open-the-control-plane).
 
 Human output is for terminals. JSON produces one structured result. JSONL emits documented events and a terminal result where streaming applies. Invalid command requests use exit code 2; consume stable machine fields rather than human wording.
+
+Standalone Quick Test forms:
+
+```bash
+fsq quick-test context --platform PLATFORM [--target-id ID]
+fsq quick-test run --platform PLATFORM --goal TEXT [--target-id ID] [--url URL]
+fsq --output jsonl --non-interactive quick-test run --platform web --target-id chrome --url 'https://example.com/search?q=FSQ#results' --goal "Verify the results contain FSQ"
+```
+
+`PLATFORM` is `android`, `web`, `windows`, or `macos`, subject to existing host/runtime prerequisites. Context is read-only: it does not send inference, create a Workspace, or launch an application. A run requires an exact Android device serial or supported Web browser channel in `--target-id`; Windows/macOS reject that run option and resolve application identity from the goal. Choose an available target reported by context.
+
+Web-only `--url` supplies one complete HTTP(S) starting address separately from the required goal. It preserves the exact address, including case, escapes, port, path, query, fragment, and punctuation. Invalid or unsafe addresses fail before inference or Workspace mutation, without correction or search fallback. Keep test actions, expected outcomes, and limits in `--goal`. Without `--url`, existing goal-based address parsing and address-free search remain available. Browser Quick Test retains its single goal field.
+
+Quick Test needs no registered project Workspace and does not inherit the current project's knowledge, private environment, or settings. Runs use the dedicated `~/.fsq/quick-test/` Workspace and shared user-level Provider settings. It is always Explore; recordings remain Run-local, with no save/publication option. Explicit Case creation and strict replay retain their existing commands.
+
+Machine operations are `quick-test.context` and `quick-test.run`. JSON returns one terminal envelope; JSONL streams actual progress followed by one terminal result/error when output remains writable. Context exits `0` when startable and `4` when unavailable. Run exits are `0` success, `1` failed/inconclusive, `2` validation, `3` Workspace/configuration, `4` Provider/runtime unavailable, `5` infrastructure, and `130` cancellation/interruption. Interrupting requests finalization of the same Run; missing terminal facts leave the outcome unknown and do not authorize a retry.
 
 Run export works without browser interaction or a Provider:
 
@@ -46,40 +64,43 @@ Strict check of the `FSQ Web Strict Replay` heading in a package-owned inline
 HTML document; a configured browser is its only external prerequisite and the
 Skill presents it only as an explicit troubleshooting fallback.
 
-The Skill makes the Coding Agent the dialogue/orchestration owner while FSQ
-remains the passive CLI/Application. It requires an exact project directory,
-platform/current target, registered Workspace status/root, Goal, acceptance
-criteria, allowed/forbidden actions, and permissions. Initialization requires
-explicit permission; later commands use the actual returned root and inspect
-Doctor readiness for the specific requested command rather than treating an
-overall `partial` result as failure.
+The Skill defaults to standalone Quick Test. The Coding Agent prepares the
+application using authorized project tools, gathers platform/device/browser
+facts with `quick-test context`, and resolves only unsettled user choices. It
+supplies the full goal, observable acceptance conditions, and action/data
+limits; a known Web starting address goes in `--url`. FSQ owns target validation,
+UI execution, evidence, and whole-goal verification. The default journey does
+not require project Workspace discovery or initialization.
 
-Provider credentials are never a Coding Agent chat input. If Goal creation is
+Provider credentials are never a Coding Agent chat input. If Quick Test is
 blocked, the preferred handoff is for the user to run `fsq ui` and enter
 credentials directly in Settings; private interactive `fsq providers configure`
 is the fallback. The Skill does not start or call the UI, receive credentials,
 or treat `providers status` as a connection test.
 
-For creation, one exact user-confirmed Goal argument combines the outcome,
-acceptance criteria, allowed actions, and forbidden actions. One confirmation
-permits one `case create`, with no retry, suggestions, rewriting, parallel
-submission, or latest-Run guessing. The Skill preserves FSQ's structured
-execution/recording/publication outcomes, selects only the returned
-`published_case_path` or returned `candidate_case_path`, and never constructs or
-rewrites a Case path. A separately confirmed strict replay uses the exact
-unchanged, statically valid canonical Case at most once without `--suggest`;
-dynamic success does not prove replay success. Optional Run reads use only an
-exact returned/error-detail Run ID with `runs show` or bounded `runs logs`.
-The packaged Skill and Codex compatibility agent use terminal
-`--output json` for Goal-based creation and accept one result/error envelope.
-This integration choice does not remove or change the public CLI's JSONL event
-stream for independent programmatic consumers.
+The request to verify a goal permits one `quick-test run` submission without a
+second FSQ execution confirmation. The Skill uses `--output jsonl` for actual
+progress and one terminal result/error, retains the same process for
+cancellation, and never automatically resubmits after failure, cancellation,
+timeout, or lost output. It leads with FSQ's whole-goal verdict and separately
+maps acceptance conditions to returned evidence as supported, unmet, or unknown.
+Optional Run reads use only exact returned Workspace/platform/Run identities
+with `runs show` or bounded `runs logs`; there is no latest-Run guessing or
+Quick Test Case publication.
+
+Explicit Case creation remains a separately requested execution with its
+existing publication behavior. Separately confirmed strict replay uses the
+exact unchanged, statically valid Case in its registered Workspace at most once
+without `--suggest`; Quick Test success does not prove replay success. The Skill
+does not author or rewrite Case YAML. The separate Codex compatibility agent
+retains terminal `--output json` for Goal-based Case creation.
 
 Review the installed instructions and use the compatible host's discovery/reload
 flow. Because installation copies package resources, upgrading the package or
 reloading the host alone does not update an existing project copy. After a
-package upgrade, rerun `fsq init --agent skill`, review its backup/update result,
-then reload discovery or start a new session. `--no-overwrite` deliberately
+package upgrade, run `fsq init --agent skill` from the user project directory,
+review its backup/update result at `.agents/skills/fsq/`, then reload discovery
+or start a new session. `--no-overwrite` deliberately
 preserves an older existing copy.
 
 `fsq init --agent codex` retains the compatibility integration: it installs the

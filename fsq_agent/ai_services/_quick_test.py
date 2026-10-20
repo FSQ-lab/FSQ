@@ -7,12 +7,12 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 
 from fsq_agent.agent_engine import EngineError, ModelRequest, OutputContract
+from fsq_agent.ai_services._web_addresses import QuickTestWebAddressParser
 from fsq_agent.models import ApplicationLookupHint
 
 if TYPE_CHECKING:
@@ -35,18 +35,26 @@ class _IntentOutput(BaseModel):
     sufficient: bool
     reason: Reason
     application_name: str | None = Field(min_length=1, max_length=512)
-    explicit_reference: str | None = Field(min_length=1, max_length=2048)
+    explicit_reference: Annotated[str, StringConstraints(strip_whitespace=False)] | None = Field(min_length=1, max_length=2048)
     inferred_hint: _InferredHintOutput | None
 
+    @field_validator("explicit_reference", mode="before")
+    @classmethod
+    def normalize_native_reference(cls, value, info: ValidationInfo):
+        if isinstance(value, str) and info.context and info.context.get("platform") != "web":
+            return value.strip()
+        return value
+
     @model_validator(mode="after")
-    def consistent(self):
+    def consistent(self, info: ValidationInfo):
+        supplied_url = info.context and info.context.get("url") is not None
         if self.sufficient != (self.reason in {"sufficient", "web_search"}):
             raise ValueError("Inconsistent intent decision.")
-        if self.sufficient and not (self.application_name or self.explicit_reference):
+        if self.sufficient and not (supplied_url or self.application_name or self.explicit_reference):
             raise ValueError("Application reference is required.")
         if self.explicit_reference is not None and self.inferred_hint is not None:
             raise ValueError("Explicit provenance and inferred assistance must not be combined.")
-        if self.reason == "web_search" and (not self.application_name or self.explicit_reference is not None or self.inferred_hint is not None):
+        if self.reason == "web_search" and not supplied_url and (not self.application_name or self.explicit_reference is not None or self.inferred_hint is not None):
             raise ValueError("Address-free search requires only a grounded search subject.")
         for value in (self.application_name, self.explicit_reference, self.inferred_hint.value if self.inferred_hint else None):
             if value and any(ord(char) < 32 or ord(char) == 127 for char in value):
@@ -70,9 +78,22 @@ class QuickTestIntentAnalyzer:
         self._session = session
         self._reasoning_effort = reasoning_effort
 
-    def analyze(self, *, platform: str, goal: str) -> QuickTestIntent:
+    def analyze(self, *, platform: str, goal: str, url: str | None = None) -> QuickTestIntent:
         failed = False
         try:
+            addresses = ()
+            if url is not None:
+                if platform != "web":
+                    raise EngineError("invalid_output", "An explicit starting URL requires Web.")  # noqa: TRY301 -- reject input within the session cleanup boundary.
+                try:
+                    url = QuickTestWebAddressParser().validate(url)
+                except ValueError:
+                    raise EngineError("invalid_output", "Invalid supplied Web navigation reference.") from None
+            elif platform == "web":
+                try:
+                    addresses = QuickTestWebAddressParser().extract(goal)
+                except ValueError:
+                    raise EngineError("invalid_output", "Invalid supplied Web navigation reference.") from None
             response = self._session.complete_sync(
                 ModelRequest(
                     input=(
@@ -99,13 +120,25 @@ class QuickTestIntentAnalyzer:
                         "When an HTTP(S) address is supplied, retain the existing sufficient reason and explicit starting address instead. Multiple navigation URLs in one "
                         "clearly identified site test need not be ambiguous; select its explicit starting address. "
                         "You cannot verify installation, readiness, or test success, and must not rank platform lookup results.\n"
-                        + json.dumps({"platform": platform, "goal": goal}, ensure_ascii=False)
+                        + (
+                            "A separate url field supplies the authoritative starting target. Evaluate whether the goal supplies actual "
+                            "actions and a checkable outcome against that target; the URL supplies application context only. "
+                            "An actionless goal remains insufficient. Use reason sufficient for an actionable test against this target. "
+                            "application_name and explicit_reference may be null: no site name or URL echo is required. "
+                            "Do not reconstruct, normalize, or replace the target. "
+                            "Other addresses in the goal describe subsequent navigation, not the starting target.\n"
+                            if url is not None
+                            else ""
+                        )
+                        + json.dumps({"platform": platform, "goal": goal, **({"url": url} if url is not None else {})}, ensure_ascii=False)
                     ),
-                    output=OutputContract(name="quick_test_intent", schema=_IntentOutput.model_json_schema(), parse=_IntentOutput.model_validate_json),
+                    output=OutputContract(
+                        name="quick_test_intent", schema=_IntentOutput.model_json_schema(), parse=lambda text: _IntentOutput.model_validate_json(text, context={"platform": platform, "url": url})
+                    ),
                     reasoning_effort=self._reasoning_effort,
                 )
             )
-            return _validated_intent(response.parsed_output, platform, goal)
+            return _validated_intent(response.parsed_output, platform, goal, addresses, url)
         except BaseException:
             failed = True
             raise
@@ -117,19 +150,21 @@ class QuickTestIntentAnalyzer:
                     raise
 
 
-def _validated_intent(payload, platform, goal):
+def _validated_intent(payload, platform, goal, addresses, url=None):
     if not isinstance(payload, _IntentOutput):
         raise EngineError("invalid_output", "Model returned invalid Quick Test intent output.")
-    reference = payload.explicit_reference
-    if reference:
-        is_web_url = platform == "web" and re.match(r"https?://", reference, flags=re.IGNORECASE)
-        grounded = _grounded_http_reference(reference, goal) if is_web_url else _grounded(reference, goal, explicit=True)
-        if not grounded:
+    reference = url if url is not None else payload.explicit_reference
+    if platform == "web" and url is None:
+        if (reference is not None and reference not in addresses) or (addresses and payload.sufficient and reference not in addresses):
+            raise EngineError("invalid_output", "Model returned an ungrounded explicit application reference.")
+    elif platform != "web" and reference:
+        reference = reference.strip()
+        if not reference or not _grounded(reference, goal, explicit=True):
             raise EngineError("invalid_output", "Model returned an ungrounded explicit application reference.")
     name = payload.application_name
     if payload.reason == "web_search" and platform != "web":
         raise EngineError("invalid_output", "Search classification requires Web.")
-    if payload.sufficient and (platform != "web" or payload.reason == "web_search") and name and not _grounded(name, goal):
+    if payload.sufficient and url is None and (platform != "web" or payload.reason == "web_search") and name and not _grounded(name, goal):
         raise EngineError("invalid_output", "Model returned an ungrounded application lookup name.")
     if payload.sufficient and not (name or reference):
         raise EngineError("invalid_output", "Model returned invalid application lookup output.")
@@ -137,27 +172,8 @@ def _validated_intent(payload, platform, goal):
     allowed_hints = {"android": {"app_id"}, "macos": {"bundle_id", "app_path"}, "windows": {"app_path"}, "web": set()}
     if hint is not None and hint.kind not in allowed_hints.get(platform, set()):
         raise EngineError("invalid_output", "Model returned a lookup hint for the wrong platform.")
-    return QuickTestIntent(payload.sufficient, payload.reason, name, reference, ApplicationLookupHint(kind=hint.kind, value=hint.value) if hint else None)
-
-
-def _grounded_http_reference(value: str, goal: str) -> bool:
-    try:
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None or "\\" in value or parsed.port == 0:
-            return False
-    except ValueError:
-        return False
-    # Match whole addresses, including path/query/fragment, rather than a URL
-    # substring inside a longer address. Keep the existing Application prose
-    # delimiters without importing that layer or normalizing the returned value.
-    punctuation = ".,;!?\uff0c\u3002\uff1b\uff01\uff1f\u201d\u2019"
-    for match in re.finditer(r"https?://[^\s<>\"'`)\]}]+", goal, flags=re.IGNORECASE):
-        if match.start() and _joined_token(goal[match.start() - 1], value[0], explicit=True):
-            continue
-        supplied = match.group()
-        if value == supplied or value == supplied.rstrip(punctuation):
-            return True
-    return False
+    reason = "sufficient" if url is not None and payload.sufficient else payload.reason
+    return QuickTestIntent(payload.sufficient, reason, name, reference, ApplicationLookupHint(kind=hint.kind, value=hint.value) if hint else None)
 
 
 def _grounded(value: str, goal: str, *, explicit: bool = False) -> bool:

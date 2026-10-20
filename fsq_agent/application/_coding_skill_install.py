@@ -25,7 +25,7 @@ from fsq_agent.case_dsl import FsqCaseLoader, FsqCaseSerializer
 from fsq_agent.core import CapabilityDefinitionFactory, CapabilityRegistry, CommonPlatformTools
 
 _MANIFEST = ("SKILL.md", "assets/getting-started.web.fsq.yaml")
-_DESCRIPTION = "Guide FSQ UI testing when users want to explore an app, test a UI, verify a workflow, or create an FSQ Case from a Goal, with readiness discovery and user-confirmed execution."
+_DESCRIPTION = "Guide FSQ Quick Test UI verification from a natural-language goal, with readiness discovery, evidence, and explicit Case creation or replay when requested."
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,8 @@ from fsq_agent.application import (
     ExportRunReportRequest,
     GenerateRunHtmlRequest,
     ListRunsRequest,
+    QuickTestContextRequest,
+    QuickTestPrepareRequest,
     ReadRunLogsRequest,
     ShowRunRequest,
     WorkspaceInitializeRequest,
@@ -40,6 +42,7 @@ from fsq_agent.application import (
     export_run_report,
     format_case,
     generate_run_html,
+    get_quick_test_context,
     initialize_workspace,
     install_coding_agent,
     list_deepseek_models,
@@ -53,6 +56,7 @@ from fsq_agent.application import (
     request_github_device_code,
     require_initialized_workspace,
     result_record,
+    run_quick_test,
     show_run,
     test_case,
 )
@@ -172,7 +176,7 @@ def _requested_operation(args: list[str] | None) -> str:
         positional.append(value)
     if not positional:
         return "fsq"
-    if positional[0] in {"case", "providers", "runs"} and len(positional) > 1:
+    if positional[0] in {"case", "providers", "runs", "quick-test"} and len(positional) > 1:
         return ".".join(positional[:2])
     return positional[0]
 
@@ -328,6 +332,57 @@ def doctor(context: click.Context) -> None:
 @main.group(name="case")
 def case_group() -> None:
     pass
+
+
+@main.group(name="quick-test")
+def quick_test_group() -> None:
+    """Verify a goal without project Workspace setup or an HTTP service."""
+
+
+@quick_test_group.command(name="context")
+@click.option("--platform", type=PLATFORMS, required=True)
+@click.option("--target-id", default=None)
+@click.pass_context
+def quick_test_context(context: click.Context, platform: str, target_id: str | None) -> None:
+    result = get_quick_test_context(QuickTestContextRequest(platform=platform, target_id=target_id))
+    _emit_terminal(context, result.model_dump(mode="json"))
+    if not result.can_start:
+        raise click.exceptions.Exit(ExitCode.UNAVAILABLE)
+
+
+@quick_test_group.command(name="run")
+@click.option("--platform", type=PLATFORMS, required=True)
+@click.option("--goal", required=True)
+@click.option("--target-id", default=None)
+@click.option("--url", default=None, help="Exact HTTP(S) starting address (Web only).")
+@click.pass_context
+def quick_test_run(context: click.Context, platform: str, goal: str, target_id: str | None, url: str | None) -> None:
+    request = QuickTestPrepareRequest(platform=platform, goal=goal, target_id=target_id, url=url)
+
+    def progress(event):
+        if context.obj["output"] == "jsonl":
+            click.echo(json.dumps(event_record(event, operation=_context_operation(context)), ensure_ascii=False, default=str))
+        elif context.obj["output"] == "human":
+            click.echo(event.get("message") or event.get("title") or event.get("phase", ""))
+
+    def check_cancelled():
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError
+
+    try:
+        result = asyncio.run(run_quick_test(request, agent_factory=create_case_agent, event_sink=progress, check_cancelled=check_cancelled))
+        _emit_terminal(context, result.model_dump(mode="json"))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        _application_error(
+            context, ApplicationError(code=ApplicationErrorCode.RUN_CANCELLED, category=ApplicationErrorCategory.INTERNAL, message="Quick Test interrupted before a terminal result was available.")
+        )
+    except ApplicationError as error:
+        _application_error(context, error)
+    except Exception as error:  # noqa: BLE001 -- normalize transport failures without leaking details.
+        _application_error(context, normalize_application_error(error))
+    if result.status != "success":
+        raise click.exceptions.Exit(_case_exit_code(result.status))
 
 
 @case_group.command(name="create")

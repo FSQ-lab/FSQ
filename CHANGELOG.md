@@ -4,11 +4,25 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-20
+
+Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.1.md) for upgrade steps and validation limits.
+
+### Added
+
+- Standalone `fsq quick-test context` and `fsq quick-test run` for Android, Web, Windows, and macOS under existing host/runtime restrictions, without project Workspace setup or an HTTP service.
+- Optional Web-only `--url` supplies an exact HTTP(S) starting address separately from the required goal. Existing goal-only execution and the browser Quick Test input remain supported.
+
 ### Changed
 
-- The package-owned, host-neutral FSQ Agent Skill now guides a platform-neutral AI testing workflow, with the provider-free Web Strict self-check retained as a fallback.
+- The package-owned, host-neutral FSQ Agent Skill guides a platform-neutral AI testing workflow and defaults to standalone Quick Test with actual streamed progress, cancellation of the same process, and evidence-based results. Candidates remain Run-local without Case publication. Explicit Case creation/replay and the provider-free Web Strict troubleshooting fallback remain available; the Codex compatibility integration is unchanged.
 - The bilingual README now leads with user value, supports Coding Agent or `fsq ui` entry paths, and keeps detailed onboarding in the user guides.
-- Python distribution metadata and current-version guidance are prepared for version 0.3.0. This does not claim publication, merge, or release completion.
+- Python distribution metadata is prepared for version 0.3.1. The private npm package keeps its independent version.
+
+### Fixed
+
+- Web goal address parsing recognizes Chinese punctuation, paired wrappers, adjacent address labels, and Markdown boundaries while preserving exact address data and rejecting malformed or ambiguous references.
+- Dynamic Web navigation receives the frozen starting address as authoritative task context, including its path, query, fragment, case, and escapes.
 
 ## [0.1.6] - 2026-10-13
 
@@ -59,7 +73,8 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/FSQ-lab/FSQ/compare/v0.3.0...v0.3.1
 [0.1.6]: https://github.com/FSQ-lab/FSQ/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/FSQ-lab/FSQ/compare/v0.1.0...v0.1.5
 [0.1.0]: https://github.com/FSQ-lab/FSQ/releases/tag/v0.1.0

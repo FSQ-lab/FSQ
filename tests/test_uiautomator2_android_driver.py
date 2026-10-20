@@ -4,12 +4,14 @@
 import builtins
 from asyncio import CancelledError
 from io import BytesIO
+from types import SimpleNamespace
 from typing import Any
 from xml.etree import ElementTree
 
 import pytest
 
-from fsq_agent.core import AndroidDriverInterface
+from fsq_agent.core import AndroidDriverInterface, CapabilityRegistry, StepRunner
+from fsq_agent.core.evidence import ArtifactStore
 from fsq_agent.core.harness._android import AndroidHarness
 from fsq_agent.core.harness._driver_tools import _discover_driver_capability_definitions
 from fsq_agent.core.harness._uiautomator2_driver import UiAutomator2AndroidDriver
@@ -211,6 +213,171 @@ def test_uiautomator2_driver_context_launch_kill_and_artifacts() -> None:
         ("screenshot", "pillow"),
         ("dump_hierarchy",),
     ]
+
+
+def _shared_memory_rpc_error() -> Exception:
+    errors = pytest.importorskip("uiautomator2.exceptions")
+    return errors.RPCUnknownError(
+        "Unknown RPC error: -32001 java.lang.IllegalStateException",
+        {},
+        "java.lang.IllegalStateException: ApplicationSharedMemory not initialized\n"
+        "\tat com.android.internal.os.ApplicationSharedMemory.getInstance(ApplicationSharedMemory.java:85)\n"
+        "\tat com.wetest.uia2.stub.AutomatorServiceImpl.deviceInfo(AutomatorServiceImpl.java:158)\n",
+    )
+
+
+class ContextReadDevice(FakeDevice):
+    def __init__(self, outcomes: list[object], *, launch_error: Exception | None = None) -> None:
+        super().__init__()
+        self.outcomes = iter(outcomes)
+        self.info_reads = 0
+        self.launch_error = launch_error
+
+    @property
+    def info(self) -> dict[str, object]:
+        self.info_reads += 1
+        outcome = next(self.outcomes, self.normal_info)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    @info.setter
+    def info(self, value: dict[str, object]) -> None:
+        self.normal_info = value
+
+    def app_start(self, app_id: str, **options: object) -> None:
+        super().app_start(app_id, **options)
+        if self.launch_error is not None:
+            raise self.launch_error
+
+
+def test_context_recovers_known_initialization_fault_and_returns_fresh_info() -> None:
+    fresh = {"displayWidth": 720, "displayHeight": 1600, "currentPackageName": "fresh.package"}
+    device = ContextReadDevice([_shared_memory_rpc_error(), fresh])
+    driver = UiAutomator2AndroidDriver(app_id="com.example.app", device=device)
+
+    context = driver.context()
+
+    assert context["screen_size"] == (720, 1600)
+    assert context["metadata"] == {"backend": "uiautomator2", "current_package": "fresh.package"}
+    assert "current_activity" not in context
+    assert device.info_reads == 2
+    assert device.calls == []
+    assert driver.context()["screen_size"] == (1080, 2400)
+    assert device.info_reads == 3
+
+
+@pytest.mark.parametrize("second_fault", ["same", "disconnect", "cancel"])
+def test_context_recovery_is_bounded_and_preserves_second_fault(second_fault: str) -> None:
+    error = {"same": _shared_memory_rpc_error(), "disconnect": ConnectionError("offline"), "cancel": CancelledError()}[second_fault]
+    device = ContextReadDevice([_shared_memory_rpc_error(), error])
+    driver = UiAutomator2AndroidDriver(app_id="com.example.app", device=device)
+
+    with pytest.raises(type(error)) as caught:
+        driver.context()
+
+    assert caught.value is error
+    assert device.info_reads == 2
+    assert device.calls == []
+
+
+@pytest.mark.parametrize(
+    "fault", ["timeout", "disconnect", "ordinary-lookalike", "rpc-params", "rpc-wrong-code", "rpc-wrong-java", "rpc-missing-frame", "rpc-malformed", "cancel", "interrupt", "exit"]
+)
+def test_context_does_not_retry_other_faults_or_lookalikes(fault: str) -> None:
+    known = _shared_memory_rpc_error()
+    errors = pytest.importorskip("uiautomator2.exceptions")
+    summary, _, stack = known.args
+    error = {
+        "timeout": TimeoutError("offline"),
+        "disconnect": errors.UiAutomationNotConnectedError("offline"),
+        "ordinary-lookalike": RuntimeError(*known.args),
+        "rpc-params": errors.RPCUnknownError(summary, {"locator": stack}, "java.lang.IllegalStateException: other failure"),
+        "rpc-wrong-code": errors.RPCUnknownError("Unknown RPC error: -32002 java.lang.IllegalStateException", {}, stack),
+        "rpc-wrong-java": errors.RPCUnknownError(summary, {}, stack.replace("java.lang.IllegalStateException:", "java.lang.SecurityException:", 1)),
+        "rpc-missing-frame": errors.RPCUnknownError(summary, {}, "java.lang.IllegalStateException: ApplicationSharedMemory not initialized"),
+        "rpc-malformed": errors.RPCUnknownError(summary, {}, {"stack": stack}),
+        "cancel": CancelledError(),
+        "interrupt": KeyboardInterrupt(),
+        "exit": SystemExit(),
+    }[fault]
+    device = ContextReadDevice([error])
+    driver = UiAutomator2AndroidDriver(app_id="com.example.app", device=device)
+
+    with pytest.raises(type(error)) as caught:
+        driver.context()
+
+    assert caught.value is error
+    assert device.info_reads == 1
+    assert device.calls == []
+
+
+def test_context_recovery_uses_actual_sdk_info_and_rpc_error_offline(monkeypatch) -> None:
+    sdk = pytest.importorskip("uiautomator2")
+    sdk_core = pytest.importorskip("uiautomator2.core")
+    summary, _, stack = _shared_memory_rpc_error().args
+    response = SimpleNamespace(text="initialization fault", json=lambda: {"error": {"code": -32001, "message": summary.removeprefix("Unknown RPC error: -32001 "), "data": stack}})
+    responses = iter([response, SimpleNamespace(json=lambda: {"result": {"displayWidth": 600, "displayHeight": 900, "currentPackageName": "sdk.package"}})])
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append((args, kwargs))
+        return next(responses)
+
+    class Rpc:
+        def deviceInfo(self, *, http_timeout):
+            return sdk_core._jsonrpc_call(None, 9008, "deviceInfo", {}, http_timeout, False)
+
+    class Device:
+        info = sdk.Device.info
+        jsonrpc = Rpc()
+
+    monkeypatch.setattr(sdk_core, "_http_request", request)
+    driver = UiAutomator2AndroidDriver(app_id="com.example.app", device=Device())
+
+    assert driver.context()["screen_size"] == (600, 900)
+    assert len(calls) == 2
+    assert all(call[0][4] == {"jsonrpc": "2.0", "id": 1, "method": "deviceInfo", "params": {}} for call in calls)
+
+
+@pytest.mark.parametrize("mode", ["transient", "persistent", "launch-failure", "launch-and-evidence-failure"])
+def test_context_recovery_through_runner_never_retries_launch(mode: str, tmp_path) -> None:
+    outcomes = [_shared_memory_rpc_error()]
+    if mode == "persistent":
+        outcomes.append(_shared_memory_rpc_error())
+    device = ContextReadDevice(outcomes, launch_error=RuntimeError("app start rejected") if mode.startswith("launch") else None)
+    if mode == "launch-and-evidence-failure":
+
+        def failed_capture(*args, **kwargs):
+            raise RuntimeError("capture unavailable")
+
+        device.screenshot = failed_capture
+    driver = UiAutomator2AndroidDriver(app_id="com.example.app", device=device)
+    harness = AndroidHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path))
+    registry = CapabilityRegistry()
+    for definition in _discover_driver_capability_definitions(driver, platform="android"):
+        registry.register(definition)
+    runner = StepRunner(harness, capability_registry=registry)
+    step = ExecutableStep(step_id="launch", action_name="launch_app", params={}, kind="setup")
+
+    result = runner.run_step("context-recovery", step)
+
+    assert len([call for call in device.calls if call[0] == "app_start"]) == (0 if mode == "persistent" else 1)
+    if mode == "persistent":
+        assert device.info_reads == 2
+        assert result.status == "failed"
+        assert [(phase.phase, phase.status) for phase in result.phase_reports] == [("prepare", "failed")]
+        assert "RPCUnknownError" in result.error_message
+    else:
+        assert result.phase_reports[0].status == "passed"
+        invoke = next(phase for phase in result.phase_reports if phase.phase == "invoke")
+        assert invoke.status == ("failed" if mode.startswith("launch") else "passed")
+        assert result.status == ("failed" if mode.startswith("launch") else "passed")
+        if mode.startswith("launch"):
+            assert "app start rejected" in result.error_message
+            assert result.failure_category == "harness_error"
+        if mode == "launch-and-evidence-failure":
+            assert result.evidence_errors
 
 
 def test_uiautomator2_driver_actions_use_locator_selectors() -> None:

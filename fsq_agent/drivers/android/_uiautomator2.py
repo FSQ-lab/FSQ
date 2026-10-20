@@ -83,7 +83,14 @@ class UiAutomator2AndroidDriver(AIAssertionBackendToolMixin):
         return None
 
     def context(self) -> dict[str, object]:
-        info = self._device_info()
+        try:
+            info = self._device_info()
+        except Exception as exc:
+            if not self._is_shared_memory_initialization_error(exc):
+                raise
+            # Some Android versions initialize this service during the first read.
+            # Observe once more; never repeat the prepared application action.
+            info = self._device_info()
         width = info.get("displayWidth")
         height = info.get("displayHeight")
         return {
@@ -94,6 +101,24 @@ class UiAutomator2AndroidDriver(AIAssertionBackendToolMixin):
                 "current_package": info.get("currentPackageName"),
             },
         }
+
+    @staticmethod
+    def _is_shared_memory_initialization_error(error: Exception) -> bool:
+        try:
+            from uiautomator2.exceptions import RPCUnknownError
+        except ImportError:
+            return False
+        if not isinstance(error, RPCUnknownError) or len(error.args) != 3:
+            return False
+        summary, _, stack = error.args
+        if summary != "Unknown RPC error: -32001 java.lang.IllegalStateException" or not isinstance(stack, str):
+            return False
+        lines = stack.splitlines()
+        return (
+            len(lines) > 1
+            and lines[0] == "java.lang.IllegalStateException: ApplicationSharedMemory not initialized"
+            and re.fullmatch(r"\s*at com\.android\.internal\.os\.ApplicationSharedMemory\.getInstance\(ApplicationSharedMemory\.java:\d+\)", lines[1]) is not None
+        )
 
     @_android_driver_tool("launchApp", description="Launch the configured Android app.")
     def launch_app(self, params: AndroidLaunchAppParams) -> dict[str, object]:

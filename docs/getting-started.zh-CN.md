@@ -1,112 +1,58 @@
 # 快速开始
 
-这份指南使用包内置 Skill，引导你完成平台中立的 AI Explore，并可按需审查
-或由用户发起确定性重放。FSQ 是 Alpha 软件；生产采用前请先阅读
-[支持与稳定性说明](support-and-stability.md)。
+用自然语言描述目标，让 FSQ Quick Test 操作真实应用并验证结果，然后检查执行证据。**Coding Agent** 与 **FSQ UI** 是平等的替代入口。FSQ 是 Alpha 软件，请先阅读[支持与稳定性](support-and-stability.md)。
 
 ## 前置条件
 
-- Python 3.11 或更新版本。
-- 满足要测试的平台和目标的前置条件。
-- 一个可作为准确本地 Coding Agent 项目根目录打开的目录。
+- Python 3.11+ 和[对应平台与目标的前置条件](platform-prerequisites.md)。
+- 已配置受支持的 Provider（OpenAI、DeepSeek、Google Gemini、Kimi、GitHub Copilot 或 Azure OpenAI），并明确选择模型。
+- 使用 Coding Agent 时，打开一个准确的项目根目录以安装 Skill。
 
-AI 探索和 suggestion 分析还需要 OpenAI、DeepSeek、Google Gemini、Kimi、GitHub Copilot 或 Azure OpenAI。确定性 Case 重放不需要规划 LLM，除非已编写的 Case 包含 AI assertion。
+Quick Test 自动准备用户级 `~/.fsq/quick-test/` Workspace，无需注册或初始化项目 Workspace，也无需先运行项目 Doctor。它不继承项目的知识、私有环境或凭据；必要的非敏感项目事实应写入目标。它不保存正式 Case，也不自动重放。
 
-## 安装 CLI 和项目本地 Skill
+## Coding Agent
 
-在 Coding Agent 中打开项目，并使用这段一次性设置：
+在 Coding Agent 中打开项目，用以下提示完成一次性安装：
 
-> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。先确定准确打开的项目
-> 根目录。批量披露 Python、`fsq` 和 Skill 是否存在的只读检查。然后请求一次
-> 批准，且只涵盖 `python -m pip install --upgrade fsq-agent`，以及从该项目
-> 根目录运行一次 `fsq init --agent skill`；列出准确命令和影响。只执行获准
-> 操作，验证 `fsq`，并报告准确的 Skill 安装路径。这不会初始化 Workspace、
-> 配置 Provider 或运行测试。最后让我重新加载或启动新的 Coding Agent
-> session，然后停止。
+> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。先确定准确打开的项目根目录。批量披露 Python、fsq 和 Skill 是否存在的只读检查，列出工作目录、命令、目的和影响。提出一次批准请求，只涵盖安装或升级 fsq-agent，以及在本项目运行一次 fsq init --agent skill；请求前列出准确命令及其对 Python 环境和项目文件的影响。只执行获准操作，验证 fsq，并报告 Skill 安装路径。此次设置不初始化 Workspace、不配置 Provider、不运行测试。最后让我重新加载 Coding Agent 或启动新 session，然后停止。
 
-重新加载或启动新的 Coding Agent session，让客户端发现
-`.agents/skills/fsq/`。升级包后，应再次运行 `fsq init --agent skill` 并再次
-重载，以更新已复制的 Skill。
+重新加载或开启新 session，让客户端发现 `.agents/skills/fsq/`。升级包后需重新运行 `fsq init --agent skill` 并重载，以更新复制的 Skill。
 
-然后简洁描述你的真实目标：
+然后说：“使用 FSQ Quick Test 测试下方目标，选择 Web 和我确认的可用浏览器。遵循已安装的 FSQ Skill，只询问无法确定的决定。”附上下方完整目标。
 
-> 测试这个用户目标：**[描述期望结果]**。遵循已安装的 FSQ Skill，只询问它
-> 无法确定的决定。
+Skill 批量披露只读发现，使用 `quick-test context` 检查平台、设备或浏览器及前置条件；它保留已确认的准确目标，不猜测或替换浏览器渠道、设备 ID 或路径。只询问影响执行的未解决决定。你的测试请求授权一次正常 Quick Test，无需另一层 FSQ 执行确认；host 与操作系统批准仍独立生效。
 
-以下只是示例而非默认值：Android，“未登录用户输入无效信息时会看到清晰
-错误”；Web，“购物者可以筛选结果并打开一个商品”；Windows，“用户可以创建
-并保存草稿”；macOS，“用户可以修改偏好设置并看到它保持生效”。不要猜测目标
-ID 或路径。
+若 Provider 尚未配置，请自行打开 `fsq ui` 在 **Settings** 私下输入凭据并选模型，或使用私有交互式 Provider 配置。不要将 Key、token 或 secret 放进聊天、命令参数、目标或 Case。报告配置完成后，Skill 检查安全状态并刷新同一目标的 Quick Test context；ready 不等于连接测试或执行成功。
 
-## 引导式 AI Explore
+Skill 只提交一次 `quick-test run`，消费实际 JSONL 进度和终态结果，保留同一进程。失败、超时、中断、输出丢失或格式错误时不会自动重提。报告权威执行状态、整体验证结论、实际目标和已有证据；逐项标准的支持/未满足/未知是 Agent 的证据解读，不是多个独立 FSQ verdict。
 
-安装后的 Skill 负责对话引导，并使用公开 FSQ CLI。它会：
-
-1. 优先使用 host 确定的准确打开的项目根目录；若有歧义，只把当前目录当作
-   候选并请你解决。它从该 root 先运行 Doctor，再询问 Doctor 无法提供的
-   信息，包括平台和准确的当前目标。
-2. 复用项目 root 上有效注册的 Workspace；否则只检查准确的
-   `<project-root>/fsq_workspace`：若为有效注册 Workspace 则复用；若为现有
-   空普通目录则初始化；若路径不存在，则在批准后用 host 原生文件系统能力
-   创建一个空目录并初始化。
-3. 若该路径是 symlink、非目录、不可读/状态不确定，或非空且无效，则阻止
-   初始化。它不会广泛搜索、创建嵌套 Workspace、跟随或替换 symlink，也不会
-   覆盖、删除、移动或迁移内容；不会规定 `mkdir` 或假设存在 shell。
-4. 创建目录或初始化前，它会提出一次内聚建议，列出准确的项目和 Workspace
-   root、平台、准确目标、事实来源、候选值、现有 `fsq init` 的准确 argv、
-   影响及仍未授权的操作。一次批准覆盖所需的准确目录创建和一次初始化；之后
-   用 Doctor 验证实际返回的 root。
-5. 明确区分 FSQ 事实、host 事实、用户决定和未经验证的模型候选。候选 app
-   ID、浏览器目标、可执行文件路径、bundle ID、设备或账号，必须先确认准确值
-   才能进入 argv。
-6. 只询问最小且内聚的一组尚未解决的用户决定。Skill 可以建议 Goal 标准、
-   操作和限制，但自动默认值只能缩小权限或在歧义时停止；不会静默选择目标、
-   账号、接收者、准确内容、金额、设备或不可逆操作。它会在一次完整 Goal 中
-   展示准确字面量和副作用，再单独请求 create 确认。
-
-相关只读检查会一次紧凑披露准确工作目录、命令、目的和只读影响；普通只读
-命令不需要逐条再次批准。范围不明确或前置条件未满足时会阻止流程，而不是
-静默使用默认值。
-
-### Provider 交接
-
-如果 AI Explore 需要设置 Provider，这一步由用户控制。API Key、token 和认证
-secret 不得进入聊天。Coding Agent 会请你自行打开 `fsq ui`，在 **Settings**
-中输入凭据；私下交互式运行 `fsq providers configure "<provider>"` 是后备方式。
-你报告完成后，它会再次检查 Provider status 和 Doctor readiness，然后恢复
-同一个 Workspace、目标和 Goal 草稿；除非事实变化，否则不会重复已确定的
-问题。readiness 不等于连接测试或成功执行。
-
-### 创建、审查并选择是否重放
-
-展示完整且已确认的 Goal 后，Skill 可以用
-`fsq --output json --non-interactive case create ...` 提交一次获准的 AI
-Explore。它只启动一次，保留同一个 host 进程/session handle，等待且只接受
-一个终态 result/error envelope；对于结果未知、中断、失败、格式错误、多份
-终态或相互矛盾的执行都不会重试。提交开始即消耗该确认，且只报告一次提交。
-在 host 提供重复的模型可见机会时，Skill 以约每 20 秒一次且绝不更频繁为目标，
-只低噪声说明 host 进程仍在运行且尚无 FSQ 终态结果。这是尽力而为而非精确
-计时器；没有重复模型可见机会的 host 无法提供该心跳。Skill 不会暴露原始机器
-输出、推断 FSQ 阶段或百分比，也不会声称提供实时进度。
-
-Skill 会先总结结果，把每项可观察验收标准映射为有支持、未满足或未知，然后
-分别说明记录、发布和 warning。随后只选择准确返回的 Case 路径：优先
-`published_case_path`，否则使用 `candidate_case_path` 并标明尚未发布。
-
-它仅在你提出请求时以只读方式原样审查该 Case。重放也只能由你主动发起。
-收到请求后，它会执行只读 Doctor 和静态预检查，包括：
+## FSQ UI
 
 ```bash
-fsq case format "<exact-case-path>" --check --json
+python -m pip install --upgrade fsq-agent
+fsq ui
 ```
 
-随后它会显示准确路径和目标，并强烈警告重放是新的目标操作，可能重复副作用。
-已知的失败/恢复或重复纠正 mutation 会作为风险说明，但不会自动改写或拒绝
-重放。如果你在警告后仍想重放，Skill 会重申剩余风险并要求第二次明确确认。
-只有在该确认后，Skill 才能用
-`fsq --output json --non-interactive case test --platform "<platform>"
-"<exact-case-path>"` 原样提交一次，且不启用 suggestion。创建 Case 不会预先
-授权重放，Explore 成功也不代表确定性重放会成功。
+1. 选择 **Quick Test**。
+2. 在共享的 **Settings** 配置 Provider 并明确选模型。
+3. 选择 Web 与可用浏览器，粘贴下方目标，点击 **Start Quick Test**。无需预先知道搜索发现的官网网址。
+4. 使用 **Open report** 检查结果和证据，或选择 **New test**。意图不明、目标零匹配或多匹配、准备失败会终止请求，不补问。目标可运行不等于模型一定理解正确。
+
+## 完整首次测试
+
+Web 便于开始；[当前视频](https://youtu.be/f1sobvVHNg0) 展示 Android。两者设置和执行不同，搜索结果和测试结果可能变化。
+
+```text
+使用已选择的浏览器搜索 FSQ-lab/FSQ GitHub 仓库。打开该仓库，访问 About 区域中的官网链接，验证目标页面同时显示 “Describe a goal.” 和 “Test the real app.”，并结合捕获的页面证据报告结果。只浏览公开页面，不登录、不修改仓库内容、不提交表单。如果无法识别仓库或 About 官网链接，停止并报告阻碍。
+```
+
+## 检查结果，再选择进阶操作
+
+先检查真实状态、页面证据、Run ID、Workspace 和报告路径。准备失败可能没有 Run；缺失证据保持未知。Quick Test 的候选记录只留在 Run 内，不发布或保存正式 Case。
+
+需要可复用 Case 时，另行使用 **FSQ Case Manager** 或明确请求 Case 创建。这是单独的 UI 执行，使用注册 Workspace 与相应 Doctor 检查，并非保存已经完成的 Quick Test。仅当实际生成候选时才有可审查内容。
+
+需要重放时，先原样审查准确返回的 Case，然后另行请求。Skill 执行静态检查与 Doctor，披露准确 Case、目标及重复副作用；你明确确认后才执行一次 Strict Replay。Quick Test 成功不证明重放成功，不自动修改 Case 或重试。
 
 ## 无需 Provider 的 Web 故障排查后备流程
 

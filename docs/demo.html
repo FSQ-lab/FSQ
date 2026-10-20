@@ -1,119 +1,75 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>FSQ v0.1.0 Demo</title>
-    <meta name="description" content="FSQ v0.1.0 evidence-first AI UI automation demo.">
-    <style>
-      :root {
-        color-scheme: light dark;
-        --bg: #f6f6f7;
-        --panel: #ffffff;
-        --text: #242428;
-        --muted: #62636b;
-        --border: #dedee5;
-        --accent: #6750d8;
-      }
-
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #111114;
-          --panel: #1b1b20;
-          --text: #f2f2f5;
-          --muted: #b6b6c0;
-          --border: #32323a;
-          --accent: #a99bff;
-        }
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        min-height: 100vh;
-        background: var(--bg);
-        color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-
-      main {
-        width: min(1120px, calc(100vw - 32px));
-        margin: 0 auto;
-        padding: 40px 0;
-      }
-
-      header {
-        margin-bottom: 20px;
-      }
-
-      h1 {
-        margin: 0 0 8px;
-        font-size: clamp(2rem, 5vw, 4.25rem);
-        line-height: 1;
-        letter-spacing: 0;
-      }
-
-      p {
-        margin: 0;
-        color: var(--muted);
-        font-size: 1rem;
-        line-height: 1.55;
-      }
-
-      .video {
-        overflow: hidden;
-        width: 100%;
-        aspect-ratio: 16 / 9;
-        background: #000;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-      }
-
-      iframe {
-        width: 100%;
-        height: 100%;
-        border: 0;
-      }
-
-      nav {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-top: 18px;
-      }
-
-      a {
-        color: var(--accent);
-        font-weight: 650;
-        text-decoration: none;
-      }
-
-      a:hover {
-        text-decoration: underline;
-      }
-    </style>
-  </head>
-  <body>
-    <main>
-      <header>
-        <h1>FSQ v0.1.0 Demo</h1>
-        <p>Evidence-first AI UI automation: describe a goal, inspect evidence, review a candidate Case, replay deterministically, and open the static report.</p>
-      </header>
-
-      <div class="video" aria-label="FSQ v0.1.0 YouTube demo">
-        <iframe src="https://www.youtube-nocookie.com/embed/QqCahxGDdS0?autoplay=1&mute=1&rel=0&modestbranding=1" title="FSQ v0.1.0 Demo" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
-      </div>
-
-      <nav aria-label="Demo links">
-        <a href="https://youtu.be/QqCahxGDdS0">Open on YouTube</a>
-        <a href="media/demo.en.srt">English captions</a>
-        <a href="media/demo.zh-CN.srt">中文字幕</a>
-        <a href="../README.md">README</a>
-        <a href="../README.zh-CN.md">中文 README</a>
-      </nav>
-    </main>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FSQ — Android Quick Test demonstration</title>
+  <meta name="description" content="Describe a goal, test the real app, and inspect the evidence in this recorded Android Quick Test.">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #fafbf8; color: #20261e; font: 1rem/1.6 system-ui, sans-serif; }
+    main { width: min(1120px, calc(100% - 32px)); margin: auto; padding: 40px 0; }
+    h1 { font-size: clamp(2rem, 6vw, 3.5rem); line-height: 1.15; }
+    p { color: #596255; }
+    .player { width: 100%; aspect-ratio: 16 / 9; background: #20261e; border-radius: 8px; overflow: hidden; }
+    .player:focus-within { outline: 3px solid #254e36; outline-offset: 4px; }
+    video, img { display: block; width: 100%; height: 100%; object-fit: contain; }
+    button { cursor: pointer; position: relative; display: block; width: 100%; height: 100%; border: 0; padding: 0; }
+    button span { position: absolute; bottom: 1rem; left: 50%; transform: translateX(-50%); background: #254e36; color: white; padding: 12px 20px; border-radius: 4px; white-space: nowrap; font: 700 1rem system-ui; }
+    a { color: #254e36; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+    nav a { min-height: 44px; display: inline-flex; align-items: center; }
+    :focus-visible { outline: 3px solid #254e36; outline-offset: 4px; }
+    #status { min-height: 1.6em; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Describe a goal. Test the real app.</h1>
+  <p>One Android Quick Test: find FSQ-lab/FSQ, follow its About website link, and verify both homepage headlines. Review the recorded outcome and page evidence.</p>
+  <div class="player" id="player">
+    <button type="button" id="play" aria-label="Play Android Quick Test demonstration">
+      <img src="media/quick-test-poster.png" alt="Recorded Android browser and FSQ execution view" width="1920" height="1080">
+      <span>▶ Play demo · 2:11</span>
+    </button>
+  </div>
+  <p id="status" role="status" aria-live="polite"></p>
+  <nav aria-label="Demo links">
+    <a href="https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f">Open GitHub video</a>
+    <a href="https://youtu.be/f1sobvVHNg0">Watch on YouTube</a>
+    <a href="media/quick-test.en.srt">English captions</a>
+    <a href="media/quick-test-demo-provenance.md">Media sources and review status</a>
+    <a href="../README.md">README</a>
+    <a href="getting-started.zh-CN.md">中文快速开始</a>
+  </nav>
+  <p>Alpha software. Evidence is local and may contain private app data; review it before sharing. AI operations send necessary provider-bound inputs to your configured Provider. This page does not run tests or collect credentials.</p>
+</main>
+<script>
+  document.getElementById('play').addEventListener('click', () => {
+    const status = document.getElementById('status');
+    const video = document.createElement('video');
+    let failed = false;
+    video.controls = true;
+    video.playsInline = true;
+    video.tabIndex = 0;
+    video.preload = 'metadata';
+    video.poster = 'media/quick-test-poster.png';
+    video.setAttribute('aria-label', 'Android Quick Test recorded demonstration');
+    const captions = document.createElement('track');
+    captions.kind = 'captions'; captions.src = 'media/quick-test.en.vtt';
+    captions.srclang = 'en'; captions.label = 'English'; captions.default = true;
+    video.append(captions);
+    video.addEventListener('playing', () => { status.textContent = 'Playing'; });
+    video.addEventListener('waiting', () => { if (!failed) status.textContent = 'Loading video…'; });
+    video.addEventListener('pause', () => { if (!failed) status.textContent = 'Paused'; });
+    video.addEventListener('ended', () => { status.textContent = 'Demonstration ended.'; });
+    video.addEventListener('error', () => { failed = true; status.textContent = 'Could not load the video. Open GitHub video or YouTube below.'; });
+    status.textContent = 'Loading video…';
+    video.src = 'https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f';
+    document.getElementById('player').replaceChildren(video);
+    video.focus();
+    video.play().catch(() => { if (!failed) status.textContent = 'Playback did not start. Use the video controls or open a viewing link below.'; });
+  });
+</script>
+</body>
 </html>

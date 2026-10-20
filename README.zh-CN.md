@@ -6,9 +6,9 @@
   </picture>
 </p>
 
-<h3 align="center">描述你要测试什么，让 AI 帮你测试用户流程。</h3>
+<h3 align="center">描述测试目标，让 AI 测试真实应用。</h3>
 
-<p align="center">描述测试目标，AI 替你操作真实 App。FSQ 记录执行证据，并把探索过程转化为可审查、可重放的测试。</p>
+<p align="center">用自然语言描述要做什么、应该发生什么。AI 操作真实应用并验证结果，FSQ 保留截图、操作和结果，供你检查。</p>
 
 <p align="center">来自 <a href="https://github.com/FSQ-lab">FSQ Lab</a> 的开源项目。</p>
 
@@ -20,70 +20,107 @@
 </p>
 
 <p align="center">
+  <a href="https://fsq-lab.github.io/FSQ/">官网</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="README.md">English</a> ·
   <a href="docs/getting-started.zh-CN.md">指南</a> ·
   <a href="CONTRIBUTING.md">参与贡献</a>
 </p>
 
-## 查看 FSQ 演示
+## 看一次完整测试
 
-https://github.com/user-attachments/assets/aa9d0a12-2f93-4894-8349-52a013424939
+https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f
 
-[在 YouTube 观看完整演示](https://youtu.be/QqCahxGDdS0)。
+[![Android Quick Test 演示封面：真实设备浏览器和 FSQ 执行证据](docs/media/quick-test-poster.png)](https://youtu.be/f1sobvVHNg0)
 
-## 工作原理
+[在 YouTube 观看](https://youtu.be/f1sobvVHNg0) · [英文字幕](docs/media/quick-test.en.srt) · [媒体来源与审查状态](docs/media/quick-test-demo-provenance.md)
 
-1. **描述：**你定义平台和目标、测试目的、成功标准，以及允许和禁止的操作。
-2. **观察** AI 测试真实 UI 流程，FSQ 记录截图、界面状态和事件，并可能生成可审查的测试。
-3. **掌控**下一步：检查证据；如果 FSQ 返回了测试，再原样检查它，然后单独请求任何确定性重放。
+视频展示 Android 上的一次真实 Quick Test：搜索 FSQ 仓库，沿 About 官网链接访问主页，验证两句主标题。你可以先使用 Web 试用；不同平台的环境和执行过程不同，搜索结果和测试结果也可能变化。
 
-最终会得到带证据的结果；如果 FSQ 返回了测试，你还会得到可移植、可复用的测试，可供审查、保留和重放，控制权始终在你手中。
+## 从目标到证据
+
+**描述完整旅程和检查点。** 找到 `FSQ-lab/FSQ`，进入 About 链接的官网，验证 `Describe a goal.` 和 `Test the real app.`。下图是在真实目标输入截图周围添加的说明，不是产品界面的一部分。
+
+![任务说明卡：真实 Quick Test 输入包含搜索仓库、进入 About 官网链接、验证两句标题的完整目标](docs/media/quick-test-task.png)
+
+**观察 AI 操作真实应用。** Android 浏览器中的页面与 FSQ 操作时间线对应，截图和界面状态保留执行过程。
+
+![真实执行截图：FSQ 操作时间线旁显示 Android 浏览器的设备画面](docs/media/quick-test-execution.png)
+
+**对照证据检查结果。** 页面证据展示两句标题；同次 Run 报告分别显示执行成功、验证成功、证据完整。说明卡将真实页面与报告截图并列，便于独立阅读。
+
+![结果说明卡：捕获的官网两句标题，与同次 Run 中执行成功、验证成功和证据完整的报告对照](docs/media/quick-test-result.png)
 
 ## 快速开始
 
-从你真正想测试的用户结果开始。你需要 Python 3.11 或更高版本，并满足[平台和目标的前置条件](docs/platform-prerequisites.md)。请从以下两条路径中选择一条。Provider 凭据只能由你在 FSQ UI 中输入，不要发送到 Coding Agent 聊天中。先审查结果；如果 FSQ 返回了 Case，再原样审查它，然后另行决定是否请求重放。
+选择 **Coding Agent** 或 **FSQ UI**，两条路径都从一次 Quick Test 和结果审查开始。需要 Python 3.11+、已配置的受支持 Provider 与明确选择的模型，以及[平台前置条件](docs/platform-prerequisites.md)。Provider 凭据请在本地 FSQ 设置中输入，不要发送到 Coding Agent 聊天。
 
-### 1. Coding Agent
+Quick Test 自动准备 `~/.fsq/quick-test/`，无需手动初始化项目 Workspace，不保存正式 Case，也不执行 Strict Replay。
 
-**初始设置。** 在 Coding Agent 中打开你的项目，然后粘贴：
-> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。先确定准确打开的项目根目录。把 Python、`fsq` 和 Skill 是否存在的只读检查批量披露，列出准确工作目录、命令、目的和影响。然后提出一次修改批准请求，且只涵盖安装或升级 `fsq-agent`，以及在本项目运行一次 `fsq init --agent skill`；请求前列出准确命令及其对 Python 环境和项目文件的影响。只执行获准操作，验证 `fsq`，并报告准确的 Skill 安装路径。此次一次性设置不会初始化 Workspace、配置 Provider 或运行测试。最后让我重新加载 Coding Agent 或启动新 session，然后停止。
+### Coding Agent
 
-完成重新加载后再继续。
+安装 FSQ Skill、重新加载后，请 Coding Agent 使用 FSQ Quick Test 执行下方完整目标。
 
-**首次测试。** 将这段提示词复制给你的 Coding Agent：
-> 使用 FSQ 测试这个用户目标：启动 Microsoft Edge Stable，使用 Bing 搜索 `FSQ GitHub`，然后检查自然搜索结果，并报告 FSQ GitHub 仓库当前所在的位置/排名。选择 Web 平台和 Microsoft Edge Stable。遵循已安装的 FSQ Skill，只询问它无法确定的决定。
+<details>
+<summary>展开：一次性安装与首次运行</summary>
 
-平台和准确目标是事实或由用户决定的事项：当 Skill 询问时请明确提供，不要让 Agent 猜测目标 ID 或路径，也不要替换为其他 Edge 渠道。
+在 Coding Agent 中打开你的项目，粘贴：
 
-先审查结果。如果 FSQ 返回了 Case，再原样审查它，然后另行决定是否请求重放。
+> FSQ 的官方项目地址是 https://github.com/FSQ-lab/FSQ。先确定准确打开的项目根目录。批量披露 Python、fsq 和 Skill 是否存在的只读检查，列出工作目录、命令、目的和影响。提出一次批准请求，只涵盖安装或升级 fsq-agent，以及在本项目运行一次 fsq init --agent skill；请求前列出准确命令及其对 Python 环境和项目文件的影响。只执行获准操作，验证 fsq，并报告 Skill 安装路径。此次设置不初始化 Workspace、不配置 Provider、不运行测试。最后让我重新加载 Coding Agent 或启动新 session，然后停止。
 
-### 2. FSQ UI
+重新加载后，指定 Web 和可用的浏览器，发送“使用 FSQ Quick Test 测试下方目标”，附上完整目标。遵循已安装的 Skill；它会发现前置条件、询问未解决的决定，并报告实际进度和证据。包升级后需再次运行 `fsq init --agent skill` 并重新加载，才能更新复制到项目的 Skill。
 
-**初始设置。**
+</details>
+
+[打开 Coding Agent 详细指南](docs/getting-started.zh-CN.md#coding-agent)
+
+### FSQ UI
+
+安装并打开本地 UI，选择 **Quick Test**，粘贴相同目标。
+
+<details>
+<summary>展开：安装与开始 Quick Test</summary>
 
 ```bash
 python -m pip install --upgrade fsq-agent
 fsq ui
 ```
 
-选择 **Quick Test**，自动使用 `~/.fsq/quick-test/` Workspace 进行探索；或选择 **FSQ Case Manager** 管理 Workspace、Case、历史运行及 Strict Replay。两个入口共用 **Settings**，在其中配置 FSQ LLM Provider 并显式选择模型。
+1. 在 **Settings** 配置受支持的 Provider，并明确选择模型。
+2. 返回 **Quick Test**，选择 Web 和可用浏览器，粘贴下方目标。
+3. 点击 **Start Quick Test**。FSQ 解析应用并验证目标和环境后开始测试；意图不明确、目标零匹配或多匹配、准备失败会终止请求，不补问。
+4. 通过 **Open report** 检查结果与证据。目标可运行不等于模型一定理解正确。
 
-1. 选择平台，以及适用的设备或浏览器。
-2. 描述要执行的操作和预期结果。Web 可以提供网址，也可以描述明确的搜索目标，例如：`搜索 FSQ github，并且帮我找到 FSQ 的官网地址。` 无需预先知道要找到的网址。
-3. 点击 **Start Quick Test**。模型识别应用，FSQ 验证解析出的目标和环境后才开始探索。意图不明确、目标查询零匹配或多匹配、准备失败时直接终止，不补问；目标可运行不等于已证明模型理解正确。
-4. 通过 **Open report** 审查结果和证据，或选择 **New test**。Quick Test 不保存 Case；在 Case Manager 中应先原样审查生成的 Case，再另行决定是否重放。
+</details>
 
-![用于描述测试目标的 FSQ Test Runner](docs/media/01-describe-goal.png)
+[打开 FSQ UI 详细指南](docs/getting-started.zh-CN.md#fsq-ui)
 
-[详细首次测试指南](docs/getting-started.zh-CN.md)
+### 试一次完整的用户旅程
 
-## 平台
+Web 是便于开始的试用选项；视频录制的是 Android。选择浏览器后，将以下完整目标复制到任一入口：
 
-FSQ 支持 Web、Android、Windows 和 macOS 目标；请查看[平台前置条件](docs/platform-prerequisites.md)，也欢迎通过[贡献](CONTRIBUTING.md)帮助扩展支持。
+```text
+使用已选择的浏览器搜索 FSQ-lab/FSQ GitHub 仓库。打开该仓库，访问 About 区域中的官网链接，验证目标页面同时显示 “Describe a goal.” 和 “Test the real app.”，并结合捕获的页面证据报告结果。只浏览公开页面，不登录、不修改仓库内容、不提交表单。如果无法识别仓库或 About 官网链接，停止并报告阻碍。
+```
+
+运行后，检查报告中的结果和页面证据。失败、无法确定或准备错误应按实际结果处理，不能当作检查已通过。
+
+## 需要时再进阶
+
+- **审查执行证据：**检查截图、界面状态、事件和报告，定位实际行为与预期的差异。
+- **管理可复用 Case：**在 **FSQ Case Manager** 中管理注册的 Workspace、显式创建或保存可用的候选 Case，并查看运行历史。Run 可能产生 Case，生成并不保证成功。
+- **另行选择确定性重放：**原样审查返回的 Case 后，再单独请求 Strict Replay。重放会再次操作目标，需检查前置条件与副作用；Quick Test 不会自动重放。
+
+FSQ 支持 Web、Android、Windows 和 macOS 目标，请查看[平台前置条件](docs/platform-prerequisites.md)。
+
+## 一起完善 FSQ
+
+如果 FSQ 对你有帮助，欢迎[前往 GitHub 仓库点击 Star](https://github.com/FSQ-lab/FSQ)，让更多人发现它。试用后，欢迎[反馈体验](https://github.com/FSQ-lab/FSQ/issues/new/choose)：什么有效、哪里卡住、下一步想测试什么。
+
+反馈请提供 FSQ 版本、平台、脱敏目标、预期与实际结果，以及审查后的少量诊断信息。移除凭据、个人数据、私有网址、路径和设备标识，再分享截图或日志。安全问题请使用 [Security](SECURITY.md) 中的渠道。
 
 > [!IMPORTANT]
-> FSQ 是用于评估和贡献的 Alpha 软件。证据保存在本地，可能包含界面中可见的数据或其他私有目标数据；分享前请审查，不要提交证据或凭据。公开接口在 1.0 前仍可能调整，请阅读[支持与稳定性说明](docs/support-and-stability.md)。
+> FSQ 是用于评估和贡献的 Alpha 软件。证据保存在本地，可能包含私有应用数据，分享前请审查，不要提交证据或凭据。AI 操作会将必要的 Provider 输入发送到你配置的 Provider。公开接口在 1.0 前可能变化，请阅读[支持与稳定性](docs/support-and-stability.md)。
 
 ## 文档
 
@@ -93,11 +130,9 @@ FSQ 支持 Web、Android、Windows 和 macOS 目标；请查看[平台前置条�
 - [FSQ Case format](docs/case-format.md)
 - [Codex 高级兼容性](docs/codex-integration.md)
 - [平台前置条件](docs/platform-prerequisites.md)
-- [支持与稳定性](docs/support-and-stability.md)
+- [参与贡献](CONTRIBUTING.md)
 
-## 由 FSQ Lab 与社区共同打造
-
-由 [FSQ Lab](https://github.com/FSQ-lab) 与社区共同打造，感谢[所有贡献者](https://github.com/FSQ-lab/FSQ/graphs/contributors)。想加入我们？请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 并参与贡献。
+由 [FSQ Lab](https://github.com/FSQ-lab) 与社区共同打造，感谢[所有贡献者](https://github.com/FSQ-lab/FSQ/graphs/contributors)。
 
 ## 许可证
 

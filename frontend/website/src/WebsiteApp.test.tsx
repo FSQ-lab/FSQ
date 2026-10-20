@@ -1,132 +1,110 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-
 import { WebsiteApp } from './WebsiteApp';
 import { websiteContent } from './content';
 import indexHtml from '../index.html?raw';
 
+const videoSource = 'https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f';
+const youtube = 'https://youtu.be/f1sobvVHNg0';
+function clipboard(writeText = vi.fn().mockResolvedValue(undefined)) {
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  return writeText;
+}
+
 describe('WebsiteApp', () => {
-  it('presents the page truth with a logical heading hierarchy', () => {
+  afterEach(() => vi.restoreAllMocks());
+  it('keeps the headline and gives equal unnumbered Quick Test entries', () => {
     render(<WebsiteApp />);
-
-    expect(
-      screen.getByRole('heading', { level: 1, name: 'Describe a goal. Test the real app.' }),
-    ).toBeInTheDocument();
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
-    expect(screen.getByText(/open-source alpha software/i)).toBeInTheDocument();
-    expect(screen.getByText(/screenshots, interface state, and events/i)).toBeInTheDocument();
-    expect(screen.getByText(/may produce a Case/i)).toBeInTheDocument();
-    expect(screen.getByText(/deterministic replay is a separate user choice/i)).toBeInTheDocument();
-
-    const main = screen.getByRole('main');
-    expect(within(main).getByRole('heading', { level: 2, name: 'From goal to evidence.' })).toBeInTheDocument();
-    expect(within(main).getByRole('heading', { level: 2, name: 'Choose how to begin.' })).toBeInTheDocument();
-  });
-
-  it('renders Coding Agent and FSQ UI as exactly two unnumbered equal alternatives', () => {
-    render(<WebsiteApp />);
-
-    const choices = screen.getByTestId('setup-choices');
-    const cards = within(choices).getAllByRole('article');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Describe a goal. Test the real app.');
+    const cards = within(screen.getByTestId('setup-choices')).getAllByRole('article');
     expect(cards).toHaveLength(2);
-    expect(within(cards[0]).getByRole('heading', { level: 3, name: 'Coding Agent' })).toBeInTheDocument();
-    expect(within(cards[1]).getByRole('heading', { level: 3, name: 'FSQ UI' })).toBeInTheDocument();
-    expect(cards[0]).toHaveClass('setup-card');
-    expect(cards[1]).toHaveClass('setup-card');
-    expect(choices).not.toHaveTextContent(/\b0?[12][.)/]\s*(Coding Agent|FSQ UI)/i);
-    expect(within(cards[0]).getByRole('link', { name: /Coding Agent setup/i })).toHaveAttribute(
-      'href',
-      websiteContent.links.codingAgent,
-    );
-    expect(within(cards[1]).getByRole('link', { name: /FSQ UI setup/i })).toHaveAttribute(
-      'href',
-      websiteContent.links.fsqUi,
-    );
+    for (const [index, title] of ['Coding Agent', 'FSQ UI'].entries()) {
+      expect(within(cards[index]).getByRole('heading', { level: 3, name: title })).toBeInTheDocument();
+      expect(cards[index]).toHaveClass('setup-card');
+      expect(cards[index].querySelector('details')).not.toHaveAttribute('open');
+      expect(within(cards[index]).getByRole('link', { name: 'Open ' + title + ' setup' })).toHaveClass('button--secondary');
+    }
+    expect(screen.getByTestId('setup-choices')).not.toHaveTextContent(/\b[12][.)]\s*(Coding Agent|FSQ UI)/);
+    expect(screen.getByText(/Python 3.11\+/)).toHaveTextContent(/configured Provider and selected model/);
+    expect(screen.getByText(/no manual project Workspace/i)).toBeInTheDocument();
+    expect(screen.getByText(/Never paste Provider credentials into Coding Agent chat/)).toBeInTheDocument();
   });
-
-  it('uses canonical links and centralized media metadata', () => {
-    render(<WebsiteApp />);
-
-    expect(screen.getByRole('link', { name: /GitHub repository/i })).toHaveAttribute(
-      'href',
-      websiteContent.links.repository,
-    );
-    expect(screen.getByRole('link', { name: /platform.*prerequisites/i })).toHaveAttribute(
-      'href',
-      websiteContent.links.prerequisites,
-    );
-    expect(screen.getByRole('link', { name: /Watch the full demonstration/i })).toHaveAttribute(
-      'href',
-      websiteContent.media.destination,
-    );
-
-    const media = screen.getByRole('img', { name: websiteContent.media.alt });
-    expect(media).toHaveAttribute('src', expect.stringContaining('fsq-v0.1.0-demo-thumbnail'));
-    expect(media).toHaveAttribute('width', String(websiteContent.media.width));
-    expect(media).toHaveAttribute('height', String(websiteContent.media.height));
-    expect(screen.getByRole('link', { name: /Play the recorded demonstration/i })).toHaveAttribute(
-      'href',
-      expect.stringContaining('fsq-control-plane-demo'),
-    );
-    expect(screen.getByText(websiteContent.media.provenanceLabel)).toBeInTheDocument();
-    expect(screen.getByText(/recorded from FSQ 0.1.0/i)).toBeInTheDocument();
-    expect(screen.queryByTitle(/youtube/i)).not.toBeInTheDocument();
+  it('does not load external media before activation and exposes both viewing links', () => {
+    const { container } = render(<WebsiteApp />);
+    expect(container.querySelector('video, iframe, source, track')).toBeNull();
+    expect(screen.getByRole('button', { name: /Play Android Quick Test demonstration/ })).toHaveTextContent('2:11');
+    expect(screen.getByRole('link', { name: /Open GitHub video/ })).toHaveAttribute('href', videoSource);
+    expect(screen.getByRole('link', { name: /YouTube/ })).toHaveAttribute('href', youtube);
+    expect(screen.getByRole('img', { name: websiteContent.media.alt })).toHaveAttribute('src', expect.stringContaining('quick-test-poster'));
   });
-
-  it('states provider, privacy, alpha, and platform boundaries', () => {
-    render(<WebsiteApp />);
-
-    expect(screen.getByText(/never paste Provider credentials into Coding Agent chat/i)).toBeInTheDocument();
-    expect(screen.getByText(/configure your Provider and model in the local FSQ UI/i)).toBeInTheDocument();
-    expect(screen.getAllByText(/configured Provider/i).length).toBeGreaterThan(0);
-    expect(screen.getByText(/Evidence is stored locally and may contain private app data/i)).toBeInTheDocument();
-    expect(
-      screen.getByText((_, element) => element?.classList.contains('platform-line') ?? false),
-    ).toHaveTextContent(/Web, Android, Windows, macOS/i);
-    expect(screen.getAllByText(/platform-specific prerequisites/i).length).toBeGreaterThan(0);
+  it('activates native inline playback with captions and waits for the playing event', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    const { container } = render(<WebsiteApp />);
+    await userEvent.click(screen.getByRole('button', { name: /Play Android Quick Test demonstration/ }));
+    const video = container.querySelector('video')!;
+    expect(video).toHaveAttribute('src', videoSource);
+    expect(video).toHaveAttribute('controls');
+    expect(video).toHaveAttribute('tabindex', '0');
+    expect(video).toHaveFocus();
+    expect(video).toHaveAttribute('playsinline');
+    expect(video).not.toHaveAttribute('autoplay');
+    expect(video.querySelector('track')).toHaveAttribute('kind', 'captions');
+    expect(video.querySelector('track')).toHaveAttribute('srclang', 'en');
+    expect(video.querySelector('track')).toHaveAttribute('src', expect.stringContaining('quick-test.en.vtt'));
+    expect(screen.getByTestId('media-status')).toHaveTextContent(/Loading/);
+    fireEvent.playing(video);
+    expect(screen.getByTestId('media-status')).toHaveTextContent('Playing');
+    fireEvent.waiting(video);
+    expect(screen.getByTestId('media-status')).toHaveTextContent(/Loading/);
+    fireEvent.pause(video);
+    expect(screen.getByTestId('media-status')).toHaveTextContent('Paused');
   });
-
-  it('reports clipboard success only after commands are written', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    });
+  it('retains controls and links after play rejection or media error', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValue(new Error('blocked'));
+    const { container } = render(<WebsiteApp />);
+    await userEvent.click(screen.getByRole('button', { name: /Play Android Quick Test demonstration/ }));
+    await waitFor(() => expect(screen.getByTestId('media-status')).toHaveTextContent(/Use the video controls/));
+    const video = container.querySelector('video')!;
+    expect(video).toHaveAttribute('controls');
+    fireEvent.error(video);
+    expect(screen.getByTestId('media-status')).toHaveTextContent(/Could not load/);
+    expect(screen.getByRole('link', { name: /Open GitHub video/ })).toHaveAttribute('href', videoSource);
+    expect(screen.getByRole('link', { name: /YouTube/ })).toHaveAttribute('href', youtube);
+    expect(screen.getByRole('heading', { name: 'Choose how to begin.' })).toBeInTheDocument();
+  });
+  it('offers the full scenario with local copy feedback and progressive capabilities', async () => {
+    const writeText = clipboard();
     render(<WebsiteApp />);
-
+    const scenario = screen.getByLabelText('First Quick Test goal');
+    for (const text of ['FSQ-lab/FSQ', 'About', 'Describe a goal.', 'Test the real app.', 'Do not sign in']) expect(scenario).toHaveTextContent(text);
+    await userEvent.click(screen.getByRole('button', { name: 'Copy test goal' }));
+    expect(writeText).toHaveBeenCalledWith(scenario.textContent);
+    expect(screen.getByText('Test goal copied.')).toBeInTheDocument();
+    expect(screen.queryByText('Commands copied.')).toBeNull();
+    expect(screen.getByText(/recorded demonstration uses Android/)).toBeInTheDocument();
+    expect(screen.getByText(/does not save a formal Case or perform Strict Replay/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Star FSQ/ })).toHaveAttribute('href', 'https://github.com/FSQ-lab/FSQ');
+    expect(screen.getByRole('link', { name: /Share your experience/ })).toHaveAttribute('href', 'https://github.com/FSQ-lab/FSQ/issues/new/choose');
+    expect(screen.getByRole('link', { name: /中文快速开始/ })).toBeInTheDocument();
+  });
+  it('preserves selectable text and explicit feedback when copying fails', async () => {
+    clipboard();
+    render(<WebsiteApp />);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
     await userEvent.click(screen.getByRole('button', { name: 'Copy commands' }));
-
-    expect(writeText).toHaveBeenCalledWith(websiteContent.setupCommands.join('\n'));
-    expect(screen.getByRole('status')).toHaveTextContent('Commands copied.');
+    expect(screen.getByText('Could not copy automatically. Select and copy the commands above.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Commands to install FSQ and open the local UI')).toHaveTextContent('fsq ui');
+    clipboard(vi.fn().mockRejectedValue(new Error('denied')));
+    await userEvent.click(screen.getByRole('button', { name: 'Copy test goal' }));
+    expect(screen.getByText('Could not copy automatically. Select and copy the test goal above.')).toBeInTheDocument();
+    expect(screen.getByLabelText('First Quick Test goal')).toHaveTextContent('FSQ-lab/FSQ');
   });
-
-  it('leaves selectable commands and explicit guidance when clipboard copying fails', async () => {
-    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText },
-    });
-    render(<WebsiteApp />);
-
-    await userEvent.click(screen.getByRole('button', { name: 'Copy commands' }));
-
-    expect(screen.getByRole('status')).toHaveTextContent(
-      'Could not copy automatically. Select and copy the commands above.',
-    );
-    const commands = screen.getByLabelText('Commands to install FSQ and open the local UI');
-    expect(commands).toHaveTextContent('python -m pip install --upgrade fsq-agent');
-    expect(commands).toHaveTextContent('fsq ui');
-    fireEvent.select(commands);
-  });
-
-  it('keeps essential product and setup guidance in the JavaScript-disabled HTML boundary', () => {
-    expect(indexHtml).toContain('Describe a goal. Test the real app.');
-    expect(indexHtml).toContain('Coding Agent');
-    expect(indexHtml).toContain('FSQ UI');
-    expect(indexHtml).toContain('#1-coding-agent');
-    expect(indexHtml).toContain('#2-fsq-ui');
-    expect(indexHtml).toMatch(/alpha/i);
-    expect(indexHtml).toMatch(/credentials.*Coding Agent chat/i);
-    expect(indexHtml).toMatch(/Evidence is stored locally/i);
+  it('keeps essential guidance and current demo without JavaScript or automatic embeds', () => {
+    for (const text of ['Describe a goal. Test the real app.', 'Coding Agent', 'FSQ UI', 'Python 3.11+', 'Quick Test', 'Alpha and privacy', '中文快速开始', youtube]) expect(indexHtml).toContain(text);
+    expect(indexHtml).not.toMatch(/<iframe|autoplay|preconnect|localStorage|sessionStorage|google-analytics/i);
+    const { container } = render(<WebsiteApp />);
+    expect(container.querySelector('iframe, form, input')).toBeNull();
+    for (const img of container.querySelectorAll('img')) expect(img).toHaveAttribute('alt');
   });
 });

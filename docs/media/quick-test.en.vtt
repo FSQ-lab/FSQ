@@ -1,0 +1,102 @@
+WEBVTT
+
+1
+00:00:00.650 --> 00:00:06.650
+Meet FSQ. Describe a goal, test the real app, and inspect the evidence.
+
+2
+00:00:07.100 --> 00:00:13.300
+This is the FSQ web interface, launched with the fsq ui command.
+
+3
+00:00:14.100 --> 00:00:20.400
+On the left, a real Android phone is mirrored so you can follow the test.
+
+4
+00:00:21.100 --> 00:00:23.200
+Open Quick Test.
+
+5
+00:00:23.600 --> 00:00:25.200
+Select Android.
+
+6
+00:00:25.800 --> 00:00:28.400
+Choose the connected Pixel 6.
+
+7
+00:00:29.300 --> 00:00:34.750
+Describe the task in natural language: open Edge and find the FSQ GitHub repository.
+
+8
+00:00:35.300 --> 00:00:39.150
+Then follow the link in its About section to the website.
+
+9
+00:00:39.800 --> 00:00:45.150
+Specify what to verify: Describe a goal, and Test the real app.
+
+10
+00:00:45.800 --> 00:00:47.650
+Then, start the test.
+
+11
+00:00:48.300 --> 00:00:53.200
+FSQ begins executing the task on the connected Android phone.
+
+12
+00:00:53.800 --> 00:00:55.950
+It opens Edge.
+
+13
+00:00:56.800 --> 00:01:01.650
+It searches for the repository, just as a user would.
+
+14
+00:01:02.300 --> 00:01:05.600
+Then it opens the FSQ repository.
+
+15
+00:01:06.300 --> 00:01:12.750
+The activity timeline shows the actions. Captured screenshots provide a record of what happened.
+
+16
+00:01:13.300 --> 00:01:16.850
+The website opens. Next, check the expected content.
+
+17
+00:01:17.300 --> 00:01:26.350
+FSQ checks for the two phrases in the test goal: Describe a goal, and Test the real app.
+
+18
+00:01:27.300 --> 00:01:30.600
+The recorded assertion passes.
+
+19
+00:01:31.300 --> 00:01:36.450
+The run reports success, with a summary of the verification result.
+
+20
+00:01:37.300 --> 00:01:43.650
+Review the captured screens to see how the task progressed.
+
+21
+00:01:44.300 --> 00:01:45.900
+Open the report.
+
+22
+00:01:46.300 --> 00:01:51.650
+Inspect the execution status, verification result, and evidence availability.
+
+23
+00:01:52.300 --> 00:01:57.650
+Explore the recorded actions and structured logs for more detail.
+
+24
+00:01:58.300 --> 00:02:03.000
+From a natural-language goal to a test result you can inspect.
+
+25
+00:02:04.008 --> 00:02:09.658
+Ready to try your own test? Visit the FSQ website to get started.
+

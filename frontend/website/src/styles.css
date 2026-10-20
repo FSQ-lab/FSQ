@@ -47,6 +47,7 @@ a:hover {
 
 a:focus-visible,
 button:focus-visible,
+summary:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 3px;
@@ -307,7 +308,8 @@ h3 {
 }
 
 .workflow-step p,
-.setup-card p {
+.setup-card > div > p,
+.setup-card details > p {
   margin: 0;
   color: var(--muted);
   font-size: 0.9rem;
@@ -533,3 +535,29 @@ h3 {
     box-shadow: none;
   }
 }
+
+.media-player { width: 100%; aspect-ratio: 16 / 9; background: #16251b; border-radius: 0.5rem; overflow: hidden; }
+.media-player:focus-within { outline: 3px solid var(--focus); outline-offset: 3px; }
+.media-player video { display: block; width: 100%; height: 100%; }
+.media-play { position: relative; display: block; width: 100%; height: 100%; padding: 0; border: 0; cursor: pointer; background: transparent; }
+.media-play__label { position: absolute; bottom: 1rem; left: 50%; transform: translateX(-50%); display: flex; align-items: center; justify-content: center; gap: 0.8rem; min-height: 48px; padding: 0.6rem 1rem; border-radius: 0.4rem; background: #254e36; color: white; font-weight: 700; white-space: nowrap; box-shadow: 0 0 0 1px white; }
+.media-status { min-height: 1.5em; margin-top: 0.4rem !important; color: var(--ink); }
+.workflow-stories { margin-top: 3rem; display: grid; gap: 3.5rem; }
+.workflow-story { min-width: 0; }
+.workflow-story__copy { max-width: 760px; margin-bottom: 1.25rem; }
+.workflow-story__copy h3 { margin-top: 0.5rem; font-size: clamp(1.3rem, 3vw, 1.8rem); }
+.workflow-story__copy p, .first-test > p { color: var(--muted); }
+.workflow-story figure { margin: 0; }
+.workflow-story img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 0.5rem; }
+.workflow-story figcaption { margin-top: 0.75rem; color: var(--muted); font-size: 0.85rem; }
+.workflow-story figcaption a { display: inline-flex; min-height: 44px; align-items: center; gap: 0.4rem; }
+.setup-card details { color: var(--muted); font-size: 0.9rem; }
+.setup-card summary { min-height: 44px; cursor: pointer; color: var(--brand); font-weight: 700; }
+.setup-card details > p { margin: 0.6rem 0 1rem; }
+.first-test { margin-top: 3rem; max-width: 860px; }
+.first-test h3 { font-size: clamp(1.5rem, 3vw, 2rem); }
+.commands--wrap { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.community .hero__actions { justify-content: flex-start; }
+.site-footer nav { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+.site-footer nav a { display: inline-flex; align-items: center; min-height: 44px; }
+@media (max-width: 420px) { .media-play__label { bottom: 0.6rem; font-size: 0.8rem; } .command-panel__header { gap: 0.4rem; } }

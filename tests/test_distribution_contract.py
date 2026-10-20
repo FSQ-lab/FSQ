@@ -303,12 +303,18 @@ def _markdown_section(document: str, heading: str) -> str:
 def test_readmes_share_current_media_and_resolvable_local_destinations() -> None:
     current_video = "https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f"
     current_youtube = "https://youtu.be/f1sobvVHNg0"
-    expected_images = {f"docs/media/quick-test-{name}.png" for name in ("poster", "task", "execution", "result")}
+    expected_images = {f"docs/media/quick-test-{name}.png" for name in ("task", "execution", "result")}
     for name in ("README.md", "README.zh-CN.md"):
         path = ROOT / name
         readme = path.read_text(encoding="utf-8")
         assert current_video in readme
         assert current_youtube in readme
+        demo_heading = "## See a complete test" if name == "README.md" else "## 看一次完整测试"
+        demo = _markdown_section(readme, demo_heading)
+        assert demo.splitlines().count(current_video) == 1
+        assert re.search(rf"(?<!!)\[[^\]\n]+\]\({re.escape(current_youtube)}\)", demo)
+        assert "![" not in demo
+        assert "<img" not in demo.lower()
         assert "aa9d0a12-2f93-4894-8349-52a013424939" not in readme
         assert "QqCahxGDdS0" not in readme
         images = re.findall(r"!\[([^\]]+)\]\((docs/media/[^)]+)\)", readme)

@@ -31,8 +31,6 @@
 
 https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f
 
-[![Android Quick Test 演示封面：真实设备浏览器和 FSQ 执行证据](docs/media/quick-test-poster.png)](https://youtu.be/f1sobvVHNg0)
-
 [在 YouTube 观看](https://youtu.be/f1sobvVHNg0) · [英文字幕](docs/media/quick-test.en.srt) · [媒体来源与审查状态](docs/media/quick-test-demo-provenance.md)
 
 视频展示 Android 上的一次真实 Quick Test：搜索 FSQ 仓库，沿 About 官网链接访问主页，验证两句主标题。你可以先使用 Web 试用；不同平台的环境和执行过程不同，搜索结果和测试结果也可能变化。

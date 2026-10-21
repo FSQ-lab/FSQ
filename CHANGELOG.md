@@ -4,6 +4,22 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-21
+
+Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.2.md) for upgrade steps and validation limits.
+
+### Fixed
+
+- Android text-entry verification tolerates geometry changes only when a unique locator remains bound to the original resource, while retaining exact readback and target-identity checks. Ambiguous, unreadable, disabled, or mismatched targets remain non-success results without implicit write retries (#39).
+- Android's initial device-context read retries once for the specifically identified `ApplicationSharedMemory not initialized` backend error; it does not repeat the application action or retry unrelated failures (#39).
+
+### Changed
+
+- Refreshed the bilingual README, Landing Page, current Android Quick Test demonstration, captions, screenshots, and media source records. The Website retains its headline and white/green visual identity, activates inline native video only on user action, and preserves independent viewing links (#41).
+- Both public entry paths now lead to Quick Test through Coding Agent or FSQ UI as equal alternatives, with one complete repository-search → About website → homepage-verification example, evidence review, separate advanced Case/replay workflows, and Star/feedback destinations. Documentation contract tests follow the current onboarding (#41).
+- Removed the duplicate YouTube cover-image links from both READMEs while retaining the GitHub inline video, text links, and three explanatory images (#42).
+- Python distribution metadata is prepared for version 0.3.2. The private npm package remains independently versioned at 0.1.0; this metadata preparation adds no runtime or dependency change.
+
 ## [0.3.1] - 2026-10-20
 
 Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.1.md) for upgrade steps and validation limits.
@@ -73,8 +89,11 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/FSQ-lab/FSQ/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/FSQ-lab/FSQ/compare/v0.3.0...v0.3.1
 [0.1.6]: https://github.com/FSQ-lab/FSQ/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/FSQ-lab/FSQ/compare/v0.1.0...v0.1.5
 [0.1.0]: https://github.com/FSQ-lab/FSQ/releases/tag/v0.1.0
+
+The 0.3.2 comparison references anticipate release tags; they do not establish that a tag or publication exists.

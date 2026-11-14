@@ -82,6 +82,9 @@ Android configuration:
 - `harness.android.backend` supports `appium_connect_agent` as the sole Android backend.
 - Workspace target `app_id` is required. Android serial is not a configuration field; an entry layer may assign it only to a run-specific settings copy after device selection.
 - Strict Android runs may fall back to FSQ case `appId` metadata where the active entry contract permits it.
+- `harness.android.uiautomator2_wait_for_idle_timeout_ms` uses the Models-owned optional exact-integer millisecond contract. The committed ordinary Android preset omits it or resolves to None, leaving the upstream Session idle policy unselected.
+- A trusted caller may validate an explicit value with public `AndroidHarnessSettings` and assign only that field on a deep run-specific Settings copy before factory/Session construction. Composition preserves the resolved app id, transient serial, prompt, skills, knowledge, authentication, and all other resolved settings; it does not mutate the original settings or an active Session.
+- Workspace version-2 YAML retains its existing schema: no harness/profile block or idle setting is added to target/env. Per-run policy selection does not write shared `~/.fsq` configuration, move credential files, introduce an environment fallback, or add another persisted configuration-precedence layer. Config does not select idle values from task, app, or benchmark names; an explicit caller profile owns a value such as 1000 ms.
 
 Web configuration:
 

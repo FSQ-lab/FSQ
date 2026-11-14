@@ -166,7 +166,10 @@ Platform settings exports:
 
 - `CaseLifecycleSettings`: Pydantic model selecting config-level strict case lifecycle hooks used by strict execution. It reuses FSQ hook entry models so config-level hooks and case-level hooks share validation and ordering semantics.
 - `HarnessSettings`: Pydantic model selecting the platform harness configuration used by goal-driven task execution. It contains platform-specific harness settings only; runner-owned execution pacing belongs to `ExecutionSettings`.
-- `AndroidHarnessSettings`: preset backend policy, Workspace app target, and transient per-Run serial without environment fallback.
+- `AndroidHarnessSettings`: preset backend and initial-Session policy, Workspace app target, and transient per-Run serial without environment fallback.
+  - `uiautomator2_wait_for_idle_timeout_ms: int | None = None` is an optional initial-Session idle setting in milliseconds. None selects no override; zero is an explicit value.
+  - Explicit values require `type(value) is int` and the inclusive range `0..9_007_199_254_740_991`, preserving exact integers through the Node/Appium JSON path. Booleans, int subclasses, floats, strings, negative values, and values above that range are rejected without coercion, clamping, rounding, or fallback.
+  - The setting is runtime harness policy, not an action parameter, Workspace target, environment fallback, credential, or SDK object. Ordinary FSQ defaults remain None; Models does not select a benchmark-specific value.
 - `WebHarnessSettings`: preset Playwright policy, Workspace browser channel and discovered/configured executable path, and preset `attach` plus `attach_endpoint` values. Attach defaults off, and its endpoint defaults to `http://127.0.0.1:9222`.
 - `WindowsHarnessSettings`: preset backend-kind policy and Workspace application path, title constraint, and launch arguments.
 - `MacOSHarnessSettings`: preset Mac2/snapshot/timeout policy and Workspace bundle/application identity. Only `FSQ_MACOS_APPIUM_SERVER_URL` overrides the preset endpoint; command-idle timeout defaults to 300 seconds independently of action timeout.

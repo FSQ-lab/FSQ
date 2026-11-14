@@ -4,6 +4,10 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+### Added
+
+- Android harness policy accepts optional `uiautomator2_wait_for_idle_timeout_ms` for owned Session creation: `None` leaves the SDK keyword omitted, and explicit built-in integers in `0..9007199254740991` retain their exact value, including zero. Borrowed Sessions reject an initial override. Ordinary defaults and Workspace v2 YAML remain unchanged.
+
 ### Fixed
 
 - Android retains pending Session, managed-runtime, and owner-thread resources until cleanup is proven complete, blocks implicit reconstruction after session failure, and consumes the SDK's public uncertain terminal-disposal contract instead of private lease state. Terminal disposal is local/owned-resource settlement, not confirmed remote Session closure.
@@ -12,6 +16,7 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 ### Integration status
 
 - SDK terminal-disposal consumption is validated separately from distribution readiness. The immutable SDK dependency is unchanged; source-overlay verification does not establish a newly packaged SDK or an evaluation-ready candidate.
+- Initial-idle policy consumption requires the reviewed SDK API through an explicit local-wheel override for isolated validation. The public SDK dependency pin is unchanged; this does not establish public installability, a device-observed idle value, or repair of the Pause inspection scenario.
 
 ## [0.3.2] - 2026-10-21
 

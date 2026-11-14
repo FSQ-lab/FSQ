@@ -2,12 +2,14 @@
 # Licensed under the MIT License.
 
 import pytest
+from pydantic import ValidationError
 
 from fsq_agent import models
 from fsq_agent.models import (
     AgentFinalOutput,
     AgentRuntimeSettings,
     AgentTaskInput,
+    AndroidHarnessSettings,
     AndroidInputTextParams,
     AndroidSwipeParams,
     ExecutionStep,
@@ -302,3 +304,21 @@ def test_page_knowledge_index_and_goal_pre_plan_defaults() -> None:
     assert plan.schema_version == "goal_pre_plan_v1"
     assert plan.key_actions[0].step_id == 1
     assert plan.verification_goal == "Verify that Downloads can be opened from the browser menu."
+
+
+class _IdleInt(int):
+    pass
+
+
+@pytest.mark.parametrize("value", [None, 0, 1000, 9_007_199_254_740_991])
+def test_android_initial_idle_policy_preserves_exact_values(value: int | None) -> None:
+    settings = AndroidHarnessSettings(uiautomator2_wait_for_idle_timeout_ms=value)
+    assert settings.uiautomator2_wait_for_idle_timeout_ms == value
+    assert type(settings.uiautomator2_wait_for_idle_timeout_ms) is type(value)
+
+
+@pytest.mark.parametrize("value", [True, False, _IdleInt(1000), 0.0, 1000.0, "1000", "", -1, 9_007_199_254_740_992, 2**63 - 1])
+def test_android_initial_idle_policy_rejects_coercion_and_inexact_values(value: object) -> None:
+    with pytest.raises(ValidationError) as failed:
+        AndroidHarnessSettings.model_validate({"uiautomator2_wait_for_idle_timeout_ms": value})
+    assert failed.value.errors()[0]["loc"] == ("uiautomator2_wait_for_idle_timeout_ms",)

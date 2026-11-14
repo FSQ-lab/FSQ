@@ -32,7 +32,11 @@ def _ensure_backend(platform: HarnessPlatform, backend: str) -> None:
 class _DriverFactoryImplementation:
     def create_android_driver(self, settings, *, app_id=None, serial=None):
         _ensure_backend("android", settings.backend)
-        return AppiumConnectAndroidDriver(app_id=app_id if app_id is not None else settings.app_id or "", serial=serial if serial is not None else settings.serial)
+        return AppiumConnectAndroidDriver(
+            app_id=app_id if app_id is not None else settings.app_id or "",
+            serial=serial if serial is not None else settings.serial,
+            uiautomator2_wait_for_idle_timeout_ms=settings.uiautomator2_wait_for_idle_timeout_ms,
+        )
 
     def create_web_driver(self, settings):
         _ensure_backend("web", settings.backend)

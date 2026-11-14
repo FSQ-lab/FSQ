@@ -322,6 +322,15 @@ def test_driver_lazy_construction_does_not_connect_or_start_threads() -> None:
     driver.close()
 
 
+@pytest.mark.parametrize("value", [0, 1000, 9_007_199_254_740_991])
+def test_borrowed_session_rejects_initial_idle_override_without_operations(value: int) -> None:
+    session = FakeSession()
+    with pytest.raises(ConfigurationError, match="borrowed"):
+        AppiumConnectAndroidDriver(app_id="com.example.app", session=session, uiautomator2_wait_for_idle_timeout_ms=value)
+    assert session.calls == []
+    assert session.thread_ids == set()
+
+
 def test_driver_context_launch_kill_screenshot_and_ui_snapshot() -> None:
     root = _tree_node(
         tag="android.widget.FrameLayout",
@@ -433,6 +442,7 @@ def test_owned_managed_lifecycle_closes_session_before_exiting_managed_scope(mon
     monkeypatch.setattr(aca_runtime, "Runtime", FakeRuntime)
 
     def fake_create_session(connection: Any, device_id: str, **_kwargs: Any) -> FakeSession:
+        assert "uiautomator2_wait_for_idle_timeout_ms" not in _kwargs
         events.append(("create_session", connection.port, device_id, threading.get_ident()))
         return session
 

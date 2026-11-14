@@ -92,8 +92,16 @@ class AndroidHarnessSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backend: Literal["appium_connect_agent"] = "appium_connect_agent"
+    uiautomator2_wait_for_idle_timeout_ms: int | None = Field(default=None, ge=0, le=9_007_199_254_740_991)
     _app_id: str | None = PrivateAttr(default=None)
     _serial: str | None = PrivateAttr(default=None)
+
+    @field_validator("uiautomator2_wait_for_idle_timeout_ms", mode="before")
+    @classmethod
+    def validate_initial_idle_timeout(cls, value: Any) -> int | None:
+        if value is not None and type(value) is not int:
+            raise ValueError("uiautomator2_wait_for_idle_timeout_ms must be a built-in integer or None")
+        return value
 
     @property
     def app_id(self) -> str | None:

@@ -19,7 +19,7 @@ from fsq_agent.config import (
     validate_strict_core_settings,
 )
 from fsq_agent.config._loader import load_platform_settings
-from fsq_agent.models import ConfigurationError
+from fsq_agent.models import AndroidHarnessSettings, ConfigurationError
 
 
 def _base_config(tmp_path: Path, body: str = "") -> str:
@@ -128,6 +128,22 @@ env:
     assert settings.agent_context.knowledge.root_dir == workspace / "knowledge" / "android"
     assert not (workspace / "cases").exists()
     assert not (workspace / "knowledge").exists()
+
+    settings.harness.android.serial = "isolated-protocol-device"
+    before = settings.model_dump()
+    policy = AndroidHarnessSettings(uiautomator2_wait_for_idle_timeout_ms=1000)
+    run_settings = settings.model_copy(deep=True)
+    run_settings.harness.android.uiautomator2_wait_for_idle_timeout_ms = policy.uiautomator2_wait_for_idle_timeout_ms
+
+    assert settings.harness.android.uiautomator2_wait_for_idle_timeout_ms is None
+    assert run_settings.harness.android.uiautomator2_wait_for_idle_timeout_ms == 1000
+    expected = settings.model_dump()
+    expected["harness"]["android"]["uiautomator2_wait_for_idle_timeout_ms"] = 1000
+    assert run_settings.model_dump() == expected
+    assert settings.model_dump() == before
+    assert run_settings.harness.android.app_id == settings.harness.android.app_id == "com.example.checkout"
+    assert run_settings.harness.android.serial == settings.harness.android.serial == "isolated-protocol-device"
+    assert run_settings.runtime_secrets.resolve("TEST_ACCOUNT_PASSWORD") == "local-secret"
 
 
 def test_load_workspace_platform_settings_uses_committed_preset_outside_repository_cwd(tmp_path: Path) -> None:

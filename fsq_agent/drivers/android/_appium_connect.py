@@ -22,6 +22,7 @@ from fsq_agent.models import (
     AndroidAssertStateParams,
     AndroidAssertVisibleParams,
     AndroidAssertWithAIParams,
+    AndroidHarnessSettings,
     AndroidInputTextParams,
     AndroidKillAppParams,
     AndroidLaunchAppParams,
@@ -239,7 +240,15 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         app_id: str,
         serial: str | None = None,
         session: object | None = None,
+        uiautomator2_wait_for_idle_timeout_ms: int | None = None,
     ) -> None:
+        if session is not None and uiautomator2_wait_for_idle_timeout_ms is not None:
+            raise ConfigurationError("An initial idle override cannot be applied to a borrowed Android Session.")
+        self._uiautomator2_wait_for_idle_timeout_ms = (
+            AndroidHarnessSettings(uiautomator2_wait_for_idle_timeout_ms=uiautomator2_wait_for_idle_timeout_ms).uiautomator2_wait_for_idle_timeout_ms
+            if uiautomator2_wait_for_idle_timeout_ms is not None
+            else None
+        )
         self.app_id = app_id
         self.serial = serial
         self._borrowed_session = session is not None
@@ -278,7 +287,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 if state == "active":
                     try:
                         session.quit(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
-                    except BaseException as exc:  # noqa: BLE001 - retain quit failure while explicitly disposing uncertain resources.
+                    except BaseException as exc:  # Retain quit failure while explicitly disposing uncertain resources.
                         primary_error = self._cleanup_primary = exc
                         state = session.session_info().state
                         if state not in {"uncertain", "disposing", "disposed"}:
@@ -292,7 +301,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                     elif state == "disposed":
                         managed_settled = True
                     elif state != "closed":
-                        raise ToolExecutionError("Owned Android session is not available for terminal cleanup.", context={"state": state})
+                        # Rejection must traverse the common ownership-retention path below.
+                        raise ToolExecutionError("Owned Android session is not available for terminal cleanup.", context={"state": state})  # noqa: TRY301
                     self._session_settled = True
 
             if not managed_settled:
@@ -1028,7 +1038,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 if isinstance(exc, ServiceLifecycleError) and exc.code == "service_port_in_use":
                     try:
                         runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
-                    except BaseException as cleanup_error:
+                    except BaseException as cleanup_error:  # noqa: BLE001 - preserve startup and cleanup failures, including cancellation.
                         raise BaseExceptionGroup("Managed startup and cleanup failed.", [exc, cleanup_error]) from None
                     self._managed_scope = None
                     self._scope_exit_attempted = False
@@ -1040,6 +1050,10 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             if last_port_error is not None:
                 raise last_port_error
             raise ConfigurationError("Failed to bind a managed Appium loopback port.")
+
+        initial_settings = {}
+        if self._uiautomator2_wait_for_idle_timeout_ms is not None:
+            initial_settings["uiautomator2_wait_for_idle_timeout_ms"] = self._uiautomator2_wait_for_idle_timeout_ms
 
         try:
             session = create_session(
@@ -1053,6 +1067,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 should_terminate_app=False,
                 new_command_timeout_seconds=DEFAULT_NEW_COMMAND_TIMEOUT_SECONDS,
                 control=OperationControl(timeout_seconds=DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS),
+                **initial_settings,
             )
         except BaseException as exc:
             # SDK create errors can carry the exact uncertain Session. Keep the

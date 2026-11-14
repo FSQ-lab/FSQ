@@ -140,7 +140,7 @@ class _IsolatedManagedDriver:
 
 
 @pytest.fixture
-def managed_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_IsolatedManagedDriver]:
+def managed_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> Iterator[_IsolatedManagedDriver]:
     from appium_connect_agent.runtime import _coordination
 
     from fsq_agent.drivers.android import _appium_connect
@@ -183,7 +183,10 @@ def managed_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
         original_killpg(group, number)
 
     monkeypatch.setattr(os, "killpg", observe_killpg)
-    driver = DriverFactory().create_android_driver(AndroidHarnessSettings(), app_id="com.example.isolated", serial="isolated-protocol-device")
+    settings = AndroidHarnessSettings(**getattr(request, "param", {}))
+    settings.app_id = "com.example.isolated"
+    settings.serial = "isolated-protocol-device"
+    driver = DriverFactory().create_android_driver(settings)
     environment = _IsolatedManagedDriver(root, appium_package / "index.js", tmp_path / "protocol.jsonl", driver, signals, frozenset(threading.enumerate()))
     environment.mode("create-disconnect")
     try:
@@ -388,9 +391,7 @@ def test_public_disposal_preflight_failure_keeps_uncertain_owner(managed_driver:
 
 
 @pytest.mark.parametrize("boundary", ["service-record", "account-lock"])
-def test_failed_terminal_close_retains_real_cleanup_for_explicit_continuation(
-    managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch, boundary: str
-) -> None:
+def test_failed_terminal_close_retains_real_cleanup_for_explicit_continuation(managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch, boundary: str) -> None:
     owner = _create_unknown(managed_driver)
     failures: list[bool] = []
     original_close = os.close
@@ -507,3 +508,42 @@ def test_unknown_quit_and_disposal_failure_preserve_order_and_explicit_continuat
     events = managed_driver.events()
     driver.close()
     assert managed_driver.events() == events
+
+
+@pytest.mark.parametrize(
+    "managed_driver",
+    [
+        {},
+        {"uiautomator2_wait_for_idle_timeout_ms": None},
+        {"uiautomator2_wait_for_idle_timeout_ms": 0},
+        {"uiautomator2_wait_for_idle_timeout_ms": 1000},
+        {"uiautomator2_wait_for_idle_timeout_ms": 9_007_199_254_740_991},
+    ],
+    indirect=True,
+    ids=["omitted", "none", "zero", "explicit", "exact-upper-bound"],
+)
+def test_initial_idle_policy_reaches_real_sdk_wire_and_preserves_owned_cleanup(managed_driver: _IsolatedManagedDriver, request: pytest.FixtureRequest) -> None:
+    managed_driver.mode("serve")
+    assert managed_driver.driver.launch_app({})["status"] == "passed"
+    owner = _observe_owner(managed_driver)
+    managed_driver.driver.close()
+    _assert_owner_settled(managed_driver, owner, state="closed")
+
+    requests = [event for event in managed_driver.events() if "method" in event and not event["path"].endswith("/status")]
+    assert [(event["method"], event["path"]) for event in requests] == [
+        ("POST", "/session"),
+        ("POST", "/session/isolated-session/execute/sync"),
+        ("DELETE", "/session/isolated-session"),
+    ]
+    caps = requests[0]["body"]["capabilities"]["alwaysMatch"]
+    assert caps["appium:udid"] == "isolated-protocol-device"
+    assert caps["appium:appPackage"] == "com.example.isolated"
+    assert caps["appium:noReset"] is True
+    assert caps["appium:autoLaunch"] is False
+    expected = request.node.callspec.params["managed_driver"].get("uiautomator2_wait_for_idle_timeout_ms")
+    key = "appium:settings[waitForIdleTimeout]"
+    if expected is None:
+        assert key not in caps
+    else:
+        assert type(caps[key]) is int
+        assert caps[key] == expected

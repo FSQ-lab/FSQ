@@ -34,7 +34,7 @@ def test_harness_protocol_compatibility_modules_alias_canonical_modules() -> Non
 
 def test_concrete_driver_and_harness_compatibility_modules_alias_canonical_modules() -> None:
     pairs = [
-        ("fsq_agent.core.harness._uiautomator2_driver", "fsq_agent.drivers.android._uiautomator2"),
+        ("fsq_agent.core.harness._appium_connect_android_driver", "fsq_agent.drivers.android._appium_connect"),
         ("fsq_agent.core.harness._playwright_driver", "fsq_agent.drivers.web._playwright"),
         ("fsq_agent.core.harness._pywinauto_driver", "fsq_agent.drivers.windows._pywinauto"),
         ("fsq_agent.core.harness._appium_mac2_driver", "fsq_agent.drivers.macos._appium_mac2"),

@@ -16,10 +16,10 @@ from fsq_agent.capabilities import (
     platform_driver_capability,
 )
 from fsq_agent.core import CapabilityRegistry, CommonPlatformTools
+from fsq_agent.core.harness._appium_connect_android_driver import AppiumConnectAndroidDriver
 from fsq_agent.core.harness._appium_mac2_driver import AppiumMac2Driver
 from fsq_agent.core.harness._driver_tools import _discover_driver_capability_definitions
 from fsq_agent.core.harness._playwright_driver import PlaywrightWebDriver
-from fsq_agent.core.harness._uiautomator2_driver import UiAutomator2AndroidDriver
 from fsq_agent.models import CapabilityDefinition, ConfigurationError, ReplayPolicy
 
 
@@ -236,9 +236,9 @@ def test_android_driver_declarations_keep_catalog_backed_metadata() -> None:
     definitions = {
         definition.name: definition
         for definition in _discover_driver_capability_definitions(
-            UiAutomator2AndroidDriver,
+            AppiumConnectAndroidDriver,
             platform="android",
-            metadata={"driver_class": "UiAutomator2AndroidDriver", "backend": "uiautomator2"},
+            metadata={"driver_class": "AppiumConnectAndroidDriver", "backend": "appium_connect_agent"},
         )
     }
 
@@ -246,7 +246,7 @@ def test_android_driver_declarations_keep_catalog_backed_metadata() -> None:
     assert tap.executor_kind == "driver"
     assert tap.owner == "driver"
     assert tap.platform == "android"
-    assert tap.backend == "uiautomator2"
+    assert tap.backend == "appium_connect_agent"
     assert tap.metadata["driver_method"] == "tap_on"
     assert tap.metadata["fsq_action_name"] == "tapOn"
     assert tap.replay == ReplayPolicy(kind="fsq_command", alias="tapOn")

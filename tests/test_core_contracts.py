@@ -73,7 +73,7 @@ def test_core_public_exports_follow_strict_boundary() -> None:
         "WebHarness",
         "WindowsHarness",
         "MacOSHarness",
-        "UiAutomator2AndroidDriver",
+        "AppiumConnectAndroidDriver",
         "PlaywrightWebDriver",
         "PywinautoWindowsDriver",
         "AppiumMac2Driver",
@@ -124,10 +124,8 @@ def test_driver_factory_returns_platform_driver_protocols(monkeypatch: pytest.Mo
         WebDriverInterface,
         WindowsDriverInterface,
     )
-    from fsq_agent.core.harness._uiautomator2_driver import UiAutomator2AndroidDriver
     from fsq_agent.models import AndroidHarnessSettings, MacOSHarnessSettings, WebHarnessSettings, WindowsHarnessSettings
 
-    monkeypatch.setattr(UiAutomator2AndroidDriver, "_connect", lambda self, serial: object())
     factory = DriverFactory()
     web_settings = WebHarnessSettings(attach=True, attach_endpoint="http://127.0.0.1:9333")
     web_driver = factory.create_web_driver(web_settings)
@@ -142,10 +140,8 @@ def test_driver_factory_returns_platform_driver_protocols(monkeypatch: pytest.Mo
 
 def test_harness_factory_returns_harness_interface(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from fsq_agent.core import ArtifactStore, HarnessFactory, HarnessInterface
-    from fsq_agent.core.harness._uiautomator2_driver import UiAutomator2AndroidDriver
     from fsq_agent.models import HarnessSettings
 
-    monkeypatch.setattr(UiAutomator2AndroidDriver, "_connect", lambda self, serial: object())
     factory = HarnessFactory()
 
     harness = factory.create_harness(
@@ -278,7 +274,7 @@ def test_harness_function_schema_is_serializable_contract() -> None:
         platform="android",
         driver_method="tap_on",
         fsq_action_name="tapOn",
-        metadata={"backend": "uiautomator2"},
+        metadata={"backend": "appium_connect_agent"},
     )
 
     dumped = schema.model_dump(mode="json")
@@ -286,7 +282,7 @@ def test_harness_function_schema_is_serializable_contract() -> None:
     assert dumped["name"] == "tap_on"
     assert "strict" not in dumped
     assert dumped["params_json_schema"]["type"] == "object"
-    assert dumped["metadata"] == {"backend": "uiautomator2"}
+    assert dumped["metadata"] == {"backend": "appium_connect_agent"}
 
 
 def test_android_parameter_models_produce_canonical_dumps_and_reject_extra_fields() -> None:

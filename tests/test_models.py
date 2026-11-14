@@ -103,11 +103,11 @@ def test_agent_runtime_settings_defaults_to_safe_offline_mode() -> None:
     assert settings.local_tool_output.total_inline_output_max_chars == 60000
 
 
-def test_harness_settings_default_to_android_uiautomator2() -> None:
+def test_harness_settings_default_to_android_appium_connect_agent() -> None:
     settings = HarnessSettings()
 
     assert settings.platform == "android"
-    assert settings.android.backend == "uiautomator2"
+    assert settings.android.backend == "appium_connect_agent"
     assert settings.android.app_id is None
     assert settings.android.serial is None
 

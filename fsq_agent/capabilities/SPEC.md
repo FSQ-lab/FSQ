@@ -34,7 +34,7 @@ Shared declaration rules:
 
 Android declaration block:
 
-- Android uiautomator2 driver methods use catalog-backed `platform_driver_capability` entries with Android replay aliases and parameter models.
+- Android `appium_connect_agent` driver methods use catalog-backed `platform_driver_capability` entries with Android replay aliases and parameter models.
 - Android platform-level non-driver behavior must not introduce a live `harness` executor kind; new recordable platform behavior should be represented as a driver-backed PlatformTool or a CommonTool after SPEC review.
 
 Web declaration block:

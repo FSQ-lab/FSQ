@@ -14,6 +14,14 @@ it('renders pending context separately from failed and not-applicable prerequisi
   expect(screen.getByText('Application pending').closest('li')).toHaveClass('prerequisite-row--pending');
 });
 
+it('renders the Managed Appium runtime prerequisite label for appium_connect_runtime', () => {
+  render(<PrerequisiteList items={[
+    { identifier: 'appium_connect_runtime', status: 'unavailable', message: 'Managed runtime uninitialized', commands: [] },
+  ]} />);
+  expect(screen.getByText('Managed Appium runtime')).toBeVisible();
+  expect(screen.getByText('Managed runtime uninitialized')).toBeVisible();
+});
+
 it('shows failures, distinguishes blocked checks, and collapses passed checks', async () => {
   const copy = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText:copy}});

@@ -8,7 +8,7 @@ import pytest
 from fsq_agent.core import ArtifactStore, HarnessInterface
 from fsq_agent.core.harness._ai_assertion_tool import AIAssertionBackendToolMixin
 from fsq_agent.core.harness._android import AndroidHarness
-from fsq_agent.core.harness._uiautomator2_driver import UiAutomator2AndroidDriver
+from fsq_agent.core.harness._appium_connect_android_driver import AppiumConnectAndroidDriver
 from fsq_agent.drivers._capabilities import _android_driver_tool
 from fsq_agent.models import (
     AIAssertionRequest,
@@ -198,7 +198,7 @@ def test_android_harness_rejects_legacy_value_wrapped_known_params() -> None:
 
 
 def test_android_harness_action_space_returns_decorated_driver_method_schemas() -> None:
-    driver = UiAutomator2AndroidDriver(app_id="com.example.app", device=object())
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=object())
     harness = AndroidHarness(driver=driver)
 
     schemas = {schema.name: schema for schema in harness.action_space()}
@@ -211,8 +211,8 @@ def test_android_harness_action_space_returns_decorated_driver_method_schemas() 
     assert schemas["tap_on"].driver_method == "tap_on"
     assert schemas["tap_on"].fsq_action_name == "tapOn"
     assert schemas["tap_on"].platform == "android"
-    assert schemas["tap_on"].metadata["driver_class"] == "UiAutomator2AndroidDriver"
-    assert schemas["tap_on"].metadata["backend"] == "uiautomator2"
+    assert schemas["tap_on"].metadata["driver_class"] == "AppiumConnectAndroidDriver"
+    assert schemas["tap_on"].metadata["backend"] == "appium_connect_agent"
     assert schemas["tap_on"].metadata["capability_name"] == "tap_on"
     assert schemas["tap_on"].metadata["executor_kind"] == "driver"
     assert schemas["tap_on"].metadata["replay"] == {"kind": "fsq_command", "alias": "tapOn"}

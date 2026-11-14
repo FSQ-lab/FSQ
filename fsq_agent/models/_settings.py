@@ -91,7 +91,7 @@ class AgentContextSettings(BaseModel):
 class AndroidHarnessSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["uiautomator2"] = "uiautomator2"
+    backend: Literal["appium_connect_agent"] = "appium_connect_agent"
     _app_id: str | None = PrivateAttr(default=None)
     _serial: str | None = PrivateAttr(default=None)
 

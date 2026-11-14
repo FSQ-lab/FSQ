@@ -369,10 +369,10 @@ def _validate_harness_settings(settings: Settings) -> None:
 
 
 def _validate_android_harness_settings(settings: Settings) -> None:
-    if settings.harness.android.backend != "uiautomator2":
+    if settings.harness.android.backend != "appium_connect_agent":
         raise ConfigurationError(
             "Unsupported Android harness backend.",
-            context={"backend": settings.harness.android.backend, "supported": ["uiautomator2"]},
+            context={"backend": settings.harness.android.backend, "supported": ["appium_connect_agent"]},
         )
 
 

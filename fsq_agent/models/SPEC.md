@@ -96,7 +96,7 @@ Android platform exports:
 - `AndroidTextAssertion`: Pydantic model for text assertion predicates, supporting `contains` and `equals`.
 - `AndroidElementState`: Pydantic model for element locators plus expected boolean Android state fields `enabled`, `checked`, `selected`, `clickable`, and `focused`.
 - `AndroidAssertStateParams`: Pydantic model for FSQ `assert` driver parameters. It supports `element` existence/state assertions and optional `text` assertions.
-- `AndroidAssertWithAIParams`: Pydantic model for authored Android visual assertion parameters with a required prompt and optional assertion metadata. This parameter model is consumed by decorated Android backend driver tools such as `UiAutomator2AndroidDriver.assert_with_ai`.
+- `AndroidAssertWithAIParams`: Pydantic model for authored Android visual assertion parameters with a required prompt and optional assertion metadata. This parameter model is consumed by decorated Android backend driver tools such as `AppiumConnectAndroidDriver.assert_with_ai`.
 
 Web platform exports:
 
@@ -185,7 +185,7 @@ Platform-runtime diagnostic exports include immutable `PlatformPrerequisiteCheck
 
 Prerequisite facts may carry an immutable, default-empty `commands` tuple of bounded operator-run command strings. Commands are explicit guidance, never an execution request; they contain no credentials, workspace secrets, or unrestricted local target data. The four diagnostic statuses retain their meaning; `not_applicable` does not by itself prove readiness.
 
-`PlatformPrerequisiteCheck` additionally accepts an optional stable `code` for machine-readable failure reasons; existing consumers may omit it. Android diagnosis differentiates ADB missing/server unavailable/endpoint invalid/timeout/query failure, no device, unauthorized/offline/unsupported device state, selection required/selected device missing, and application identity/missing/query-failed outcomes without embedding raw backend details.
+`PlatformPrerequisiteCheck` additionally accepts an optional stable `code` for machine-readable failure reasons; existing consumers may omit it. Android diagnosis differentiates ADB missing/server unavailable/endpoint invalid/timeout/query failure, `appium_connect_runtime` missing/managed-root unready or recovery-required/host Node or JDK missing, no device, unauthorized/offline/unsupported device state, selection required/selected device missing, and application identity/missing/query-failed outcomes without embedding raw backend details.
 
 `PlatformPrerequisiteCheck.target_id` is an optional bounded transient Android device identity carried by the device-selection fact for shared diagnosis composition. It has the same serial validation as `AndroidDevice`, is absent for other prerequisites/platforms, and is never persisted as Workspace configuration. Application removes it from individual `DoctorPrerequisite` projections and exposes the effective identity only as `DoctorPlatformResult.target_id` and the selected-device readiness response binding.
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
@@ -339,6 +340,7 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
     metadata = None
     run_dir = None
     evaluator = None
+    harness = None
     try:
         workspace_root = settings.workspace.root_dir
         if workspace_root is None:
@@ -402,6 +404,11 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
             )
             .report
         )
+        close_harness = getattr(harness, "close", None)
+        harness = None
+        evaluator = None
+        if callable(close_harness):
+            close_harness()
         state.transition(request_id, "finalizing", summary="Finalizing strict evidence and report.")
         projection.load_persisted_manifest()
         persisted = load_run_metadata(run_dir)
@@ -423,10 +430,26 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         terminal = None
         if run_dir is not None and metadata is not None:
             terminal = _best_effort_terminal_run(run_dir, metadata, "error")
-        state.finish(request_id, status=terminal.status if terminal else "error", summary=terminal.result.summary if terminal else safe_exception_message(exc, settings=settings, unexpected=True))
+        state.finish(
+            request_id,
+            status="error",
+            summary=safe_exception_message(exc, settings=settings, unexpected=True)
+            if terminal is not None and terminal.status != "error"
+            else (terminal.result.summary if terminal else safe_exception_message(exc, settings=settings, unexpected=True)),
+        )
     finally:
-        if evaluator is not None:
-            evaluator.close()
+        if harness is not None:
+            fallback_close = getattr(harness, "close", None)
+            if callable(fallback_close):
+                try:
+                    fallback_close()
+                except Exception as cleanup_exc:  # noqa: BLE001 - preserve already-published failure/cancel state.
+                    logging.getLogger(__name__).warning("Fallback strict harness cleanup failed (%s)", type(cleanup_exc).__name__)
+        elif evaluator is not None:
+            try:
+                evaluator.close()
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning("Fallback strict evaluator cleanup failed (%s)", type(cleanup_exc).__name__)
 
 
 class _ProjectionEvidenceRecorder(EvidenceRecorder):

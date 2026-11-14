@@ -3,15 +3,15 @@
 
 from typing import cast
 
-from fsq_agent.drivers.android._uiautomator2 import UiAutomator2AndroidDriver
+from fsq_agent.drivers.android._appium_connect import AppiumConnectAndroidDriver
 from fsq_agent.drivers.macos._appium_mac2 import AppiumMac2Driver
 from fsq_agent.drivers.web._playwright import PlaywrightWebDriver
 from fsq_agent.drivers.windows._pywinauto import PywinautoWindowsDriver
 from fsq_agent.models import ConfigurationError, HarnessPlatform
 
-_BACKENDS = {"android": "uiautomator2", "web": "playwright", "windows": "pywinauto", "macos": "appium_mac2"}
+_BACKENDS = {"android": "appium_connect_agent", "web": "playwright", "windows": "pywinauto", "macos": "appium_mac2"}
 _DRIVER_CLASSES: dict[HarnessPlatform, type[object]] = {
-    "android": cast("type[object]", UiAutomator2AndroidDriver),
+    "android": cast("type[object]", AppiumConnectAndroidDriver),
     "web": cast("type[object]", PlaywrightWebDriver),
     "windows": cast("type[object]", PywinautoWindowsDriver),
     "macos": cast("type[object]", AppiumMac2Driver),
@@ -32,7 +32,7 @@ def _ensure_backend(platform: HarnessPlatform, backend: str) -> None:
 class _DriverFactoryImplementation:
     def create_android_driver(self, settings, *, app_id=None, serial=None):
         _ensure_backend("android", settings.backend)
-        return UiAutomator2AndroidDriver(app_id=app_id if app_id is not None else settings.app_id or "", serial=serial if serial is not None else settings.serial)
+        return AppiumConnectAndroidDriver(app_id=app_id if app_id is not None else settings.app_id or "", serial=serial if serial is not None else settings.serial)
 
     def create_web_driver(self, settings):
         _ensure_backend("web", settings.backend)

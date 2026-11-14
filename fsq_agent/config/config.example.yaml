@@ -13,7 +13,7 @@ agent_runtime:
 harness:
   platform: android
   android:
-    backend: uiautomator2
+    backend: appium_connect_agent
     # Android devices are selected per run; serial is not persisted here.
 
 execution:

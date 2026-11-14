@@ -13,7 +13,7 @@ from fsq_agent.core import AndroidDeviceDiscovery
 from ._evidence import safe_exception_message
 
 _TARGET_LABELS = {"android": "Device", "web": "Browser", "windows": "Application", "macos": "Application"}
-_BACKEND_MODULES = {"android": "uiautomator2", "web": "playwright", "windows": "pywinauto", "macos": "appium"}
+_BACKEND_MODULES = {"android": "appium_connect_agent", "web": "playwright", "windows": "pywinauto", "macos": "appium"}
 
 
 def discover_targets(settings: Settings, *, timeout_seconds: float = 5.0) -> dict[str, Any]:

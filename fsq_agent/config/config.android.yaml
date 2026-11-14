@@ -6,7 +6,7 @@ agent_runtime:
 harness:
   platform: android
   android:
-    backend: uiautomator2
+    backend: appium_connect_agent
 
 execution:
   post_action_delay_seconds:

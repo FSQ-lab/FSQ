@@ -562,6 +562,68 @@ def test_strict_execution_composes_real_lifecycle_with_fake_harness(tmp_path: Pa
     assert (settings.output.runs_dir / run_id / "run.json").is_file()
 
 
+def test_strict_execution_surfaces_harness_close_failure_as_error_instead_of_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.require_android_preflight", lambda *_args, **_kwargs: None)
+    settings = _settings(tmp_path)
+    _case(settings.cases.dir / "wait.fsq.yaml")
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.validate_target", lambda _settings, _target: None)
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.validate_strict_core_settings", lambda *_args, **_kwargs: None)
+    prepared = prepare_run(
+        request_id="request-strict-close-error",
+        settings=settings,
+        body={"mode": "strict", "workspaceName": "checkout", "platform": "android", "targetId": "device", "casePath": "wait.fsq.yaml"},
+    )
+    state = ControlPlaneState()
+    request_id = state.reserve(workspace_name="checkout", platform="android", target_id="device", mode="strict", source={"casePath": "wait.fsq.yaml"})
+    prepared.request_id = request_id
+    close_calls = 0
+
+    class FailingCloseHarness:
+        def __init__(self, store):
+            self.store = store
+
+        def get_context(self):
+            return HarnessContext(platform="android", session_id="fake")
+
+        def action_space(self):
+            return {}
+
+        def before_action(self, step, context):
+            return None
+
+        def invoke_action(self, step, context):
+            return HarnessActionResult(status="passed", action_name=step.action_name)
+
+        def after_action(self, step, context, action_result):
+            return None
+
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            ref = self.store.write_bytes(kind=kind, step_id=step_id, phase=phase, name=reason, data=b"evidence")
+            return HarnessArtifactRef(**ref.model_dump(exclude={"step_id", "step_execution_id", "phase"}))
+
+        def classify_error(self, error, phase, step):
+            return "unknown"
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            raise RuntimeError("managed session teardown failed")
+
+    monkeypatch.setattr(
+        "fsq_agent.adapters.control_plane._execution.HarnessFactory.create_harness",
+        lambda *_args, **kwargs: FailingCloseHarness(kwargs["artifact_store"]),
+    )
+
+    _run_strict(prepared, state)
+
+    snapshot = state.snapshot(request_id)
+    assert snapshot["status"] == "error"
+    assert close_calls == 1
+
+
 @pytest.mark.asyncio
 async def test_explore_execution_delegates_to_agent_and_records_without_changing_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _settings(tmp_path)

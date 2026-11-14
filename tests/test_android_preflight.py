@@ -1,8 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import json
 import socket
 import struct
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,15 +14,77 @@ from fsq_agent.environments.providers import _android
 from fsq_agent.models import AndroidDevice, AndroidDeviceDiscoveryResult
 
 
+def _create_ready_managed_root(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    root.chmod(0o700)
+    marker = root / "managed.json"
+    marker.write_text(json.dumps({"owner": "appium-connect-agent", "schema": 1}), encoding="utf-8")
+    marker.chmod(0o600)
+    records = root / "records"
+    records.mkdir(exist_ok=True)
+    records.chmod(0o700)
+    install_json = records / "installation.json"
+    install_json.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "state": "complete",
+                "operation_id": "install-op-001",
+                "combination_id": "macos-android-uiautomator2",
+                "changed": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_json.chmod(0o600)
+    appium_pkg_dir = root / "appium" / "node_modules" / "appium"
+    appium_pkg_dir.mkdir(parents=True, exist_ok=True)
+    (root / "appium").chmod(0o700)
+    (appium_pkg_dir / "index.js").write_text("// appium", encoding="utf-8")
+    (appium_pkg_dir / "package.json").write_text(json.dumps({"name": "appium", "version": "3.7.0"}), encoding="utf-8")
+    driver_pkg_dir = root / "driver-home" / "node_modules" / "appium-uiautomator2-driver"
+    driver_pkg_dir.mkdir(parents=True, exist_ok=True)
+    (root / "driver-home").chmod(0o700)
+    (driver_pkg_dir / "package.json").write_text(
+        json.dumps({"name": "appium-uiautomator2-driver", "version": "8.7.0"}),
+        encoding="utf-8",
+    )
+    driver_manifest = root / "driver-home" / "node_modules" / ".cache" / "appium" / "extensions.yaml"
+    driver_manifest.parent.mkdir(parents=True, exist_ok=True)
+    driver_manifest.write_text("drivers:\n  installed:\n    uiautomator2:\n      pkgName: appium-uiautomator2-driver\n", encoding="utf-8")
+    return root
+
+
 @pytest.fixture(autouse=True)
-def no_external_process(monkeypatch):
+def no_external_process(monkeypatch, tmp_path_factory):
     def forbidden(*args, **kwargs):
         pytest.fail("Diagnosis must never start a process")
 
     monkeypatch.setattr("subprocess.run", forbidden)
+    monkeypatch.setattr("subprocess.Popen", forbidden)
     for name in ("ADB_SERVER_SOCKET", "ANDROID_ADB_SERVER_HOST", "ANDROID_ADB_SERVER_PORT", "ADB_SERVER_PORT"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(_android.shutil, "which", lambda _: "/adb")
+    monkeypatch.setattr(_android.platform, "system", lambda: "Darwin")
+    fixture_root = tmp_path_factory.mktemp("android-host-fixture")
+    node_bin = fixture_root / "host" / "bin"
+    node_bin.mkdir(parents=True, exist_ok=True)
+    node_exe = node_bin / "node"
+    node_exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    node_exe.chmod(0o700)
+    java_home = fixture_root / "host" / "jdk"
+    (java_home / "bin").mkdir(parents=True, exist_ok=True)
+    (java_home / "bin" / "java").write_text("", encoding="utf-8")
+    (java_home / "release").write_text('JAVA_VERSION="21"\n', encoding="utf-8")
+    sdk_root = fixture_root / "host" / "sdk"
+    (sdk_root / "platform-tools").mkdir(parents=True, exist_ok=True)
+    (sdk_root / "platform-tools" / "adb").write_text("", encoding="utf-8")
+    (sdk_root / "platform-tools" / "source.properties").write_text("Pkg.Revision=35.0.0\n", encoding="utf-8")
+    managed_root = _create_ready_managed_root(fixture_root / "managed-root")
+    monkeypatch.setattr(_android, "_resolve_first_host_executable", lambda name: node_exe if name == "node" else None)
+    monkeypatch.setattr(_android, "_resolve_java_home", lambda: java_home)
+    monkeypatch.setattr(_android, "_resolve_android_sdk_root", lambda: sdk_root)
+    monkeypatch.setattr(_android, "_managed_root", lambda: managed_root)
 
 
 class Wire:
@@ -219,15 +283,12 @@ def test_invalid_endpoint_never_connects(monkeypatch, name, value):
     assert AndroidDeviceDiscovery().discover().error_code == "adb_endpoint_invalid"
 
 
-def test_nondefault_ipv4_endpoint_matches_backend_configuration(monkeypatch):
-    from adbutils import AdbClient
-
+def test_nondefault_ipv4_endpoint_matches_adb_environment_configuration(monkeypatch):
     from fsq_agent.environments.providers._adb_transport import endpoint
 
     monkeypatch.setenv("ANDROID_ADB_SERVER_HOST", "127.0.0.2")
     monkeypatch.setenv("ANDROID_ADB_SERVER_PORT", "5038")
-    backend = AdbClient()
-    assert endpoint() == (backend.host, backend.port)
+    assert endpoint() == ("127.0.0.2", 5038)
     wire = Wire(framed(""))
     calls = []
     monkeypatch.setattr(socket, "create_connection", lambda address, **kwargs: calls.append(address) or wire)
@@ -408,3 +469,144 @@ def test_prerequisite_device_binding_rejects_invalid_or_wrong_scope():
     for fields in ({"identifier": "device_selection", "target_id": "one;two"}, {"identifier": "adb_server", "target_id": "one"}):
         with pytest.raises(ValidationError):
             PlatformPrerequisiteCheck(status="ready", message="Ready", **fields)
+
+
+def test_appium_connect_runtime_prerequisite_distinguishes_readonly_managed_states(monkeypatch, tmp_path):
+    monkeypatch.setattr(_android, "discover_android_devices", lambda **kwargs: AndroidDeviceDiscoveryResult(devices=[AndroidDevice(serial="one", state="device")]))
+    monkeypatch.setattr(_android, "package_status", lambda *args, **kwargs: "installed")
+
+    ready_facts = PlatformRuntimeService().check_prerequisites(settings("one"))
+    assert ready_facts[1].identifier == "appium_connect_runtime"
+    assert ready_facts[1].status == "ready"
+
+    absent_root = tmp_path / "absent-managed-root"
+    monkeypatch.setattr(_android, "_managed_root", lambda: absent_root)
+    uninitialized_facts = PlatformRuntimeService().check_prerequisites(settings("one"))
+    assert uninitialized_facts[1].identifier == "appium_connect_runtime"
+    assert uninitialized_facts[1].status == "unavailable"
+    assert uninitialized_facts[1].code == "android.managed_runtime_uninitialized"
+    assert any("InstallRequest" in cmd for cmd in uninitialized_facts[1].commands)
+
+    unowned_root = tmp_path / "unowned-root"
+    unowned_root.mkdir()
+    unowned_root.chmod(0o700)
+    (unowned_root / "foreign.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(_android, "_managed_root", lambda: unowned_root)
+    unowned_facts = PlatformRuntimeService().check_prerequisites(settings("one"))
+    assert unowned_facts[1].status == "error"
+    assert unowned_facts[1].code == "android.managed_runtime_conflict"
+
+    settled_root = _create_ready_managed_root(tmp_path / "settled-managed-root")
+    settled_service = settled_root / "records" / "service.json"
+    settled_service.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "state": "stopped",
+                "operation_id": "svc-op-01",
+                "host": "127.0.0.1",
+                "port": 4723,
+                "base_path": "/wd/hub",
+            }
+        ),
+        encoding="utf-8",
+    )
+    settled_service.chmod(0o600)
+    settled_maint = settled_root / "records" / "maintenance.json"
+    settled_maint.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "state": "complete",
+                "operation_id": "maint-op-01",
+                "operation": "driver_doctor",
+                "driver": "uiautomator2",
+                "may_have_changed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    settled_maint.chmod(0o600)
+    monkeypatch.setattr(_android, "_managed_root", lambda: settled_root)
+    assert PlatformRuntimeService().check_prerequisites(settings("one"))[1].status == "ready"
+
+    active_root = _create_ready_managed_root(tmp_path / "active-managed-root")
+    service_json = active_root / "records" / "service.json"
+    service_json.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "state": "running",
+                "operation_id": "svc-op-02",
+                "host": "127.0.0.1",
+                "port": 4723,
+                "base_path": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    service_json.chmod(0o600)
+    monkeypatch.setattr(_android, "_managed_root", lambda: active_root)
+    recovery_facts = PlatformRuntimeService().check_prerequisites(settings("one"))
+    assert recovery_facts[1].status == "unavailable"
+    assert recovery_facts[1].code == "android.managed_runtime_recovery_required"
+    assert any("cleanup_installation" in cmd for cmd in recovery_facts[1].commands)
+
+    for case_name, record_filename, payload, mode in (
+        ("partial-service", "service.json", {"state": "stopped"}, 0o600),
+        (
+            "trailing-slash-service",
+            "service.json",
+            {"schema": 1, "state": "stopped", "operation_id": "svc-1", "host": "127.0.0.1", "port": 4723, "base_path": "/wd/hub/"},
+            0o600,
+        ),
+        (
+            "loose-perms-service",
+            "service.json",
+            {"schema": 1, "state": "stopped", "operation_id": "svc-1", "host": "127.0.0.1", "port": 4723, "base_path": ""},
+            0o644,
+        ),
+        (
+            "malformed-install",
+            "installation.json",
+            {"schema": 1, "state": "complete", "combination_id": "macos-android-uiautomator2"},
+            0o600,
+        ),
+        (
+            "bool-schema-install",
+            "installation.json",
+            {"schema": True, "state": "complete", "operation_id": "op-1", "combination_id": "macos-android-uiautomator2", "changed": False},
+            0o600,
+        ),
+        (
+            "malformed-maint",
+            "maintenance.json",
+            {"schema": 1, "state": "complete", "operation_id": "maint-1", "operation": "unknown_op", "driver": "uiautomator2", "may_have_changed": False},
+            0o600,
+        ),
+    ):
+        bad_record_root = _create_ready_managed_root(tmp_path / f"bad-{case_name}")
+        bad_record_path = bad_record_root / "records" / record_filename
+        bad_record_path.write_text(json.dumps(payload), encoding="utf-8")
+        bad_record_path.chmod(mode)
+        monkeypatch.setattr(_android, "_managed_root", lambda root=bad_record_root: root)
+        bad_facts = PlatformRuntimeService().check_prerequisites(settings("one"))
+        assert bad_facts[1].status == "unavailable", case_name
+        assert bad_facts[1].code == "android.managed_runtime_recovery_required", case_name
+    damaged_root = _create_ready_managed_root(tmp_path / "damaged-managed-root")
+    (damaged_root / "appium" / "node_modules" / "appium" / "package.json").write_text(
+        json.dumps({"name": "appium", "version": "2.0.0"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_android, "_managed_root", lambda: damaged_root)
+    damaged_facts = PlatformRuntimeService().check_prerequisites(settings("one"))
+    assert damaged_facts[1].status == "error"
+    assert damaged_facts[1].code == "android.managed_runtime_damaged"
+
+    monkeypatch.setattr(_android, "_resolve_java_home", lambda: None)
+    java_missing = PlatformRuntimeService().check_prerequisites(settings("one"))
+    assert java_missing[1].code == "android.java_missing"
+
+    monkeypatch.setattr(_android, "_resolve_first_host_executable", lambda _name: None)
+    node_missing = PlatformRuntimeService().check_prerequisites(settings("one"))
+    assert node_missing[1].code == "android.node_missing"

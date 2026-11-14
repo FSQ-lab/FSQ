@@ -79,7 +79,7 @@ Provider configuration:
 
 Android configuration:
 
-- `harness.android.backend` supports `uiautomator2` in the first Android backend.
+- `harness.android.backend` supports `appium_connect_agent` as the sole Android backend.
 - Workspace target `app_id` is required. Android serial is not a configuration field; an entry layer may assign it only to a run-specific settings copy after device selection.
 - Strict Android runs may fall back to FSQ case `appId` metadata where the active entry contract permits it.
 
@@ -162,7 +162,7 @@ OpenAI, DeepSeek, and Gemini candidate/persistence failures provide their exact 
 - Reusable skills remain preset-owned tracked package resources under `fsq_agent/resources/skills/`. Optional project/page knowledge resolves under workspace `knowledge/<platform>/` and is loaded only when non-blank content exists.
 - `agent_runtime.prompt` owns prompt template customization and scalar prompt variables. `prompt.agent_template_path` and `prompt.task_template_path` may point to files resolved relative to the configuration file directory; when template paths are omitted, package default templates are used. Static prompt text, headings, loops, and task formatting live in templates. `prompt.variables` provides operator-controlled scalar model data injected into templates. `prompt.custom_instructions` and `prompt.custom_instructions_path` are not supported configuration keys; project-specific guidance belongs in `knowledge/project.md`, and reusable execution guidance belongs in configured skills.
 - `harness.platform` selects the platform harness used by goal-driven task execution and strict-core execution. Supported platforms are `android`, `web`, `windows`, and `macos`.
-- `harness.android.backend` selects the Android backend. The supported backend is `uiautomator2`.
+- `harness.android.backend` selects the Android backend. The supported backend is `appium_connect_agent`.
 - `harness.web.backend` selects Playwright; the preset owns headless/base-URL policy and the `attach`/`attach_endpoint` connection policy, while the workspace target supplies the browser channel and executable path. `attach` defaults to `false`, and `attach_endpoint` defaults to `http://127.0.0.1:9222`.
 - `execution.post_action_delay_seconds` controls runner-owned post-action stabilization delay defaults. `platform` defaults to `1.0` seconds and applies to PlatformTool capabilities when capability metadata does not override it. `common` defaults to `0.0` seconds and applies to inherited CommonTool capabilities when capability metadata does not override it. Values must be non-negative, and this pacing is execution timing only: it must not add `waitMs` commands, mutate parsed FSQ commands, record generated strict replay waits, or create synthetic evidence steps.
 - Android workspace target supplies app id; strict case metadata may override the app id where already allowed. Android serial remains transient run state and is not accepted from case metadata or configuration.

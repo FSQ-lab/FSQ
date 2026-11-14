@@ -150,7 +150,7 @@ env: {{}}
     settings = load_workspace_platform_settings(workspace, "android")
 
     assert settings.harness.platform == "android"
-    assert settings.harness.android.backend == "uiautomator2"
+    assert settings.harness.android.backend == "appium_connect_agent"
     assert settings.harness.android.app_id == "com.example.registered"
     assert settings.agent_runtime.max_turns == 100
     assert settings.agent_context.knowledge.skills.dir == Path(_loader.__file__).resolve().parents[1] / "resources" / "skills"
@@ -523,7 +523,7 @@ def test_load_settings_ignores_fsq_process_environment(tmp_path: Path, monkeypat
 harness:
   platform: android
   android:
-    backend: uiautomator2
+    backend: appium_connect_agent
 """,
         ),
         encoding="utf-8",
@@ -532,7 +532,7 @@ harness:
     settings = load_settings(config_path)
 
     assert settings.harness.platform == "android"
-    assert settings.harness.android.backend == "uiautomator2"
+    assert settings.harness.android.backend == "appium_connect_agent"
     assert settings.harness.android.app_id is None
     assert settings.harness.android.serial is None
     assert settings.harness.web.browser_executable_path is None
@@ -965,7 +965,7 @@ def test_load_settings_rejects_android_app_and_serial_in_yaml(tmp_path: Path) ->
             """
 harness:
   android:
-    backend: uiautomator2
+    backend: appium_connect_agent
     app_id: com.example.app
     serial: emulator-5554
 """,
@@ -1338,7 +1338,7 @@ def test_load_settings_uses_default_harness_without_android_env(tmp_path: Path) 
     settings = load_settings(config_path)
 
     assert settings.harness.platform == "android"
-    assert settings.harness.android.backend == "uiautomator2"
+    assert settings.harness.android.backend == "appium_connect_agent"
     assert settings.harness.android.app_id is None
     assert settings.harness.android.serial is None
 

@@ -379,7 +379,7 @@ class RunLifecycleService:
                 safe_config["agent_runtime"] = safe_policy
         import platform as python_platform
 
-        packages = {"web": "playwright", "android": "uiautomator2", "windows": "pywinauto", "macos": "Appium-Python-Client"}
+        packages = {"web": "playwright", "android": "appium-connect-agent", "windows": "pywinauto", "macos": "Appium-Python-Client"}
         try:
             backend_version = version(packages[metadata.platform])
         except PackageNotFoundError:

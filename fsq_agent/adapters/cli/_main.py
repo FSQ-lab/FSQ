@@ -787,7 +787,7 @@ def _render_doctor(result: object) -> None:
         if platform.prerequisites:
             labels = {
                 "adb_cli": "ADB CLI",
-                "uiautomator2_runtime": "uiautomator2 dependency",
+                "appium_connect_runtime": "Managed Appium runtime",
                 "adb_server": "Existing ADB server",
                 "device_connection": "Device connection/authorization",
                 "device_selection": "Device selection",

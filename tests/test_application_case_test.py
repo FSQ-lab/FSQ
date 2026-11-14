@@ -346,3 +346,77 @@ def test_suggestion_status_disk_failure_preserves_completed_result(tmp_path, mon
     assert result.status == "success"
     assert result.processing["suggestion"]["persistence"] == "unavailable"
     assert result.run_id == "run"
+
+
+def test_android_case_test_resolves_sole_online_serial_and_closes_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fsq_agent.config import Settings
+    from fsq_agent.execution import RunResultSummary
+    from fsq_agent.models import AndroidDevice, AndroidDeviceDiscoveryResult, ConfigurationError, ReportArtifact
+
+    source = tmp_path / "case.fsq.yaml"
+    source.write_text("schemaVersion: fsq.ai-test/v1\nname: demo\nplatform: android\nappId: com.example.app\n---\n- waitMs:\n    duration_ms: 1\n", encoding="utf-8")
+    settings = Settings(harness={"platform": "android"})
+    settings.cases.dir = tmp_path
+    settings.output.runs_dir = tmp_path
+    settings.harness.android.app_id = "com.example.app"
+    settings.harness.android.serial = None
+    settings.execution.post_action_delay_seconds = 0
+    run_dir = tmp_path / "run-android"
+    run_dir.mkdir()
+    (run_dir / "execution-result.json").write_text('{"summary":{"status":"passed"}}', encoding="utf-8")
+    metadata = SimpleNamespace(run_id="run-android", status="preparing")
+
+    events: list[tuple[str, object]] = []
+
+    class ClosableHarness:
+        def close(self) -> None:
+            events.append(("harness.close", None))
+
+    monkeypatch.setattr(case_test_module, "require_initialized_workspace", lambda _req: SimpleNamespace(workspace=tmp_path))
+    monkeypatch.setattr(case_test_module, "load_workspace_platform_settings", lambda *_args: settings)
+    monkeypatch.setattr(case_test_module, "_registered_workspace_name", lambda _root: "demo")
+    monkeypatch.setattr(case_test_module, "build_capability_registry", lambda **_kwargs: SimpleNamespace(snapshot=lambda: None))
+    monkeypatch.setattr(case_test_module, "collect_strict_lifecycle_cases", lambda **_kwargs: [])
+    monkeypatch.setattr(case_test_module, "validate_strict_core_settings", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(case_test_module, "allocate_run", lambda **_kwargs: metadata)
+    monkeypatch.setattr(case_test_module, "transition_run", lambda *_args, **_kwargs: metadata)
+    monkeypatch.setattr(case_test_module.RuntimeSecretStore, "from_settings", lambda *_args: object())
+    monkeypatch.setattr(
+        case_test_module.AndroidDeviceDiscovery,
+        "discover",
+        lambda _self: AndroidDeviceDiscoveryResult(devices=[AndroidDevice(serial="sole-online", state="device"), AndroidDevice(serial="other", state="offline")]),
+    )
+    monkeypatch.setattr(
+        case_test_module.HarnessFactory,
+        "create_harness",
+        lambda _self, **kwargs: events.append(("create_harness", kwargs.get("serial"))) or ClosableHarness(),
+    )
+    monkeypatch.setattr(
+        case_test_module,
+        "run_strict_lifecycle_case",
+        lambda **_kwargs: events.append(("execute", None)) or ReportArtifact(run_id="run-android", path=run_dir / "execution-result.json"),
+    )
+    monkeypatch.setattr(
+        case_test_module,
+        "load_run_metadata",
+        lambda _path: SimpleNamespace(execution_result="execution-result.json", status="success", result=RunResultSummary(summary="Completed.")),
+    )
+
+    result = case_test_module.execute_case_test(
+        CaseTestRequest(current_directory=tmp_path, platform="android", case_path=source),
+        suggestion_analyzer_factory=None,
+    )
+    assert result.status == "success"
+    assert events == [("create_harness", "sole-online"), ("execute", None), ("harness.close", None)]
+
+    monkeypatch.setattr(
+        case_test_module.AndroidDeviceDiscovery,
+        "discover",
+        lambda _self: AndroidDeviceDiscoveryResult(devices=[AndroidDevice(serial="one", state="device"), AndroidDevice(serial="two", state="device")]),
+    )
+    with pytest.raises(case_test_module.ApplicationError) as exc_info:
+        case_test_module.execute_case_test(
+            CaseTestRequest(current_directory=tmp_path, platform="android", case_path=source),
+            suggestion_analyzer_factory=None,
+        )
+    assert exc_info.value.category == ConfigurationError.__name__ or exc_info.value.code is not None

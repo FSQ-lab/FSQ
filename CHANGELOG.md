@@ -4,6 +4,15 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+### Fixed
+
+- Android retains pending Session, managed-runtime, and owner-thread resources until cleanup is proven complete, blocks implicit reconstruction after session failure, and consumes the SDK's public uncertain terminal-disposal contract instead of private lease state. Terminal disposal is local/owned-resource settlement, not confirmed remote Session closure.
+- Coding Agent runtime cleanup failures remain independently visible alongside execution failures and cancellation instead of being reduced to warnings or masked by a completed final answer.
+
+### Integration status
+
+- SDK terminal-disposal consumption is validated separately from distribution readiness. The immutable SDK dependency is unchanged; source-overlay verification does not establish a newly packaged SDK or an evaluation-ready candidate.
+
 ## [0.3.2] - 2026-10-21
 
 Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.2.md) for upgrade steps and validation limits.

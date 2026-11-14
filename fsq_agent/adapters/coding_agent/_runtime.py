@@ -173,6 +173,7 @@ class DefaultCodingAgentRuntime:
         self._harness_tool_names: set[str] = set()
         self._harness_tool_schemas: dict[str, Any] = {}
         self._stream_tool_calls: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._pending_cleanup: list[tuple[object, BaseException]] = []
 
     def _discover_agent_tool_names(self, tool_factory: AgentToolAdapter) -> set[str]:
         registry = getattr(tool_factory, "registry", None)
@@ -188,6 +189,13 @@ class DefaultCodingAgentRuntime:
             return list(list_providers())
         return None
 
+    def _raise_if_cleanup_pending(self) -> None:
+        if not self._pending_cleanup:
+            return
+        errors = [error for _, error in self._pending_cleanup]
+        cause = errors[0] if len(errors) == 1 else BaseExceptionGroup("Owned-resource cleanup remains pending", errors)
+        raise ConfigurationError("Runtime has unresolved owned-resource cleanup failure.") from cause
+
     async def run_task(
         self,
         task: Task,
@@ -200,6 +208,7 @@ class DefaultCodingAgentRuntime:
         evidence_sink=None,
         cancellation_check=None,
     ) -> list[StepResult]:
+        self._raise_if_cleanup_pending()
         if evidence_sink is None or context is None or context.run_id != run_id:
             raise ConfigurationError("Runtime execution requires an allocated context and evidence sink.")
         if cancellation_check is not None:
@@ -208,7 +217,7 @@ class DefaultCodingAgentRuntime:
         started = time.perf_counter()
         provider_session = None
         harness = None
-        primary_failure = False
+        primary_error: BaseException | None = None
         result = None
         usage_event_emitted = False
         try:
@@ -345,9 +354,11 @@ class DefaultCodingAgentRuntime:
                 if usage_event is not None:
                     usage_event_emitted = True
                     await self._emit(event_sink, usage_event)
+            except BaseExceptionGroup:
+                raise
             # Engine and provider packages raise implementation-specific exceptions that become failed steps.
             except Exception as exc:  # noqa: BLE001
-                primary_failure = True
+                primary_error = exc
                 duration_ms = int((time.perf_counter() - started) * 1000)
                 failure_metadata = _runtime_failure_metadata(exc)
                 error_message = self._replace_secret_values(str(exc), self._runtime_secret_values())
@@ -379,24 +390,31 @@ class DefaultCodingAgentRuntime:
                         tool_output=failure_metadata,
                     )
                 ]
+        except BaseExceptionGroup as exc:
+            primary_error = exc
+            raise
         # Runtime startup dependencies may fail with package-specific exceptions that become failed steps.
         except Exception as exc:  # noqa: BLE001
-            primary_failure = True
+            primary_error = exc
             duration_ms = int((time.perf_counter() - started) * 1000)
             failure_metadata = _runtime_failure_metadata(exc)
             error_message = self._replace_secret_values(str(exc), self._runtime_secret_values())
-            await self._emit(
-                event_sink,
-                RunEvent(
-                    run_id=run_id,
-                    task_id=task.id,
-                    type="run_failed",
-                    title="Agent run failed",
-                    message=error_message,
-                    duration_ms=duration_ms,
-                    payload=failure_metadata,
-                ),
-            )
+            try:
+                await self._emit(
+                    event_sink,
+                    RunEvent(
+                        run_id=run_id,
+                        task_id=task.id,
+                        type="run_failed",
+                        title="Agent run failed",
+                        message=error_message,
+                        duration_ms=duration_ms,
+                        payload=failure_metadata,
+                    ),
+                )
+            except BaseException as reporting_error:
+                primary_error = reporting_error
+                raise
             return [
                 StepResult(
                     step_id=1,
@@ -408,8 +426,8 @@ class DefaultCodingAgentRuntime:
                     tool_output=failure_metadata,
                 )
             ]
-        except BaseException:
-            primary_failure = True
+        except BaseException as exc:
+            primary_error = exc
             if result is not None and not usage_event_emitted:
                 usage_event = self._dynamic_agent_token_usage_event(result, run_id, task.id)
                 if usage_event is not None:
@@ -420,7 +438,7 @@ class DefaultCodingAgentRuntime:
                         logging.getLogger(__name__).warning("Cancellation diagnostics failed (%s)", type(diagnostic_error).__name__)
             raise
         finally:
-            await self._finish_cleanup(self._dispose_run(harness, provider_session), failed=primary_failure)
+            await self._finish_cleanup(self._dispose_run(harness, provider_session), primary_error=primary_error)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         if result is None:
@@ -490,6 +508,7 @@ class DefaultCodingAgentRuntime:
                 try:
                     harness.close()
                 except BaseException as cleanup_error:  # noqa: BLE001 - the caller has already timed out or cancelled.
+                    self._pending_cleanup.append((harness, cleanup_error))
                     logging.getLogger(__name__).warning("Late Harness disposal failed (%s)", type(cleanup_error).__name__)
 
         threading.Thread(target=build_harness, name=f"fsq-harness-setup-{run_id}", daemon=True).start()
@@ -500,7 +519,7 @@ class DefaultCodingAgentRuntime:
                 abandoned = True
                 harness, unclaimed = unclaimed, None
             if harness is not None:
-                await self._finish_cleanup(asyncio.to_thread(harness.close), failed=True)
+                await self._finish_cleanup(self._dispose_run(harness, None), primary_error=exc)
             if isinstance(exc, TimeoutError) and future.cancelled():
                 raise TimeoutError(f"Harness setup timed out after {timeout_seconds} seconds.") from exc
             raise
@@ -574,6 +593,7 @@ class DefaultCodingAgentRuntime:
         event_sink: RunEventSink | None = None,
         reference_type: str = "goal",
     ) -> GoalPrePlan:
+        self._raise_if_cleanup_pending()
         validate_runtime_settings(self.settings)
         task_id = "pre-plan"
         started = time.perf_counter()
@@ -589,6 +609,7 @@ class DefaultCodingAgentRuntime:
         )
         provider_session = build_model_provider_session(self.settings)
         result = None
+        primary_error: BaseException | None = None
         try:
             model = provider_session.get_model()
             request = self._build_request(
@@ -612,20 +633,28 @@ class DefaultCodingAgentRuntime:
             result = await self._run_agent(model, request, run_id, task_id, event_sink)
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)
-            await self._emit(
-                event_sink,
-                RunEvent(
-                    run_id=run_id,
-                    task_id=task_id,
-                    type="run_failed",
-                    title="Pre-plan failed",
-                    message=self._replace_secret_values(str(exc), self._runtime_secret_values()),
-                    duration_ms=duration_ms,
-                ),
-            )
-            raise PlanningError("Goal pre-plan failed before producing structured output.", context={"error": str(exc)}) from exc
+            try:
+                await self._emit(
+                    event_sink,
+                    RunEvent(
+                        run_id=run_id,
+                        task_id=task_id,
+                        type="run_failed",
+                        title="Pre-plan failed",
+                        message=self._replace_secret_values(str(exc), self._runtime_secret_values()),
+                        duration_ms=duration_ms,
+                    ),
+                )
+            except BaseException as reporting_error:
+                primary_error = reporting_error
+                raise
+            primary_error = PlanningError("Goal pre-plan failed before producing structured output.", context={"error": str(exc)})
+            raise primary_error from exc
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
-            await self._close_provider_session(provider_session, failed=result is None)
+            await self._close_provider_session(provider_session, primary_error=primary_error)
 
         pre_plan = result.final_output
         if isinstance(pre_plan, GoalPrePlan):
@@ -749,6 +778,7 @@ class DefaultCodingAgentRuntime:
         events_path: Any = None,
         event_sink: RunEventSink | None = None,
     ) -> list[StepResult]:
+        self._raise_if_cleanup_pending()
         validate_runtime_settings(self.settings)
         started = time.perf_counter()
         await self._emit(
@@ -765,6 +795,7 @@ class DefaultCodingAgentRuntime:
         evidence_input = self._replace_secret_values(evidence_input, self._runtime_secret_values())
         provider_session = build_model_provider_session(self.settings)
         result = None
+        primary_error: BaseException | None = None
         try:
             model = provider_session.get_model()
             request = self._build_request(
@@ -776,8 +807,12 @@ class DefaultCodingAgentRuntime:
                 run_id=run_id,
             )
             result = await self._run_agent(model, request, run_id, task.id, event_sink)
+        except BaseExceptionGroup as exc:
+            primary_error = exc
+            raise
         # Verifier engine/provider failures must become reportable verification step failures.
         except Exception as exc:  # noqa: BLE001
+            primary_error = exc
             duration_ms = int((time.perf_counter() - started) * 1000)
             return [
                 StepResult(
@@ -789,8 +824,11 @@ class DefaultCodingAgentRuntime:
                     tool_name="agent_runtime.verifier",
                 )
             ]
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
-            await self._close_provider_session(provider_session, failed=result is None)
+            await self._close_provider_session(provider_session, primary_error=primary_error)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         final_output = self.policy.coerce_agent_final_output(result.final_output) or str(result.final_output)
@@ -807,28 +845,29 @@ class DefaultCodingAgentRuntime:
             )
         ]
 
-    async def _close_provider_session(self, session: ModelProviderSession, *, failed: bool) -> None:
-        await self._finish_cleanup(session.close(), failed=failed)
+    async def _close_provider_session(self, session: ModelProviderSession, *, primary_error: BaseException | None) -> None:
+        await self._finish_cleanup(self._dispose_run(None, session), primary_error=primary_error)
 
     async def _dispose_run(self, harness, session) -> None:
-        failure = None
+        errors = []
         if harness is not None:
             try:
                 await asyncio.to_thread(harness.close)
             except BaseException as exc:  # noqa: BLE001 - attempt Provider cleanup even after Harness failure.
-                failure = exc
+                self._pending_cleanup.append((harness, exc))
+                errors.append(exc)
         if session is not None:
             try:
                 await session.close()
-            except BaseException as exc:  # noqa: BLE001 - preserve the first disposal failure.
-                if failure is None:
-                    failure = exc
-                else:
-                    logging.getLogger(__name__).warning("Additional Provider disposal failed (%s)", type(exc).__name__)
-        if failure is not None:
-            raise failure
+            except BaseException as exc:  # noqa: BLE001 - preserve every owned-resource disposal failure.
+                self._pending_cleanup.append((session, exc))
+                errors.append(exc)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("Owned-resource cleanup failed", errors)
 
-    async def _finish_cleanup(self, operation, *, failed: bool) -> None:
+    async def _finish_cleanup(self, operation, *, primary_error: BaseException | None) -> None:
         async def capture_failure():
             try:
                 await operation
@@ -837,19 +876,31 @@ class DefaultCodingAgentRuntime:
             return None
 
         cleanup = asyncio.create_task(capture_failure())
-        cancellation = None
+        cancellation: BaseException | None = None
         while not cleanup.done():
             try:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError as exc:
                 cancellation = cancellation or exc
         cleanup_error = cleanup.result()
-        if cleanup_error is not None:
-            if not failed and cancellation is None:
-                raise cleanup_error
-            logging.getLogger(__name__).warning("Runtime cleanup failed (%s)", type(cleanup_error).__name__)
-        if cancellation is not None and not failed:
+        if isinstance(primary_error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            cancellation = primary_error
+            primary_error = None
+        if cancellation is not None:
+            causes = [primary_error] if primary_error is not None else []
+            if cleanup_error is not None:
+                causes.append(cleanup_error)
+            if cancellation.__cause__ is not None:
+                causes.insert(0, cancellation.__cause__)
+            if len(causes) == 1:
+                raise cancellation from causes[0]
+            if causes:
+                raise cancellation from BaseExceptionGroup("Runtime cancellation and cleanup failed", causes)
             raise cancellation
+        if cleanup_error is not None:
+            if primary_error is not None:
+                raise BaseExceptionGroup("Runtime execution and cleanup failed", [primary_error, cleanup_error]) from None
+            raise cleanup_error
 
     async def _emit(self, event_sink: RunEventSink | None, event: RunEvent) -> None:
         if not event_sink:

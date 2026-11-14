@@ -194,11 +194,11 @@ class _FakeEngine:
 
 
 @pytest.mark.parametrize("outcome", ["success", "startup", "model", "cancelled"])
-@pytest.mark.parametrize("close_fails", [False, True])
-async def test_owned_harness_and_provider_are_disposed_for_every_exit(tmp_path, monkeypatch, outcome, close_fails):
+@pytest.mark.parametrize("cleanup_failures", [(), ("harness",), ("provider",), ("harness", "provider")])
+async def test_owned_harness_and_provider_are_disposed_for_every_exit(tmp_path, monkeypatch, outcome, cleanup_failures):
     closed = []
     primary = asyncio.CancelledError("primary") if outcome == "cancelled" else EngineError("model", "primary")
-    cleanup_error = OSError("cleanup")
+    cleanup_errors = {resource: OSError(f"{resource} cleanup") for resource in cleanup_failures}
 
     class Harness(_FakeHarness):
         def action_space(self):
@@ -208,12 +208,14 @@ async def test_owned_harness_and_provider_are_disposed_for_every_exit(tmp_path, 
 
         def close(self):
             closed.append("harness")
-            if close_fails:
-                raise cleanup_error
+            if "harness" in cleanup_errors:
+                raise cleanup_errors["harness"]
 
     class Session(_FakeProviderSession):
         async def close(self):
             closed.append("provider")
+            if "provider" in cleanup_errors:
+                raise cleanup_errors["provider"]
 
     class Engine(_FakeEngine):
         async def run(self, *args, **kwargs):
@@ -226,16 +228,122 @@ async def test_owned_harness_and_provider_are_disposed_for_every_exit(tmp_path, 
     monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: Harness(), engine=Engine())
     operation = _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "owned")
-    if outcome == "cancelled" or (outcome == "success" and close_fails):
-        with pytest.raises(asyncio.CancelledError if outcome == "cancelled" else OSError) as raised:
+    if outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError) as raised:
             await operation
-        assert raised.value is (primary if outcome == "cancelled" else cleanup_error)
+        assert raised.value is primary
+        if cleanup_errors:
+            _assert_cleanup_errors(raised.value.__cause__, list(cleanup_errors.values()))
+    elif cleanup_errors:
+        with pytest.raises(BaseExceptionGroup if outcome != "success" or len(cleanup_errors) > 1 else OSError) as raised:
+            await operation
+        cleanup_failure = raised.value
+        if outcome != "success":
+            execution_failure, cleanup_failure = raised.value.exceptions
+            if outcome == "startup":
+                assert execution_failure.__cause__ is primary
+            else:
+                assert execution_failure is primary
+        _assert_cleanup_errors(cleanup_failure, list(cleanup_errors.values()))
     else:
         result = await operation
         assert result[-1].status == ("success" if outcome == "success" else "failed")
         if outcome != "success":
             assert result[-1].error == ("Harness action-space discovery failed." if outcome == "startup" else "primary")
     assert closed == ["harness", "provider"]
+
+
+def _assert_cleanup_errors(error, expected):
+    if len(expected) == 1:
+        assert error is expected[0]
+    else:
+        assert isinstance(error, BaseExceptionGroup)
+        assert error.exceptions == tuple(expected)
+
+
+@pytest.mark.parametrize("operation", ["run_task", "run_pre_plan"])
+@pytest.mark.parametrize("failure_phase", ["provider", "model"])
+async def test_runtime_cancellation_during_failure_reporting_keeps_cleanup_visible(tmp_path, monkeypatch, operation, failure_phase):
+    primary = EngineError("model", "Primary failure")
+    cancellation = asyncio.CancelledError("Failure reporting cancelled")
+    cleanup_error = OSError("Provider cleanup failed")
+
+    class Session(_FakeProviderSession):
+        def get_model(self):
+            if failure_phase == "provider":
+                raise primary
+            return super().get_model()
+
+        async def close(self):
+            raise cleanup_error
+
+    class Engine(_FakeEngine):
+        async def run(self, *args, **kwargs):
+            raise primary
+
+    def event_sink(event):
+        if event.type == "run_failed":
+            raise cancellation
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=Engine())
+    with pytest.raises(asyncio.CancelledError) as failure:
+        if operation == "run_pre_plan":
+            await runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "report-cancel", event_sink)
+        else:
+            await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "report-cancel", event_sink)
+    assert failure.value is cancellation
+    assert cancellation.__cause__ is cleanup_error
+
+
+@pytest.mark.parametrize("operation", ["run_task", "run_pre_plan", "run_verification"])
+@pytest.mark.parametrize("failed_resources", [("harness",), ("provider",), ("harness", "provider")])
+async def test_runtime_retains_failed_cleanup_and_rejects_reuse(tmp_path, monkeypatch, operation, failed_resources):
+    from fsq_agent.models import ConfigurationError
+
+    constructed = []
+    cleanup_errors = {resource: OSError(f"{resource} cleanup") for resource in failed_resources}
+
+    class Harness(_FakeHarness):
+        def close(self):
+            if "harness" in cleanup_errors:
+                raise cleanup_errors["harness"]
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            if "provider" in cleanup_errors:
+                raise cleanup_errors["provider"]
+
+    harness, session = Harness(), Session()
+
+    def build_harness(run_id):
+        constructed.append("harness")
+        return harness
+
+    def build_session(settings):
+        constructed.append("provider")
+        return session
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", build_session)
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), build_harness, engine=_FakeEngine())
+    with pytest.raises(OSError if len(failed_resources) == 1 else ExceptionGroup):
+        await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "pending-cleanup")
+    resources = {"harness": harness, "provider": session}
+    assert runtime._pending_cleanup == [(resources[name], cleanup_errors[name]) for name in failed_resources]
+
+    with pytest.raises(ConfigurationError, match="unresolved owned-resource cleanup") as failure:
+        if operation == "run_pre_plan":
+            await runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "no-rebuild")
+        elif operation == "run_verification":
+            await runtime.run_verification(Task(description="Test"), [], "no-rebuild")
+        else:
+            await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "no-rebuild")
+    _assert_cleanup_errors(failure.value.__cause__, list(cleanup_errors.values()))
+    assert constructed == ["provider", "harness"]
 
 
 @pytest.mark.parametrize("interruption", ["timeout", "cancelled"])
@@ -267,15 +375,48 @@ async def test_late_harness_construction_is_disposed_in_worker(tmp_path, interru
         assert await asyncio.to_thread(closed.wait, 2)
 
 
-async def test_cancellation_during_disposal_waits_for_owned_cleanup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider_fails", [False, True])
+async def test_runtime_preserves_grouped_harness_setup_cleanup_failure(tmp_path, monkeypatch, provider_fails):
+    startup_error = ExceptionGroup("Harness setup and cleanup failed", [TimeoutError("Setup timed out"), OSError("Harness cleanup failed")])
+    provider_error = OSError("Provider cleanup failed")
+    closed = []
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            closed.append("provider")
+            if provider_fails:
+                raise provider_error
+
+    async def fail_setup(run_id):
+        raise startup_error
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=_FakeEngine())
+    monkeypatch.setattr(runtime, "_build_harness_with_timeout", fail_setup)
+    with pytest.raises(ExceptionGroup) as failure:
+        await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "grouped-setup")
+    if provider_fails:
+        assert failure.value.exceptions == (startup_error, provider_error)
+    else:
+        assert failure.value is startup_error
+    assert closed == ["provider"]
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_cancellation_during_disposal_waits_for_owned_cleanup(tmp_path, monkeypatch, cleanup_fails):
     started, release = threading.Event(), threading.Event()
     closed = []
+    cleanup_error = OSError("Harness cleanup failed")
 
     class Harness(_FakeHarness):
         def close(self):
             started.set()
             assert release.wait(5)
             closed.append("harness")
+            if cleanup_fails:
+                raise cleanup_error
 
     class Session(_FakeProviderSession):
         async def close(self):
@@ -295,8 +436,9 @@ async def test_cancellation_during_disposal_waits_for_owned_cleanup(tmp_path, mo
         assert not operation.done()
     finally:
         release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as failure:
         await operation
+    assert failure.value.__cause__ is (cleanup_error if cleanup_fails else None)
     assert closed == ["harness", "provider"]
 
 
@@ -693,33 +835,37 @@ async def test_runtime_harness_construction_failure_is_visible(monkeypatch: pyte
 
 @pytest.mark.asyncio
 async def test_runtime_cleanup_failure_preserves_original_failed_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    primary = EngineError("incomplete", "Primary model failure", reason="content_filter")
+    cleanup_error = EngineError("cleanup", "Secondary cleanup failure")
+
     class FailedCloseSession(_FakeProviderSession):
         async def close(self) -> None:
-            raise EngineError("cleanup", "Secondary cleanup failure")
+            raise cleanup_error
 
     class FailedEngine:
         async def run(self, model, request, *, on_event=None):
-            raise EngineError("incomplete", "Primary model failure", reason="content_filter")
+            raise primary
 
     _patch_runtime_engine(monkeypatch)
     monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda settings: FailedCloseSession())
     runtime = DefaultCodingAgentRuntime(Settings(agent_runtime=_azure_openai_settings()), _EmptyToolFactory(), _fake_harness_factory, engine=FailedEngine())
 
-    results = await _run_in_context(runtime, Task(id="failure", description="Fail run"), KnowledgeBundle(), [], "failed-cleanup-run")
+    with pytest.raises(ExceptionGroup) as failure:
+        await _run_in_context(runtime, Task(id="failure", description="Fail run"), KnowledgeBundle(), [], "failed-cleanup-run")
 
-    assert results[0].status == "failed"
-    assert results[0].error == "Primary model failure"
-    assert results[0].tool_output["failure_category"] == "provider_content_filter"
+    assert failure.value.exceptions == (primary, cleanup_error)
+    assert primary.category == "incomplete"
+    assert primary.reason == "content_filter"
 
 
 @pytest.mark.parametrize("operation", ["run_task", "run_pre_plan", "run_verification"])
 @pytest.mark.parametrize("outcome", ["failure", "cancelled", "success"])
-@pytest.mark.parametrize("cleanup_cancelled", [False, True])
-async def test_runtime_cleanup_preserves_primary_outcome_with_real_session(monkeypatch: pytest.MonkeyPatch, operation: str, outcome: str, cleanup_cancelled: bool) -> None:
+@pytest.mark.parametrize("cleanup_outcome", ["success", "failure", "cancelled"])
+async def test_runtime_cleanup_preserves_primary_outcome_with_real_session(monkeypatch: pytest.MonkeyPatch, operation: str, outcome: str, cleanup_outcome: str) -> None:
     from fsq_agent.models import PlanningError
 
     primary = asyncio.CancelledError("Primary cancellation") if outcome == "cancelled" else EngineError("incomplete", "Primary model failure", reason="content_filter")
-    cleanup_error = asyncio.CancelledError("Secondary cleanup cancellation") if cleanup_cancelled else EngineError("cleanup", "Secondary cleanup failure")
+    cleanup_error = asyncio.CancelledError("Secondary cleanup cancellation") if cleanup_outcome == "cancelled" else EngineError("cleanup", "Secondary cleanup failure")
     closed = []
 
     class ControlledProvider:
@@ -728,7 +874,8 @@ async def test_runtime_cleanup_preserves_primary_outcome_with_real_session(monke
 
         async def aclose(self) -> None:
             closed.append(True)
-            raise cleanup_error
+            if cleanup_outcome != "success":
+                raise cleanup_error
 
     class ControlledEngine(_FakeEngine):
         async def run(self, model, request, *, on_event=None):
@@ -754,19 +901,108 @@ async def test_runtime_cleanup_preserves_primary_outcome_with_real_session(monke
         with pytest.raises(asyncio.CancelledError) as failure:
             await invoke_operation()
         assert failure.value is primary
-    elif outcome == "success":
-        with pytest.raises(type(cleanup_error)) as failure:
-            await invoke_operation()
-        assert failure.value is cleanup_error
-    elif operation == "run_pre_plan":
+        assert primary.__cause__ is (None if cleanup_outcome == "success" else cleanup_error)
+    elif cleanup_outcome != "success":
+        if outcome == "success":
+            with pytest.raises(type(cleanup_error)) as failure:
+                await invoke_operation()
+            assert failure.value is cleanup_error
+        else:
+            with pytest.raises(BaseExceptionGroup) as failure:
+                await invoke_operation()
+            execution_error, secondary_error = failure.value.exceptions
+            assert secondary_error is cleanup_error
+            if operation == "run_pre_plan":
+                assert isinstance(execution_error, PlanningError)
+                assert execution_error.__cause__ is primary
+            else:
+                assert execution_error is primary
+    elif outcome == "failure" and operation == "run_pre_plan":
         with pytest.raises(PlanningError) as failure:
             await invoke_operation()
         assert failure.value.__cause__ is primary
     else:
         results = await invoke_operation()
-        assert results[0].status == "failed"
-        assert results[0].error == "Primary model failure"
+        if operation == "run_pre_plan":
+            assert isinstance(results, GoalPrePlan)
+        else:
+            assert results[0].status == ("failed" if outcome == "failure" else "success")
+            if outcome == "failure":
+                assert results[0].error == "Primary model failure"
     assert closed == [True]
+
+
+@pytest.mark.parametrize("operation", ["run_task", "run_pre_plan", "run_verification"])
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_runtime_cancellation_during_provider_cleanup_preserves_all_failures(tmp_path, monkeypatch, operation, outcome, cleanup_fails):
+    from fsq_agent.models import PlanningError
+
+    started, release = asyncio.Event(), asyncio.Event()
+    closed = []
+    primary = asyncio.CancelledError("Primary cancellation") if outcome == "cancelled" else EngineError("model", "Primary failure")
+    cleanup_error = OSError("Provider cleanup failed")
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            started.set()
+            await release.wait()
+            closed.append("provider")
+            if cleanup_fails:
+                raise cleanup_error
+
+    class Engine(_FakeEngine):
+        async def run(self, *args, **kwargs):
+            if outcome != "success":
+                raise primary
+            return await super().run(*args, **kwargs)
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=Engine())
+
+    async def invoke_operation():
+        if operation == "run_pre_plan":
+            return await runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "cancel-cleanup")
+        if operation == "run_verification":
+            return await runtime.run_verification(Task(description="Test"), [], "cancel-cleanup")
+        return await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "cancel-cleanup")
+
+    invocation = asyncio.create_task(invoke_operation())
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        invocation.cancel("During cleanup")
+        await asyncio.sleep(0)
+        invocation.cancel("Repeated cancellation")
+        await asyncio.sleep(0)
+        assert not invocation.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError) as failure:
+        await invocation
+    assert closed == ["provider"]
+    cancellation = failure.value
+    if outcome == "cancelled":
+        assert cancellation is primary
+        assert cancellation.__cause__ is (cleanup_error if cleanup_fails else None)
+    else:
+        assert cancellation.args == ("During cleanup",)
+        cause = cancellation.__cause__
+        if outcome == "failure":
+            if cleanup_fails:
+                assert isinstance(cause, BaseExceptionGroup)
+                execution_error, secondary_error = cause.exceptions
+                assert secondary_error is cleanup_error
+            else:
+                execution_error = cause
+            if operation == "run_pre_plan":
+                assert isinstance(execution_error, PlanningError)
+                assert execution_error.__cause__ is primary
+            else:
+                assert execution_error is primary
+        else:
+            assert cause is (cleanup_error if cleanup_fails else None)
 
 
 @pytest.mark.asyncio

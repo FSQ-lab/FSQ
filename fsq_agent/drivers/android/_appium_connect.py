@@ -3,11 +3,11 @@
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 import socket
 import time
+from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -33,6 +33,7 @@ from fsq_agent.models import (
     AndroidTapOnParams,
     AndroidUiTreeParams,
     ConfigurationError,
+    ToolExecutionError,
 )
 
 if TYPE_CHECKING:
@@ -247,62 +248,82 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         self._managed_scope: AbstractContextManager[Any] | None = None
         self._connection: Any | None = None
         self._executor: ThreadPoolExecutor | None = None
+        self._cleanup_pending = False
+        self._session_settled = False
+        self._scope_exit_attempted = False
+        self._cleanup_primary: BaseException | None = None
+        self._closed = False
 
     def close(self) -> None:
         if self._borrowed_session:
             return
         if self._executor is None and self._session is None and self._managed_scope is None and self._runtime is None:
+            self._closed = True
             return
         try:
             self._run_sync(self._close_owned_resources)
         finally:
-            self._shutdown_executor()
+            # Pending disposal must retain its original SDK owner thread.
+            if self._session is None and self._managed_scope is None and self._runtime is None:
+                self._shutdown_executor()
 
     def _close_owned_resources(self) -> None:
-        primary_error: BaseException | None = None
-        session = self._session
-        self._session = None
-        if session is not None:
-            try:
-                control = self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS)
-                session.quit(control=control)
-            except BaseException as exc:  # noqa: BLE001 - continue managed scope cleanup before re-raising.
-                if not self._is_already_closed_session_error(exc):
-                    primary_error = exc
+        self._cleanup_pending = True
+        primary_error = self._cleanup_primary
+        managed_settled = False
+        try:
+            session = self._session
+            if session is not None and not self._session_settled:
+                state = session.session_info().state
+                if state == "active":
+                    try:
+                        session.quit(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+                    except BaseException as exc:  # noqa: BLE001 - retain quit failure while explicitly disposing uncertain resources.
+                        primary_error = self._cleanup_primary = exc
+                        state = session.session_info().state
+                        if state not in {"uncertain", "disposing", "disposed"}:
+                            raise
+                    else:
+                        self._session_settled = True
+                if not self._session_settled:
+                    if state in {"uncertain", "disposing"}:
+                        session.dispose(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+                        managed_settled = True
+                    elif state == "disposed":
+                        managed_settled = True
+                    elif state != "closed":
+                        raise ToolExecutionError("Owned Android session is not available for terminal cleanup.", context={"state": state})
+                    self._session_settled = True
 
-        scope = self._managed_scope
+            if not managed_settled:
+                if self._scope_exit_attempted and self._runtime is not None:
+                    self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+                elif self._managed_scope is not None:
+                    self._scope_exit_attempted = True
+                    # No primary exception is passed: scope cleanup failure must raise,
+                    # rather than being attached to and hidden behind a business error.
+                    self._managed_scope.__exit__(None, None, None)
+                elif self._runtime is not None:
+                    self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+        except BaseException as cleanup_error:
+            if primary_error is not None and cleanup_error is not primary_error:
+                if isinstance(primary_error, (CancelledError, KeyboardInterrupt, SystemExit)):
+                    raise primary_error from cleanup_error
+                raise BaseExceptionGroup("Android session and owned-resource cleanup failed.", [primary_error, cleanup_error]) from None
+            raise
+
+        # Public quit + scope completion, or public dispose, is the settlement proof.
+        self._session = None
         self._managed_scope = None
         self._connection = None
-        runtime = self._runtime
         self._runtime = None
-        if scope is not None:
-            try:
-                if primary_error is not None:
-                    scope.__exit__(type(primary_error), primary_error, primary_error.__traceback__)
-                else:
-                    scope.__exit__(None, None, None)
-            except BaseException as cleanup_exc:  # noqa: BLE001 - preserve primary quit error if present.
-                if primary_error is None:
-                    primary_error = cleanup_exc
-                else:
-                    logging.getLogger(__name__).warning(
-                        "Managed Appium scope exit failed after session quit error (%s)",
-                        type(cleanup_exc).__name__,
-                    )
-            if runtime is not None and getattr(runtime, "_managed_cleanup", None) is not None:
-                try:
-                    runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
-                except BaseException as cleanup_exc:  # noqa: BLE001 - best-effort secondary process-group sweep.
-                    logging.getLogger(__name__).warning(
-                        "Managed Appium secondary cleanup did not complete (%s)",
-                        type(cleanup_exc).__name__,
-                    )
+        self._session_settled = False
+        self._scope_exit_attempted = False
+        self._cleanup_primary = None
+        self._cleanup_pending = False
+        self._closed = True
         if primary_error is not None:
             raise primary_error
-
-    @staticmethod
-    def _is_already_closed_session_error(exc: BaseException) -> bool:
-        return getattr(exc, "code", None) == "session_closed"
 
     def context(self) -> dict[str, object]:
         return self._run_on_worker(self._context_impl)
@@ -952,18 +973,16 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return any(key not in ANDROID_UI_SNAPSHOT_STRUCTURAL_ATTRIBUTES for key in attributes)
 
     def _ensure_session(self) -> Any:
+        if self._closed or self._cleanup_pending:
+            raise ToolExecutionError("Android resources are closed or awaiting explicit terminal cleanup.")
         if self._session is not None:
             info_fn = getattr(self._session, "session_info", None)
             if callable(info_fn):
-                info = info_fn()
-                state = getattr(info, "state", "active")
-                if state == "active":
-                    return self._session
-                if self._borrowed_session:
-                    return self._session
-                self._close_owned_resources()
-            else:
-                return self._session
+                state = getattr(info_fn(), "state", "active")
+                if state != "active":
+                    self._cleanup_pending = not self._borrowed_session
+                    raise ToolExecutionError("Android session is unavailable; explicit terminal cleanup is required.", context={"state": state})
+            return self._session
 
         serial = (self.serial or "").strip()
         if not serial:
@@ -984,6 +1003,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
 
         local_settings = _resolve_managed_local_settings(LocalSettings)
         runtime = Runtime(local_settings)
+        self._runtime = runtime
+        self._cleanup_pending = True
         scope: AbstractContextManager[Any] | None = None
         connection: Any | None = None
         last_port_error: BaseException | None = None
@@ -995,12 +1016,22 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 base_path="",
                 control=OperationControl(timeout_seconds=DEFAULT_MANAGED_STARTUP_TIMEOUT_SECONDS),
             )
+            self._managed_scope = candidate_scope
             try:
                 connection = candidate_scope.__enter__()
                 scope = candidate_scope
+                self._connection = connection
                 break
-            except ServiceLifecycleError as exc:
-                if exc.code == "service_port_in_use":
+            except BaseException as exc:
+                self._cleanup_pending = True
+                self._scope_exit_attempted = True
+                if isinstance(exc, ServiceLifecycleError) and exc.code == "service_port_in_use":
+                    try:
+                        runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+                    except BaseException as cleanup_error:
+                        raise BaseExceptionGroup("Managed startup and cleanup failed.", [exc, cleanup_error]) from None
+                    self._managed_scope = None
+                    self._scope_exit_attempted = False
                     last_port_error = exc
                     continue
                 raise
@@ -1024,19 +1055,14 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 control=OperationControl(timeout_seconds=DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS),
             )
         except BaseException as exc:
-            try:
-                scope.__exit__(type(exc), exc, exc.__traceback__)
-            except BaseException as cleanup_exc:  # noqa: BLE001 - preserve session creation failure.
-                logging.getLogger(__name__).warning(
-                    "Managed Appium scope cleanup failed after session creation error (%s)",
-                    type(cleanup_exc).__name__,
-                )
+            # SDK create errors can carry the exact uncertain Session. Keep the
+            # complete owner chain for explicit close; never rebuild it implicitly.
+            self._session = getattr(exc, "session", None)
+            self._cleanup_pending = True
             raise
 
-        self._runtime = runtime
-        self._managed_scope = scope
-        self._connection = connection
         self._session = session
+        self._cleanup_pending = False
         return session
 
     def _run_on_worker(self, func: Callable[[], _T]) -> _T:
@@ -1046,7 +1072,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         try:
             return self._run_sync(func)
         except BaseException:
-            if self._session is None and self._managed_scope is None:
+            if self._session is None and self._managed_scope is None and self._runtime is None:
                 self._shutdown_executor()
             raise
 

@@ -418,11 +418,14 @@ def test_owned_managed_lifecycle_closes_session_before_exiting_managed_scope(mon
 
     class FakeRuntime:
         def __init__(self, _settings: Any) -> None:
-            self._managed_cleanup = None
+            del _settings
 
         def start_managed(self, *, host: str, port: int, base_path: str, control: Any = None) -> FakeScope:
             del host, base_path, control
             return FakeScope(port)
+
+        def cleanup_managed(self, *, control: Any = None) -> None:
+            del control
 
     ports = iter([41001, 41002])
     monkeypatch.setattr("fsq_agent.drivers.android._appium_connect._allocate_loopback_port", lambda: next(ports))

@@ -51,6 +51,8 @@ Neutral engine dependency/configuration, model, tool conversion, streaming, cont
 
 The construction-timeout boundary disposes any late-created owned Harness rather than abandoning it. Late construction never permits tool invocation. Synchronous resource disposal does not block the event loop; cancellation does not detach cleanup while owned resources remain releasable. Primary failures, including failures already converted to StepResult, retain precedence; cleanup-only failures remain visible and do not fabricate an authored browser/application lifecycle step.
 
+Owned-resource cleanup failure remains an independent reportable runtime failure even when main execution has already produced a final output or a failed StepResult. A successful final output or evidence-based verification cannot turn pending disposal into successful cleanup. Primary execution failures and cancellation retain precedence while secondary cleanup diagnostics remain independently inspectable; warning-only handling is insufficient. The runtime still attempts Provider disposal after Harness failure, and cleanup creates no authored capability, device-restoration claim, or replay step.
+
 ## Current Invariants
 
 - Main execution, pre-plan, and verification use the same neutral engine contracts for model settings, tracing, tool-output filtering, event metadata, and structured output. The adapter does not depend on OpenAI Agents SDK or implement a tool-continuation loop.

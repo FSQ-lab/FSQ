@@ -54,32 +54,70 @@ _RUNTIME_TOOL_NAMES = {
     "read_knowledge_index",
     "read_knowledge_page",
 }
+_ENGINE_FAILURE_CATEGORIES = {
+    "authentication",
+    "cleanup",
+    "closed",
+    "configuration",
+    "evidence",
+    "incompatible_model",
+    "incomplete",
+    "invalid_output",
+    "lifecycle",
+    "max_turns",
+    "rate_limit",
+    "refusal",
+    "runtime",
+    "timeout",
+    "unavailable",
+}
+_ENGINE_FAILURE_REASONS = {
+    "connection_error",
+    "read_error",
+    "remote_protocol_error",
+    "incomplete_read",
+    "timeout",
+    "rate_limit",
+    "service_unavailable",
+    "stream_error",
+    "stream_incomplete",
+}
 
 
-def _runtime_failure_metadata(exc: BaseException) -> dict[str, str]:
+def _runtime_failure_metadata(exc: BaseException) -> dict[str, str | int]:
+    metadata: dict[str, str | int]
     if isinstance(exc, EngineError) and exc.category == "evidence":
-        return {
+        metadata = {
             "failure_category": "artifact_error",
             "failure_reason": "evidence_persistence",
             "failure_summary": "Agent runtime stopped because durable execution evidence failed.",
         }
-    if isinstance(exc, EngineError) and exc.category == "incomplete" and exc.reason == "content_filter":
-        return {
+    elif isinstance(exc, EngineError) and exc.category == "incomplete" and exc.reason == "content_filter":
+        metadata = {
             "failure_category": "provider_content_filter",
             "failure_reason": "content_filter",
             "failure_summary": "Agent runtime execution ended with an incomplete provider response due to content filtering.",
         }
-    if isinstance(exc, EngineError) and exc.category == "incomplete":
-        return {
+    elif isinstance(exc, EngineError) and exc.category == "incomplete":
+        metadata = {
             "failure_category": "provider_response_incomplete",
             "failure_reason": "incomplete",
             "failure_summary": "Agent runtime execution ended with an incomplete provider response.",
         }
-    return {
-        "failure_category": "agent_runtime_error",
-        "failure_reason": "agent_runtime_error",
-        "failure_summary": "Agent runtime execution failed before producing structured verification output.",
-    }
+    else:
+        metadata = {
+            "failure_category": "agent_runtime_error",
+            "failure_reason": "agent_runtime_error",
+            "failure_summary": "Agent runtime execution failed before producing structured verification output.",
+        }
+    if isinstance(exc, EngineError):
+        if isinstance(exc.category, str) and exc.category in _ENGINE_FAILURE_CATEGORIES:
+            metadata["engine_category"] = exc.category
+        if isinstance(exc.reason, str) and exc.reason in _ENGINE_FAILURE_REASONS:
+            metadata["engine_reason"] = exc.reason
+        if type(exc.status_code) is int and 100 <= exc.status_code <= 599:
+            metadata["status_code"] = exc.status_code
+    return metadata
 
 
 class _ToolOutputBudgetFilter:

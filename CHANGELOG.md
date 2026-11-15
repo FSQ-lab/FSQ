@@ -19,6 +19,8 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 - GitHub Copilot task preparation reuses a valid cached bearer token outside its 60-second expiration safety window without authentication requests or configuration writes. Non-interactive remote refresh shares at most three additional retries for transient transport, 429, or 5xx failures; deterministic authentication, format, and storage failures remain immediate errors. Task and inference budgets are unchanged.
 - Interrupted Agent runs retain allowlisted domain error codes, reasons, HTTP statuses, and operating-system errno in `run_failed` events without copying raw exception text, credentials, headers, response bodies, or complete exception context.
 - The bundled Android harness skill preserves requested foreground, timer/activity, draft, and settings terminal states instead of routinely killing the application after final verification. Explicit user/lifecycle closure or restart remains supported; runtime session disposal is not a business application kill action.
+- Responses streaming Agent turns retry bounded pre-commit transport, timeout, rate-limit, service, and incomplete-stream failures without multiplying SDK retries or replaying accepted tool effects. Old streams settle before retry, cancellation remains effective, and deterministic authentication/schema/refusal/output failures are not repaired by additional model requests.
+- Exhausted streamed turns retain safe neutral failure categories, reasons, HTTP status, and sanitized causal diagnostics; failed runner records and `run_failed` events preserve allowlisted engine fields without changing infrastructure failures into budget-generated inconclusive results.
 
 ### Integration status
 

@@ -634,6 +634,190 @@ async def test_runtime_classifies_durable_evidence_failure_separately_from_model
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category,reason,status_code",
+    [
+        ("unavailable", "connection_error", None),
+        ("unavailable", "read_error", None),
+        ("unavailable", "remote_protocol_error", None),
+        ("unavailable", "incomplete_read", None),
+        ("timeout", "timeout", None),
+        ("rate_limit", "rate_limit", 429),
+        ("unavailable", "service_unavailable", 503),
+        ("unavailable", "stream_error", 100),
+        ("unavailable", "stream_incomplete", 599),
+    ],
+)
+async def test_exhausted_stream_failure_preserves_safe_fields_in_failed_runner_and_event(tmp_path, monkeypatch, category, reason, status_code):
+    canary = "private-transport-credential-and-response-fragment"
+    primary = EngineError(category, "Model streaming operation failed.", reason=reason, status_code=status_code)
+    cause = RuntimeError(canary)
+    primary.context = {"failure_category": canary, "request": canary}
+    requests, closed, events = [], [], []
+
+    class Harness(_FakeHarness):
+        def close(self):
+            closed.append("harness")
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            closed.append("provider")
+
+    class FailedEngine:
+        async def run(self, model, request, *, on_event=None):
+            requests.append(request)
+            raise primary from cause
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.agent_runtime.max_turns = 1
+    settings.output.runs_dir = tmp_path
+    harness = Harness()
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: harness, engine=FailedEngine())
+    results = await _run_in_context(runtime, Task(id="stream-failure", description="Complete the goal."), KnowledgeBundle(), [], "stream-failure-run", events.append)
+
+    assert len(results) == 1
+    runner = results[0]
+    assert runner.status == "failed"
+    assert runner.tool_name == "agent_runtime.runner"
+    assert runner.error == "Model streaming operation failed."
+    expected = {
+        "failure_category": "agent_runtime_error",
+        "failure_reason": "agent_runtime_error",
+        "failure_summary": "Agent runtime execution failed before producing structured verification output.",
+        "engine_category": category,
+        "engine_reason": reason,
+    }
+    if status_code is not None:
+        expected["status_code"] = status_code
+    assert runner.tool_output == expected
+    assert runner.actual_outcome == expected["failure_summary"]
+    failures = [json.loads(event.model_dump_json()) for event in events if event.type == "run_failed"]
+    assert len(failures) == 1
+    assert failures[0]["payload"] == expected
+    assert failures[0]["run_id"] == "stream-failure-run"
+    assert failures[0]["task_id"] == "stream-failure"
+    assert canary not in runner.model_dump_json() + json.dumps([event.model_dump(mode="json") for event in events])
+    assert not any("termination_reason" in event.payload for event in events)
+    assert len(requests) == 1
+    assert harness.steps == []
+    assert closed == ["harness", "provider"]
+    assert primary.__cause__ is cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category,reason,status_code,expected",
+    [
+        ("unknown-credential-canary", "unknown-credential-canary", "unknown-credential-canary", {}),
+        (["unknown-credential-canary"], {"secret": "unknown-credential-canary"}, {"secret": "unknown-credential-canary"}, {}),
+        (None, False, None, {}),
+        ("unavailable", "read_error", True, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", False, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", 99, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", 600, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", 503.0, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", "503", {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unknown-credential-canary", "read_error", 503, {"engine_reason": "read_error", "status_code": 503}),
+        ("timeout", "unknown-credential-canary", None, {"engine_category": "timeout"}),
+    ],
+)
+async def test_runtime_omits_unknown_or_malformed_engine_fields_without_leaking_causes(tmp_path, monkeypatch, category, reason, status_code, expected):
+    canary = "unknown-credential-canary"
+    primary = EngineError(category, "Model operation failed.", reason=reason, status_code=status_code)
+    primary.context = {"engine_category": canary, "engine_reason": canary, "status_code": canary}
+    primary.raw_response = {"body": canary}
+
+    class FailedEngine:
+        async def run(self, model, request, *, on_event=None):
+            raise primary from RuntimeError(canary)
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: _FakeProviderSession())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=FailedEngine())
+    events = []
+    results = await _run_in_context(runtime, Task(description="Fail safely."), KnowledgeBundle(), [], "malformed-engine-run", events.append)
+
+    runner = results[0]
+    assert runner.status == "failed"
+    assert runner.tool_name == "agent_runtime.runner"
+    assert runner.tool_output["failure_category"] == runner.tool_output["failure_reason"] == "agent_runtime_error"
+    assert {key: value for key, value in runner.tool_output.items() if key in {"engine_category", "engine_reason", "status_code"}} == expected
+    failure = json.loads(events[-1].model_dump_json())
+    assert failure["type"] == "run_failed"
+    assert failure["payload"] == runner.tool_output
+    assert canary not in runner.model_dump_json() + json.dumps([event.model_dump(mode="json") for event in events])
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_accept_engine_fields_from_other_exceptions(tmp_path, monkeypatch):
+    primary = RuntimeError("Runtime operation failed.")
+    primary.category, primary.reason, primary.status_code = "unavailable", "read_error", 503
+
+    class FailedEngine:
+        async def run(self, model, request, *, on_event=None):
+            raise primary
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: _FakeProviderSession())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=FailedEngine())
+    events = []
+    results = await _run_in_context(runtime, Task(description="Fail runtime."), KnowledgeBundle(), [], "non-engine-run", events.append)
+
+    assert results[0].status == "failed"
+    assert not {"engine_category", "engine_reason", "status_code"}.intersection(results[0].tool_output)
+    assert json.loads(events[-1].model_dump_json())["payload"] == results[0].tool_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category,reason,failure_category,failure_reason,summary",
+    [
+        ("evidence", "read_error", "artifact_error", "evidence_persistence", "Agent runtime stopped because durable execution evidence failed."),
+        (
+            "incomplete",
+            "content_filter",
+            "provider_content_filter",
+            "content_filter",
+            "Agent runtime execution ended with an incomplete provider response due to content filtering.",
+        ),
+        ("incomplete", "incomplete", "provider_response_incomplete", "incomplete", "Agent runtime execution ended with an incomplete provider response."),
+    ],
+)
+async def test_safe_engine_fields_do_not_replace_existing_failure_classification(tmp_path, monkeypatch, category, reason, failure_category, failure_reason, summary):
+    canary = "private-failure-context-canary"
+    primary = EngineError(category, "Engine operation failed.", reason=reason, status_code=503)
+    primary.context = {"failure_category": canary, "failure_reason": canary, "failure_summary": canary}
+
+    class FailedEngine:
+        async def run(self, model, request, *, on_event=None):
+            raise primary from RuntimeError(canary)
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: _FakeProviderSession())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=FailedEngine())
+    events = []
+    results = await _run_in_context(runtime, Task(description="Keep failure classification."), KnowledgeBundle(), [], "classified-engine-run", events.append)
+
+    runner = results[0]
+    assert runner.status == "failed"
+    assert runner.tool_output["failure_category"] == failure_category
+    assert runner.tool_output["failure_reason"] == failure_reason
+    assert runner.tool_output["failure_summary"] == runner.actual_outcome == summary
+    assert runner.tool_output["engine_category"] == category
+    assert runner.tool_output["status_code"] == 503
+    if reason == "read_error":
+        assert runner.tool_output["engine_reason"] == reason
+    else:
+        assert "engine_reason" not in runner.tool_output
+    assert json.loads(events[-1].model_dump_json())["payload"] == runner.tool_output
+    assert canary not in runner.model_dump_json() + json.dumps([event.model_dump(mode="json") for event in events])
+
+
+@pytest.mark.asyncio
 async def test_main_turn_limit_returns_complete_inconclusive_task_result(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -949,8 +1133,9 @@ async def test_runtime_harness_construction_failure_is_visible(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_runtime_cleanup_failure_preserves_original_failed_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    primary = EngineError("incomplete", "Primary model failure", reason="content_filter")
+@pytest.mark.parametrize("category,reason", [("incomplete", "content_filter"), ("unavailable", "read_error"), ("timeout", "timeout"), ("rate_limit", "rate_limit")])
+async def test_runtime_cleanup_failure_preserves_original_failed_result(monkeypatch: pytest.MonkeyPatch, category: str, reason: str) -> None:
+    primary = EngineError(category, "Primary model failure", reason=reason)
     cleanup_error = EngineError("cleanup", "Secondary cleanup failure")
 
     class FailedCloseSession(_FakeProviderSession):
@@ -969,8 +1154,8 @@ async def test_runtime_cleanup_failure_preserves_original_failed_result(monkeypa
         await _run_in_context(runtime, Task(id="failure", description="Fail run"), KnowledgeBundle(), [], "failed-cleanup-run")
 
     assert failure.value.exceptions == (primary, cleanup_error)
-    assert primary.category == "incomplete"
-    assert primary.reason == "content_filter"
+    assert primary.category == category
+    assert primary.reason == reason
 
 
 @pytest.mark.parametrize("operation", ["run_task", "run_pre_plan", "run_verification"])

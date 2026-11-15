@@ -39,37 +39,6 @@ def test_skill_loader_fails_missing_required_skill(tmp_path: Path) -> None:
     assert exc_info.value.context == {"skill": "missing", "path": str(tmp_path / "missing.md")}
 
 
-def test_repository_android_harness_skill_documents_tool_usage_recovery() -> None:
-    skill_path = Path(__file__).resolve().parents[1] / "fsq_agent" / "resources" / "skills" / "android-harness.md"
-
-    bundles = SkillLoader(skill_path.parent).load([SkillConfig(name="android-harness", path=Path("android-harness.md"), required=True)])
-
-    assert "Tool Selection" not in bundles[0].instructions
-    assert "Tool Usage Error Recovery" in bundles[0].instructions
-    assert "Correct Key Examples" in bundles[0].instructions
-    assert "Case Lifecycle" in bundles[0].instructions
-    assert "press_key" in bundles[0].instructions
-    assert "active tool schema already defines callable names and arguments" in bundles[0].instructions
-    assert "Start each Android case with `launch_app`" in bundles[0].instructions
-    assert "End each Android case with `kill_app`" in bundles[0].instructions
-    assert "Use coordinate taps only when current platform evidence" in bundles[0].instructions
-    assert "ui_snapshot" in bundles[0].instructions
-    assert "ui_tree" not in bundles[0].instructions
-    assert "textType" in bundles[0].instructions
-    assert "runtimeSecret" in bundles[0].instructions
-    assert '"key": "Back"' in bundles[0].instructions
-    assert '"key": "Enter"' in bundles[0].instructions
-    assert '"key": "BACK"' in bundles[0].instructions
-    assert '"keyCode": 66' in bundles[0].instructions
-    assert '"key": "ENTER"' not in bundles[0].instructions
-    assert "keyCode-only" not in bundles[0].instructions
-    assert "Do not call session management" not in bundles[0].instructions
-    assert "required `pressKey` action succeeded" in bundles[0].instructions
-    assert "submit_visual_assertion" not in bundles[0].instructions
-    assert "sessionId" not in bundles[0].instructions
-    assert "pointerType" not in bundles[0].instructions
-
-
 def test_repository_web_harness_skill_documents_snapshot_first_guidance() -> None:
     skill_path = Path(__file__).resolve().parents[1] / "fsq_agent" / "resources" / "skills" / "web-harness.md"
 

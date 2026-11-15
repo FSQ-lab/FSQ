@@ -16,6 +16,9 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 - Android close returns normally after an unconfirmed remote quit is taken over by fully completed public terminal disposal and all owned resources settle. Safe diagnostics preserve the unconfirmed DELETE; pending disposal, managed scope, or worker cleanup still fails visibly.
 - Main-execution turn-budget exhaustion returns a complete inconclusive task result with a validated, explicitly runtime-generated terminal summary and no additional verifier request. Configured turn limits, real execution evidence, and independent cleanup/error precedence remain unchanged.
 - Artifact search reports bounded Run-local repeated-search diagnostics across interleaved artifacts, provides character-offset slice/refinement guidance, and preserves saved-text offsets across Unicode lowercase expansion without implying a fresh UI observation.
+- GitHub Copilot task preparation reuses a valid cached bearer token outside its 60-second expiration safety window without authentication requests or configuration writes. Non-interactive remote refresh shares at most three additional retries for transient transport, 429, or 5xx failures; deterministic authentication, format, and storage failures remain immediate errors. Task and inference budgets are unchanged.
+- Interrupted Agent runs retain allowlisted domain error codes, reasons, HTTP statuses, and operating-system errno in `run_failed` events without copying raw exception text, credentials, headers, response bodies, or complete exception context.
+- The bundled Android harness skill preserves requested foreground, timer/activity, draft, and settings terminal states instead of routinely killing the application after final verification. Explicit user/lifecycle closure or restart remains supported; runtime session disposal is not a business application kill action.
 
 ### Integration status
 

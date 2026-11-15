@@ -5,8 +5,9 @@ Use when `harness.platform` is Android. This skill contains Android-specific sta
 ## Case Lifecycle
 
 - Start each Android case with `launch_app` before the main business path.
-- Collect the final required verification before teardown.
-- End each Android case with `kill_app` after final evidence is collected.
+- Collect the final required verification while preserving the user's requested business terminal state, including the foreground page or application, running timers or activities, unsent or unsaved drafts, and system settings.
+- Do not routinely call `kill_app` at the end of a task. Use it only when the user goal or explicit lifecycle instructions require closing or restarting the application.
+- Automation-session and managed-service cleanup is owned by the runtime through `harness.close()`; killing the business application is not session cleanup.
 - Do not report lifecycle actions as satisfying a business key action unless the case explicitly tests launch or kill behavior.
 
 ## Observation and Locator Rules
@@ -23,7 +24,7 @@ Use when `harness.platform` is Android. This skill contains Android-specific sta
 - Use `assert_state` for deterministic element state or text checks, such as verifying that `com.microsoft.emmx:id/url_bar` contains or equals a required URL or keyword.
 - Use `assert_visible` or `assert_not_visible` for required presence or absence of visible UI elements.
 - Use `assert_with_ai` for visual/page-content assertions or when the only deterministic option is a brittle complex locator, such as a long XPath through repeated generic controls or reused switch ids.
-- Use `ui_snapshot` to inspect, locate, or collect evidence before an assertion. Before teardown, collect the final required verification with an assertion tool when an assertion-capable locator or text condition is available.
+- Use `ui_snapshot` to inspect, locate, or collect evidence before an assertion. Collect final verification with an assertion tool when an assertion-capable locator or text condition is available, without disturbing the requested business terminal state.
 
 ## Argument Rules
 

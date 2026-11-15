@@ -14,10 +14,69 @@ from fsq_agent.agent._verifier import Verifier
 from fsq_agent.config import Settings
 from fsq_agent.core.interfaces import EvidenceJournalSink
 from fsq_agent.knowledge import PrivateKnowledgeLoader
-from fsq_agent.models import DynamicAgentOutcome, KnowledgeBundle, PlanningError, RunEvent, RunEventSink, RunExecutionContext, Task
+from fsq_agent.models import (
+    ConfigurationError,
+    DynamicAgentOutcome,
+    FsqAgentError,
+    KnowledgeBundle,
+    PlanningError,
+    ReportGenerationError,
+    RunEvent,
+    RunEventSink,
+    RunExecutionContext,
+    Task,
+    ToolExecutionError,
+    VerificationError,
+)
 from fsq_agent.observation import ExecutionLogger
 from fsq_agent.providers import refresh_model_provider_session
 from fsq_agent.skills import SkillLoader
+
+_FAILURE_ERROR_CODES = {
+    FsqAgentError: "fsq_agent_error",
+    ConfigurationError: "configuration_error",
+    PlanningError: "planning_error",
+    ToolExecutionError: "tool_execution_error",
+    VerificationError: "verification_error",
+    ReportGenerationError: "report_generation_error",
+}
+_FAILURE_REASONS = frozenset({"invalid_candidate", "authentication", "access_denied", "rate_limited", "timeout", "network", "malformed_response", "storage", "internal"})
+
+
+def _failure_event_payload(exc: BaseException) -> dict[str, str | int]:
+    payload: dict[str, str | int] = {"exception_type": type(exc).__name__}
+    if not isinstance(exc, FsqAgentError):
+        return payload
+
+    error_code = _FAILURE_ERROR_CODES.get(type(exc))
+    if error_code is not None:
+        payload["error_code"] = error_code
+    context = exc.context
+    if isinstance(context, dict):
+        reason = context.get("reason")
+        if type(reason) is str and reason in _FAILURE_REASONS:
+            payload["reason"] = reason
+        status_code = context.get("status_code")
+        if type(status_code) is int and 100 <= status_code <= 599:
+            payload["status_code"] = status_code
+        errno = context.get("errno")
+        if type(errno) is int and errno > 0:
+            payload["errno"] = errno
+            return payload
+
+    seen: set[int] = set()
+    cause: BaseException | None = exc
+    for _ in range(8):
+        if cause is None or id(cause) in seen:
+            break
+        seen.add(id(cause))
+        if isinstance(cause, OSError):
+            errno = cause.errno
+            if type(errno) is int and errno > 0:
+                payload["errno"] = errno
+                break
+        cause = cause.__cause__
+    return payload
 
 
 class FsqAgent:
@@ -122,9 +181,7 @@ class FsqAgent:
             )
         except BaseException as exc:
             with suppress(BaseException):
-                await emitter.emit(
-                    RunEvent(run_id=run_id, task_id=task.id, type="run_failed", title="Execution interrupted", message=type(exc).__name__, payload={"exception_type": type(exc).__name__})
-                )
+                await emitter.emit(RunEvent(run_id=run_id, task_id=task.id, type="run_failed", title="Execution interrupted", message=type(exc).__name__, payload=_failure_event_payload(exc)))
             raise
 
     def _load_pre_plan_knowledge(self) -> KnowledgeBundle:

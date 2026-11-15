@@ -174,6 +174,7 @@ class DefaultCodingAgentRuntime:
         self._harness_tool_schemas: dict[str, Any] = {}
         self._stream_tool_calls: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._pending_cleanup: list[tuple[object, BaseException]] = []
+        self._turn_limit_result: tuple[str, StepResult] | None = None
 
     def _discover_agent_tool_names(self, tool_factory: AgentToolAdapter) -> set[str]:
         registry = getattr(tool_factory, "registry", None)
@@ -209,6 +210,7 @@ class DefaultCodingAgentRuntime:
         cancellation_check=None,
     ) -> list[StepResult]:
         self._raise_if_cleanup_pending()
+        self._turn_limit_result = None
         if evidence_sink is None or context is None or context.run_id != run_id:
             raise ConfigurationError("Runtime execution requires an allocated context and evidence sink.")
         if cancellation_check is not None:
@@ -220,6 +222,7 @@ class DefaultCodingAgentRuntime:
         primary_error: BaseException | None = None
         result = None
         usage_event_emitted = False
+        turn_limit_reached = False
         try:
             await self._emit(
                 event_sink,
@@ -359,37 +362,40 @@ class DefaultCodingAgentRuntime:
             # Engine and provider packages raise implementation-specific exceptions that become failed steps.
             except Exception as exc:  # noqa: BLE001
                 primary_error = exc
-                duration_ms = int((time.perf_counter() - started) * 1000)
-                failure_metadata = _runtime_failure_metadata(exc)
-                error_message = self._replace_secret_values(str(exc), self._runtime_secret_values())
-                if result is not None and not usage_event_emitted:
-                    usage_event = self._dynamic_agent_token_usage_event(result, run_id, task.id)
-                    if usage_event is not None:
-                        usage_event_emitted = True
-                        await self._emit(event_sink, usage_event)
-                await self._emit(
-                    event_sink,
-                    RunEvent(
-                        run_id=run_id,
-                        task_id=task.id,
-                        type="run_failed",
-                        title="Agent run failed",
-                        message=error_message,
-                        duration_ms=duration_ms,
-                        payload=failure_metadata,
-                    ),
-                )
-                return [
-                    StepResult(
-                        step_id=1,
-                        status="failed",
-                        actual_outcome=failure_metadata["failure_summary"],
-                        duration_ms=duration_ms,
-                        error=error_message,
-                        tool_name="agent_runtime.runner",
-                        tool_output=failure_metadata,
+                if isinstance(exc, EngineError) and exc.category == "max_turns":
+                    turn_limit_reached = True
+                else:
+                    duration_ms = int((time.perf_counter() - started) * 1000)
+                    failure_metadata = _runtime_failure_metadata(exc)
+                    error_message = self._replace_secret_values(str(exc), self._runtime_secret_values())
+                    if result is not None and not usage_event_emitted:
+                        usage_event = self._dynamic_agent_token_usage_event(result, run_id, task.id)
+                        if usage_event is not None:
+                            usage_event_emitted = True
+                            await self._emit(event_sink, usage_event)
+                    await self._emit(
+                        event_sink,
+                        RunEvent(
+                            run_id=run_id,
+                            task_id=task.id,
+                            type="run_failed",
+                            title="Agent run failed",
+                            message=error_message,
+                            duration_ms=duration_ms,
+                            payload=failure_metadata,
+                        ),
                     )
-                ]
+                    return [
+                        StepResult(
+                            step_id=1,
+                            status="failed",
+                            actual_outcome=failure_metadata["failure_summary"],
+                            duration_ms=duration_ms,
+                            error=error_message,
+                            tool_name="agent_runtime.runner",
+                            tool_output=failure_metadata,
+                        )
+                    ]
         except BaseExceptionGroup as exc:
             primary_error = exc
             raise
@@ -441,6 +447,35 @@ class DefaultCodingAgentRuntime:
             await self._finish_cleanup(self._dispose_run(harness, provider_session), primary_error=primary_error)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
+        if turn_limit_reached:
+            final_output = self._redact_runtime_secrets(
+                AgentFinalOutput(
+                    status="inconclusive",
+                    summary=f"Runtime-generated termination: main execution exhausted max_turns={self.settings.agent_runtime.max_turns} without a model final answer. Goal completion is unverified.",
+                    errors=["runtime_termination:max_turns"],
+                )
+            )
+            step = StepResult(
+                step_id=1,
+                status="success",
+                actual_outcome=self.policy.serialize_agent_final_output(final_output),
+                duration_ms=duration_ms,
+                tool_name="agent_runtime.runner",
+                tool_output=final_output.model_dump(mode="json"),
+            )
+            await self._emit(
+                event_sink,
+                RunEvent(
+                    run_id=run_id,
+                    task_id=task.id,
+                    type="run_failed",
+                    title="Agent run failed",
+                    message=final_output.summary,
+                    payload={"termination_reason": "max_turns", "summary_origin": "runtime", "status": "inconclusive"},
+                ),
+            )
+            self._turn_limit_result = (run_id, step)
+            return [step]
         if result is None:
             return [
                 StepResult(
@@ -779,6 +814,10 @@ class DefaultCodingAgentRuntime:
         event_sink: RunEventSink | None = None,
     ) -> list[StepResult]:
         self._raise_if_cleanup_pending()
+        termination = self._turn_limit_result
+        if termination is not None and termination[0] == run_id and any(step is termination[1] for step in execution_results):
+            self._turn_limit_result = None
+            return []
         validate_runtime_settings(self.settings)
         started = time.perf_counter()
         await self._emit(

@@ -15,7 +15,7 @@ from fsq_agent.models import (
     RuntimeSecretSettings,
     ToolExecutionError,
 )
-from fsq_agent.tools import AgentToolAdapter, AgentToolExecutor, AgentToolRegistry, DefaultAgentToolProvider, FileOps
+from fsq_agent.tools import AgentToolAdapter, AgentToolExecutor, AgentToolRegistry, DefaultAgentToolProvider, FileOps, ToolArtifactStore
 
 
 def _provider(tmp_path: Path, **kwargs) -> DefaultAgentToolProvider:
@@ -157,13 +157,13 @@ async def test_agent_tool_writes_full_output_artifact_and_returns_inline(tmp_pat
 async def test_agent_tool_large_output_uses_artifact_search_and_slice(tmp_path: Path) -> None:
     runs_dir = tmp_path / "runs"
     settings = LocalToolOutputSettings(
-        full_output_max_chars=1000,
+        full_output_max_chars=3000,
         historical_preview_chars=20,
         model_response_max_chars=500,
     )
     provider = _provider(tmp_path, local_tool_output_settings=settings, runs_dir=runs_dir, run_id="run-1")
     adapter = AgentToolAdapter(_registry(provider), local_tool_output_settings=settings)
-    (tmp_path / "large.txt").write_text("alpha beta gamma " * 100, encoding="utf-8")
+    (tmp_path / "large.txt").write_text("alpha beta gamma " * 1000, encoding="utf-8")
     tools = adapter.build_tools(run_id="run-1", task_id="task-1")
     read_tool = next(tool for tool in tools if tool.name == "read_file")
     search_tool = next(tool for tool in tools if tool.name == "search_artifact")
@@ -192,6 +192,215 @@ async def test_agent_tool_large_output_uses_artifact_search_and_slice(tmp_path: 
         ),
     )
     assert "gamma" in json.loads(slice_output)["result"]["output"]["content"]
+
+
+def test_artifact_search_changed_content_between_queries_resets_prior_windows(tmp_path: Path) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    path = store.write("snapshot", "field before")
+    assert path is not None
+    saved_text = path.read_text(encoding="utf-8")
+    first = store.search(str(path), "field", False, max_matches=1, context_chars=5)
+    path.write_text(saved_text.replace("before", "after!"), encoding="utf-8")
+    changed_query = store.search(str(path), "after!", False, max_matches=1, context_chars=5)
+    path.write_text(saved_text, encoding="utf-8")
+    restored = store.search(str(path), "field", False, max_matches=1, context_chars=5)
+
+    assert first["repeated_search"] is False
+    assert changed_query["repeated_search"] is False
+    assert restored["repeated_search"] is False
+    assert restored["matches"] == first["matches"]
+
+
+@pytest.mark.parametrize(
+    ("content", "query", "case_sensitive"),
+    [
+        ('İ 前缀 😀 "Field": "line\\nvalue\\\\tail"', "field", False),
+        ("😀 İ dotted and İ", "İ", False),
+        ("😀 field field", "field", True),
+        ("literal .* [field] .*", ".*", False),
+        ('😀 "field" line', r"\"field\"", True),
+    ],
+)
+def test_artifact_search_offsets_address_saved_serialized_text(tmp_path: Path, content: str, query: str, case_sensitive: bool) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    path = store.write("snapshot", content)
+    assert path is not None
+    saved_text = path.read_text(encoding="utf-8")
+    result = store.search(str(path), query, case_sensitive, max_matches=1, context_chars=7)
+
+    expected_offset = saved_text.index(query if case_sensitive else query.replace("field", "Field"))
+    match = result["matches"][0]
+    assert match["offset"] == expected_offset
+    assert match["context_start"] == max(0, expected_offset - 7)
+    assert match["context_end"] == min(len(saved_text), expected_offset + len(query) + 7)
+    assert match["preview"] == saved_text[match["context_start"] : match["context_end"]]
+    assert result["total_chars"] == len(saved_text)
+    assert store.read_slice(str(path), match["offset"], len(query))["content"] == saved_text[expected_offset : expected_offset + len(query)]
+
+
+@pytest.mark.parametrize(
+    ("content", "query", "source_match"),
+    [
+        ("😀 İ separated İ", "İ", "İ"),
+        ("😀 İ separated İ", "i\u0307", "İ"),
+        ("😀 i\u0307 separated i\u0307", "İ", "i\u0307"),
+        ("İ Field middle İ Field", "field", "Field"),
+    ],
+)
+def test_artifact_search_multiple_matches_preserve_unicode_source_spans(tmp_path: Path, content: str, query: str, source_match: str) -> None:
+    store = ToolArtifactStore(tmp_path, "unicode-run", LocalToolOutputSettings())
+    path = store.write("snapshot", content)
+    assert path is not None
+    saved_text = path.read_text(encoding="utf-8")
+    first = saved_text.index(source_match)
+    second = saved_text.index(source_match, first + len(source_match))
+    result = store.search(str(path), query, False, max_matches=2, context_chars=7)
+    assert result["truncated"] is False
+    assert [match["offset"] for match in result["matches"]] == [first, second]
+    for match, offset in zip(result["matches"], (first, second), strict=True):
+        start, end = max(0, offset - 7), min(len(saved_text), offset + len(source_match) + 7)
+        assert (match["context_start"], match["context_end"]) == (start, end)
+        assert match["preview"] == saved_text[start:end]
+        assert store.read_slice(str(path), offset, len(source_match))["content"] == source_match
+
+
+def test_artifact_search_guides_field_and_context_recovery(tmp_path: Path) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    path = store.write("snapshot", '"field": "' + "value " * 40 + '" field')
+    assert path is not None
+    result = store.search(str(path), "field", True, max_matches=1, context_chars=8)
+    match = result["matches"][0]
+
+    assert result["truncated"] is True
+    assert f"read_artifact_slice(artifact_path, offset={match['offset']}, length=12000)" in result["instructions"]
+    assert f"read_artifact_slice(artifact_path, offset={match['context_end']}, length=12000)" in result["instructions"]
+    assert "refine" in result["instructions"].lower()
+    assert "max_matches" in result["instructions"]
+    assert "identical" in result["instructions"].lower()
+    recovered = store.read_slice(str(path), match["offset"], 12000)
+    assert recovered["content"].startswith('field\\":')
+
+
+def test_artifact_search_repeat_preserves_matches_across_resolved_paths(tmp_path: Path) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    path = store.write("snapshot", "field value " * 10)
+    assert path is not None
+    saved_text = path.read_text(encoding="utf-8")
+    first = store.search(str(path), "field", False, max_matches=1, context_chars=5)
+    repeated = store.search(str(path.relative_to(tmp_path / "run-1")), "field", False, max_matches=1, context_chars=5)
+
+    assert first["repeated_search"] is False
+    assert repeated["repeated_search"] is True
+    assert repeated["matches"] == first["matches"]
+    assert repeated["truncated"] == first["truncated"]
+    assert repeated["artifact_path"] == first["artifact_path"]
+    assert "no new content" in repeated["diagnostic"].lower()
+    assert "read_artifact_slice" in repeated["instructions"]
+    assert path.read_text(encoding="utf-8") == saved_text
+
+
+def test_artifact_search_recognizes_six_interleaved_repeats(tmp_path: Path) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    paths = [store.write("snapshot", f"field value {index}") for index in range(6)]
+    assert all(path is not None for path in paths)
+    first_results = [store.search(str(path), "field", False, max_matches=1, context_chars=4) for path in paths]
+    for path, first in zip(paths, first_results, strict=True):
+        repeated = store.search(str(path), "field", False, max_matches=1, context_chars=4)
+        assert first["repeated_search"] is False
+        assert repeated["repeated_search"] is True
+        assert repeated["matches"] == first["matches"]
+        assert "no new content" in repeated["diagnostic"].lower()
+
+
+@pytest.mark.parametrize(
+    "changed_arguments",
+    [
+        {"query": "FIELD"},
+        {"case_sensitive": True},
+        {"max_matches": 2},
+        {"context_chars": 6},
+    ],
+)
+def test_artifact_search_different_parameters_are_not_repeats(tmp_path: Path, changed_arguments: dict) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    path = store.write("snapshot", "field value field")
+    assert path is not None
+    arguments = {"query": "field", "case_sensitive": False, "max_matches": 1, "context_chars": 5}
+    first = store.search(str(path), **arguments)
+    changed = store.search(str(path), **(arguments | changed_arguments))
+    repeated = store.search(str(path), **arguments)
+
+    assert first["repeated_search"] is False
+    assert changed["repeated_search"] is False
+    assert repeated["repeated_search"] is True
+
+
+def test_artifact_search_content_change_is_not_an_unchanged_repeat(tmp_path: Path) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    path = store.write("snapshot", "field before")
+    assert path is not None
+    store.search(str(path), "field", False, max_matches=1, context_chars=20)
+    path.write_text(path.read_text(encoding="utf-8").replace("before", "after!"), encoding="utf-8")
+    changed = store.search(str(path), "field", False, max_matches=1, context_chars=20)
+    repeated = store.search(str(path), "field", False, max_matches=1, context_chars=20)
+
+    assert changed["repeated_search"] is False
+    assert "after!" in changed["matches"][0]["preview"]
+    assert repeated["repeated_search"] is True
+    assert repeated["matches"] == changed["matches"]
+
+
+@pytest.mark.asyncio
+async def test_artifact_search_run_history_is_isolated_in_neutral_bindings(tmp_path: Path) -> None:
+    provider = _provider(tmp_path, runs_dir=tmp_path / "runs", run_id="run-1")
+    adapter = AgentToolAdapter(_registry(provider))
+    for run_id in ("run-1", "run-2"):
+        provider.configure_run(run_id)
+        assert provider.artifact_store is not None
+        path = provider.artifact_store.write("snapshot", "field value")
+        assert path is not None
+        tool = next(tool for tool in adapter.build_tools(run_id=run_id, task_id="task-1") if tool.name == "search_artifact")
+        call = ToolCall(name="search_artifact", arguments={"artifact_path": str(path), "query": "field", "max_matches": 1, "context_chars": 4}, call_id="search")
+        first = json.loads(await tool.invoke(call))["result"]["output"]
+        repeated = json.loads(await tool.invoke(call))["result"]["output"]
+        assert first["repeated_search"] is False
+        assert repeated["repeated_search"] is True
+        assert repeated["matches"] == first["matches"]
+        assert "no new content" in repeated["diagnostic"].lower()
+
+
+def test_repeated_artifact_search_without_matches_guides_refinement(tmp_path: Path) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    path = store.write("snapshot", "field value")
+    assert path is not None
+    first = store.search(str(path), "missing", False, max_matches=1, context_chars=5)
+    repeated = store.search(str(path), "missing", False, max_matches=1, context_chars=5)
+
+    assert first["matches"] == repeated["matches"] == []
+    assert repeated["truncated"] is False
+    assert repeated["repeated_search"] is True
+    assert "no new content" in repeated["diagnostic"].lower()
+    assert "refine" in repeated["instructions"].lower()
+
+
+def test_artifact_slice_only_guides_continuation_before_end(tmp_path: Path) -> None:
+    store = ToolArtifactStore(tmp_path, "run-1", LocalToolOutputSettings())
+    path = store.write("snapshot", "😀 field value")
+    assert path is not None
+    first = store.read_slice(str(path), 0, 7)
+    assert first["has_more_after"] is True
+    assert f"read_artifact_slice(artifact_path, offset={first['offset'] + first['length']}, length=12000)" in first["instructions"]
+    terminal = store.read_slice(str(path), first["offset"] + first["length"], 30000)
+    assert terminal["has_more_after"] is False
+    assert "read_artifact_slice(" not in terminal["instructions"]
+    assert first["content"] + terminal["content"] == path.read_text(encoding="utf-8")
+    empty = store.read_slice(str(path), terminal["total_chars"], 1)
+    assert empty["length"] == 0
+    assert empty["has_more_after"] is False
+    assert "read_artifact_slice(" not in empty["instructions"]
+    search = store.search(str(path), "field", True, max_matches=1, context_chars=2000)
+    assert search["matches"][0]["context_end"] == search["total_chars"]
+    assert search["instructions"].count("read_artifact_slice(") == 1
 
 
 @pytest.mark.parametrize("content_length", [20, 40000])

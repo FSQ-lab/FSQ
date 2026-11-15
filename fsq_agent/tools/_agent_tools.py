@@ -38,23 +38,37 @@ class _WriteFileArgs(BaseModel):
 
 class _SearchArtifactArgs(BaseModel):
     artifact_path: str = Field(description="Artifact path returned by a previous tool response.")
-    query: str = Field(description="Text to search for inside the artifact.")
+    query: str = Field(description="Literal text in the saved serialized artifact, not a decoded JSON field. Refine instead of repeating an identical search.")
     case_sensitive: bool = Field(default=False, description="Whether the search is case-sensitive.")
-    max_matches: int = Field(default=20, ge=1, le=100, description="Maximum number of matches to return.")
-    context_chars: int = Field(default=300, ge=0, le=2000, description="Characters of context around each match.")
+    max_matches: int = Field(default=20, ge=1, le=100, description="Maximum matches to return; increase or refine query when truncated.")
+    context_chars: int = Field(default=300, ge=0, le=2000, description="Unicode characters around each match. Identical searches return the same window; use read_artifact_slice for more content.")
 
 
 class _ReadArtifactSliceArgs(BaseModel):
     artifact_path: str = Field(description="Artifact path returned by a previous tool response.")
-    offset: int = Field(default=0, ge=0, description="Character offset to start reading from.")
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Zero-based Unicode-character position in saved serialized text: a match offset for field recovery, context_end for more context, or offset + length only when has_more_after.",
+    )
     length: int = Field(default=12000, ge=1, le=30000, description="Maximum characters to read.")
 
 
 _AGENT_TOOL_MODELS: dict[str, tuple[str, type[BaseModel]]] = {
     "read_file": ("Read a scoped workspace file.", _ReadFileArgs),
     "write_file": ("Write a scoped output file.", _WriteFileArgs),
-    "search_artifact": ("Search a large AgentTool-output artifact by text and return offsets with local context.", _SearchArtifactArgs),
-    "read_artifact_slice": ("Read a bounded character slice from a large AgentTool-output artifact by offset and length.", _ReadArtifactSliceArgs),
+    "search_artifact": (
+        (
+            "Search literal saved artifact text, not current UI state. Offsets and exclusive context_end are Unicode-character positions. "
+            "Read fields with read_artifact_slice at a match offset; continue from context_end below total_chars. "
+            "Refine query or increase max_matches when truncated; identical searches never advance."
+        ),
+        _SearchArtifactArgs,
+    ),
+    "read_artifact_slice": (
+        "Read saved serialized artifact text using artifact_path, offset and length. Continue at offset + length only when has_more_after is true.",
+        _ReadArtifactSliceArgs,
+    ),
 }
 
 

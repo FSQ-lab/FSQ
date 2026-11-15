@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import socket
@@ -262,20 +263,37 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         self._session_settled = False
         self._scope_exit_attempted = False
         self._cleanup_primary: BaseException | None = None
+        self._terminal_disposal_diagnostic: dict[str, object] | None = None
         self._closed = False
 
     def close(self) -> None:
         if self._borrowed_session:
             return
-        if self._executor is None and self._session is None and self._managed_scope is None and self._runtime is None:
-            self._closed = True
-            return
-        try:
+        if self._session is not None or self._managed_scope is not None or self._runtime is not None or self._connection is not None:
             self._run_sync(self._close_owned_resources)
-        finally:
-            # Pending disposal must retain its original SDK owner thread.
-            if self._session is None and self._managed_scope is None and self._runtime is None:
-                self._shutdown_executor()
+        # Only the executor can remain after resource settlement. Do not submit
+        # work to it again: a failed shutdown may already have stopped submission.
+        try:
+            self._shutdown_executor()
+        except BaseException as shutdown_error:
+            self._cleanup_pending = True
+            primary_error = self._cleanup_primary
+            if primary_error is not None:
+                if isinstance(primary_error, (CancelledError, KeyboardInterrupt, SystemExit)):
+                    raise primary_error from shutdown_error
+                raise BaseExceptionGroup("Android session and owner-thread shutdown failed.", [primary_error, shutdown_error]) from None
+            raise
+
+        primary_error = self._cleanup_primary
+        self._cleanup_primary = None
+        self._cleanup_pending = False
+        self._closed = True
+        if self._terminal_disposal_diagnostic is not None:
+            if not self._terminal_disposal_diagnostic["terminal_disposal_completed"]:
+                self._terminal_disposal_diagnostic["terminal_disposal_completed"] = True
+                logging.getLogger(__name__).info("Android terminal disposal settled an unconfirmed remote quit.", extra=self._terminal_disposal_diagnostic)
+        elif primary_error is not None:
+            raise primary_error
 
     def _close_owned_resources(self) -> None:
         self._cleanup_pending = True
@@ -291,6 +309,16 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                     except BaseException as exc:  # Retain quit failure while explicitly disposing uncertain resources.
                         primary_error = self._cleanup_primary = exc
                         state = session.session_info().state
+                        if state in {"uncertain", "disposing"} and getattr(exc, "code", None) == "session_quit_unknown":
+                            from appium_connect_agent.automation import ResourceStateError
+
+                            if isinstance(exc, ResourceStateError):
+                                self._terminal_disposal_diagnostic = {
+                                    "backend_code": "session_quit_unknown",
+                                    "request_state": exc.request_state if exc.request_state in {"not_sent", "response_unknown", "response_received"} else "unknown",
+                                    "remote_quit_confirmed": False,
+                                    "terminal_disposal_completed": False,
+                                }
                         if state not in {"uncertain", "disposing", "disposed"}:
                             raise
                     else:
@@ -298,6 +326,9 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 if not self._session_settled:
                     if state in {"uncertain", "disposing"}:
                         session.dispose(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+                        state = session.session_info().state
+                        if state != "disposed":
+                            raise ToolExecutionError("Owned Android terminal disposal did not complete.", context={"state": state})  # noqa: TRY301
                         managed_settled = True
                     elif state == "disposed":
                         managed_settled = True
@@ -306,16 +337,15 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                         raise ToolExecutionError("Owned Android session is not available for terminal cleanup.", context={"state": state})  # noqa: TRY301
                     self._session_settled = True
 
-            if not managed_settled:
-                if self._scope_exit_attempted and self._runtime is not None:
-                    self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
-                elif self._managed_scope is not None:
-                    self._scope_exit_attempted = True
-                    # No primary exception is passed: scope cleanup failure must raise,
-                    # rather than being attached to and hidden behind a business error.
-                    self._managed_scope.__exit__(None, None, None)
-                elif self._runtime is not None:
-                    self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+            if self._scope_exit_attempted and self._runtime is not None and not managed_settled:
+                self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+            elif self._managed_scope is not None and not self._scope_exit_attempted:
+                self._scope_exit_attempted = True
+                # No primary exception is passed: scope cleanup failure must raise,
+                # rather than being attached to and hidden behind a business error.
+                self._managed_scope.__exit__(None, None, None)
+            elif self._runtime is not None and not managed_settled:
+                self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
         except BaseException as cleanup_error:
             if primary_error is not None and cleanup_error is not primary_error:
                 if isinstance(primary_error, (CancelledError, KeyboardInterrupt, SystemExit)):
@@ -330,11 +360,6 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         self._runtime = None
         self._session_settled = False
         self._scope_exit_attempted = False
-        self._cleanup_primary = None
-        self._cleanup_pending = False
-        self._closed = True
-        if primary_error is not None:
-            raise primary_error
 
     def context(self) -> dict[str, object]:
         return self._run_on_worker(self._context_impl)
@@ -1090,7 +1115,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         try:
             return self._run_sync(func)
         except BaseException:
-            if self._session is None and self._managed_scope is None and self._runtime is None:
+            if not self._cleanup_pending and self._session is None and self._managed_scope is None and self._runtime is None:
                 self._shutdown_executor()
             raise
 
@@ -1343,9 +1368,9 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
 
     def _shutdown_executor(self) -> None:
         executor = self._executor
-        self._executor = None
         if executor is not None:
             executor.shutdown(wait=True)
+            self._executor = None
 
     def _target_missing(self, params: dict[str, object]) -> dict[str, object]:
         return self._failed("target_resolution_error", "Target was not found.", metadata={"params": params})

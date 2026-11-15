@@ -37,6 +37,12 @@ The exposed AgentTool names are:
 | `search_artifact` | Search text artifacts below the current run directory and return bounded matches. |
 | `read_artifact_slice` | Read a bounded character slice from one current-run artifact path. |
 
+Artifact search is literal text lookup in the saved serialized artifact, not semantic field extraction or a fresh UI observation. Match `offset`, `context_start`, and exclusive `context_end`, together with `total_chars`, describe zero-based Unicode-character positions in that same saved text, not byte offsets or decoded JSON-string positions. Slice reads use the existing `artifact_path`, `offset`, and `length` arguments; no `artifact_id`/`limit` aliases or duplicate offset names are introduced.
+
+Search responses and tool descriptions give actionable bounded recovery guidance: read the matched field from its reported offset with `read_artifact_slice`, continue beyond a returned context window from `context_end` when it is below `total_chars`, and refine a query or request more matches when match selection is truncated. Slice continuation uses `offset + length` only when `has_more_after` is true. Repeating an identical search does not advance its window.
+
+A bounded Run-local history recognizes repeated searches of unchanged artifact content with the same resolved path, query, case-sensitivity, match limit, and context size, including repeats interleaved with other artifact searches. Such responses carry an explicit repeated-search/no-new-content diagnostic and concrete slice or query-refinement guidance rather than presenting the identical window as new progress. Real match metadata and text remain truthful; the guard never turns a repeat into a false no-match result, silently advances a cursor, changes artifact contents, performs a UI action, or changes engine turn limits. Different arguments, changed content, and different Runs are not conflated with an unchanged repeat.
+
 AgentTools have no `ReplayPolicy`, do not produce `CapabilityDefinition` records, and must not be converted into generated strict replay commands.
 
 This module does not expose `wait_ms`, `get_runtime_secret`, runtime-secret resolution, `run_cli_tool`, SDK `ShellTool` construction/execution, public/common `submit_visual_assertion`, or public/common `publish_progress`.
@@ -72,6 +78,7 @@ AgentTool events must use an AgentTool-specific origin such as `agent_tool`. Rec
 ## Verification Scope
 
 - Verification covers AgentTool registration, scoped file access, bounded artifact lookup/slicing, large-output artifacting, structured failure results, and neutral tool binding behavior.
+- Artifact recovery verification proves exact reported character boundaries and slice continuation, preserves truthful bounded matches on repeated searches including interleaved calls, and distinguishes changed artifact content and independent Runs. Repeated-result guidance uses only the exposed tool names and argument schema and does not claim current UI state or alter the turn budget.
 - Boundary verification ensures AgentTools remain dynamic-only, absent from strict capability registries, and ignored by dynamic strict-case recording.
 
 ## Current Invariants

@@ -481,25 +481,209 @@ def test_active_close_uses_real_quit_then_managed_scope_exit(managed_driver: _Is
     assert managed_driver.events() == events
 
 
-def test_unknown_quit_disposes_locally_and_preserves_original_failure(managed_driver: _IsolatedManagedDriver) -> None:
+def test_unknown_quit_disposes_locally_and_retains_safe_diagnostic_history(managed_driver: _IsolatedManagedDriver, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="fsq_agent.drivers.android._appium_connect")
     managed_driver.mode("quit-disconnect")
     driver = managed_driver.driver
     assert driver.launch_app({})["status"] == "passed"
     owner = _observe_owner(managed_driver)
 
-    with pytest.raises(aca_automation.ResourceStateError) as failed:
-        driver.close()
+    driver.close()
 
-    assert failed.value.code == "session_quit_unknown"
+    assert driver._terminal_disposal_diagnostic == {
+        "backend_code": "session_quit_unknown",
+        "request_state": "response_unknown",
+        "remote_quit_confirmed": False,
+        "terminal_disposal_completed": True,
+    }
     _assert_owner_settled(managed_driver, owner)
     assert owner.session.session_info().appium_session_id == "isolated-session"
     assert len([event for event in managed_driver.events() if event.get("method") == "DELETE"]) == 1
     events = managed_driver.events()
     driver.close()
     assert managed_driver.events() == events
+    assert driver._terminal_disposal_diagnostic["terminal_disposal_completed"] is True
+    records = [record for record in caplog.records if getattr(record, "backend_code", None) == "session_quit_unknown"]
+    assert len(records) == 1
+    assert records[0].request_state == "response_unknown"
+    assert records[0].remote_quit_confirmed is False
+    assert records[0].terminal_disposal_completed is True
 
 
-def test_unknown_quit_and_disposal_failure_preserve_order_and_explicit_continuation(managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_other_real_resource_state_error_is_not_settled_quit_history(managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch) -> None:
+    from urllib3 import PoolManager
+
+    managed_driver.mode("serve")
+    driver = managed_driver.driver
+    assert driver.launch_app({})["status"] == "passed"
+    owner = _observe_owner(managed_driver)
+    original_clear = PoolManager.clear
+    failures: list[OSError] = []
+
+    def fail_client_pool_clear(pool: PoolManager) -> None:
+        if not failures:
+            failure = OSError("controlled isolated client-pool close failure")
+            failures.append(failure)
+            raise failure
+        original_clear(pool)
+
+    with monkeypatch.context() as boundary_patch:
+        boundary_patch.setattr(PoolManager, "clear", fail_client_pool_clear)
+        with pytest.raises(aca_automation.ResourceStateError) as failed:
+            driver.close()
+
+    assert failures
+    assert failed.value.code == "cleanup_failed"
+    assert failed.value.request_state == "response_received"
+    assert failed.value.completed_steps == ("session_deleted",)
+    assert failed.value.cleanup_errors == tuple(failures)
+    assert driver._terminal_disposal_diagnostic is None
+    _assert_owner_settled(managed_driver, owner)
+    assert len([event for event in managed_driver.events() if event.get("method") == "DELETE"]) == 1
+    events = managed_driver.events()
+    driver.close()
+    assert managed_driver.events() == events
+
+
+def test_real_managed_scope_failure_retains_owners_after_successful_quit(managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch) -> None:
+    managed_driver.mode("serve")
+    driver = managed_driver.driver
+    assert driver.launch_app({})["status"] == "passed"
+    owner = _observe_owner(managed_driver)
+    with monkeypatch.context() as boundary_patch:
+        failures = _fail_stopped_record_publication(managed_driver, boundary_patch)
+        with pytest.raises(OSError, match="controlled isolated service-record publication failure"):
+            driver.close()
+
+    assert failures
+    assert owner.session.session_info().state == "closed"
+    _assert_peer_exited(owner)
+    _assert_account_lock(managed_driver, held=True)
+    _assert_quarantined(managed_driver, owner)
+    assert driver._terminal_disposal_diagnostic is None
+    events = managed_driver.events()
+    signals = list(managed_driver.signals)
+
+    driver.close()
+
+    _assert_owner_settled(managed_driver, owner, state="closed")
+    assert managed_driver.events() == events
+    assert managed_driver.signals == signals
+
+
+@pytest.mark.parametrize("mode", ["serve", "quit-disconnect"])
+@pytest.mark.parametrize("shutdown_started", [False, True], ids=["before-shutdown", "after-shutdown"])
+def test_executor_shutdown_failure_retains_exact_owner_and_explicit_continuation(
+    managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch, mode: str, shutdown_started: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="fsq_agent.drivers.android._appium_connect")
+    managed_driver.mode(mode)
+    driver = managed_driver.driver
+    assert driver.launch_app({})["status"] == "passed"
+    owner = _observe_owner(managed_driver)
+    executor_type = type(owner.executor)
+    original_shutdown = executor_type.shutdown
+    shutdown_error = OSError("controlled isolated worker-shutdown failure")
+
+    def fail_shutdown(executor: Any, *, wait: bool = True, cancel_futures: bool = False) -> None:
+        assert executor is owner.executor
+        if shutdown_started:
+            original_shutdown(executor, wait=wait, cancel_futures=cancel_futures)
+        raise shutdown_error
+
+    with monkeypatch.context() as boundary_patch:
+        boundary_patch.setattr(executor_type, "shutdown", fail_shutdown)
+        if mode == "quit-disconnect":
+            with pytest.raises(BaseExceptionGroup) as combined:
+                driver.close()
+            primary, secondary = combined.value.exceptions
+            assert isinstance(primary, aca_automation.ResourceStateError)
+            assert primary.code == "session_quit_unknown"
+            assert secondary is shutdown_error
+        else:
+            with pytest.raises(OSError, match="controlled isolated worker-shutdown failure") as failed:
+                driver.close()
+            assert failed.value is shutdown_error
+
+    expected_state = "disposed" if mode == "quit-disconnect" else "closed"
+    assert owner.session.session_info().state == expected_state
+    assert driver._session is None
+    assert driver._runtime is None
+    assert driver._connection is None
+    assert driver._managed_scope is None
+    assert driver._executor is owner.executor
+    assert owner.worker.is_alive() is not shutdown_started
+    _assert_peer_exited(owner)
+    _assert_account_lock(managed_driver, held=False)
+    events = managed_driver.events()
+    with pytest.raises((ToolExecutionError, RuntimeError)):
+        driver.context()
+    assert managed_driver.events() == events
+    assert driver._executor is owner.executor
+    if mode == "quit-disconnect":
+        assert driver._terminal_disposal_diagnostic == {
+            "backend_code": "session_quit_unknown",
+            "request_state": "response_unknown",
+            "remote_quit_confirmed": False,
+            "terminal_disposal_completed": False,
+        }
+    else:
+        assert driver._terminal_disposal_diagnostic is None
+    assert not any(getattr(record, "backend_code", None) == "session_quit_unknown" for record in caplog.records)
+
+    driver.close()
+
+    _assert_owner_settled(managed_driver, owner, state=expected_state)
+    assert managed_driver.events() == events
+    if mode == "quit-disconnect":
+        assert driver._terminal_disposal_diagnostic["terminal_disposal_completed"] is True
+        records = [record for record in caplog.records if getattr(record, "backend_code", None) == "session_quit_unknown"]
+        assert len(records) == 1
+        assert records[0].terminal_disposal_completed is True
+    driver.close()
+    assert managed_driver.events() == events
+
+
+def test_real_quit_cancellation_is_not_swallowed_by_later_cleanup(managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch) -> None:
+    from appium_connect_agent.runtime import OperationControl
+
+    managed_driver.mode("serve")
+    driver = managed_driver.driver
+    assert driver.launch_app({})["status"] == "passed"
+    owner = _observe_owner(managed_driver)
+    cancellation = threading.Event()
+    cancellation.set()
+    control = OperationControl(timeout_seconds=3.0, cancellation=cancellation)
+    with monkeypatch.context() as boundary_patch:
+        boundary_patch.setattr(driver, "_operation_control", lambda timeout: control)
+        with pytest.raises(aca_automation.OperationCancelledError) as cancelled:
+            driver.close()
+
+    assert cancelled.value.code == "operation_cancelled"
+    assert cancelled.value.request_state == "not_sent"
+    assert owner.session.session_info().state == "active"
+    assert driver._session is owner.session
+    assert driver._runtime is owner.runtime
+    assert driver._managed_scope is owner.scope
+    assert driver._connection is owner.connection
+    assert driver._executor is owner.executor
+    assert owner.worker.is_alive()
+    assert managed_driver.signals == []
+    assert not any(event.get("method") == "DELETE" for event in managed_driver.events())
+    _assert_account_lock(managed_driver, held=True)
+    assert driver._terminal_disposal_diagnostic is None
+
+    with pytest.raises(aca_automation.OperationCancelledError) as continued:
+        driver.close()
+
+    assert continued.value is cancelled.value
+    _assert_owner_settled(managed_driver, owner, state="closed")
+    assert driver._terminal_disposal_diagnostic is None
+    driver.close()
+
+
+def test_unknown_quit_and_disposal_failure_preserve_order_and_explicit_continuation(managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="fsq_agent.drivers.android._appium_connect")
     managed_driver.mode("quit-disconnect")
     driver = managed_driver.driver
     assert driver.launch_app({})["status"] == "passed"
@@ -523,12 +707,23 @@ def test_unknown_quit_and_disposal_failure_preserve_order_and_explicit_continuat
     _assert_peer_exited(owner)
     _assert_account_lock(managed_driver, held=True)
     _assert_quarantined(managed_driver, owner)
+    assert driver._terminal_disposal_diagnostic == {
+        "backend_code": "session_quit_unknown",
+        "request_state": primary.request_state,
+        "remote_quit_confirmed": False,
+        "terminal_disposal_completed": False,
+    }
+    assert not any(getattr(record, "backend_code", None) == "session_quit_unknown" for record in caplog.records)
     signals = list(managed_driver.signals)
 
-    with pytest.raises(aca_automation.ResourceStateError) as continued:
-        driver.close()
+    driver.close()
 
-    assert continued.value is primary
+    assert driver._terminal_disposal_diagnostic["terminal_disposal_completed"] is True
+    records = [record for record in caplog.records if getattr(record, "backend_code", None) == "session_quit_unknown"]
+    assert len(records) == 1
+    assert records[0].request_state == primary.request_state
+    assert records[0].remote_quit_confirmed is False
+    assert records[0].terminal_disposal_completed is True
     _assert_owner_settled(managed_driver, owner)
     assert managed_driver.signals == signals
     assert len([event for event in managed_driver.events() if event.get("method") == "DELETE"]) == 1

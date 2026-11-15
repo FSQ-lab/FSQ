@@ -13,6 +13,9 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 - Android assertions inspect only the attributes needed by the active text, state, or existence branch, preserving compound locator constraints and the 10-second inspection budget. Input-text post-verification omits the unused visibility read while retaining target-identity, enabled-state, password/readability, bounds, and exact-text checks.
 - Android retains pending Session, managed-runtime, and owner-thread resources until cleanup is proven complete, blocks implicit reconstruction after session failure, and consumes the SDK's public uncertain terminal-disposal contract instead of private lease state. Terminal disposal is local/owned-resource settlement, not confirmed remote Session closure.
 - Coding Agent runtime cleanup failures remain independently visible alongside execution failures and cancellation instead of being reduced to warnings or masked by a completed final answer.
+- Android close returns normally after an unconfirmed remote quit is taken over by fully completed public terminal disposal and all owned resources settle. Safe diagnostics preserve the unconfirmed DELETE; pending disposal, managed scope, or worker cleanup still fails visibly.
+- Main-execution turn-budget exhaustion returns a complete inconclusive task result with a validated, explicitly runtime-generated terminal summary and no additional verifier request. Configured turn limits, real execution evidence, and independent cleanup/error precedence remain unchanged.
+- Artifact search reports bounded Run-local repeated-search diagnostics across interleaved artifacts, provides character-offset slice/refinement guidance, and preserves saved-text offsets across Unicode lowercase expansion without implying a fresh UI observation.
 
 ### Integration status
 

@@ -289,11 +289,13 @@ async def test_runtime_cancellation_during_failure_reporting_keeps_cleanup_visib
     settings.output.runs_dir = tmp_path
     monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=Engine())
+    invocation = (
+        runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "report-cancel", event_sink)
+        if operation == "run_pre_plan"
+        else _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "report-cancel", event_sink)
+    )
     with pytest.raises(asyncio.CancelledError) as failure:
-        if operation == "run_pre_plan":
-            await runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "report-cancel", event_sink)
-        else:
-            await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "report-cancel", event_sink)
+        await invocation
     assert failure.value is cancellation
     assert cancellation.__cause__ is cleanup_error
 
@@ -335,13 +337,14 @@ async def test_runtime_retains_failed_cleanup_and_rejects_reuse(tmp_path, monkey
     resources = {"harness": harness, "provider": session}
     assert runtime._pending_cleanup == [(resources[name], cleanup_errors[name]) for name in failed_resources]
 
+    if operation == "run_pre_plan":
+        invocation = runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "no-rebuild")
+    elif operation == "run_verification":
+        invocation = runtime.run_verification(Task(description="Test"), [], "no-rebuild")
+    else:
+        invocation = _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "no-rebuild")
     with pytest.raises(ConfigurationError, match="unresolved owned-resource cleanup") as failure:
-        if operation == "run_pre_plan":
-            await runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "no-rebuild")
-        elif operation == "run_verification":
-            await runtime.run_verification(Task(description="Test"), [], "no-rebuild")
-        else:
-            await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "no-rebuild")
+        await invocation
     _assert_cleanup_errors(failure.value.__cause__, list(cleanup_errors.values()))
     assert constructed == ["provider", "harness"]
 
@@ -628,6 +631,118 @@ async def test_runtime_classifies_durable_evidence_failure_separately_from_model
     assert results[0].tool_output["failure_category"] == "artifact_error"
     assert results[0].tool_output["failure_reason"] == "evidence_persistence"
     assert results[0].actual_outcome == "Agent runtime stopped because durable execution evidence failed."
+
+
+@pytest.mark.asyncio
+async def test_main_turn_limit_returns_complete_inconclusive_task_result(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from fsq_agent.agent import FsqAgent
+    from fsq_agent.core import ArtifactStore
+    from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService, load_run_metadata
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.agent_runtime.max_turns = 100
+    settings.workspace.root_dir = tmp_path
+    settings.output.runs_dir = tmp_path / "runs"
+    settings.agent_runtime.user_config_root = tmp_path / "user"
+    requests, closed = [], []
+    events = []
+
+    def event_sink(event):
+        if event.payload.get("termination_reason") == "max_turns":
+            assert closed == ["harness", "provider"]
+        events.append(event)
+
+    class Harness(_FakeHarness):
+        def close(self):
+            closed.append("harness")
+
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            store = ArtifactStore(self.run_dir)
+            if kind == "ui_snapshot":
+                return store.write_json(kind=kind, step_id=step_id, phase=phase, name=reason, payload={"xml": "<hierarchy/>"})
+            return store.write_bytes(kind=kind, step_id=step_id, phase=phase, name=reason, data=b"controlled-observation")
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            closed.append("provider")
+
+    class BudgetEngine:
+        async def run(self, model, request, *, on_event=None):
+            requests.append(request)
+            action = next(tool for tool in request.tools if tool.name == "tap_on")
+            await action.invoke(ToolCall(name="tap_on", arguments={"target": "controlled-target"}, call_id="before-limit"))
+            raise EngineError("max_turns", "Main execution exhausted its turn budget.")
+
+    def harness_factory(run_id):
+        harness = Harness()
+        harness.run_dir = settings.output.runs_dir / run_id
+        return harness
+
+    monkeypatch.setattr("fsq_agent.agent._core.refresh_model_provider_session", lambda _: SimpleNamespace(close_sync=lambda: None))
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), harness_factory, engine=BudgetEngine())
+    agent = FsqAgent.from_settings(settings, runtime_factory=lambda *_args, **_kwargs: runtime)
+    task = Task(id="turn-limit", description="Complete the controlled goal.", key_actions=["Inspect the goal state"], verification_goal="The controlled goal is complete.")
+    result = await DynamicExecutionService(agent=agent).execute(DynamicExecutionRequest(task=task, settings=settings, event_sink=event_sink))
+    task_result = result.task_result
+    directory = settings.output.runs_dir / task_result.report.run_id
+    frozen = json.loads((directory / "execution-result.json").read_text())
+    runners = [step for step in task_result.steps if step.tool_name == "agent_runtime.runner"]
+    assert len(runners) == 1
+    assert runners[0].status == "success"
+    output = AgentFinalOutput.model_validate(runners[0].tool_output)
+    assert output.status == task_result.status == task_result.verification.status == frozen["outcome"] == "inconclusive"
+    assert output.summary == task_result.verification.summary
+    assert output.summary.strip()
+    assert output.satisfied_criteria == output.evidence == []
+    assert any("max_turns" in error for error in output.errors)
+    assert len(requests) == 1
+    assert requests[0].max_turns == 100
+    assert closed == ["harness", "provider"]
+    assert frozen["counts"]["total"] == frozen["counts"]["passed"] == 1
+    assert load_run_metadata(directory).status == "inconclusive"
+    assert task_result.report.path.is_file()
+    (tmp_path / "task-result.json").write_text(task_result.model_dump_json(), encoding="utf-8")
+    assert any(event.payload.get("termination_reason") == "max_turns" for event in events)
+    assert runtime._turn_limit_result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resource", ["harness", "provider"])
+async def test_main_turn_limit_does_not_hide_pending_cleanup(tmp_path, monkeypatch, resource):
+    primary = EngineError("max_turns", "Main execution exhausted its turn budget.")
+    cleanup = OSError("Owned resource remains pending.")
+    closed = []
+    events = []
+
+    class Harness(_FakeHarness):
+        def close(self):
+            closed.append("harness")
+            if resource == "harness":
+                raise cleanup
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            closed.append("provider")
+            if resource == "provider":
+                raise cleanup
+
+    class BudgetEngine:
+        async def run(self, model, request, *, on_event=None):
+            raise primary
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: Harness(), engine=BudgetEngine())
+    with pytest.raises(ExceptionGroup) as failure:
+        await _run_in_context(runtime, Task(description="Exhaust turns"), KnowledgeBundle(), [], "pending-limit", events.append)
+    assert failure.value.exceptions == (primary, cleanup)
+    assert closed == ["harness", "provider"]
+    assert not any(event.payload.get("termination_reason") == "max_turns" for event in events)
+    assert runtime._turn_limit_result is None
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,19 @@ Instances satisfy `AndroidDriverInterface`; the concrete backend class is privat
 
 Successful text entry requires a bounded read-only postcondition check of the resolved target's text after replacement. The observed value must equal the requested string, including empty strings and Unicode text. A non-throwing backend call is not proof of acceptance. Rejected writes, mismatched values, unreadable or masked values, and targets that cannot be verified after entry do not produce success. The driver performs no implicit write retry, alternative-target selection, or focus-only keyboard fallback.
 
+`input_text` pre-entry inspection requests `("type", "id", "package", "enabled", "displayed", "password", "text", "bounds")` to establish editability, visibility, readability, and target identity. Post-entry verification requests only `("type", "id", "package", "enabled", "password", "text", "bounds")`; it does not request the unused `displayed` attribute. Target-identity, enabled-state, unmasked-readability, bounds-binding, and exact-text postconditions remain unchanged.
+
+`assert_state` (`assert`) requests only the attributes required by its active assertion branch, without changing its public parameters, text-predicate precedence, target-uniqueness checks, or result semantics:
+
+- The text-assertion branch requests only `("text",)`, including when an element also supplies state predicates; the existing text branch retains precedence and the driver does not add state assertions that branch does not evaluate.
+- A state-only assertion requests exactly the explicitly supplied boolean state fields, including expected `False`, once each in canonical order `("enabled", "checked", "selected", "clickable", "focused")`. Unasserted fields are not requested.
+- A locator-only existence assertion requests only `("enabled",)` as the single observation needed to use the SDK's non-empty inspection contract. Its success requires unique target resolution, not an enabled value of `True`; this does not turn existence into an enabled-state or visibility assertion.
+- `assert_visible` and `assert_not_visible` request only `("displayed",)` and retain their existing visibility, absence, and ambiguity semantics.
+
+The reduced `assert_state` inspection retains `OperationControl(timeout_seconds=10.0)` and the existing semantic-wait and cancellation behavior. Its existing target-not-found semantic polling is preserved; operation timeouts and response-unknown failures remain operational non-successes, without business retry, implicit reconnection, or timeout expansion. Visibility assertions retain their existing polling policies. Attribute selection does not change initial idle policy, SDK-internal attribute dependencies, evidence capture, reports, or cleanup.
+
+Locators use only the supported SDK `Session.element` strategies `id`, `accessibility id`, and `xpath`. A single resource-id or accessibility-id retains its existing native strategy; compound string locator fields retain conjunctive XPath semantics. Expected boolean states are assertion predicates, not locator predicates. The driver neither emits unsupported `-android uiautomator` or `class name` strategies nor drops compound constraints to choose a faster but different target.
+
 `ui_snapshot` (`uiTree`) consumes public `Session.observe_tree()` `TreeObservation` and deterministically synthesizes compact Android `<hierarchy>` XML in `{"xml": ..., "coverage": ..., "compaction": ...}`. It preserves `resource-id`, `content-desc`, `text`, `class`, `package`, `bounds`, `window-id`, and non-default boolean states (`enabled="false"`, `displayed="false"`, `focused="true"`, `checked="true"`, `selected="true"`), folds meaningless layout-only wrapper nodes, clips `text` and `content-desc` to the first 50 characters, and falls back safely to complete unfolded `TreeObservation` XML serialization on unexpected compaction errors without accessing any private `_driver` handle.
 
 On first session-requiring operation, the driver lazily binds on its dedicated single-worker thread (`ThreadPoolExecutor(max_workers=1)`), allocates an ephemeral loopback TCP port (`127.0.0.1`), enters `Runtime.start_managed(...)`, and creates an Automation `Session` with `auto_launch=False`, `force_app_launch=False`, `no_reset=True`, `full_reset=False`, and `should_terminate_app=False`.
@@ -54,6 +67,8 @@ Primary action/session failures and secondary cleanup failures remain independen
 ## Verification Scope
 
 Isolated device-free lifecycle verification consumes the real pinned SDK's public terminal-disposal contract and exercises pending ownership, explicit continuation, owned-resource settlement, failure propagation, and cancellation without mocking the lifecycle or usage authority under proof. It makes no device, application, or model calls and does not use or mutate shared SDK records, locks, frozen installations, or historical Run evidence.
+
+Device-free assertion verification uses the real SDK and Appium client with an isolated protocol peer to establish that unrequested assertion attributes are not fetched, requested predicates still govern consumer-visible results, and target ambiguity, unavailable values, cancellation, and response-unknown failures retain their existing semantics. It preserves SDK-internal reads required by a requested attribute, such as the `checkable` dependency of `checked`; it does not promise one HTTP request per attribute or a fixed device-side latency.
 
 ## Current Invariants
 

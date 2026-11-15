@@ -8,6 +8,7 @@ import os
 import signal
 import sys
 import threading
+from asyncio import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -75,6 +76,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         record({'method': 'GET', 'path': self.path})
         if self.path == base + '/status':
             self.respond({'ready': True, 'build': {'version': '3.7.0'}})
+        elif self.path.startswith(base + '/session/isolated-session/element/isolated-element/'):
+            current = json.loads(entry.read_text())
+            suffix = self.path.removeprefix(base + '/session/isolated-session/element/isolated-element/')
+            name = suffix.removeprefix('attribute/')
+            attributes = current.get('attributes', {})
+            if name not in attributes or (current.get('written') and name == 'displayed'):
+                self.send_error(500, 'Unexpected attribute read')
+            elif attributes[name] == '__stall__':
+                while True:
+                    time.sleep(1)
+            else:
+                self.respond(attributes[name])
         elif self.path == base + '/session/isolated-session/screenshot':
             # Keep the request unanswered until the real client deadline expires.
             # The entire peer, including this daemon thread, belongs to the SDK PGID.
@@ -94,7 +107,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.respond({'capabilities': {}})
             else:
                 self.respond({'sessionId': 'isolated-session', 'capabilities': {'platformName': 'Android', 'appium:automationName': 'UiAutomator2'}})
+        elif self.path == base + '/session/isolated-session/elements':
+            current = json.loads(entry.read_text())
+            if payload != current.get('selector'):
+                self.send_error(400, 'Unexpected locator strategy or constraint')
+            else:
+                identifiers = ['isolated-element', 'another-element'][:current.get('match_count', 1)]
+                self.respond([{'element-6066-11e4-a52e-4f735466cecf': identifier} for identifier in identifiers])
+        elif self.path == base + '/session/isolated-session/element/isolated-element/click':
+            self.respond(None)
         elif self.path == base + '/session/isolated-session/execute/sync':
+            if payload.get('script') == 'mobile: replaceElementValue':
+                current = json.loads(entry.read_text())
+                current['attributes']['text'] = payload['args'][0]['text']
+                current['attributes']['password'] = current.get('password_after', False)
+                current['written'] = True
+                entry.write_text(json.dumps(current))
             self.respond(None)
         else:
             self.send_error(404)
@@ -129,8 +157,8 @@ class _IsolatedManagedDriver:
     def lock_path(self) -> Path:
         return self.root.parent / "Library" / "Application Support" / "appium-connect-agent" / "runtime.lock"
 
-    def mode(self, value: str) -> None:
-        _write_json(self.entry, {"mode": value, "journal": str(self.journal)})
+    def mode(self, value: str, **options: object) -> None:
+        _write_json(self.entry, {"mode": value, "journal": str(self.journal), **options})
 
     def events(self) -> list[dict[str, Any]]:
         return [json.loads(line) for line in self.journal.read_text().splitlines()]
@@ -547,3 +575,122 @@ def test_initial_idle_policy_reaches_real_sdk_wire_and_preserves_owned_cleanup(m
     else:
         assert type(caps[key]) is int
         assert caps[key] == expected
+
+
+_ASSERT_LOCATOR = {"resourceId": "com.example.isolated:id/fab", "accessibilityId": "Pause"}
+_ASSERT_SELECTOR = {"using": "xpath", "value": "//*[@resource-id='com.example.isolated:id/fab' and @content-desc='Pause']"}
+
+
+@pytest.mark.parametrize(
+    ("predicate", "attributes", "expected_output", "reads"),
+    [
+        ({"element": {**_ASSERT_LOCATOR, "enabled": True}}, {"enabled": True}, {"enabled": True}, ["attribute/enabled"]),
+        ({"element": {**_ASSERT_LOCATOR, "enabled": False}}, {"enabled": False}, {"enabled": False}, ["attribute/enabled"]),
+        (
+            {"element": {**_ASSERT_LOCATOR, "focused": False, "selected": True, "enabled": True}},
+            {"enabled": True, "selected": True, "focused": False},
+            {"enabled": True, "selected": True, "focused": False},
+            ["attribute/enabled", "attribute/selected", "attribute/focused"],
+        ),
+        ({"element": {**_ASSERT_LOCATOR, "checked": True}}, {"checkable": True, "checked": True}, {"checked": True}, ["attribute/checkable", "attribute/checked"]),
+        ({"element": {**_ASSERT_LOCATOR, "enabled": False}, "text": {"contains": "running"}}, {"text": "running clock"}, {"text": "running clock"}, ["text"]),
+        ({"element": _ASSERT_LOCATOR, "text": {"equals": "running"}}, {"text": "running"}, {"text": "running"}, ["text"]),
+        ({"element": _ASSERT_LOCATOR}, {"enabled": False}, {"exists": True}, ["attribute/enabled"]),
+        ({"element": _ASSERT_LOCATOR}, {"enabled": None}, {"exists": True}, ["attribute/enabled"]),
+    ],
+)
+def test_assertion_reads_only_needed_attributes_through_real_client(
+    managed_driver: _IsolatedManagedDriver,
+    predicate: dict[str, object],
+    attributes: dict[str, object],
+    expected_output: dict[str, object],
+    reads: list[str],
+) -> None:
+    managed_driver.mode("inspect", selector=_ASSERT_SELECTOR, attributes=attributes)
+    result = managed_driver.driver.assert_state(predicate)
+    assert result == {"status": "passed", "output": expected_output}
+    owner = _observe_owner(managed_driver)
+    managed_driver.driver.close()
+    _assert_owner_settled(managed_driver, owner, state="closed")
+    events = managed_driver.events()
+    queries = [event for event in events if event.get("path", "").endswith("/elements")]
+    assert len(queries) == 1
+    assert queries[0]["body"] == _ASSERT_SELECTOR
+    prefix = "/session/isolated-session/element/isolated-element/"
+    assert [event["path"].removeprefix(prefix) for event in events if event.get("method") == "GET" and event["path"].startswith(prefix)] == reads
+
+
+@pytest.mark.parametrize("actual", [False, None])
+def test_minimal_state_read_still_fails_mismatched_or_unknown_value(managed_driver: _IsolatedManagedDriver, actual: bool | None) -> None:
+    managed_driver.mode("inspect", selector=_ASSERT_SELECTOR, attributes={"enabled": actual})
+    result = managed_driver.driver.assert_state({"element": {**_ASSERT_LOCATOR, "enabled": True}})
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "assertion_error"
+    assert result["output"] == {"field": "enabled", "expected": True, "actual": actual}
+
+
+def test_minimal_inspection_still_rejects_ambiguous_target(managed_driver: _IsolatedManagedDriver) -> None:
+    managed_driver.mode("inspect", selector=_ASSERT_SELECTOR, attributes={"enabled": True}, match_count=2)
+    result = managed_driver.driver.assert_state({"element": {**_ASSERT_LOCATOR, "enabled": True}})
+    assert result["status"] == "failed"
+    assert result["metadata"] == {"reason": "target_ambiguous"}
+    assert not any("/attribute/" in event.get("path", "") for event in managed_driver.events())
+
+
+def test_minimal_inspection_preserves_real_timeout_quarantine_and_disposal(managed_driver: _IsolatedManagedDriver) -> None:
+    managed_driver.mode("inspect", selector=_ASSERT_SELECTOR, attributes={"enabled": "__stall__"})
+    result = managed_driver.driver.assert_state({"element": {**_ASSERT_LOCATOR, "enabled": True}})
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "action_error"
+    assert result["metadata"] == {"backend_code": "operation_timeout", "request_state": "response_unknown"}
+    owner = _observe_owner(managed_driver)
+    assert owner.session.session_info().state == "uncertain"
+    events = managed_driver.events()
+    quarantined = managed_driver.driver.assert_state({"element": {**_ASSERT_LOCATOR, "enabled": True}})
+    assert quarantined["status"] == "failed"
+    assert managed_driver.events() == events
+    managed_driver.driver.close()
+    _assert_owner_settled(managed_driver, owner)
+
+
+def test_minimal_inspection_propagates_real_cancellation_without_request(managed_driver: _IsolatedManagedDriver, monkeypatch: pytest.MonkeyPatch) -> None:
+    from appium_connect_agent.runtime import OperationControl
+
+    managed_driver.mode("inspect", selector=_ASSERT_SELECTOR, attributes={"enabled": True})
+    assert managed_driver.driver.launch_app({})["status"] == "passed"
+    before = managed_driver.events()
+    cancellation = threading.Event()
+    cancellation.set()
+    with monkeypatch.context() as patch:
+        patch.setattr(managed_driver.driver, "_operation_control", lambda timeout_seconds: OperationControl(timeout_seconds=timeout_seconds, cancellation=cancellation))
+        with pytest.raises(CancelledError):
+            managed_driver.driver.assert_state({"element": {**_ASSERT_LOCATOR, "enabled": True}})
+    assert managed_driver.events() == before
+
+
+@pytest.mark.parametrize("password_after", [False, True])
+def test_input_postread_omits_displayed_without_losing_password_guard(managed_driver: _IsolatedManagedDriver, password_after: bool) -> None:
+    locator = {"resourceId": "com.example.isolated:id/input"}
+    attributes = {
+        "class": "android.widget.EditText",
+        "resource-id": locator["resourceId"],
+        "package": "com.example.isolated",
+        "enabled": True,
+        "displayed": True,
+        "password": False,
+        "text": "before",
+        "rect": {"x": 0, "y": 0, "width": 100, "height": 40},
+    }
+    managed_driver.mode("inspect", selector={"using": "id", "value": locator["resourceId"]}, attributes=attributes, password_after=password_after)
+    result = managed_driver.driver.input_text({"locator": locator, "text": "中文 café 👩🏽‍💻"})
+    if password_after:
+        assert result["status"] == "failed"
+        assert result["metadata"] == {"reason": "verification_unavailable"}
+        assert "中文" not in str(result)
+    else:
+        assert result == {"status": "passed", "output": None}
+    events = managed_driver.events()
+    replacement = next(index for index, event in enumerate(events) if event.get("body", {}).get("script") == "mobile: replaceElementValue")
+    prefix = "/session/isolated-session/element/isolated-element/"
+    reads = [event["path"].removeprefix(prefix) for event in events[replacement + 1 :] if event.get("method") == "GET" and event["path"].startswith(prefix)]
+    assert reads == ["attribute/class", "attribute/resource-id", "attribute/package", "attribute/enabled", "attribute/password", "text", "rect"]

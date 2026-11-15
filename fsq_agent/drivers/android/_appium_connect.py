@@ -75,13 +75,14 @@ ANDROID_INSPECT_INPUT_ATTRIBUTES = (
     "text",
     "bounds",
 )
-ANDROID_INSPECT_ASSERT_ATTRIBUTES = (
-    "text",
+ANDROID_INSPECT_INPUT_POST_ATTRIBUTES = (
+    "type",
+    "id",
+    "package",
     "enabled",
-    "checked",
-    "selected",
-    "clickable",
-    "focused",
+    "password",
+    "text",
+    "bounds",
 )
 ANDROID_PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 ANDROID_LOCAL_RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -484,7 +485,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
 
         try:
             inspection = element.inspect(
-                attributes=ANDROID_INSPECT_INPUT_ATTRIBUTES,
+                attributes=ANDROID_INSPECT_INPUT_POST_ATTRIBUTES,
                 control=self._operation_control(10.0),
             )
             after = self._attributes_dict(inspection)
@@ -744,12 +745,15 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
     def _assert_state_impl(self, params: AndroidAssertStateParams) -> dict[str, object]:
         data = self._param_data(params)
         session = self._ensure_session()
+        expected_text = data.get("text")
+        element_payload = data.get("element")
+        expected_states = self._expected_element_states(element_payload) if isinstance(element_payload, dict) else {}
+        attributes = ("text",) if isinstance(expected_text, dict) else tuple(expected_states) or ("enabled",)
         element = self._resolve_element(session, data, locator_key="element")
-        attrs, resolution_error = self._wait_for_assert_attributes(element, data)
+        attrs, resolution_error = self._wait_for_assert_attributes(element, data, attributes)
         if resolution_error is not None or attrs is None:
             return resolution_error or self._target_missing(data)
 
-        expected_text = data.get("text")
         if isinstance(expected_text, dict):
             actual = self._attr_value(attrs, "text")
             if not isinstance(actual, str):
@@ -762,9 +766,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 return self._passed({"text": actual})
             return self._failed("assertion_error", "Text assertion failed.", output={"text": actual})
 
-        element_payload = data.get("element")
         if isinstance(element_payload, dict):
-            expected_states = self._expected_element_states(element_payload)
             if expected_states:
                 passed: dict[str, bool] = {}
                 for field, expected in expected_states.items():
@@ -785,12 +787,13 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         self,
         element: Any,
         data: dict[str, object],
+        attributes: tuple[str, ...],
     ) -> tuple[dict[str, tuple[str, object]] | None, dict[str, object] | None]:
         deadline = time.monotonic() + DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS
         while True:
             try:
                 inspection = element.inspect(
-                    attributes=ANDROID_INSPECT_ASSERT_ATTRIBUTES,
+                    attributes=attributes,
                     control=self._operation_control(10.0),
                 )
                 return self._attributes_dict(inspection), None

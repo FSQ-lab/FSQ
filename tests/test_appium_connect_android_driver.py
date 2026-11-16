@@ -1126,8 +1126,8 @@ def test_missing_or_failed_display_api_is_explicit_and_never_uses_tree(monkeypat
     [
         ("up", (60, 99, 60, 20)),
         ("down", (60, 20, 60, 99)),
-        ("left", (109, 60, 10, 60)),
-        ("right", (10, 60, 109, 60)),
+        ("left", (84, 60, 10, 60)),
+        ("right", (35, 60, 110, 60)),
     ],
 )
 def test_element_swipe_uses_unique_current_bounds_and_single_public_gesture(direction: str, expected: tuple[int, ...]) -> None:
@@ -1480,3 +1480,64 @@ def test_coordinate_recording_uses_action_display_not_earlier_context(action_nam
         assert execution.output == expected_output
     finally:
         harness.close()
+
+
+@pytest.mark.parametrize(
+    ("direction", "fraction", "bounds", "expected"),
+    [
+        ("right", 1.0, (42, 357, 1038, 483), (105, 420, 1038, 420)),
+        ("left", 1.0, (42, 357, 1038, 483), (974, 420, 42, 420)),
+        ("right", 0.5, (42, 357, 1038, 483), (291, 420, 788, 420)),
+        ("left", 0.5, (42, 357, 1038, 483), (788, 420, 291, 420)),
+        ("right", 1.0, (0, 357, 1080, 483), (63, 420, 1079, 420)),
+        ("left", 1.0, (0, 357, 1080, 483), (1016, 420, 0, 420)),
+        ("right", 1.0, (42, 357, 44, 483), (42, 420, 44, 420)),
+        ("left", 1.0, (42, 357, 44, 483), (43, 420, 42, 420)),
+        ("right", 0.5, (42, 357, 46, 483), (43, 420, 44, 420)),
+        ("left", 0.5, (42, 357, 46, 483), (44, 420, 43, 420)),
+    ],
+)
+def test_horizontal_element_swipe_uses_interior_start_and_exact_full_right_endpoint(direction, fraction, bounds, expected) -> None:
+    session = FakeSession()
+    session.element_attrs["bounds"] = ("value", _bounds(*bounds))
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        result = driver.swipe({"locator": {"resourceId": "slider"}, "direction": direction, "percent": fraction})
+    finally:
+        driver.close()
+    assert result["status"] == "passed"
+    assert [call for call in session.calls if call[0] == "swipe_between"] == [("swipe_between", *expected, 200)]
+    assert [call[-1] for call in session.calls if call[0] == "inspect"] == [("bounds",)]
+
+
+@pytest.mark.parametrize("slow_stage", ["pre_inspection", "identity_binding", "post_verification"])
+def test_input_text_slow_inspection_within_operation_budget_preserves_single_verified_write(monkeypatch: pytest.MonkeyPatch, slow_stage: str) -> None:
+    session = FakeSession(text="original")
+    original_inspect = FakeElement.inspect
+    stages = []
+
+    def inspect(self, *, attributes=(), wait_timeout_seconds=None, control=None):
+        if attributes == ("type", "id", "package", "bounds"):
+            stage = "identity_binding"
+        elif any(call[0] == "replace_element_value" for call in session.calls):
+            stage = "post_verification"
+        else:
+            stage = "pre_inspection"
+        stages.append(stage)
+        # Model a single read-only operation completing after nine idle-waiting
+        # HTTP requests, without sleeping or touching a real SDK Session.
+        if stage == slow_stage and control.timeout_seconds < 10.08:
+            raise CommandError("operation_timeout", "read-only inspection exceeded its control budget")
+        return original_inspect(self, attributes=attributes, wait_timeout_seconds=wait_timeout_seconds, control=control)
+
+    monkeypatch.setattr(FakeElement, "inspect", inspect)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        result = driver.input_text({"locator": {"resourceId": "com.example.app:id/input"}, "text": "verified replacement"})
+    finally:
+        driver.close()
+    assert result["status"] == "passed"
+    assert session.text == "verified replacement"
+    assert stages == ["pre_inspection", "identity_binding", "post_verification"]
+    assert sum(call[0] == "click" for call in session.calls) == 1
+    assert sum(call[0] == "replace_element_value" for call in session.calls) == 1

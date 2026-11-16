@@ -547,7 +547,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             try:
                 # Bind the observed raw identity before mutation; never re-use mutable text or a positional selector.
                 element = session.element("id", before_id, raw_id=ANDROID_STANDARD_RESOURCE_ID.fullmatch(before_id) is None)
-                bound = self._attributes_dict(element.inspect(attributes=ANDROID_INPUT_BINDING_ATTRIBUTES, control=self._operation_control(10.0)))
+                bound = self._attributes_dict(element.inspect(attributes=ANDROID_INPUT_BINDING_ATTRIBUTES, control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS)))
             except Exception as exc:  # noqa: BLE001 - Sanitize arbitrary SDK/client failures; cancellation is re-raised below.
                 self._propagate_if_cancelled(exc)
                 return self._input_failure(exc, "verification_unavailable", "identity_binding", "Input target identity could not be established.")
@@ -566,7 +566,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         try:
             inspection = element.inspect(
                 attributes=ANDROID_INSPECT_INPUT_POST_ATTRIBUTES,
-                control=self._operation_control(10.0),
+                control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS),
             )
             after = self._attributes_dict(inspection)
         except Exception as exc:  # noqa: BLE001 - Sanitize observed text from SDK/client failures; preserve cancellation below.
@@ -596,7 +596,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             try:
                 inspection = element.inspect(
                     attributes=ANDROID_INSPECT_INPUT_ATTRIBUTES,
-                    control=self._operation_control(10.0),
+                    control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS),
                 )
                 return self._attributes_dict(inspection), None
             except Exception as exc:  # noqa: BLE001
@@ -733,6 +733,18 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             if low >= high:
                 return self._failed("action_error", "Element swipe collapses to fewer than two physical pixels.")
             start_axis, end_axis = (high, low) if direction in {"up", "left"} else (low, high)
+            if horizontal:
+                inset = min(element_height // 2, element_width // 4)
+                if direction == "right":
+                    if fraction == 1.0:
+                        end_axis = min(width - 1, x + element_width)
+                    inset_start = max(start_axis, x + inset)
+                    if inset_start < end_axis:
+                        start_axis = inset_start
+                else:
+                    inset_start = min(start_axis, x + element_width - 1 - inset)
+                    if inset_start > end_axis:
+                        start_axis = inset_start
             sx, sy, ex, ey = (start_axis, y + element_height // 2, end_axis, y + element_height // 2) if horizontal else (x + element_width // 2, start_axis, x + element_width // 2, end_axis)
         else:
             sx, sy, ex, ey = self._swipe_points(direction, width, height)

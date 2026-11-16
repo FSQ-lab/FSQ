@@ -78,6 +78,17 @@ def test_web_target_checks_are_static_and_do_not_construct_driver(tmp_path: Path
     assert service.check_target_availability(settings)[0] is True
 
 
+@pytest.fixture
+def ready_android_runtime(monkeypatch):
+    from fsq_agent.models import PlatformPrerequisiteCheck
+
+    monkeypatch.setattr(
+        "fsq_agent.environments.providers._android._check_appium_connect_runtime",
+        lambda: PlatformPrerequisiteCheck(identifier="appium_connect_runtime", status="ready", message="Isolated host runtime fixture."),
+    )
+
+
+@pytest.mark.usefixtures("ready_android_runtime")
 def test_android_target_requires_exact_online_device_and_installed_app(monkeypatch) -> None:
     monkeypatch.setattr("fsq_agent.environments.providers._android.shutil.which", lambda _: "/adb")
     from fsq_agent.models import AndroidDevice, AndroidDeviceDiscoveryResult
@@ -101,6 +112,7 @@ def test_android_target_requires_exact_online_device_and_installed_app(monkeypat
     assert calls == [("device-2", "com.example.app")]
 
 
+@pytest.mark.usefixtures("ready_android_runtime")
 def test_android_target_fails_when_application_is_absent(monkeypatch) -> None:
     monkeypatch.setattr("fsq_agent.environments.providers._android.shutil.which", lambda _: "/adb")
     from fsq_agent.models import AndroidDevice, AndroidDeviceDiscoveryResult

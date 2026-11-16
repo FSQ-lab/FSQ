@@ -372,7 +372,7 @@ def diagnosis(ready=True, provider=True, target="two"):
 def test_start_preflight_provider_free_strict_and_failure(monkeypatch):
     from fsq_agent.adapters.control_plane._readiness import AndroidPreflightError, require_android_preflight
 
-    monkeypatch.setattr("fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings", lambda _: diagnosis(provider=False))
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings", lambda _, **_kwargs: diagnosis(provider=False))
     require_android_preflight(settings("two"), "strict")
     with pytest.raises(AndroidPreflightError):
         require_android_preflight(settings("two"), "strict", requires_provider=True)
@@ -451,11 +451,12 @@ def test_strict_preflight_uses_effective_app_on_selected_device(monkeypatch, tmp
     case.write_text("schemaVersion: fsq.ai-test/v1\nname: flow\nplatform: android\nappId: com.case.app\n---\n- waitMs:\n    duration_ms: 1\n", encoding="utf-8")
     seen = []
     monkeypatch.setattr(
-        "fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings", lambda value: seen.append((value.harness.android.serial, value.harness.android.app_id)) or diagnosis(provider=False)
+        "fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings",
+        lambda value, **kwargs: seen.append((value.harness.android.serial, value.harness.android.app_id, kwargs.get("provider_checks"))) or diagnosis(provider=False),
     )
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.require_provider", lambda *_args: pytest.fail("Provider-free Strict must not require Provider"))
     prepared = prepare_run(request_id="qa", settings=current, body={"workspaceName": "test", "platform": "android", "targetId": "two", "mode": "strict", "casePath": "flow.fsq.yaml"})
-    assert seen == [("two", expected)]
+    assert seen == [("two", expected, False)]
     assert prepared.settings.harness.android.app_id == expected
     assert current.harness.android.app_id == workspace_app
     assert current.harness.android.serial is None

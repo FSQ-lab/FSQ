@@ -1885,7 +1885,7 @@ def test_harness_tool_adapter_builds_macos_bindings_with_strict_schema_requireme
     from fsq_agent.core.harness._macos import MacOSHarness
 
     class SchemaOnlyEvaluator:
-        def evaluate(self, request: Any) -> Any:
+        def evaluate(self, request: Any, *, cancellation_check=None) -> Any:
             raise AssertionError(f"Schema construction must not invoke the evaluator: {request!r}")
 
     harness = MacOSHarness(

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Never, Protocol
 
-from fsq_agent._capability_bootstrap import build_capability_registry, provider_required_capability_names, steps_require_provider
+from fsq_agent._capability_bootstrap import ai_assertion_capability_names, build_capability_registry, steps_require_provider
 from fsq_agent.ai_services import CaseSuggestionAnalysis, build_ai_assertion_evaluator
 from fsq_agent.application.contracts import (
     ApplicationError,
@@ -108,13 +108,16 @@ def execute_case_test(
         RunLifecycleService.preflight_steps([step for steps in resolved_steps.values() for step in steps], runtime_secret_store, registry=registry)
     except ConfigurationError as exc:
         raise _invalid_case_error(exc) from exc
-    requires_ai = any(steps_require_provider(steps, snapshot, provider_required_capability_names(request.platform)) for steps in resolved_steps.values())
+    requires_ai = any(steps_require_provider(steps, snapshot, ai_assertion_capability_names(request.platform)) for steps in resolved_steps.values())
     validate_strict_core_settings(settings, requires_ai_assertion=requires_ai)
     android_serial: str | None = None
     if request.platform == "android":
         android_serial = _resolve_android_run_serial(settings)
         settings = settings.model_copy(deep=True)
         settings.harness.android.serial = android_serial
+        settings.harness.android.visual_assertion_policy = settings.harness.android.visual_assertion_policy.model_copy(
+            update={"provider_available": bool(settings.agent_runtime.provider and settings.agent_runtime.model)}
+        )
     workspace_name = _registered_workspace_name(workspace.workspace)
     metadata = allocate_run(
         workspace=workspace.workspace,
@@ -132,7 +135,8 @@ def execute_case_test(
     execution_failed = False
     try:
         metadata = transition_run(run_dir, metadata, "running")
-        evaluator = build_ai_assertion_evaluator(settings) if requires_ai else None
+        if requires_ai and request.platform != "android":
+            evaluator = build_ai_assertion_evaluator(settings)
         harness = HarnessFactory().create_harness(
             platform=request.platform,
             harness_settings=settings.harness,
@@ -217,7 +221,7 @@ def execute_case_test(
     else:
         # Explicit collaborator compatibility: injected legacy runners may return a stored report.
         legacy_status, summary = _report_status(artifact.path)
-        status = "success" if legacy_status == "passed" else "failed"
+        status = {"passed": "success", "incomplete": "inconclusive"}.get(legacy_status, legacy_status)
     suggestion_path = None
     candidate_case_path = None
     warnings = ["case.suffix_deprecated: rename this Case to *.fsq.yaml"] if case_path.name.endswith(".codex.yaml") else []
@@ -313,9 +317,19 @@ def _invalid_case_error(error: ConfigurationError) -> ApplicationError:
 def _report_status(path: Path) -> tuple[str, str]:
     payload = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     summary = payload.get("summary", {})
-    status = str(summary.get("status", "failed"))
+    status = str(summary.get("status", "inconclusive"))
+    if status not in {"passed", "success", "failed", "inconclusive", "incomplete", "cancelled", "error"}:
+        status = "inconclusive"
     failed = summary.get("failed_steps", 0)
-    return status, "Case passed." if status == "passed" else f"Case failed with {failed} failed step(s)."
+    messages = {
+        "passed": "Case passed.",
+        "success": "Case passed.",
+        "inconclusive": "Case remains unverified.",
+        "incomplete": "Case remains unverified.",
+        "cancelled": "Case cancelled.",
+        "error": "Case encountered an infrastructure error.",
+    }
+    return status, messages.get(status, f"Case failed with {failed} failed step(s).")
 
 
 def _best_effort_terminal(run_dir: Path, metadata, status: str) -> None:

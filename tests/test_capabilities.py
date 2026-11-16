@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from fsq_agent._capability_bootstrap import build_capability_registry, provider_required_capability_names, steps_require_provider
+from fsq_agent._capability_bootstrap import ai_assertion_capability_names, build_capability_registry, provider_required_capability_names, steps_require_provider
 from fsq_agent.capabilities import (
     CapabilityActionDefinition,
     capability,
@@ -73,9 +73,13 @@ def test_provider_requirement_is_derived_from_platform_registry_metadata(platfor
     snapshot = build_capability_registry(platform=platform).snapshot()
     required_names = provider_required_capability_names(platform)
 
-    assert required_names == frozenset({"assert_with_ai"})
-    assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, required_names)
-    assert steps_require_provider([SimpleNamespace(action_name="assert_with_ai")], snapshot, required_names)
+    assert required_names == (frozenset() if platform == "android" else frozenset({"assert_with_ai"}))
+    assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, required_names) is (platform != "android")
+    assert steps_require_provider([SimpleNamespace(action_name="assert_with_ai")], snapshot, required_names) is (platform != "android")
+    assertion_names = ai_assertion_capability_names(platform)
+    assert assertion_names == frozenset({"assert_with_ai"})
+    assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, assertion_names)
+    assert snapshot.resolve("assertWithAI") is not None
     assert not steps_require_provider([SimpleNamespace(action_name="waitMs")], snapshot, required_names)
     assert not steps_require_provider([SimpleNamespace(action_name="unknown")], snapshot, required_names)
 

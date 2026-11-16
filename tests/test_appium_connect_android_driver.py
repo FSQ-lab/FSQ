@@ -374,6 +374,7 @@ def test_driver_context_launch_kill_screenshot_and_ui_snapshot() -> None:
             "screen_size": (1080, 2400),
             "metadata": {
                 "backend": "appium_connect_agent",
+                "sdk_session_id": "local-session-1",
                 "current_package": "com.example.app",
             },
         }
@@ -384,6 +385,7 @@ def test_driver_context_launch_kill_screenshot_and_ui_snapshot() -> None:
             screen_size=(1080, 2400),
             metadata={
                 "backend": "appium_connect_agent",
+                "sdk_session_id": "local-session-1",
                 "current_package": "com.example.app",
             },
         )
@@ -1051,7 +1053,7 @@ def test_runner_step_execution_and_ai_assertion_metadata(tmp_path: Any) -> None:
     try:
         assert registry.get("assert_with_ai").replay == ReplayPolicy(kind="fsq_command", alias="assertWithAI")
         assert driver.perform_actions({"actions": []})["failure_category"] == "configuration_error"
-        assert driver.assert_with_ai(AndroidAssertWithAIParams(prompt="Verify screen."))["failure_category"] == "configuration_error"
+        assert driver.assert_with_ai(AndroidAssertWithAIParams(assertion="Verify screen.", surface="appearance", full_screen_reason="Whole display appearance"))["status"] == "incomplete"
 
         runner = StepRunner(harness, capability_registry=registry)
         step = ExecutableStep(step_id="launch", action_name="launch_app", params={}, kind="setup")

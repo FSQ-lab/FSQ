@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fsq_agent._capability_bootstrap import build_capability_registry, provider_required_capability_names, steps_require_provider
+from fsq_agent._capability_bootstrap import ai_assertion_capability_names, build_capability_registry, steps_require_provider
 from fsq_agent.case_dsl import FSQ_CASE_SUFFIX, FsqCaseLoader, FsqExecutableStepAdapter, is_fsq_case_file
 from fsq_agent.execution import collect_strict_lifecycle_cases
 
@@ -21,7 +21,7 @@ CASE_LIMIT = 500
 def build_strict_registry_context(platform: str) -> tuple[Any, Any, frozenset[str]]:
     registry = build_capability_registry(platform=platform, include_ai_assertion=True)
     snapshot = registry.snapshot()
-    return registry, snapshot, provider_required_capability_names(platform)
+    return registry, snapshot, ai_assertion_capability_names(platform)
 
 
 def discover_cases(settings: Settings, *, limit: int = CASE_LIMIT) -> dict[str, Any]:
@@ -33,8 +33,8 @@ def discover_cases(settings: Settings, *, limit: int = CASE_LIMIT) -> dict[str, 
         key=lambda path: path.relative_to(root).as_posix().casefold(),
     )
     truncated = len(candidates) > limit
-    _, registry_snapshot, provider_required = build_strict_registry_context(settings.harness.platform)
-    entries = [_case_summary(path, root, settings, registry_snapshot, provider_required) for path in candidates[:limit]]
+    _, registry_snapshot, assertion_names = build_strict_registry_context(settings.harness.platform)
+    entries = [_case_summary(path, root, settings, registry_snapshot, assertion_names) for path in candidates[:limit]]
     return {"platform": settings.harness.platform, "cases": entries, "truncated": truncated}
 
 
@@ -53,7 +53,7 @@ def resolve_case(settings: Settings, path_text: str) -> Path:
     return resolved
 
 
-def _case_summary(path: Path, root: Path, settings: Settings, registry_snapshot: Any, provider_required: frozenset[str]) -> dict[str, Any]:
+def _case_summary(path: Path, root: Path, settings: Settings, registry_snapshot: Any, assertion_names: frozenset[str]) -> dict[str, Any]:
     relative = path.relative_to(root).as_posix()
     try:
         _require_case_containment(path, root)
@@ -79,7 +79,7 @@ def _case_summary(path: Path, root: Path, settings: Settings, registry_snapshot:
             "name": case.config.name,
             "platform": case.config.platform,
             "commandCount": len(steps),
-            "requiresAiAssertion": any(steps_require_provider(case_steps, registry_snapshot, provider_required) for case_steps in steps_by_case),
+            "requiresAiAssertion": any(steps_require_provider(case_steps, registry_snapshot, assertion_names) for case_steps in steps_by_case),
             "validationStatus": status,
             "selectable": selectable,
             "diagnostics": diagnostics,

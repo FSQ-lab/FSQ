@@ -138,7 +138,7 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         raise ValueError("Strict runs must not include goal.")
     case_path = resolve_case(run_settings, body.get("casePath"))
     case = FsqCaseLoader().load_case(case_path)
-    registry, snapshot, provider_required = build_strict_registry_context(run_settings.harness.platform)
+    registry, snapshot, assertion_names = build_strict_registry_context(run_settings.harness.platform)
     lifecycle_cases = collect_strict_lifecycle_cases(
         case_path=case_path,
         case=case,
@@ -155,13 +155,16 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         steps = FsqExecutableStepAdapter(registry_snapshot=snapshot).to_executable_steps(lifecycle_case)
         _preflight_steps(steps, snapshot, secret_store)
         resolved_steps[lifecycle_path.resolve()] = steps
-        requires_ai = requires_ai or steps_require_provider(steps, snapshot, provider_required)
+        requires_ai = requires_ai or steps_require_provider(steps, snapshot, assertion_names)
     require_macos_preflight(run_settings, "strict", requires_provider=requires_ai)
     if platform == "android":
         run_settings.harness.android.app_id = _android_app_id(run_settings, case)
-        require_android_preflight(run_settings, "strict", requires_provider=requires_ai)
+        run_settings.harness.android.visual_assertion_policy = run_settings.harness.android.visual_assertion_policy.model_copy(
+            update={"provider_available": bool(run_settings.agent_runtime.provider and run_settings.agent_runtime.model)}
+        )
+        require_android_preflight(run_settings, "strict", requires_provider=False)
     validate_strict_core_settings(run_settings, requires_ai_assertion=requires_ai)
-    if requires_ai:
+    if requires_ai and platform != "android":
         require_provider(run_settings)
     return PreparedRun(
         request_id=request_id,
@@ -370,7 +373,9 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         state.raise_if_cancelled(request_id)
         state.transition(request_id, "running", summary="Strict replay is executing.")
         metadata = transition_run(run_dir, metadata, "running")
-        evaluator = build_ai_assertion_evaluator(settings) if prepared.requires_ai_assertion else None
+        evaluator = None
+        if prepared.requires_ai_assertion and settings.harness.platform != "android":
+            evaluator = build_ai_assertion_evaluator(settings)
         harness = HarnessFactory().create_harness(
             platform=settings.harness.platform,
             harness_settings=settings.harness,

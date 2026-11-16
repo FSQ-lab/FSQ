@@ -195,7 +195,7 @@ def _record_dynamic_run_as_strict_case(
     else:
         commands = collector.collect(events)
         command_mapping = []
-    incomplete = any(item.get("reason") == "sensitive_parameters_redacted" for item in collector.skipped_tool_calls)
+    incomplete = bool(collector.unverified_assertions) or any(item.get("reason") == "sensitive_parameters_redacted" for item in collector.skipped_tool_calls)
     draft = draft or incomplete
     if not commands:
         recording = _StrictCaseRecording(
@@ -206,7 +206,7 @@ def _record_dynamic_run_as_strict_case(
             warnings=collector.warnings,
             draft=draft,
             publication_status="failed" if publication_directory is not None and incomplete else "not_requested",
-            publication_errors=["Incomplete redacted recording cannot be published."] if publication_directory is not None and incomplete else [],
+            publication_errors=["Incomplete draft recording cannot be published."] if publication_directory is not None and incomplete else [],
         )
         _write_recording(recording)
         return recording
@@ -233,6 +233,7 @@ def _record_dynamic_run_as_strict_case(
             "source_task_id": task.id,
             "source_status": result.status,
             "command_mapping": command_mapping,
+            "unverified_assertions": collector.unverified_assertions,
         },
     )
     try:
@@ -264,7 +265,7 @@ def _record_dynamic_run_as_strict_case(
             recording.warnings.append("case.publication_conflict" if recording.publication_outcome == "conflict" else "case.publication_failed")
     elif effective_publication_directory is not None and incomplete:
         recording.publication_status = "failed"
-        recording.publication_errors.append("Incomplete redacted recording cannot be published.")
+        recording.publication_errors.append("Incomplete draft recording cannot be published.")
     _write_recording(recording)
     return recording
 
@@ -308,6 +309,7 @@ class _RecordingCollector:
         self.required_runtime_secret_names: set[str] = set()
         self.warnings: list[str] = []
         self.skipped_tool_calls: list[dict[str, Any]] = []
+        self.unverified_assertions: list[dict[str, Any]] = []
 
     def collect(self, events: list[RunEvent]) -> list[dict[str, Any]]:
         commands: list[dict[str, Any]] = []
@@ -367,7 +369,10 @@ class _RecordingCollector:
         if not isinstance(fsq_action_name, str) or not fsq_action_name:
             self._skip(start.tool_name, "platform tool did not include fsq_command replay alias")
             return
-        if event.type != "tool_call_completed" or payload.get("status") not in {"passed", "success", None}:
+        result_summary = payload.get("result")
+        assertion = _ai_assertion_metadata(result_summary.get("metadata") if isinstance(result_summary, dict) else None)
+        unresolved = payload.get("status") == "incomplete" and assertion.get("outcome") == "inconclusive"
+        if event.type != "tool_call_completed" or (payload.get("status") not in {"passed", "success", None} and not unresolved):
             self._skip(start.tool_name, f"platform action status was {payload.get('status') or event.type}")
             return
         safe_replay_params = payload.get("safe_replay_params")
@@ -376,7 +381,16 @@ class _RecordingCollector:
             self._skip(start.tool_name, "platform tool arguments were not a JSON object")
             return
         self._collect_runtime_secret_names(args)
+        if unresolved:
+            if not isinstance(safe_replay_params, dict):
+                self._skip(start.tool_name, "unverified assertion has no safe authored replay parameters")
+                return
+            self._retain_unverified(assertion, payload.get("step_execution_id") or event.tool_call_id)
         commands.append({fsq_action_name: args})
+
+    def _retain_unverified(self, assertion: dict[str, Any], step_id: str | None) -> None:
+        self.unverified_assertions.append({"step_execution_id": step_id, "disposition": "unverified", "ai_assertion": assertion})
+        self.warnings.append(f"Visual assertion remains unverified ({assertion.get('error_code') or 'assertion_unverified'}); replay requires a fresh evaluation.")
 
     def _collect_runtime_secret_names(self, value: Any) -> None:
         if isinstance(value, dict):
@@ -614,14 +628,24 @@ def _append_publication_lineage(candidate_path, candidate_bytes, destination, co
     )
 
 
+def _ai_assertion_metadata(metadata: Any) -> dict[str, Any]:
+    harness_metadata = metadata.get("harness_metadata") if isinstance(metadata, dict) else None
+    assertion = harness_metadata.get("ai_assertion") if isinstance(harness_metadata, dict) else None
+    return assertion if isinstance(assertion, dict) else {}
+
+
 def _commands_from_evidence(bundle, collector):
     commands = []
     mapping = []
     for result in bundle.steps:
         invoke = next((phase for phase in result.phase_reports if phase.phase == "invoke"), None)
-        if result.status != "passed" or invoke is None:
+        if invoke is None:
             continue
         metadata = invoke.metadata
+        assertion = _ai_assertion_metadata(metadata)
+        unresolved = result.status == "incomplete" and assertion.get("outcome") == "inconclusive"
+        if result.status != "passed" and not unresolved:
+            continue
         replay = metadata.get("replay")
         if not isinstance(replay, dict) or replay.get("kind") != "fsq_command" or metadata.get("step_kind") in {"observation", "diagnostic"}:
             continue
@@ -636,6 +660,8 @@ def _commands_from_evidence(bundle, collector):
         if not isinstance(alias, str) or not alias:
             continue
         collector._collect_runtime_secret_names(params)
+        if unresolved:
+            collector._retain_unverified(assertion, result.step_execution_id or result.step_id)
         commands.append({alias: params})
         mapping.append(
             {"command_index": len(commands) - 1, "source_step_id": result.source_step_id, "step_execution_id": result.step_execution_id or result.step_id, "invocation_path": result.invocation_path}

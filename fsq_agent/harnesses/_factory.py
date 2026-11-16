@@ -13,7 +13,9 @@ from fsq_agent.harnesses._web import WebHarness
 from fsq_agent.harnesses._windows import WindowsHarness
 from fsq_agent.models import (
     AndroidHarnessSettings,
+    AndroidVisualAssertionPolicy,
     ConfigurationError,
+    HarnessContext,
     HarnessPlatform,
     HarnessSettings,
     MacOSHarnessSettings,
@@ -23,6 +25,8 @@ from fsq_agent.models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from fsq_agent.core.evidence import ArtifactStore
     from fsq_agent.core.interfaces import (
         AIAssertionEvaluatorProtocol,
@@ -58,6 +62,7 @@ class _HarnessFactoryProtocol(Protocol):
         harness_settings: HarnessSettings,
         artifact_store: ArtifactStore | None = None,
         ai_assertion_evaluator: AIAssertionEvaluatorProtocol | None = None,
+        visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,
         runtime_secret_settings: RuntimeSecretSettings | None = None,
         app_id: str | None = None,
         serial: str | None = None,
@@ -75,6 +80,7 @@ class _HarnessFactoryImplementation:
         harness_settings: HarnessSettings,
         artifact_store: ArtifactStore | None = None,
         ai_assertion_evaluator: AIAssertionEvaluatorProtocol | None = None,
+        visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,
         runtime_secret_settings: RuntimeSecretSettings | None = None,
         app_id: str | None = None,
         serial: str | None = None,
@@ -100,6 +106,15 @@ class _HarnessFactoryImplementation:
                 artifact_store=artifact_store,
                 ai_assertion_evaluator=ai_assertion_evaluator,
                 runtime_secret_settings=runtime_secret_settings,
+                **(
+                    {
+                        "visual_assertion_policy_resolver": visual_assertion_policy_resolver,
+                        "visual_assertion_budget": harness_settings.android.visual_assertion_policy.budget,
+                        "visual_assertion_provider_available": harness_settings.android.visual_assertion_policy.provider_available,
+                    }
+                    if platform == "android"
+                    else {}
+                ),
             )
         except BaseException:
             try:

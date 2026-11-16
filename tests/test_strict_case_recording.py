@@ -9,7 +9,7 @@ import yaml
 
 from fsq_agent.config._settings import Settings
 from fsq_agent.execution import RecordingService
-from fsq_agent.models import AndroidHarnessSettings, ConfigurationError, HarnessSettings, OutputSettings, ReportArtifact, RunEvent, Task, TaskResult, VerificationResult
+from fsq_agent.models import AndroidHarnessSettings, ConfigurationError, HarnessSettings, OutputSettings, ReportArtifact, RunEvent, RunnerEvent, Task, TaskResult, VerificationResult
 
 
 def _write_event(path: Path, event: RunEvent) -> None:
@@ -785,3 +785,91 @@ def test_publication_rejection_preserves_candidate_and_metadata(tmp_path: Path) 
     assert recording.publication_outcome == "failed"
     assert json.loads(recording.recording_path.read_text())["publication_outcome"] == "failed"
     assert outside.read_text() == "untouched"
+
+
+@pytest.mark.parametrize("durable", [False, True])
+def test_draft_retains_unresolved_visual_obligation_without_runtime_capture_args(tmp_path, durable):
+    from fsq_agent.core import EvidenceRecorder
+    from fsq_agent.models import ExecutableStep, RunnerStepResult, StepPhaseReport
+
+    run = tmp_path / "runs" / "unverified"
+    run.mkdir(parents=True)
+    params = {"assertion": "The logo is blue", "surface": "appearance", "full_screen_reason": "The logo fills the screen"}
+    assertion = {"outcome": "inconclusive", "passed": False, "error_code": "provider_unavailable", "capture": {"pointer_mapping_state": "unverified"}}
+    replay = {"kind": "fsq_command", "alias": "assertWithAI"}
+    if durable:
+        recorder = EvidenceRecorder(run_id="unverified", output_dir=run)
+        step = recorder.allocate_step_identity(ExecutableStep(step_id="visual", action_name="assert_with_ai", kind="assertion", params=params))
+        recorder.record_event(
+            RunnerEvent(event_type="step_start", run_id="unverified", **step.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}))
+        )
+        recorder.record_step_result(
+            RunnerStepResult(
+                step_id=step.step_id,
+                source_step_id=step.source_step_id,
+                step_execution_id=step.step_execution_id,
+                invocation_path=step.invocation_path,
+                action_name=step.action_name,
+                kind="assertion",
+                status="incomplete",
+                phase_reports=[
+                    StepPhaseReport(
+                        step_id=step.step_id,
+                        phase="invoke",
+                        status="incomplete",
+                        metadata={"step_kind": "assertion", "replay": replay, "safe_replay_params": params, "harness_metadata": {"ai_assertion": assertion}},
+                    )
+                ],
+            )
+        )
+        recorder.write_manifest()
+    else:
+        _write_event(
+            run / "events.jsonl",
+            RunEvent(
+                run_id="unverified",
+                task_id="task",
+                type="tool_call_started",
+                title="Visual assertion",
+                tool_name="assert_with_ai",
+                tool_call_id="visual",
+                tool_arguments=params,
+                payload={"tool_origin": "platform", "step_kind": "assertion", "replay": replay},
+            ),
+        )
+        _write_event(
+            run / "events.jsonl",
+            RunEvent(
+                run_id="unverified",
+                task_id="task",
+                type="tool_call_completed",
+                title="Unverified",
+                tool_name="assert_with_ai",
+                tool_call_id="visual",
+                payload={
+                    "tool_origin": "platform",
+                    "step_kind": "assertion",
+                    "status": "incomplete",
+                    "replay": replay,
+                    "safe_replay_params": params,
+                    "result": {"metadata": {"harness_metadata": {"ai_assertion": assertion}}},
+                },
+            ),
+        )
+    result = TaskResult(
+        task_id="task",
+        status="inconclusive",
+        steps=[],
+        verification=VerificationResult(status="inconclusive", summary="Unverified"),
+        report=ReportArtifact(run_id="unverified", path=run / "report.md"),
+    )
+    settings = Settings()
+    settings.harness.platform = "android"
+    recording = RecordingService().record(run_dir=run, task=Task(id="task", description="Check logo"), result=result, settings=settings, allow_failure=True, publication_directory=None)
+    assert recording.status == "recorded"
+    assert recording.draft is True
+    assert list(yaml.safe_load_all(recording.recorded_case_path.read_text()))[1] == [{"assertWithAI": params}]
+    metadata = json.loads((run / "recording.json").read_text())
+    assert "unverified" in " ".join(metadata["warnings"]).lower()
+    assert metadata["unverified_assertions"][0]["disposition"] == "unverified"
+    assert metadata["unverified_assertions"][0]["ai_assertion"] == assertion

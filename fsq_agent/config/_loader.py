@@ -286,7 +286,7 @@ def validate_runtime_settings(settings: Settings) -> None:
 
 def validate_strict_core_settings(settings: Settings, requires_ai_assertion: bool = False) -> None:
     _validate_harness_settings(settings)
-    if requires_ai_assertion:
+    if requires_ai_assertion and settings.harness.platform != "android":
         validate_provider_settings(settings)
 
 

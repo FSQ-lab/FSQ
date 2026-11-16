@@ -53,6 +53,7 @@ class VerificationEvidenceBuilder:
                 "Mark the verification_goal unmet only when supplied evidence proves it did not happen or the required final state is false.",
                 "If evidence is missing, truncated, ambiguous, or outside the supplied bundle, use status=inconclusive.",
                 "For visual assertions such as assertWithAI, do not re-inspect screenshot pixels. Verify that execution evidence contains the backend AI assertion tool result, including verdict metadata and screenshot artifact references, and that no supplied evidence contradicts that result.",
+                "Android visual outcome=inconclusive or Runner status=incomplete is an unverified assertion, never a negative verdict inferred from passed=false. A completed tool callback or summary envelope is transport success, not business success. Optional metadata cannot waive the unresolved assertion. Preserve its safe reason; do not rejudge its pixels. Only independently proven failures justify failure when an assertion remains unverified.",
                 "Do not transform key actions into independent final verification requirements.",
             ],
         )

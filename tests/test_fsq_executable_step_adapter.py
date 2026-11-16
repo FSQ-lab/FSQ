@@ -44,7 +44,9 @@ tags:
       contains: bing.com
     optional: false
 - assertWithAI:
-    prompt: Verify Bing page is visible.
+    assertion: Verify the page appearance.
+    surface: appearance
+    full_screen_reason: The entire page appearance is under test.
     optional: false
 - killApp
 """

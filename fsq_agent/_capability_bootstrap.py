@@ -33,10 +33,15 @@ def build_capability_registry(*, platform: HarnessPlatform = "android", include_
     )
 
 
-def provider_required_capability_names(platform: HarnessPlatform) -> frozenset[str]:
+def ai_assertion_capability_names(platform: HarnessPlatform) -> frozenset[str]:
     full_snapshot = build_capability_registry(platform=platform, include_ai_assertion=True).snapshot()
     provider_free_names = build_capability_registry(platform=platform, include_ai_assertion=False).snapshot().by_name()
     return frozenset(capability.name for capability in full_snapshot.capabilities if capability.name not in provider_free_names)
+
+
+def provider_required_capability_names(platform: HarnessPlatform) -> frozenset[str]:
+    # Android Strict recognizes unavailable visual assertions as incomplete.
+    return frozenset() if platform == "android" else ai_assertion_capability_names(platform)
 
 
 def steps_require_provider(

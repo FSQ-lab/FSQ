@@ -1,12 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_serializer, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 StepPhase: TypeAlias = Literal["prepare", "invoke", "settle", "finalize"]
@@ -131,6 +132,15 @@ class HarnessContext(BaseModel):
     current_activity: str | None = None
     screen_size: tuple[int, int] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    _cancellation_check: Callable[[], None] | None = PrivateAttr(default=None)
+
+    @property
+    def cancellation_check(self) -> Callable[[], None] | None:
+        return self._cancellation_check
+
+    @cancellation_check.setter
+    def cancellation_check(self, value: Callable[[], None] | None) -> None:
+        self._cancellation_check = value
 
 
 class HarnessActionResult(BaseModel):
@@ -398,24 +408,112 @@ class AndroidAssertStateParams(BaseModel):
         raise ValueError("requires text assertion or element locator/state assertion")
 
 
+class VisualRect(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    left: int
+    right: int
+    top: int
+    bottom: int
+
+
+class VisualRegion(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["image_rect"] = "image_rect"
+    rect: VisualRect
+
+
+class VisualExpectation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+
+    kind: Literal["visual_property", "exact_color", "display_identity"] = "visual_property"
+    property: str = Field(min_length=1)
+    value: str | bool | int | float | None
+    target: str | None = None
+    locator: AndroidLocator | None = None
+
+
+class DeterministicFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+
+    subject: str
+    property: str
+    value: str | bool | int | float | None
+    state: Literal["value", "unknown", "not_applicable", "missing"] = "value"
+    run_id: str
+    step_execution_id: str
+    observed_monotonic_ns: int
+    exact: bool = True
+
+
+class AssertionBudget(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+
+    timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    max_prompt_bytes: int = Field(default=16384, gt=0, le=16384)
+    max_image_bytes: int = Field(default=33554432, gt=0, le=33554432)
+    max_image_pixels: int = Field(default=64000000, gt=0, le=64000000)
+    max_image_height: int = Field(default=16384, gt=0, le=16384)
+    max_capture_age_ns: int = Field(default=2000000000, gt=0, le=60000000000)
+    max_capture_span_ns: int = Field(default=10000000000, gt=0, le=10000000000)
+
+
+class AndroidVisualAssertionPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    allow_provider_upload: bool = False
+    provider_available: bool | None = None
+    frame_sensitivity: Literal["unknown", "sensitive", "non_sensitive"] = "unknown"
+    budget: AssertionBudget = Field(default_factory=AssertionBudget)
+
+
+class HostCaptureEnvelopeV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["host_capture_envelope/v1"] = "host_capture_envelope/v1"
+    source_tool: Literal["assert_with_ai"] = "assert_with_ai"
+    run_id: str
+    step_id: str
+    step_execution_id: str
+    capture_sequence: int = Field(ge=1)
+    sdk_session_id: str | None = None
+    host_capture_started_monotonic_ns: int
+    host_capture_finished_monotonic_ns: int
+    captured_wall_clock: str
+    display_query_monotonic_ns: int | None = None
+    png_sha256: str
+    png_size_bytes: int = Field(gt=0)
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    display_width: int | None = None
+    display_height: int | None = None
+    pointer_mapping_state: Literal["unverified"] = "unverified"
+    region: VisualRect | None = None
+
+
 class AndroidAssertWithAIParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={
-            "description": "Evaluate a pure visual appearance, image, or Canvas assertion. Never use for grounding or visual driving, replacing available exact accessibility text/SeekBar values/checked/selected assertions, or overriding contradictory structural evidence."
+            "description": "Evaluate only an image-space visual assertion. Required assertion and surface; region is image_rect only, or omit it with full_screen_reason. Never locate/drive UI or replace exact accessibility facts."
         },
     )
 
-    prompt: str = Field(
-        description="Non-empty pure visual appearance/image/Canvas assertion. Not for grounding, visual driving, replacing available exact accessibility/state evidence, or overriding contradictory evidence."
-    )
-    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+    assertion: str = Field(description="Pure visual appearance/image/Canvas expectation, not instructions or a UI action.")
+    surface: Literal["custom_canvas", "image_content", "map_view", "appearance"]
+    region: VisualRegion | None = None
+    expect: VisualExpectation | None = None
+    full_screen_reason: str | None = None
+    optional: bool | None = None
 
     @model_validator(mode="after")
     def _require_prompt(self) -> "AndroidAssertWithAIParams":
-        if self.prompt.strip():
-            return self
-        raise ValueError("requires non-empty prompt")
+        if not self.assertion.strip() or len(self.assertion.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank assertion of at most 4 KiB")
+        if self.region is None and not (self.full_screen_reason and self.full_screen_reason.strip()):
+            raise ValueError("full-image assertions require full_screen_reason")
+        return self
 
 
 class WebLocatorScope(BaseModel):

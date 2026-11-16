@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 from pydantic import ValidationError
 
-from fsq_agent.core.interfaces import CapabilityRegistryInterface, EvidenceJournalSink, HarnessInterface, RuntimeSecretResolver
+from fsq_agent.core.interfaces import CancellationCheck, CapabilityRegistryInterface, EvidenceJournalSink, HarnessInterface, RuntimeSecretResolver
 from fsq_agent.models import (
     CapabilityDefinition,
     CapabilityExecutionResult,
@@ -47,6 +47,7 @@ class _StepExecutionState:
     evidence_errors: list[dict[str, object]] = field(default_factory=list)
     action_status: RunnerStatus | None = None
     interruption: BaseException | None = None
+    prepared_artifacts: list[HarnessArtifactRef] = field(default_factory=list)
 
 
 class StepRunner:
@@ -58,12 +59,14 @@ class StepRunner:
         post_action_delay_seconds: PostActionDelaySettings | None = None,
         runtime_secret_store: RuntimeSecretResolver | None = None,
         evidence_sink: EvidenceJournalSink | None = None,
+        cancellation_check: CancellationCheck | None = None,
     ) -> None:
         self.harness = harness
         self.capability_registry = capability_registry
         self.post_action_delay_seconds = post_action_delay_seconds or PostActionDelaySettings(platform=0.0, common=0.0)
         self.runtime_secret_store = runtime_secret_store
         self.evidence_sink = evidence_sink
+        self.cancellation_check = cancellation_check
         self._identities: set[str] = set()
         self._source_occurrences: dict[str, int] = {}
         redaction_values = getattr(runtime_secret_store, "redaction_values", None)
@@ -233,6 +236,17 @@ class StepRunner:
                 status, category, message = value.status, value.failure_category, self._safe_text(value.error_message)
                 metadata = getattr(self, "_invoke_report_metadata", {})
         except BaseException as exc:
+            diagnostics = getattr(exc, "fsq_capture_diagnostics", None)
+            if isinstance(diagnostics, dict):
+                metadata["capture_diagnostics"] = {key: value for key, value in diagnostics.items() if key in {"backend_code", "request_state", "session_state", "stage"}}
+            provenance = getattr(exc, "fsq_provider_provenance", None)
+            if (
+                isinstance(provenance, dict)
+                and "provider_upload_occurred" in provenance
+                and provenance.get("request_state") in ("not_sent", "response_unknown", "response_received")
+                and type(provenance["provider_upload_occurred"]) in {bool, type(None)}
+            ):
+                metadata["provider_provenance"] = {key: provenance[key] for key in ("provider_upload_occurred", "request_state")}
             if self._persistence_failed:
                 raise
             classified = self._classify(exc, phase, step) if isinstance(exc, Exception) else None
@@ -301,15 +315,38 @@ class StepRunner:
         return value
 
     def _prepare(self, run_id, step):
+        validated = self._with_validated_params(step, self._resolve_capability(step.action_name))
+        if self.cancellation_check is not None:
+            self.cancellation_check()
         context = self.harness.get_context()
-        self._capture_artifacts(run_id=run_id, step=step, context=context, phase="prepare", reason="before-action", enabled=step.evidence_policy.capture_before)
-        self.harness.before_action(step, context)
+        context = context.model_copy(
+            update={
+                "metadata": {
+                    **context.metadata,
+                    "capture_invocation": {
+                        "run_id": run_id,
+                        "step_id": step.step_id,
+                        "step_execution_id": step.step_execution_id or step.step_id,
+                        "action_name": validated.action_name,
+                        "params": validated.params,
+                    },
+                }
+            }
+        )
+        context.cancellation_check = self.cancellation_check
+        refs, _ = self._capture_artifacts(run_id=run_id, step=step, context=context, phase="prepare", reason="before-action", enabled=step.evidence_policy.capture_before)
+        if self._state is not None:
+            self._state.prepared_artifacts = [HarnessArtifactRef.model_validate(ref.model_dump(exclude={"step_id", "step_execution_id", "phase"})) for ref in refs]
+        self.harness.before_action(validated, context)
         return context
 
     def _invoke(self, run_id, step, capability, context, state):
         self._emit(run_id=run_id, event_type="harness_call_start", step=step, phase="invoke")
         validated = self._with_validated_params(step, capability)
         invoke_step = self._resolve_runtime_secret_text_step(validated, capability)
+        invoke_step = invoke_step.model_copy(update={"metadata": {**invoke_step.metadata, "run_id": run_id, "prepared_artifacts": [ref.model_dump(mode="json") for ref in state.prepared_artifacts]}})
+        if self.cancellation_check is not None:
+            self.cancellation_check()
         capture_scope = getattr(self.harness, "capture_scope", None)
         with capture_scope(lambda ref: self._acknowledge_invoke_artifact(run_id, step, ref)) if capture_scope else nullcontext():
             result = self.harness.invoke_action(invoke_step, context)
@@ -319,10 +356,12 @@ class StepRunner:
             result = result.model_copy(update={"status": "incomplete", "error_message": "Action did not return a terminal result."})
         state.action_status = result.status
         self._last_capability_execution_result = self._capability_execution_result(result, validated, capability, context)
-        if result.status in {"failed", "cancelled", "skipped", "incomplete"}:
+        if result.status in {"failed", "cancelled", "skipped"}:
             state.failure_category = result.failure_category or ("cancelled" if result.status == "cancelled" else "action_error")
             state.error_message = self._safe_text(result.error_message)
             self._emit(run_id=run_id, event_type="step_error", step=step, phase="invoke")
+        elif result.status == "incomplete":
+            state.error_message = self._safe_text(result.error_message)
         metadata = self._action_result_metadata(result, validated, invoke_step, capability, context)
         self._invoke_report_metadata = self._with_post_action_delay_metadata(metadata, self._effective_post_action_delay_seconds(capability))
         self._emit(

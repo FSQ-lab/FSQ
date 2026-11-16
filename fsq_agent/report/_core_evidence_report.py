@@ -112,12 +112,16 @@ class CoreEvidenceReportGenerator:
         if ai_assertions:
             lines.extend(["", "## AI Assertions", ""])
             for assertion in ai_assertions:
-                verdict = assertion.get("status") or ("passed" if assertion.get("passed") else "failed")
+                verdict = assertion.get("outcome") or assertion.get("status") or "unverified"
                 provider = assertion.get("provider") or "unknown provider"
                 model = assertion.get("model") or "unknown model"
                 prompt = assertion.get("prompt") or ""
                 explanation = assertion.get("explanation") or assertion.get("error") or "No explanation."
                 lines.append(f"- `{assertion['step_id']}` `{verdict}` via `{provider}`/`{model}`: {explanation}")
+                if assertion.get("error_code"):
+                    lines.append(f"  Reason: `{assertion['error_code']}`")
+                if assertion.get("capture"):
+                    lines.append(f"  Capture: `{json.dumps(assertion['capture'], sort_keys=True)}`")
                 if prompt:
                     lines.append(f"  Prompt: {prompt}")
                 lines.extend(f"  Artifact: `{artifact_path}`" for artifact_path in assertion.get("artifact_paths", []))

@@ -41,6 +41,10 @@ Runner normalizes prepare/invoke/settle/finalize/capture failures into safe fact
 
 Action failure remains the primary failure. Capture/persistence errors are separate evidence errors and cannot overwrite action category, message, or assertion verdict. Required missing evidence remains fail-closed; evidence-only failure uses compatibility `artifact_error`. Screenshot and UI snapshot outcomes remain independently visible. Teardown eligibility survives earlier failure or cancellation according to execution policy; interrupted unacknowledged results remain unknown rather than fabricated outcomes.
 
+An action result with `status="incomplete"` remains incomplete in phase, step, capability, event, and durable evidence projections. A safe assertion reason and `ai_assertion` block survive normalization without an `assertion_error` category. Ordered sequences stop dependent normal work after an incomplete step, retain explicit blocked/unexecuted facts, and still run eligible teardown. No optional flag converts incomplete to passed.
+
+Capability-neutral evidence coordination permits the active harness to supply one privacy-approved assertion screenshot as the step's before evidence without an earlier unsafe or duplicate capture. This does not add a Runner action-name switch or a public `CapabilityDefinition.capture_evidence` policy. Other step-kind capture behavior remains unchanged; missing/omitted evidence carries its actual requirement and reason rather than a fabricated artifact.
+
 ## Current Invariants
 
 - Capability metadata, not action-name branches, controls routing, replay metadata, timing, sensitivity, and evidence policy.

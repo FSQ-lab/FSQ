@@ -6,8 +6,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from fsq_agent.core.evidence import ArtifactStore
-    from fsq_agent.models import HarnessPlatform, HarnessSettings, RuntimeSecretSettings
+    from fsq_agent.models import AndroidVisualAssertionPolicy, HarnessContext, HarnessPlatform, HarnessSettings, RuntimeSecretSettings
 
 
 class DriverFactory:
@@ -40,6 +42,7 @@ class HarnessFactory:
         harness_settings: HarnessSettings,
         artifact_store: ArtifactStore | None = None,
         ai_assertion_evaluator: Any | None = None,
+        visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,
         runtime_secret_settings: RuntimeSecretSettings | None = None,
         app_id: str | None = None,
         serial: str | None = None,
@@ -51,6 +54,7 @@ class HarnessFactory:
             harness_settings=harness_settings,
             artifact_store=artifact_store,
             ai_assertion_evaluator=ai_assertion_evaluator,
+            visual_assertion_policy_resolver=visual_assertion_policy_resolver,
             runtime_secret_settings=runtime_secret_settings,
             app_id=app_id,
             serial=serial,

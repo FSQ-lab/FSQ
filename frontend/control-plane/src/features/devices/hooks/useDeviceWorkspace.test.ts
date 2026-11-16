@@ -434,7 +434,7 @@ it('derives start eligibility and sends mode-specific strict payloads', async ()
   expect(result.current.controlsLocked).toBe(true);
 });
 
-it('requires provider readiness only for provider-gated strict cases', async () => {
+it('allows Android Strict with an unverified visual obligation while Explore still needs Provider', async () => {
   const unavailableProvider = { ...readiness('android'), provider: { status: 'unavailable' as const, message: 'setup', action: 'configure' } };
   const baseCase = cases('android').cases[0];
   const providerCases = { ...cases('android'), cases: [{ ...baseCase, path: 'gated.fsq.yaml', requiresAiAssertion: true }, { ...baseCase, path: 'free.fsq.yaml' }] };
@@ -452,10 +452,14 @@ it('requires provider readiness only for provider-gated strict cases', async () 
 
   act(() => result.current.setCasePath('gated.fsq.yaml'));
   expect(result.current.selectedCase?.requiresAiAssertion).toBe(true);
-  expect(result.current.canStart).toBe(false);
+  expect(result.current.canStart).toBe(true);
+  expect(result.current.blockedReason).not.toContain('setup');
 
   act(() => result.current.setCasePath('free.fsq.yaml'));
   expect(result.current.canStart).toBe(true);
+  act(() => result.current.setMode('explore'));
+  act(() => result.current.setGoal('Verify the canvas'));
+  expect(result.current.canStart).toBe(false);
 });
 
 it('allows Explore and sends its payload without waiting for case discovery', async () => {

@@ -292,3 +292,29 @@ def test_core_evidence_report_preserves_ai_assertion_verdict_metadata(tmp_path: 
     assert ai_assertion["provider"] == "github_copilot"
     assert ai_assertion["model"] == "gpt-5.5"
     assert ai_assertion["token_usage"] == {"input_tokens": 10, "output_tokens": 5}
+
+
+def test_core_report_uses_authoritative_inconclusive_outcome_not_false_bool(tmp_path):
+    manifest = tmp_path / "evidence-manifest.json"
+    assertion = {"outcome": "inconclusive", "passed": False, "error_code": "provider_unavailable", "capture": {"pointer_mapping_state": "unverified"}}
+    bundle = EvidenceBundle(
+        bundle_id="visual",
+        run_id="visual",
+        manifest_path=manifest,
+        steps=[
+            RunnerStepResult(
+                step_id="visual",
+                status="incomplete",
+                kind="assertion",
+                phase_reports=[StepPhaseReport(step_id="visual", phase="invoke", status="incomplete", metadata={"harness_metadata": {"ai_assertion": assertion}})],
+            )
+        ],
+    )
+    manifest.write_text(bundle.model_dump_json())
+    report = CoreEvidenceReportGenerator().generate_from_manifest(manifest)
+    text = report.path.read_text()
+    assert "`inconclusive` via" in text
+    assert "provider_unavailable" in text
+    assert "`failed` via" not in text
+    payload = json.loads(report.path.with_suffix(".json").read_text())
+    assert payload["steps"][0]["phase_reports"][0]["metadata"]["harness_metadata"]["ai_assertion"] == assertion

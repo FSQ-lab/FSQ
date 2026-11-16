@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from fsq_agent.models._core import AndroidVisualAssertionPolicy
 from fsq_agent.models._skills import SkillConfig
 
 
@@ -95,6 +96,15 @@ class AndroidHarnessSettings(BaseModel):
     uiautomator2_wait_for_idle_timeout_ms: int | None = Field(default=None, ge=0, le=9_007_199_254_740_991)
     _app_id: str | None = PrivateAttr(default=None)
     _serial: str | None = PrivateAttr(default=None)
+    _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)
+
+    @property
+    def visual_assertion_policy(self) -> AndroidVisualAssertionPolicy:
+        return self._visual_assertion_policy
+
+    @visual_assertion_policy.setter
+    def visual_assertion_policy(self, value: AndroidVisualAssertionPolicy) -> None:
+        self._visual_assertion_policy = AndroidVisualAssertionPolicy.model_validate(value)
 
     @field_validator("uiautomator2_wait_for_idle_timeout_ms", mode="before")
     @classmethod

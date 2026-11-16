@@ -12,7 +12,7 @@ import pytest
 
 from fsq_agent.config import Settings
 from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService, load_run_metadata
-from fsq_agent.models import DynamicAgentOutcome, ExecutableStep, ReportArtifact, RunnerEvent, RunnerStepResult, Task, ToolExecutionError, VerificationResult
+from fsq_agent.models import DynamicAgentOutcome, ExecutableStep, ReportArtifact, RunnerEvent, RunnerStepResult, StepPhaseReport, Task, ToolExecutionError, VerificationResult
 
 
 def _settings(root: Path) -> Settings:
@@ -784,3 +784,172 @@ async def test_dynamic_workspace_identity_uses_configured_user_registry(tmp_path
     metadata = load_run_metadata(settings.output.runs_dir / result.task_result.report.run_id)
     assert metadata.workspace == {"name": "checkout"}
     assert observed_roots == [selected_root]
+
+
+@pytest.mark.parametrize("claim", ["success", "failed"])
+@pytest.mark.parametrize("independent", [None, "failed", "cancelled", "error", "evidence"])
+async def test_incomplete_assertion_reconciles_every_dynamic_consumer(tmp_path, claim, independent):
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, *, evidence_sink, **kwargs):
+            visual = evidence_sink.allocate_step_identity(ExecutableStep(step_id="visual", action_name="assert_with_ai", kind="assertion"))
+            evidence_sink.record_event(
+                RunnerEvent(event_type="step_start", run_id=context.run_id, **visual.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}))
+            )
+            evidence_sink.record_step_result(
+                RunnerStepResult(
+                    step_id=visual.step_id,
+                    source_step_id=visual.source_step_id,
+                    step_execution_id=visual.step_execution_id,
+                    invocation_path=visual.invocation_path,
+                    action_name=visual.action_name,
+                    kind="assertion",
+                    status="incomplete",
+                    action_status="incomplete",
+                    metadata={"optional": True},
+                    phase_reports=[
+                        StepPhaseReport(
+                            step_id=visual.step_id,
+                            phase="invoke",
+                            status="incomplete",
+                            metadata={"harness_metadata": {"ai_assertion": {"outcome": "inconclusive", "passed": False, "error_code": "provider_unavailable"}}},
+                        )
+                    ],
+                )
+            )
+            if independent in {"failed", "cancelled"}:
+                step = evidence_sink.allocate_step_identity(ExecutableStep(step_id="independent", action_name="independent", kind="action"))
+                evidence_sink.record_event(
+                    RunnerEvent(event_type="step_start", run_id=context.run_id, **step.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}))
+                )
+                evidence_sink.record_step_result(
+                    RunnerStepResult(
+                        step_id=step.step_id,
+                        source_step_id=step.source_step_id,
+                        step_execution_id=step.step_execution_id,
+                        invocation_path=step.invocation_path,
+                        action_name=step.action_name,
+                        status=independent,
+                        failure_category="assertion_error" if independent == "failed" else None,
+                    )
+                )
+            if independent == "evidence":
+                step = evidence_sink.allocate_step_identity(ExecutableStep(step_id="capture", action_name="capture", kind="observation"))
+                evidence_sink.record_event(
+                    RunnerEvent(event_type="step_start", run_id=context.run_id, **step.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}))
+                )
+                evidence_sink.record_step_result(
+                    RunnerStepResult(
+                        step_id=step.step_id,
+                        source_step_id=step.source_step_id,
+                        step_execution_id=step.step_execution_id,
+                        invocation_path=step.invocation_path,
+                        action_name=step.action_name,
+                        status="passed",
+                        evidence_errors=[{"reason": "required_capture_missing"}],
+                    )
+                )
+            return DynamicAgentOutcome(
+                task=task, steps=[], verification=VerificationResult(status=claim, summary="Model claim"), errors=[{"message": "Independent infrastructure failure"}] if independent == "error" else []
+            )
+
+    settings = _settings(tmp_path)
+    coordinated = []
+    settings.harness.platform = "android"
+    settings.output.runs_dir = tmp_path / ".fsq" / "runs" / "android"
+    result = (
+        await DynamicExecutionService(agent=Agent()).execute(DynamicExecutionRequest(task=Task(description="Check visual property"), settings=settings, report_coordinator=coordinated.append))
+    ).task_result
+    frozen = json.loads((settings.output.runs_dir / result.report.run_id / "execution-result.json").read_text())
+    expected = "error" if independent == "evidence" else independent or "inconclusive"
+    assert result.status == frozen["outcome"] == expected
+    assert result.verification.status == frozen["verification"]["status"] == ("failed" if independent == "failed" else "inconclusive")
+    assert coordinated[0].verification == result.verification
+    assert "provider_unavailable" in " ".join(result.verification.diagnostics)
+    assert "Model claim" not in result.verification.summary
+
+
+@pytest.mark.parametrize("claim", ["success", "failed"])
+async def test_real_android_unavailable_assertion_sequences_to_effective_dynamic_result(tmp_path, claim):
+    from io import BytesIO
+
+    from PIL import Image
+
+    from fsq_agent._capability_bootstrap import build_capability_registry
+    from fsq_agent.core import StepRunner, StepSequenceRunner
+    from fsq_agent.core.evidence import ArtifactStore
+    from fsq_agent.drivers.android._appium_connect import AppiumConnectAndroidDriver
+    from fsq_agent.harnesses._android import AndroidHarness
+
+    png = BytesIO()
+    Image.new("RGB", (2, 2), "blue").save(png, format="PNG")
+    screenshot_steps = []
+
+    class OfflineDriver(AppiumConnectAndroidDriver):
+        def context(self):
+            return {"session_id": "fixture"}
+
+        def ui_snapshot(self, params=None):
+            return {"xml": "<hierarchy/>", "coverage": {"status": "complete"}}
+
+        def screenshot(self, params=None):
+            assert active_capture_step == "teardown", "Unavailable visual assertion must not capture pixels"
+            screenshot_steps.append(active_capture_step)
+            return png.getvalue()
+
+    active_capture_step = None
+
+    class ObservedHarness(AndroidHarness):
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            nonlocal active_capture_step
+            previous = active_capture_step
+            active_capture_step = step_id
+            try:
+                return super().capture_artifact(kind, reason, context, step_id, phase)
+            finally:
+                active_capture_step = previous
+
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, *, evidence_sink, **kwargs):
+            harness = ObservedHarness(driver=OfflineDriver(app_id="com.example"), artifact_store=ArtifactStore(evidence_sink.output_dir))
+            registry = build_capability_registry(platform="android")
+            runner = StepRunner(harness, capability_registry=registry, evidence_sink=evidence_sink)
+            try:
+                StepSequenceRunner(runner, evidence_sink).run_steps(
+                    context.run_id,
+                    [
+                        ExecutableStep(
+                            step_id="visual",
+                            action_name="assert_with_ai",
+                            kind="assertion",
+                            params={"assertion": "The logo is blue", "surface": "appearance", "full_screen_reason": "Logo fills the screen"},
+                            metadata={"optional": True},
+                        ),
+                        ExecutableStep(step_id="blocked", action_name="wait_ms", kind="action", params={"duration_ms": 1}),
+                    ],
+                    teardown_steps=[ExecutableStep(step_id="teardown", action_name="wait_ms", kind="teardown", params={"duration_ms": 1})],
+                )
+                evidence_sink.write_manifest()
+            finally:
+                harness.close()
+            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status=claim, summary="Model claim"))
+
+    settings = _settings(tmp_path)
+    settings.harness.platform = "android"
+    settings.output.runs_dir = tmp_path / ".fsq" / "runs" / "android"
+    result = (await DynamicExecutionService(agent=Agent()).execute(DynamicExecutionRequest(task=Task(description="Check logo"), settings=settings))).task_result
+    frozen = json.loads((settings.output.runs_dir / result.report.run_id / "execution-result.json").read_text())
+    assert result.status == result.verification.status == frozen["outcome"] == frozen["verification"]["status"] == "inconclusive"
+    assert frozen["counts"]["incomplete"] == 1
+    assert frozen["counts"]["skipped"] == 1
+    assert frozen["counts"]["passed"] == 1
+    assert frozen["counts"]["failed"] == 0
+    visual = next(step for step in frozen["steps"] if step["action_name"] == "assert_with_ai")
+    blocked = next(step for step in frozen["steps"] if step["source_step_id"] == "blocked")
+    assert blocked["blocked_by_step"] == visual["step_execution_id"]
+    assert visual["status"] == "incomplete"
+    assert visual["failure_category"] is None
+    assert screenshot_steps
+    assert set(screenshot_steps) == {"teardown"}
+    assert not visual["evidence_errors"]
+    assert "provider_unavailable" in " ".join(result.verification.diagnostics)
+    assert result.report.path.read_text() == result.verification.summary

@@ -177,11 +177,9 @@ def test_normal_step_cancellation_does_not_block_teardown(tmp_path):
 
     harness = CliCoreHarness()
     runner = StepRunner(harness)
-    checks = []
 
     def cancelled():
-        checks.append(True)
-        if len(checks) > 1:
+        if harness.actions:
             raise asyncio.CancelledError
 
     sequence = StepSequenceRunner(runner, EvidenceRecorder(run_id="run", output_dir=tmp_path), cancellation_check=cancelled)

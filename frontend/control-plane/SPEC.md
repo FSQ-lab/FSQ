@@ -287,7 +287,7 @@ Strict Replay:
 - Lists selectable cases returned by Control Plane case discovery.
 - Shows case name/path, declared platform, command count, `requiresAiAssertion`, and `validated` state.
 - Never labels machine validation as human review.
-- Requires explicit workspace/platform selection plus workspace, platform, strict, target, and source readiness. It additionally requires provider readiness when the selected case has `requiresAiAssertion=true`.
+- Requires explicit workspace/platform selection plus workspace, platform, strict, target, and source readiness. A selected Case's `requiresAiAssertion` remains a truthful authored-assertion fact. Android Strict does not require Provider readiness merely because that fact is true: it permits execution to record an unavailable visual assertion as incomplete/unverified, while retaining actual device/runtime prerequisites. Other platforms still require Provider readiness for `requiresAiAssertion=true`. Explore retains its Provider requirement on every platform; browser labels do not claim that an unavailable Android assertion was verified or no longer exists.
 - When case discovery returns no selectable cases, shows the empty case-source state and keeps start disabled without changing workspace or strict-runner readiness.
 - Strict authored rows map source identity and logical invocation to actual attempts. They retain authored/canonical action and kind with backend-normalized outcome, measured duration, and diagnostics. Only an explicit skipped outcome with reason is shown as skipped; started-but-unfinished or ambiguous history remains incomplete/unknown. Low-level progress cannot override final outcomes.
 

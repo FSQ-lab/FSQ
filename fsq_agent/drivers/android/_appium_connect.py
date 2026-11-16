@@ -10,8 +10,10 @@ import socket
 import time
 from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from math import ceil, floor
 from pathlib import Path
+from threading import Event
 from typing import TYPE_CHECKING, Any, TypeVar
 from xml.etree import ElementTree
 
@@ -319,6 +321,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
 
     def close(self) -> None:
         if self._borrowed_session:
+            self._shutdown_executor()
             return
         if self._session is not None or self._managed_scope is not None or self._runtime is not None or self._connection is not None:
             self._run_sync(self._close_owned_resources)
@@ -428,6 +431,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             "metadata": {
                 "backend": self.backend,
                 "current_package": current_package,
+                "sdk_session_id": getattr(info, "id", None),
             },
         }
 
@@ -885,12 +889,65 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return self._run_ai_assertion_tool(params)
 
     def screenshot(self, params: object | None = None) -> bytes:
-        del params
-        return self._run_on_worker(self._screenshot_impl)
+        options = params if isinstance(params, dict) else {}
+        check = options.get("cancellation_check")
+        timeout = options.get("timeout_seconds", 20.0)
+        cancellation = Event() if check is not None else None
+        failures: list[BaseException] = []
+        backend_error: BaseException | None = None
 
-    def _screenshot_impl(self) -> bytes:
+        def capture():
+            nonlocal backend_error
+            try:
+                return self._screenshot_impl(timeout, cancellation)
+            except BaseException as error:
+                # The caller settles this same operation before reading its safe facts.
+                backend_error = error
+                raise
+
+        def check_on_caller():
+            try:
+                check()
+            except BaseException as error:
+                failures.append(error)
+                raise
+
+        if check is not None:
+            check()
+        try:
+            data = self._run_on_worker(capture, cancellation_check=check_on_caller if check is not None else None, cancellation_event=cancellation)
+            if check is not None:
+                check_on_caller()
+        except BaseException as error:
+            if check is not None and not failures:
+                with suppress(BaseException):
+                    check_on_caller()
+            diagnostics = {
+                key: value
+                for key, value in self._safe_diagnostics(backend_error if backend_error is not None else error, stage="screenshot").items()
+                if key in {"backend_code", "request_state", "session_state", "stage"}
+            }
+            if failures:
+                interrupted = failures[0]
+                interrupted.fsq_capture_diagnostics = diagnostics
+                raise interrupted from None
+            if isinstance(error, CancelledError) or type(error).__name__ == "OperationCancelledError" or getattr(error, "code", None) == "operation_cancelled":
+                cancelled = CancelledError()
+                cancelled.fsq_capture_diagnostics = diagnostics
+                raise cancelled from None
+            if not isinstance(error, Exception):
+                raise
+            raise ToolExecutionError("Android screenshot is unavailable.", context={"capture_diagnostics": diagnostics}) from None
+        return data
+
+    def _screenshot_impl(self, timeout_seconds=20.0, cancellation=None) -> bytes:
         session = self._ensure_session()
-        return bytes(session.device.take_screenshot(control=self._operation_control(20.0)))
+        control = self._operation_control(timeout_seconds)
+        if cancellation is not None:
+            from appium_connect_agent.runtime import OperationControl
+
+            control = OperationControl(timeout_seconds=timeout_seconds, cancellation=cancellation)
+        return bytes(session.device.take_screenshot(control=control))
 
     @_android_driver_tool(
         "uiTree",
@@ -1195,12 +1252,14 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         self._cleanup_pending = False
         return session
 
-    def _run_on_worker(self, func: Callable[[], _T]) -> _T:
-        if self._closed or self._cleanup_pending or (self._borrowed_session and self._executor is None):
+    def _run_on_worker(self, func: Callable[[], _T], *, cancellation_check: Callable[[], None] | None = None, cancellation_event: Event | None = None) -> _T:
+        # Default borrowed calls remain inline; controlled capture needs caller-side
+        # polling and the SDK's cross-thread Event, not ownership of its Runtime scope.
+        if self._closed or self._cleanup_pending or (self._borrowed_session and cancellation_check is None):
             return func()
         self._ensure_executor()
         try:
-            return self._run_sync(func)
+            return self._run_sync(func, cancellation_check=cancellation_check, cancellation_event=cancellation_event)
         except BaseException:
             if not self._cleanup_pending and self._session is None and self._managed_scope is None and self._runtime is None:
                 self._shutdown_executor()
@@ -1467,10 +1526,26 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             return params.model_dump(mode="json", exclude_none=True)
         return dict(params)
 
-    def _run_sync(self, func: Callable[[], _T]) -> _T:
+    def _run_sync(self, func: Callable[[], _T], *, cancellation_check: Callable[[], None] | None = None, cancellation_event: Event | None = None) -> _T:
         if self._executor is None:
             return func()
-        return self._executor.submit(func).result()
+        future = self._executor.submit(func)
+        if cancellation_check is None:
+            return future.result()
+        while True:
+            try:
+                return future.result(timeout=0.025)
+            except TimeoutError:
+                if future.done():
+                    return future.result()
+                try:
+                    cancellation_check()
+                except BaseException:
+                    if cancellation_event is not None:
+                        cancellation_event.set()
+                    with suppress(BaseException):
+                        future.result()
+                    raise
 
     def _ensure_executor(self) -> None:
         if self._executor is None:

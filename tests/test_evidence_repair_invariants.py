@@ -238,3 +238,38 @@ def test_unknown_capability_duration_stays_unknown():
     result = CapabilityExecutionResult(capability_name="action", executor_kind="driver", status="passed")
     assert result.duration_ms is None
     assert result.unavailable_reason == "unmeasured"
+
+
+@pytest.mark.parametrize("claim", [None, "success", "failed"])
+@pytest.mark.parametrize("independent_failure", [False, True])
+def test_strict_freeze_retains_unverified_assertion_and_real_failure_precedence(tmp_path, claim, independent_failure):
+    run, metadata = _run(tmp_path)
+    steps = [
+        RunnerStepResult(
+            step_id="visual",
+            step_execution_id="visual",
+            kind="assertion",
+            status="incomplete",
+            metadata={"optional": True},
+            phase_reports=[
+                StepPhaseReport(
+                    step_id="visual",
+                    phase="invoke",
+                    status="incomplete",
+                    metadata={"harness_metadata": {"ai_assertion": {"outcome": "inconclusive", "passed": False, "error_code": "provider_unavailable"}}},
+                )
+            ],
+        )
+    ]
+    if independent_failure:
+        steps.append(RunnerStepResult(step_id="failed", step_execution_id="failed", status="failed", failure_category="assertion_error", error_message="A distinct deterministic assertion failed."))
+    bundle = EvidenceBundle(bundle_id="visual", run_id=metadata.run_id, completeness="complete", steps=steps)
+    frozen = RunLifecycleService.freeze(run, metadata, bundle=bundle, verification={"status": claim, "summary": "Model claim"} if claim else None)
+    expected = "failed" if independent_failure else "inconclusive"
+    assert frozen.outcome == frozen.verification["status"] == expected
+    assert frozen.counts.incomplete == 1
+    assert frozen.counts.failed == int(independent_failure)
+    assert frozen.steps[0]["status"] == "incomplete"
+    assert frozen.steps[0]["failure_category"] is None
+    assert frozen.failed_step == ("failed" if independent_failure else None)
+    assert "provider_unavailable" in " ".join(frozen.verification["diagnostics"])

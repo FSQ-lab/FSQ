@@ -21,6 +21,8 @@ class StepSequenceRunner:
             raise ValueError("A step sequence must use its runner's evidence sink.")
         self._sequence_index = 0
         self.cancellation_check = cancellation_check
+        if cancellation_check is not None:
+            self.step_runner.cancellation_check = cancellation_check
 
     def run_steps(self, run_id: str, steps: Sequence[ExecutableStep], teardown_steps: Sequence[ExecutableStep] = ()) -> EvidenceBundle:
         self._sequence_index += 1
@@ -45,11 +47,16 @@ class StepSequenceRunner:
                 except BaseException as persistence_error:  # noqa: BLE001 - preserve the original interruption.
                     logging.getLogger(__name__).warning("Interrupted step persistence failed (%s)", type(persistence_error).__name__)
         finally:
-            for step in teardown:
-                try:
-                    self.step_runner.run_step(run_id=run_id, step=step)
-                except BaseException as exc:  # noqa: BLE001 - finish independent teardown without swallowing interruption.
-                    interrupted = interrupted or exc
+            cancellation_check = self.step_runner.cancellation_check
+            self.step_runner.cancellation_check = None
+            try:
+                for step in teardown:
+                    try:
+                        self.step_runner.run_step(run_id=run_id, step=step)
+                    except BaseException as exc:  # noqa: BLE001 - finish independent teardown without swallowing interruption.
+                        interrupted = interrupted or exc
+            finally:
+                self.step_runner.cancellation_check = cancellation_check
         if interrupted is not None:
             raise interrupted
         return self.evidence_recorder.build_bundle()

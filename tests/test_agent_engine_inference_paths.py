@@ -3,6 +3,8 @@
 
 import asyncio
 import builtins
+import hashlib
+import io
 import json
 import time
 from pathlib import Path
@@ -10,13 +12,26 @@ from pathlib import Path
 import httpx
 import pytest
 from openai import AsyncOpenAI
+from PIL import Image
 
 from fsq_agent.adapters.coding_agent import DefaultCodingAgentRuntime
 from fsq_agent.agent_engine import AgentResult, EngineError, ModelRequest, ModelResult, OutputContract, _openai_backend
 from fsq_agent.ai_services import AIAssertionEvaluator, CaseSuggestionAnalyzer, QuickTestIntentAnalyzer, build_ai_assertion_evaluator, build_case_suggestion_analyzer, build_quick_test_intent_analyzer
 from fsq_agent.config import Settings, refresh_provider_settings, save_azure_openai_provider
 from fsq_agent.core.evidence import EvidenceRecorder
-from fsq_agent.models import AgentFinalOutput, AgentRuntimeSettings, AIAssertionRequest, ConfigurationError, GoalPrePlan, KnowledgeBundle, PlanningError, RunExecutionContext, Task
+from fsq_agent.models import (
+    AgentFinalOutput,
+    AgentRuntimeSettings,
+    AIAssertionRequest,
+    ConfigurationError,
+    GoalPrePlan,
+    HarnessArtifactRef,
+    HostCaptureEnvelopeV1,
+    KnowledgeBundle,
+    PlanningError,
+    RunExecutionContext,
+    Task,
+)
 from fsq_agent.providers import build_model_provider_session, test_model_provider_connection
 
 
@@ -295,7 +310,7 @@ async def test_reasoning_effort_task_snapshot_and_injected_evaluator_survive_pro
 
         async def complete(self, request):
             model_requests.append((self.model_name, request))
-            text = '{"passed":true,"explanation":"Visible.","confidence":null}'
+            text = '{"outcome":"passed","explanation":"Visible.","confidence":null}'
             return ModelResult(text=text, parsed_output=request.output.parse(text))
 
         async def aclose(self):
@@ -309,7 +324,43 @@ async def test_reasoning_effort_task_snapshot_and_injected_evaluator_survive_pro
             else:
                 text = AgentFinalOutput(status="success", summary="Done.").model_dump_json()
                 if request.name == "snapshot-agent":
-                    result = evaluators[-1].evaluate(AIAssertionRequest(platform="android", prompt="Visible?"))
+                    run_dir = tmp_path / "assertion-evidence"
+                    run_dir.mkdir(exist_ok=True)
+                    buffer = io.BytesIO()
+                    Image.new("RGB", (4, 4), "blue").save(buffer, format="PNG")
+                    pixels = buffer.getvalue()
+                    relative = Path("screen.png")
+                    (run_dir / relative).write_bytes(pixels)
+                    now = time.monotonic_ns()
+                    digest = hashlib.sha256(pixels).hexdigest()
+                    capture = HostCaptureEnvelopeV1(
+                        run_id="assertion-run",
+                        step_id="source",
+                        step_execution_id="assertion-execution",
+                        capture_sequence=len(model_requests) + 1,
+                        host_capture_started_monotonic_ns=now,
+                        host_capture_finished_monotonic_ns=now,
+                        captured_wall_clock="2026-01-01T00:00:00Z",
+                        png_sha256=digest,
+                        png_size_bytes=len(pixels),
+                        image_width=4,
+                        image_height=4,
+                    )
+                    result = evaluators[-1].evaluate(
+                        AIAssertionRequest(
+                            platform="android",
+                            prompt="Visible?",
+                            surface="appearance",
+                            run_id="assertion-run",
+                            step_id="assertion-execution",
+                            run_dir=run_dir,
+                            screenshot_path=relative,
+                            screenshot_artifact_ref=HarnessArtifactRef(artifact_id="screen", kind="screenshot", path=relative, sha256=digest, size_bytes=len(pixels)),
+                            capture=capture,
+                            upload_authorized=True,
+                            frame_sensitivity="non_sensitive",
+                        )
+                    )
                     assert result.status == "passed"
             return AgentResult(final_output=request.output.parse(text))
 

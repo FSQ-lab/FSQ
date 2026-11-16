@@ -123,7 +123,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 current['attributes']['password'] = current.get('password_after', False)
                 current['written'] = True
                 entry.write_text(json.dumps(current))
-            self.respond(None)
+            if payload.get('script') == 'mobile: deviceInfo':
+                self.respond({'realDisplaySize': '1080x2400'})
+            else:
+                self.respond(None)
         else:
             self.send_error(404)
     def do_DELETE(self):
@@ -291,9 +294,13 @@ def _assert_quarantined(environment: _IsolatedManagedDriver, owner: _ObservedOwn
     record = environment.service()
     info = owner.session.session_info()
     signals = list(environment.signals)
-    with pytest.raises(ToolExecutionError):
+    with pytest.raises(ToolExecutionError) as unavailable:
         driver.context()
-    assert driver.launch_app({})["status"] != "passed"
+    assert unavailable.value.context["reason"] == "cleanup_pending"
+    assert unavailable.value.context["session_state"] == info.state
+    action = driver.launch_app({})
+    assert action["status"] == "failed"
+    assert action["metadata"]["reason"] == "cleanup_pending"
     assert driver._session is owner.session
     assert driver._runtime is owner.runtime
     assert driver._managed_scope is owner.scope
@@ -837,7 +844,9 @@ def test_minimal_inspection_preserves_real_timeout_quarantine_and_disposal(manag
     result = managed_driver.driver.assert_state({"element": {**_ASSERT_LOCATOR, "enabled": True}})
     assert result["status"] == "failed"
     assert result["failure_category"] == "action_error"
-    assert result["metadata"] == {"backend_code": "operation_timeout", "request_state": "response_unknown"}
+    assert result["metadata"]["backend_code"] == "operation_timeout"
+    assert result["metadata"]["request_state"] == "response_unknown"
+    assert result["metadata"]["session_state"] == "uncertain"
     owner = _observe_owner(managed_driver)
     assert owner.session.session_info().state == "uncertain"
     events = managed_driver.events()
@@ -880,7 +889,8 @@ def test_input_postread_omits_displayed_without_losing_password_guard(managed_dr
     result = managed_driver.driver.input_text({"locator": locator, "text": "中文 café 👩🏽‍💻"})
     if password_after:
         assert result["status"] == "failed"
-        assert result["metadata"] == {"reason": "verification_unavailable"}
+        assert result["metadata"]["reason"] == "verification_unavailable"
+        assert result["metadata"]["stage"] == "post_verification"
         assert "中文" not in str(result)
     else:
         assert result == {"status": "passed", "output": None}
@@ -889,3 +899,25 @@ def test_input_postread_omits_displayed_without_losing_password_guard(managed_dr
     prefix = "/session/isolated-session/element/isolated-element/"
     reads = [event["path"].removeprefix(prefix) for event in events[replacement + 1 :] if event.get("method") == "GET" and event["path"].startswith(prefix)]
     assert reads == ["attribute/class", "attribute/resource-id", "attribute/package", "attribute/enabled", "attribute/password", "text", "rect"]
+    binding_queries = [event for event in events[:replacement] if event.get("path", "").endswith("/elements")]
+    assert len(binding_queries) >= 2
+    assert all(event["body"] == {"using": "id", "value": locator["resourceId"]} for event in binding_queries)
+    assert not any("/appium/settings" in event.get("path", "") for event in events)
+
+
+@pytest.mark.parametrize("password", [False, True, None])
+def test_complete_inspection_guards_text_through_real_sdk_and_public_client(managed_driver: _IsolatedManagedDriver, password: bool | None) -> None:
+    from fsq_agent.models import AndroidInspectElementParams
+
+    path = "/storage/emulated/0/" + "long-safe-directory/" * 20 + "report.txt"
+    locator = {"resourceId": "com.example.isolated:id/path"}
+    attributes = {"password": password, "content-desc": path}
+    if password is False:
+        attributes["text"] = path
+    managed_driver.mode("inspect", selector={"using": "id", "value": locator["resourceId"]}, attributes=attributes)
+    result = managed_driver.driver.inspect_element(AndroidInspectElementParams(locator=locator))
+    assert result["attributes"]["desc"] == {"state": "value", "value": path}
+    assert result["attributes"]["text"] == ({"state": "value", "value": path} if password is False else {"state": "unknown", "value": None})
+    prefix = "/session/isolated-session/element/isolated-element/"
+    reads = [event["path"].removeprefix(prefix) for event in managed_driver.events() if event.get("method") == "GET" and event["path"].startswith(prefix)]
+    assert reads == (["attribute/password", "text", "attribute/content-desc"] if password is False else ["attribute/password", "attribute/content-desc"])

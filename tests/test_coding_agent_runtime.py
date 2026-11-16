@@ -21,6 +21,8 @@ from fsq_agent.config import Settings
 from fsq_agent.models import (
     AgentFinalOutput,
     AgentRuntimeSettings,
+    AndroidSwipeParams,
+    AndroidTapAtParams,
     GoalPrePlan,
     HarnessActionResult,
     HarnessArtifactRef,
@@ -36,6 +38,7 @@ from fsq_agent.models import (
     StepPhaseReport,
     StepResult,
     Task,
+    WebClickOnParams,
 )
 from fsq_agent.providers import build_model_provider_session
 
@@ -74,11 +77,13 @@ class _FakeHarness:
         self.calls: list[str] = []
 
     def action_space(self) -> list[HarnessFunctionSchema]:
+        params_models = {"tap_at": AndroidTapAtParams, "swipe": AndroidSwipeParams, "click_on": WebClickOnParams}
+        params_model = params_models.get(self.driver_method)
         return [
             HarnessFunctionSchema(
                 name=self.tool_name,
                 description=f"Run {self.fsq_action_name}.",
-                params_json_schema={"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"]},
+                params_json_schema=params_model.model_json_schema() if params_model is not None else {"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"]},
                 platform="android",
                 driver_method=self.driver_method,
                 fsq_action_name=self.fsq_action_name,
@@ -2300,6 +2305,7 @@ async def test_file_helper_context_filter_preserves_complete_artifact(tmp_path: 
     from fsq_agent.agent_engine import ToolCall
 
     settings = Settings()
+    settings.workspace.root_dir = tmp_path
     settings.output.runs_dir = tmp_path / "runs"
     settings.agent_context.knowledge.root_dir = tmp_path / "knowledge"
     settings.agent_context.knowledge.root_dir.mkdir()
@@ -2309,7 +2315,7 @@ async def test_file_helper_context_filter_preserves_complete_artifact(tmp_path: 
     tools = runtime.tool_factory.build_tools(run_id="run-1", task_id="task-1")
     read_tool = next(tool for tool in tools if tool.name == "read_file")
     search_tool = next(tool for tool in tools if tool.name == "search_artifact")
-    output = await read_tool.invoke(ToolCall(name="read_file", arguments={"path": "large.txt"}, call_id="large-read"))
+    output = await read_tool.invoke(ToolCall(name="read_file", arguments={"path": "knowledge/large.txt"}, call_id="large-read"))
     payload = json.loads(output)
     artifact_path = Path(payload["artifact"]["path"])
     original_artifact = await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
@@ -2535,3 +2541,59 @@ def test_neutral_argument_redaction_preserves_shape_and_removes_credentials(as_j
     assert "CANARY" not in json.dumps(parsed)
     assert parsed["key"] == "Enter"
     assert parsed["text"] == "PASSWORD_REFERENCE"
+
+
+@pytest.mark.parametrize("reference", [None, {"width": 1080, "height": 2209}])
+@pytest.mark.parametrize(
+    ("name", "alias", "arguments"),
+    [
+        ("tap_at", "tapAt", {"point": {"x": 100, "y": 200}}),
+        ("swipe", "swipe", {"start": {"x": 100, "y": 200}, "end": {"x": 200, "y": 200}}),
+    ],
+)
+async def test_online_coordinate_callbacks_reject_replay_reference_before_any_action(name, alias, arguments, reference):
+    harness = _FakeHarness(tool_name=name, driver_method=name, fsq_action_name=alias, screen_size=(1080, 2400))
+    [tool] = HarnessToolAdapter(harness, run_id="reference-rejected").build_tools()
+    arguments = {**arguments, "reference_screen_size": reference}
+    result = json.loads(await tool.invoke(ToolCall(name=name, arguments=arguments, call_id="hidden-reference")))
+    assert result["status"] == "failed"
+    assert result["capability_name"] == name
+    assert result["artifact_refs"] == []
+    assert harness.calls == []
+    assert harness.steps == []
+
+
+@pytest.mark.parametrize("shape", ["ref", "all_of", "all_of_ref"])
+async def test_harness_callback_accepts_properties_from_supported_schema_composition(shape: str) -> None:
+    harness = _FakeHarness()
+    adapter = HarnessToolAdapter(harness, run_id="composed-schema")
+    parameters = {"type": "object", "properties": {"target": {"type": "string"}}, "additionalProperties": False}
+    if shape == "ref":
+        adapter.schemas[0].params_json_schema = {"$defs": {"Arguments": parameters}, "$ref": "#/$defs/Arguments"}
+    elif shape == "all_of":
+        adapter.schemas[0].params_json_schema = {"type": "object", "additionalProperties": False, "allOf": [parameters]}
+    else:
+        adapter.schemas[0].params_json_schema = {"$defs": {"Arguments": parameters}, "allOf": [{"$ref": "#/$defs/Arguments"}]}
+    [tool] = adapter.build_tools()
+
+    result = json.loads(await tool.invoke(ToolCall(name="tap_on", arguments={"target": "Save"}, call_id="composed-save")))
+
+    assert result["status"] == "passed"
+    assert harness.steps[0].params == {"target": "Save"}
+    assert "invoke:tap_on:session-1" in harness.calls
+
+
+@pytest.mark.parametrize("additional", [None, True])
+async def test_harness_callback_preserves_permitted_additional_properties(additional: bool | None) -> None:
+    harness = _FakeHarness()
+    adapter = HarnessToolAdapter(harness, run_id="permissive-schema")
+    if additional is not None:
+        adapter.schemas[0].params_json_schema["additionalProperties"] = additional
+    [tool] = adapter.build_tools()
+    arguments = {"target": "Save", "locator": {"resourceId": "save"}}
+
+    result = json.loads(await tool.invoke(ToolCall(name="tap_on", arguments=arguments, call_id="permissive-save")))
+
+    assert result["status"] == "passed"
+    assert harness.steps[0].params == arguments
+    assert "invoke:tap_on:session-1" in harness.calls

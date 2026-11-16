@@ -25,6 +25,7 @@ def check_dynamic_agent_readiness(settings: Settings) -> tuple[bool, str, str]:
         ]
         CapabilityRegistry.from_definitions(definitions)
         file_ops = FileOps(
+            workspace_base=settings.workspace.root_dir,
             read_roots=[settings.cases.dir, knowledge_settings.root_dir, knowledge_settings.skills.dir, knowledge_settings.pre_plan.dir or knowledge_settings.root_dir, settings.output.root_dir],
             write_root=settings.output.root_dir / "artifacts",
         )

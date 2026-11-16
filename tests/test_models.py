@@ -156,8 +156,8 @@ def test_capability_parameter_schemas_include_llm_facing_guidance() -> None:
     assert "semantic target" in android_text_schema["properties"]["target"]["description"]
     assert "structured Android locator" in android_text_schema["properties"]["locator"]["description"]
 
-    assert "direction or both start and end" in android_swipe_schema["description"]
-    assert "screen size" in android_swipe_schema["properties"]["reference_screen_size"]["description"]
+    assert "exactly one" in android_swipe_schema["description"]
+    assert "reference_screen_size" not in android_swipe_schema["properties"]
 
     assert "exactly one locator or url" in web_wait_schema["description"]
     assert "condition timeout" in web_wait_schema["properties"]["timeout_ms"]["description"]
@@ -178,9 +178,65 @@ def test_capability_parameter_schemas_include_llm_facing_guidance() -> None:
     assert "retain" in macos_kill_schema["properties"]["close_session"]["description"]
     assert "Enter" in macos_press_key_schema["properties"]["key"]["description"]
     assert "COMMAND" in macos_press_key_schema["properties"]["modifiers"]["description"]
-
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         MacOSLaunchAppParams(environment={"APP_MODE": "test"})
+
+
+def test_android_replay_references_are_hidden_but_validated_and_serialized() -> None:
+    context = models.HarnessContext(platform="android", screen_size=(1080, 2400))
+    for model, payload in (
+        (models.AndroidTapAtParams, {"point": {"x": 1, "y": 2}}),
+        (AndroidSwipeParams, {"start": {"x": 1, "y": 2}, "end": {"x": 3, "y": 4}}),
+    ):
+        assert "reference_screen_size" not in model.model_json_schema()["properties"]
+        params = model.model_validate({**payload, "reference_screen_size": {"width": 540, "height": 1200}})
+        assert params.model_dump(mode="json")["reference_screen_size"] == {"width": 540, "height": 1200}
+        assert params.replay_params(context)["reference_screen_size"] == {"width": 540, "height": 1200}
+        assert model.model_validate(payload).replay_params(context)["reference_screen_size"] == {"width": 1080, "height": 2400}
+        with pytest.raises(ValidationError):
+            model.model_validate({**payload, "reference_screen_size": {"width": 0, "height": 1200}})
+
+
+@pytest.mark.parametrize("percent", [None, 1, 0.5, 0.0001])
+def test_android_element_swipe_accepts_fraction_without_replay_reference(percent: float | None) -> None:
+    params = AndroidSwipeParams(locator={"resourceId": "list"}, direction="up", percent=percent)
+    assert params.percent == percent
+    assert "reference_screen_size" not in params.replay_params(models.HarnessContext(platform="android", screen_size=(1080, 2400)))
+    assert AndroidSwipeParams(target="List", direction="down").percent is None
+    assert AndroidSwipeParams(direction="left", percent=None).direction == "left"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"start": {"x": 1, "y": 2}},
+        {"direction": "up", "start": {"x": 1, "y": 2}, "end": {"x": 3, "y": 4}},
+        {"target": "List"},
+        {"locator": {}, "direction": "up"},
+        {"target": "List", "start": {"x": 1, "y": 2}, "end": {"x": 3, "y": 4}},
+        {"direction": "up", "percent": 0.5},
+        {"direction": "up", "reference_screen_size": {"width": 10, "height": 20}},
+        {"target": "List", "direction": "up", "reference_screen_size": {"width": 10, "height": 20}},
+        *({"target": "List", "direction": "up", "percent": value} for value in [True, False, 0, -0.5, 1.01, float("nan"), float("inf"), "0.5"]),
+        *({"direction": "up", "duration": value} for value in [True, 0, 60001, 1.5]),
+    ],
+)
+def test_android_swipe_rejects_conflicts_invalid_fractions_and_durations(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        AndroidSwipeParams.model_validate(payload)
+
+
+def test_android_inspect_attributes_are_safe_explicit_and_duplicate_free() -> None:
+    model = models.AndroidInspectElementParams
+    assert model(target="Path").attributes == ("text", "desc")
+    allowed = ("id", "text", "desc", "type", "package", "bounds", "enabled", "displayed", "checked", "selected", "clickable", "focused")
+    assert model(locator={"resourceId": "path"}, attributes=allowed).attributes == allowed
+    for attributes in ([], ["text", "text"], ["password"], ["value"], ["arbitrary"]):
+        with pytest.raises(ValidationError):
+            model(target="Path", attributes=attributes)
+    with pytest.raises(ValidationError):
+        model(locator={}, attributes=["text"])
 
 
 def test_web_parameter_models_enforce_semantic_replay_contract() -> None:
@@ -322,3 +378,10 @@ def test_android_initial_idle_policy_rejects_coercion_and_inexact_values(value: 
     with pytest.raises(ValidationError) as failed:
         AndroidHarnessSettings.model_validate({"uiautomator2_wait_for_idle_timeout_ms": value})
     assert failed.value.errors()[0]["loc"] == ("uiautomator2_wait_for_idle_timeout_ms",)
+
+
+@pytest.mark.parametrize("duration", [1, 60000])
+def test_android_swipe_duration_boundaries_and_nullable_point_fraction(duration: int) -> None:
+    params = AndroidSwipeParams(start={"x": 1, "y": 2}, end={"x": 3, "y": 4}, percent=None, duration=duration)
+    assert params.duration == duration
+    assert params.percent is None

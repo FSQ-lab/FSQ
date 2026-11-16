@@ -10,11 +10,12 @@ import socket
 import time
 from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
+from math import ceil, floor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 from xml.etree import ElementTree
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _android_driver_tool
@@ -25,6 +26,7 @@ from fsq_agent.models import (
     AndroidAssertWithAIParams,
     AndroidHarnessSettings,
     AndroidInputTextParams,
+    AndroidInspectElementParams,
     AndroidKillAppParams,
     AndroidLaunchAppParams,
     AndroidLongPressOnParams,
@@ -53,7 +55,6 @@ DEFAULT_NEW_COMMAND_TIMEOUT_SECONDS = 300.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 25.0
 DEFAULT_LONG_PRESS_DURATION_MS = 1000
 MAX_COORDINATE_VALUE = 2_147_483_647
-MAX_SWIPE_DURATION_MS = 60_000
 MAX_PORT_BIND_ATTEMPTS = 3
 
 ANDROID_STATE_ASSERTION_FIELDS = ("enabled", "checked", "selected", "clickable", "focused")
@@ -66,6 +67,53 @@ ANDROID_EDITABLE_CLASSES = frozenset(
     }
 )
 ANDROID_INPUT_IDENTITY_FIELDS = ("type", "id", "package")
+ANDROID_INPUT_BINDING_ATTRIBUTES = (*ANDROID_INPUT_IDENTITY_FIELDS, "bounds")
+ANDROID_SAFE_BACKEND_CODES = frozenset(
+    {
+        "invalid_argument",
+        "invalid_request",
+        "command_failed",
+        "operation_timeout",
+        "operation_cancelled",
+        "target_not_found",
+        "target_ambiguous",
+        "target_not_displayed",
+        "target_not_enabled",
+        "target_stale",
+        "session_not_active",
+        "session_closed",
+        "session_uncertain",
+        "session_disposed",
+        "session_busy",
+        "session_create_unknown",
+        "session_quit_unknown",
+        "execution_unknown",
+        "response_unknown",
+        "connection_unavailable",
+        "connection_closed",
+        "cleanup_failed",
+        "source_settings_invalid",
+        "unsupported_operation",
+        "unsupported_platform",
+        "invalid_response",
+    }
+)
+ANDROID_SAFE_COMPLETED_STEPS = frozenset(
+    {
+        "target_resolved",
+        "target_displayed",
+        "target_enabled",
+        "action_completed",
+        "settings_changed",
+        "settings_restored",
+        "attributes_read",
+        "display_size_read",
+        "session_deleted",
+        "observation_built",
+        "source_parsed",
+    }
+)
+ANDROID_SESSION_STATES = frozenset({"creating", "active", "uncertain", "disposing", "disposed", "closing", "closed"})
 ANDROID_INSPECT_INPUT_ATTRIBUTES = (
     "type",
     "id",
@@ -129,7 +177,10 @@ ANDROID_KEYCODE_MAP: dict[str, int] = {
     "esc": 111,
     "forward_del": 112,
     "move_home": 122,
+    "movehome": 122,
     "move_end": 123,
+    "moveend": 123,
+    "end": 123,
     "numpad_enter": 160,
     "volume_mute": 164,
     "mute": 164,
@@ -369,7 +420,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         info = session.session_info()
         session_id = getattr(info, "appium_session_id", None) or getattr(info, "id", None) or f"appium_connect_agent:{self.serial or 'injected'}"
         observation = session.observe_tree(control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS))
-        screen_size = self._viewport_size(observation)
+        screen_size = self._display_size(session)
         current_package = self._extract_current_package(observation)
         return {
             "session_id": str(session_id),
@@ -430,14 +481,12 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         if point is None:
             return self._configuration_error("tapAt requires integer point.x and point.y parameters.")
         session = self._ensure_session()
-        scaled = self._scale_points_if_needed(session, [point], data.get("reference_screen_size"))
-        if scaled is None:
-            return self._failed("action_error", "Current Android viewport size is unavailable for coordinate scaling.")
+        scaled, screen_size = self._scale_points_if_needed(session, [point], data.get("reference_screen_size"))
         x, y = scaled[0]
-        if not (0 <= x <= MAX_COORDINATE_VALUE and 0 <= y <= MAX_COORDINATE_VALUE):
-            return self._configuration_error("tapAt coordinates must be integers between 0 and 2147483647.")
         session.device.tap_at(x, y, control=self._operation_control(15.0))
-        return self._passed({"point": {"x": x, "y": y}})
+        if data.get("reference_screen_size") is None:
+            data["reference_screen_size"] = {"width": screen_size[0], "height": screen_size[1]}
+        return {**self._passed({"point": {"x": x, "y": y}}), "metadata": {"safe_replay_params": data}}
 
     @_android_driver_tool("longPressOn", description="Long press an Android UI target.")
     def long_press_on(self, params: AndroidLongPressOnParams) -> dict[str, object]:
@@ -456,10 +505,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
 
     @_android_driver_tool("inputText", description="Replace text in an editable Android UI target and verify the accepted value.")
     def input_text(self, params: AndroidInputTextParams) -> dict[str, object]:
-        if self._borrowed_session and self._executor is None:
-            return self._input_text_impl(params)
-        self._ensure_executor()
-        return self._run_sync(lambda: self._input_text_impl(params))
+        return self._run_tool(lambda: self._input_text_impl(params))
 
     def _input_text_impl(self, params: AndroidInputTextParams) -> dict[str, object]:
         data = self._param_data(params)
@@ -475,38 +521,43 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             self._propagate_if_cancelled(exc)
             if isinstance(exc, ConfigurationError):
                 raise
-            return self._failed("action_error", "Input target inspection failed.", metadata={"reason": "entry_backend_error"})
+            return self._input_failure(exc, "entry_backend_error", "pre_inspection", "Input target inspection failed.")
 
         before, resolution_failure = self._wait_and_inspect_input_target(element)
         if resolution_failure is not None or before is None:
-            return resolution_failure or self._failed("action_error", "Input target inspection failed.", metadata={"reason": "entry_backend_error"})
+            return resolution_failure or self._input_failure(None, "entry_backend_error", "pre_inspection", "Input target inspection failed.")
 
         class_name = self._attr_value(before, "type")
         enabled = self._attr_value(before, "enabled")
         displayed = self._attr_value(before, "displayed")
         if not isinstance(class_name, str) or class_name not in ANDROID_EDITABLE_CLASSES or enabled is not True or displayed is not True:
-            return self._failed("target_resolution_error", "Input target is not demonstrably editable.", metadata={"reason": "invalid_input_target"})
+            return self._input_failure(None, "invalid_input_target", "pre_inspection", "Input target is not demonstrably editable.", failure_category="target_resolution_error")
 
         before_package = self._attr_value(before, "package")
         before_bounds = self._attr_value(before, "bounds")
         if not self._input_text_is_readable(before) or not isinstance(before_package, str) or not before_package.strip() or before_bounds is None:
-            return self._failed("action_error", "Input target text cannot be verified.", metadata={"reason": "verification_unavailable"})
+            return self._input_failure(None, "verification_unavailable", "pre_inspection", "Input target text cannot be verified.")
 
-        before_text = self._attr_value(before, "text")
+        before_id = self._attr_raw_id(before)
+        if before_id is not None:
+            try:
+                # Bind the observed raw identity before mutation; never re-use mutable text or a positional selector.
+                element = session.element("id", before_id, raw_id=ANDROID_STANDARD_RESOURCE_ID.fullmatch(before_id) is None)
+                bound = self._attributes_dict(element.inspect(attributes=ANDROID_INPUT_BINDING_ATTRIBUTES, control=self._operation_control(10.0)))
+            except Exception as exc:  # noqa: BLE001 - Sanitize arbitrary SDK/client failures; cancellation is re-raised below.
+                self._propagate_if_cancelled(exc)
+                return self._input_failure(exc, "verification_unavailable", "identity_binding", "Input target identity could not be established.")
+            if any(before.get(field) != bound.get(field) for field in ANDROID_INPUT_BINDING_ATTRIBUTES):
+                return self._input_failure(None, "verification_unavailable", "identity_binding", "Input target identity changed before entry.")
+        elif not self._input_locator_is_text_independent(data):
+            return self._input_failure(None, "verification_unavailable", "identity_binding", "Input target has no stable text-independent identity.")
+
         try:
             element.click(wait_timeout_seconds=2.0, control=self._operation_control(10.0))
             element.replace_element_value(text, wait_timeout_seconds=5.0, control=self._operation_control(15.0))
-        # Contain backend messages locally so literal/secret text never leaks; BaseException cancellation propagates.
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - Never expose submitted text from SDK/client failures; preserve cancellation below.
             self._propagate_if_cancelled(exc)
-            return self._failed("action_error", "Text entry backend failed; acceptance is unknown.", metadata={"reason": "entry_backend_error"})
-
-        if before_text != text and not self._input_locator_is_text_independent(data):
-            return self._failed(
-                "action_error",
-                "Text entry acceptance cannot be verified on the original target.",
-                metadata={"reason": "verification_unavailable"},
-            )
+            return self._input_failure(exc, "entry_backend_error", "write", "Text entry backend failed; acceptance is unknown.")
 
         try:
             inspection = element.inspect(
@@ -514,26 +565,26 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 control=self._operation_control(10.0),
             )
             after = self._attributes_dict(inspection)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - Sanitize observed text from SDK/client failures; preserve cancellation below.
             self._propagate_if_cancelled(exc)
-            return self._failed("action_error", "Text entry acceptance could not be read.", metadata={"reason": "verification_unavailable"})
+            return self._input_failure(exc, "verification_unavailable", "post_verification", "Text entry acceptance could not be read.")
 
-        before_id = self._attr_raw_id(before)
         if (
             not self._input_text_is_readable(after)
             or self._attr_value(after, "enabled") is not True
             or any(before.get(field) != after.get(field) for field in ANDROID_INPUT_IDENTITY_FIELDS)
-            or (self._attr_value(before, "bounds") != self._attr_value(after, "bounds") and not self._input_locator_binds_resource(data, before_id))
+            or (before.get("bounds") != after.get("bounds") and before_id is None)
         ):
-            return self._failed(
-                "action_error",
-                "Text entry acceptance cannot be verified on the original target.",
-                metadata={"reason": "verification_unavailable"},
-            )
+            return self._input_failure(None, "verification_unavailable", "post_verification", "Text entry acceptance cannot be verified on the original target.")
 
         if self._attr_value(after, "text") != text:
-            return self._failed("action_error", "Text entry did not match the requested replacement.", metadata={"reason": "entry_mismatch"})
+            return self._input_failure(None, "entry_mismatch", "post_verification", "Text entry did not match the requested replacement.")
         return self._passed()
+
+    def _input_failure(self, exc: Exception | None, reason: str, stage: str, message: str, *, failure_category: str = "action_error") -> dict[str, object]:
+        metadata = self._safe_diagnostics(exc, stage=stage)
+        metadata.setdefault("reason", reason)
+        return self._failed(failure_category, message, metadata=metadata)
 
     def _wait_and_inspect_input_target(self, element: Any) -> tuple[dict[str, tuple[str, object]] | None, dict[str, object] | None]:
         deadline = time.monotonic() + DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS
@@ -548,22 +599,16 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 self._propagate_if_cancelled(exc)
                 code = getattr(exc, "code", None)
                 if code == "target_ambiguous":
-                    return None, self._failed(
-                        "target_resolution_error",
-                        "Target locator matched multiple Android elements; refine the locator.",
-                        metadata={"reason": "target_ambiguous"},
+                    return None, self._input_failure(
+                        exc, "target_ambiguous", "pre_inspection", "Target locator matched multiple Android elements; refine the locator.", failure_category="target_resolution_error"
                     )
                 if code == "target_not_found":
                     remaining = deadline - time.monotonic()
                     if remaining > 0:
                         time.sleep(min(DEFAULT_POLL_INTERVAL_SECONDS, remaining))
                         continue
-                    return None, self._failed(
-                        "target_resolution_error",
-                        "Input target was not found.",
-                        metadata={"reason": "target_missing"},
-                    )
-                return None, self._failed("action_error", "Input target inspection failed.", metadata={"reason": "entry_backend_error"})
+                    return None, self._input_failure(exc, "target_missing", "pre_inspection", "Input target was not found.", failure_category="target_resolution_error")
+                return None, self._input_failure(exc, "entry_backend_error", "pre_inspection", "Input target inspection failed.")
 
     @staticmethod
     def _attributes_dict(inspection: Any) -> dict[str, tuple[str, object]]:
@@ -584,9 +629,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return None
 
     def _input_text_is_readable(self, attrs: dict[str, tuple[str, object]]) -> bool:
-        password_entry = attrs.get("password")
         text_entry = attrs.get("text")
-        if password_entry != ("value", False) or text_entry is None or text_entry[0] != "value":
+        if self._attr_value(attrs, "password") is not False or text_entry is None or text_entry[0] != "value":
             return False
         text = text_entry[1]
         return isinstance(text, str) and (not text or not set(text) <= {"*", "•", "●"})
@@ -602,23 +646,6 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 return "text" not in populated
         return False
 
-    def _input_locator_binds_resource(self, data: dict[str, object], resource_name: str | None) -> bool:
-        locator = data.get("locator")
-        if not isinstance(resource_name, str) or not resource_name.strip() or not isinstance(locator, dict):
-            return False
-        xpath = locator.get("xpath")
-        if isinstance(xpath, str) and xpath.strip():
-            return ANDROID_TEXT_INDEPENDENT_XPATH.fullmatch(xpath) is not None and any(xpath.endswith(f"[@resource-id={quote}{resource_name}{quote}]") for quote in ("'", '"'))
-        locator_id = locator.get("resourceId")
-        if not isinstance(locator_id, str) or not locator_id.strip():
-            return False
-        if locator_id == resource_name:
-            return True
-        app_id = (self.app_id or "").strip()
-        if ":" not in locator_id and ANDROID_LOCAL_RESOURCE_ID_PATTERN.fullmatch(locator_id) is not None and app_id:
-            return resource_name == f"{app_id}:id/{locator_id}"
-        return False
-
     @_android_driver_tool("pressKey", description="Press an Android key.")
     def press_key(self, params: AndroidPressKeyParams) -> dict[str, object]:
         return self._run_tool(lambda: self._press_key_impl(params))
@@ -632,30 +659,33 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         normalized = key_text.lower().replace("-", "_").replace(" ", "_")
         if normalized.startswith("keycode_"):
             normalized = normalized.removeprefix("keycode_")
-        session = self._ensure_session()
-        if normalized == "back":
-            session.device.back(control=self._operation_control(15.0))
-            return self._passed({"key": key_text})
-        keycode: int | None = ANDROID_KEYCODE_MAP.get(normalized)
+        keycode: int | None = 123 if normalized == "ctrl+end" else ANDROID_KEYCODE_MAP.get(normalized)
         if keycode is None and normalized.isascii() and normalized.isdigit():
             parsed = int(normalized)
             if 0 <= parsed <= MAX_COORDINATE_VALUE:
                 keycode = parsed
         if keycode is None:
             return self._configuration_error(f"Unsupported Android key: {key_text!r}.")
-        session.device.press_keycode(keycode, control=self._operation_control(15.0))
+        session = self._ensure_session()
+        if normalized == "back":
+            session.device.back(control=self._operation_control(15.0))
+            return self._passed({"key": key_text})
+        if normalized == "ctrl+end":
+            session.device.press_keycode(keycode, metastate=4096, control=self._operation_control(15.0))
+        else:
+            session.device.press_keycode(keycode, control=self._operation_control(15.0))
         return self._passed({"key": key_text})
 
-    @_android_driver_tool("swipe", description="Swipe by direction or explicit Android screen coordinates.")
+    @_android_driver_tool("swipe", description="Swipe in exactly one mode: full-screen direction, explicit points, or target/locator plus direction and optional finite percent of element bounds.")
     def swipe(self, params: AndroidSwipeParams) -> dict[str, object]:
         return self._run_tool(lambda: self._swipe_impl(params))
 
     def _swipe_impl(self, params: AndroidSwipeParams) -> dict[str, object]:
-        data = self._param_data(params)
-        raw_duration = data.get("duration")
-        duration_ms = 200 if raw_duration is None else raw_duration
-        if not _is_strict_int(duration_ms) or not (1 <= duration_ms <= MAX_SWIPE_DURATION_MS):
-            return self._configuration_error("swipe duration must be an integer from 1 through 60000 milliseconds.")
+        try:
+            data = AndroidSwipeParams.model_validate(self._param_data(params)).model_dump(mode="json", exclude_none=True)
+        except ValidationError:
+            return self._configuration_error("Invalid Android swipe mode, coordinates, fraction, or duration.")
+        duration_ms = data.get("duration", 200)
         timeout_budget = max(15.0, duration_ms / 1000.0 + 10.0)
         session = self._ensure_session()
 
@@ -664,12 +694,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             if points is None:
                 return self._configuration_error("swipe point payload requires integer start.x, start.y, end.x, and end.y parameters.")
             sx, sy, ex, ey = points
-            scaled = self._scale_points_if_needed(session, [(sx, sy), (ex, ey)], data.get("reference_screen_size"))
-            if scaled is None:
-                return self._failed("action_error", "Current Android viewport size is unavailable for coordinate scaling.")
+            scaled, screen_size = self._scale_points_if_needed(session, [(sx, sy), (ex, ey)], data.get("reference_screen_size"))
             (sx, sy), (ex, ey) = scaled
-            if not all(0 <= coord <= MAX_COORDINATE_VALUE for coord in (sx, sy, ex, ey)):
-                return self._configuration_error("swipe coordinates must be integers between 0 and 2147483647.")
             session.device.swipe_between(
                 sx,
                 sy,
@@ -678,17 +704,34 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 duration_ms=duration_ms,
                 control=self._operation_control(timeout_budget),
             )
-            return self._passed({"start": {"x": sx, "y": sy}, "end": {"x": ex, "y": ey}})
+            if "reference_screen_size" not in data:
+                data["reference_screen_size"] = {"width": screen_size[0], "height": screen_size[1]}
+            return {**self._passed({"start": {"x": sx, "y": sy}, "end": {"x": ex, "y": ey}}), "metadata": {"safe_replay_params": data}}
 
-        direction = data.get("direction")
-        if not isinstance(direction, str) or direction.strip().lower() not in {"up", "down", "left", "right"}:
-            return self._configuration_error("swipe requires a supported direction parameter.")
-        observation = session.observe_tree(control=self._operation_control(15.0))
-        viewport = self._viewport_size(observation)
-        if viewport is None:
-            return self._failed("action_error", "Current Android viewport size is unavailable for directional swipe.")
-        width, height = viewport
-        sx, sy, ex, ey = self._swipe_points(direction, width, height)
+        direction = str(data["direction"])
+        width, height = self._display_size(session)
+        if "target" in data or "locator" in data:
+            element = self._resolve_element(session, data)
+            attrs = self._attributes_dict(element.inspect(attributes=("bounds",), control=self._operation_control(10.0)))
+            bounds = self._attr_value(attrs, "bounds")
+            if bounds is None or not all(_is_strict_int(getattr(bounds, name, None)) for name in ("x", "y", "width", "height")):
+                return self._failed("action_error", "Element bounds are unavailable for swipe.")
+            x, y, element_width, element_height = bounds.x, bounds.y, bounds.width, bounds.height
+            if x < 0 or y < 0 or element_width <= 0 or element_height <= 0 or x + element_width > width or y + element_height > height:
+                return self._failed("action_error", "Element swipe requires positive fully on-screen bounds.")
+            horizontal = direction in {"left", "right"}
+            first = x if horizontal else y
+            last = first + (element_width if horizontal else element_height) - 1
+            fraction = data.get("percent", 1.0)
+            midpoint = (first + last) / 2
+            half_span = (last - first) * fraction / 2
+            low, high = ceil(midpoint - half_span), floor(midpoint + half_span)
+            if low >= high:
+                return self._failed("action_error", "Element swipe collapses to fewer than two physical pixels.")
+            start_axis, end_axis = (high, low) if direction in {"up", "left"} else (low, high)
+            sx, sy, ex, ey = (start_axis, y + element_height // 2, end_axis, y + element_height // 2) if horizontal else (x + element_width // 2, start_axis, x + element_width // 2, end_axis)
+        else:
+            sx, sy, ex, ey = self._swipe_points(direction, width, height)
         session.device.swipe_between(
             sx,
             sy,
@@ -834,7 +877,10 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 return None, self._target_missing(data)
             time.sleep(min(DEFAULT_POLL_INTERVAL_SECONDS, remaining))
 
-    @_android_driver_tool("assertWithAI", description="Evaluate an explicit Android visual assertion with AI.")
+    @_android_driver_tool(
+        "assertWithAI",
+        description="Evaluate a pure visual appearance/image/Canvas assertion. Not for grounding, visual driving, replacing available exact accessibility text/SeekBar values/checked/selected assertions, or overriding contradictory structural evidence.",
+    )
     def assert_with_ai(self, params: AndroidAssertWithAIParams) -> dict[str, object]:
         return self._run_ai_assertion_tool(params)
 
@@ -862,6 +908,45 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         session = self._ensure_session()
         observation = session.observe_tree(control=self._operation_control(20.0))
         return self._serialize_tree_observation(observation)
+
+    @_android_driver_tool(
+        "inspectElement",
+        description="Inspect one uniquely resolved Android element and return complete selected safe attributes with explicit observation states. Text is read only after password is explicitly false.",
+    )
+    def inspect_element(self, params: AndroidInspectElementParams) -> dict[str, object]:
+        return self._run_on_worker(lambda: self._inspect_element_impl(params))
+
+    def _inspect_element_impl(self, params: AndroidInspectElementParams) -> dict[str, object]:
+        if not isinstance(params, AndroidInspectElementParams):
+            params = AndroidInspectElementParams.model_validate(params)
+        data = self._param_data(params)
+        attributes = params.attributes
+        session = self._ensure_session()
+        element = self._resolve_element(session, data)
+        deadline = time.monotonic() + DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS
+        readable_text = False
+        if "text" in attributes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ToolExecutionError("Android element inspection timed out.")
+            password = self._attributes_dict(element.inspect(attributes=("password",), control=self._operation_control(remaining)))
+            readable_text = self._attr_value(password, "password") is False
+        selected = tuple(name for name in attributes if name != "text" or readable_text)
+        attrs = {}
+        if selected:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ToolExecutionError("Android element inspection timed out.")
+            attrs = self._attributes_dict(element.inspect(attributes=selected, control=self._operation_control(remaining)))
+        output: dict[str, object] = {}
+        for name in attributes:
+            state, value = attrs.get(name, ("unknown", None))
+            if state != "value":
+                value = None
+            elif name == "bounds":
+                value = {field: getattr(value, field) for field in ("x", "y", "width", "height")}
+            output[name] = {"state": state, "value": value}
+        return {"attributes": output}
 
     def _serialize_tree_observation(self, observation: Any) -> dict[str, object]:
         try:
@@ -1011,15 +1096,17 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return any(key not in ANDROID_UI_SNAPSHOT_STRUCTURAL_ATTRIBUTES for key in attributes)
 
     def _ensure_session(self) -> Any:
-        if self._closed or self._cleanup_pending:
-            raise ToolExecutionError("Android resources are closed or awaiting explicit terminal cleanup.")
+        if self._closed:
+            raise ToolExecutionError("Android resources are closed.", context=self._safe_diagnostics())
+        if self._cleanup_pending:
+            raise ToolExecutionError("Android resources await explicit terminal cleanup.", context=self._safe_diagnostics())
         if self._session is not None:
             info_fn = getattr(self._session, "session_info", None)
             if callable(info_fn):
                 state = getattr(info_fn(), "state", "active")
                 if state != "active":
                     self._cleanup_pending = not self._borrowed_session
-                    raise ToolExecutionError("Android session is unavailable; explicit terminal cleanup is required.", context={"state": state})
+                    raise ToolExecutionError("Android session is unavailable; explicit terminal cleanup is required.", context={"reason": "session_unavailable", **self._safe_diagnostics()})
             return self._session
 
         serial = (self.serial or "").strip()
@@ -1109,7 +1196,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return session
 
     def _run_on_worker(self, func: Callable[[], _T]) -> _T:
-        if self._borrowed_session and self._executor is None:
+        if self._closed or self._cleanup_pending or (self._borrowed_session and self._executor is None):
             return func()
         self._ensure_executor()
         try:
@@ -1132,13 +1219,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
 
     def _normalize_backend_exception(self, exc: Exception) -> dict[str, object]:
         code = getattr(exc, "code", None)
-        request_state = getattr(exc, "request_state", None)
         cls_name = type(exc).__name__
-        metadata: dict[str, Any] = {}
-        if isinstance(code, str) and code:
-            metadata["backend_code"] = code
-        if isinstance(request_state, str) and request_state:
-            metadata["request_state"] = request_state
+        metadata = self._safe_diagnostics(exc)
 
         if cls_name in {"InvalidRequestError", "ElementValidationError"}:
             return self._failed("configuration_error", "Invalid Android automation request parameters.", metadata=metadata)
@@ -1146,7 +1228,40 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             if code == "target_ambiguous":
                 return self._target_ambiguous()
             return self._failed("target_resolution_error", "Target was not found.", metadata=metadata)
-        return self._failed("action_error", f"Android backend operation failed ({code or cls_name}).", metadata=metadata)
+        return self._failed("action_error", "Android backend operation failed.", metadata=metadata)
+
+    def _safe_diagnostics(self, exc: Exception | None = None, *, stage: str | None = None) -> dict[str, object]:
+        metadata: dict[str, object] = {}
+        if stage is not None:
+            metadata["stage"] = stage
+        if self._closed:
+            metadata["reason"] = "closed"
+        elif self._cleanup_pending:
+            metadata["reason"] = "cleanup_pending"
+        if exc is not None:
+            code = getattr(exc, "code", None)
+            if isinstance(code, str) and code in ANDROID_SAFE_BACKEND_CODES:
+                metadata["backend_code"] = code
+            request_state = getattr(exc, "request_state", None)
+            if isinstance(request_state, str) and request_state in {"not_sent", "response_received", "response_unknown"}:
+                metadata["request_state"] = request_state
+            steps = getattr(exc, "completed_steps", None)
+            if isinstance(steps, (tuple, list)):
+                metadata["completed_steps"] = list(dict.fromkeys(step for step in steps[: len(ANDROID_SAFE_COMPLETED_STEPS)] if isinstance(step, str) and step in ANDROID_SAFE_COMPLETED_STEPS))
+            if isinstance(exc, ToolExecutionError):
+                reason = exc.context.get("reason")
+                if reason in {"closed", "cleanup_pending", "session_unavailable", "display_size_unavailable"}:
+                    metadata["reason"] = reason
+        # SessionInfo is a public local snapshot: no device request, reconnection, or cleanup.
+        # A broken diagnostic getter must never replace a primary failure or cancellation.
+        try:
+            if self._session is not None:
+                state = self._session.session_info().state
+                if isinstance(state, str) and state in ANDROID_SESSION_STATES:
+                    metadata["session_state"] = state
+        except BaseException:  # noqa: BLE001 - Optional local diagnostics must not replace the primary failure or its cancellation.
+            return metadata
+        return metadata
 
     @staticmethod
     def _propagate_if_cancelled(exc: BaseException) -> None:
@@ -1235,21 +1350,15 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 result[key] = value
         return result
 
-    @staticmethod
-    def _viewport_size(observation: Any) -> tuple[int, int] | None:
-        viewport = getattr(observation, "viewport", None)
-        width_obs = getattr(viewport, "width", None)
-        height_obs = getattr(viewport, "height", None)
-        if (
-            getattr(width_obs, "state", None) == "value"
-            and getattr(height_obs, "state", None) == "value"
-            and _is_strict_int(width_obs.value)
-            and _is_strict_int(height_obs.value)
-            and width_obs.value > 0
-            and height_obs.value > 0
-        ):
-            return int(width_obs.value), int(height_obs.value)
-        return None
+    def _display_size(self, session: Any) -> tuple[int, int]:
+        query = getattr(session.device, "display_size", None)
+        if not callable(query):
+            raise ToolExecutionError("Public Android physical display size is unavailable.", context={"reason": "display_size_unavailable"})
+        display = query(control=self._operation_control(15.0))
+        width, height = getattr(display, "width", None), getattr(display, "height", None)
+        if not (_is_strict_int(width) and _is_strict_int(height) and 1 <= width <= MAX_COORDINATE_VALUE and 1 <= height <= MAX_COORDINATE_VALUE):
+            raise ToolExecutionError("Public Android physical display size is invalid.", context={"reason": "display_size_unavailable"})
+        return width, height
 
     def _extract_current_package(self, observation: Any) -> str | None:
         focused_candidate: str | None = None
@@ -1280,24 +1389,25 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         session: Any,
         points: list[tuple[int, int]],
         reference_screen_size: object,
-    ) -> list[tuple[int, int]] | None:
+    ) -> tuple[list[tuple[int, int]], tuple[int, int]]:
+        screen_size = self._display_size(session)
+        width, height = screen_size
+        if reference_screen_size is None:
+            if not all(0 <= px < width and 0 <= py < height for px, py in points):
+                raise _LocatorConfigurationError("Android coordinates must be inside the current physical display.")
+            return points, screen_size
         if not isinstance(reference_screen_size, dict):
-            return points
+            raise _LocatorConfigurationError("Invalid Android replay reference screen size.")
         ref_w = reference_screen_size.get("width")
         ref_h = reference_screen_size.get("height")
         if not _is_strict_int(ref_w) or not _is_strict_int(ref_h) or ref_w < 1 or ref_h < 1:
-            return points
-        observation = session.observe_tree(control=self._operation_control(15.0))
-        viewport = self._viewport_size(observation)
-        if viewport is None:
-            return None
-        width, height = viewport
+            raise _LocatorConfigurationError("Invalid Android replay reference screen size.")
         scaled: list[tuple[int, int]] = []
         for px, py in points:
             sx = self._clamp_coordinate(round(px * width / ref_w), width)
             sy = self._clamp_coordinate(round(py * height / ref_h), height)
             scaled.append((sx, sy))
-        return scaled
+        return scaled, screen_size
 
     @staticmethod
     def _clamp_coordinate(value: int, limit: int) -> int:

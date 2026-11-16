@@ -13,10 +13,12 @@ class FileOps:
         self,
         root: Path | None = None,
         *,
+        workspace_base: Path | None = None,
         read_roots: list[Path] | None = None,
         write_root: Path | None = None,
     ) -> None:
         default_root = (root or Path.cwd()).resolve()
+        self.workspace_base = (workspace_base or default_root).resolve()
         self.read_roots = [path.resolve() for path in (read_roots or [default_root])]
         self.write_root = (write_root or default_root).resolve()
 
@@ -30,16 +32,10 @@ class FileOps:
         if not isinstance(path_value, str):
             raise ToolExecutionError("File path must be a string.")
         raw_path = Path(path_value)
-        if raw_path.is_absolute():
-            path = raw_path.resolve()
-            if any(self._is_inside(path, root) for root in self.read_roots):
-                return path
+        path = (raw_path if raw_path.is_absolute() else self.workspace_base / raw_path).resolve()
+        if not any(self._is_inside(path, root) for root in self.read_roots):
             raise ToolExecutionError("File path is outside the allowed read roots.", context={"path": str(path)})
-        for root in self.read_roots:
-            candidate = (root / raw_path).resolve()
-            if self._is_inside(candidate, root) and candidate.exists():
-                return candidate
-        return (self.read_roots[0] / raw_path).resolve()
+        return path
 
     def _resolve_write(self, path_value: object) -> Path:
         if not isinstance(path_value, str):

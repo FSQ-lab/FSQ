@@ -22,6 +22,7 @@ The package exports the approved protocols and factories used across module boun
 - `CapabilityRegistryInterface`, `RuntimeSecretResolver`, `CancellationCheck`, and `EvidenceSink`; existing event/result/bundle methods remain supported.
 - `EvidenceJournalSink`: synchronous durable acknowledgement of incremental step, phase, action-result, artifact-outcome, and completion facts using Models values. Failure cannot be represented as successful acknowledgement; Core Evidence owns persistence and recovery.
 - `DriverFactory` and `HarnessFactory` as stable composition boundaries with private selection implementations.
+- `AndroidDriverInterface.inspect_element(params: AndroidInspectElementParams) -> dict[str, object]` is a read-only structural observation of one uniquely resolved Android element through Models-owned parameters. It exposes complete requested safe attribute values and explicit observation states, not provider evaluation or backend object handles. Observation capabilities do not become recorded business actions.
 
 `core` and the existing `core.harness` compatibility surface re-export these same objects. Concrete harness and backend driver classes are not public.
 

@@ -710,7 +710,7 @@ class StepRunner:
             if action_result.output is not None and not metadata.get("sensitivity"):
                 metadata.setdefault("common_output", action_result.output)
             return metadata
-        metadata: dict[str, object] = self._capability_metadata(capability, original_step, context)
+        metadata: dict[str, object] = self._capability_metadata(capability, original_step, context, action_result)
         if action_result.metadata:
             metadata["harness_metadata"] = action_result.metadata
         if action_result.output is not None and not self._used_runtime_secret_text(original_step, invoke_step) and not (capability and capability.sensitivity):
@@ -725,6 +725,7 @@ class StepRunner:
         capability: CapabilityDefinition | None,
         step: ExecutableStep,
         context: object,
+        action_result: HarnessActionResult | None = None,
     ) -> dict[str, object]:
         if capability is None:
             return {}
@@ -738,7 +739,7 @@ class StepRunner:
             "replay": capability.replay.model_dump(mode="json") if capability.replay else None,
             "sensitivity": capability.sensitivity,
         }
-        params = self._safe_replay_params(step, capability, context)
+        params = self._safe_replay_params(step, capability, context, action_result)
         if params is not None and self._safe_value(params) != params:
             metadata["safe_replay_params"] = None
             metadata["replay_unavailable_reason"] = "sensitive_parameters_redacted"
@@ -752,15 +753,21 @@ class StepRunner:
         step: ExecutableStep,
         capability: CapabilityDefinition,
         context: object,
+        action_result: HarnessActionResult | None = None,
     ) -> dict[str, object] | None:
         params = dict(step.params)
         if params.get("textType") == "runtimeSecret":
             return params
         if capability.sensitivity:
             return None
+        result_params = action_result.metadata.get("safe_replay_params") if action_result is not None else None
+        if isinstance(result_params, dict):
+            params = result_params
         if callable(getattr(capability.params_model, "replay_params", None)):
             parsed = capability.params_model.model_validate(params)
             return parsed.replay_params(context)
+        if isinstance(result_params, dict):
+            return capability.params_model.model_validate(params).model_dump(mode="json", exclude_none=True)
         return params
 
     def _capability_execution_result(
@@ -774,7 +781,7 @@ class StepRunner:
         if metadata.get("executor_kind") != "common":
             if capability is None:
                 return None
-            metadata = self._capability_metadata(capability, step, context)
+            metadata = self._capability_metadata(capability, step, context, action_result)
             replay = metadata.get("replay")
             safe_replay_params = metadata.get("safe_replay_params")
             return CapabilityExecutionResult(

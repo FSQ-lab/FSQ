@@ -93,6 +93,7 @@ class HarnessToolAdapter:
                 if self.cancellation_check is not None:
                     self.cancellation_check()
                 params = call.arguments
+                self._validate_arguments(schema, params)
                 action_name = self._capability_name(schema)
                 step = ExecutableStep(
                     step_id=f"agent-{schema.name}-{next(self._counter)}",
@@ -124,6 +125,43 @@ class HarnessToolAdapter:
                 return self._format_failure(schema, exc, int((time.perf_counter() - started) * 1000))
 
         return invoke
+
+    @staticmethod
+    def _validate_arguments(schema: HarnessFunctionSchema, params: dict[str, object]) -> None:
+        root = schema.params_json_schema
+        pending = [root]
+        seen: set[int] = set()
+        declared: set[str] = set()
+        closed = False
+        while pending:
+            current = pending.pop()
+            if not isinstance(current, dict):
+                raise TypeError("Invalid published tool parameter schema.")
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            properties = current.get("properties", {})
+            if not isinstance(properties, dict):
+                raise TypeError("Invalid published tool parameter properties.")
+            declared.update(properties)
+            closed = closed or current.get("additionalProperties") is False
+            if "$ref" in current:
+                reference = current["$ref"]
+                if not isinstance(reference, str) or not reference.startswith("#/"):
+                    raise ValueError("Invalid published tool parameter reference.")
+                resolved: object = root
+                for key in reference[2:].split("/"):
+                    if not isinstance(resolved, dict):
+                        raise TypeError("Invalid published tool parameter reference target.")
+                    resolved = resolved[key]
+                pending.append(resolved)
+            if "allOf" in current:
+                variants = current["allOf"]
+                if not isinstance(variants, list) or len(variants) != 1:
+                    raise ValueError("Unsupported published tool parameter composition.")
+                pending.extend(variants)
+        if closed and params.keys() - declared:
+            raise ValueError("Tool arguments contain fields outside the published schema.")
 
     def _capability_name(self, schema: HarnessFunctionSchema) -> str:
         value = schema.metadata.get("capability_name")

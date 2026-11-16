@@ -21,7 +21,7 @@ Current `__init__.py` exports via `__all__`:
 - `AgentToolProvider`: Protocol for a provider of SDK-neutral dynamic helper tools. It exposes serializable AgentTool definitions and invokes one helper by canonical name with JSON-like arguments.
 - `AgentToolRegistry`: Maintains the active AgentTool helper set for dynamic runtime exposure and rejects duplicate canonical names. It is not the global capability registry and must not contain recordable CommonTools or PlatformTools.
 - `AgentToolExecutor`: Routes AgentTool calls to registered providers and returns normalized `AgentToolResult` values.
-- `FileOps`: Performs scoped file reads and writes. Read roots include the selected workspace platform's resolved cases/knowledge roots, resolved preset skill resources, and the current run where needed; writes are restricted to the current run artifact boundary.
+- `FileOps`: Performs scoped file reads and writes. Its explicit `workspace_base` defines relative-read resolution independently of `read_roots`, which authorize selected resolved cases/knowledge roots, preset skill resources, and allowed output paths. Writes remain restricted to the configured output or current-run artifact boundary.
 - `ToolArtifactStore`: Persists complete AgentTool outputs under the current run directory and provides bounded artifact search and slice reads.
 - `DefaultAgentToolProvider`: Built-in provider for `read_file`, `write_file`, `search_artifact`, and `read_artifact_slice`.
 - `AgentToolAdapter`: Builds neutral `ToolBinding` values from AgentTool definitions, receives `ToolCall` JSON-object arguments, and preserves existing helper execution and model-facing JSON. `build_tools` does not accept an SDK class.
@@ -38,6 +38,8 @@ The exposed AgentTool names are:
 | `read_artifact_slice` | Read a bounded character slice from one current-run artifact path. |
 
 Artifact search is literal text lookup in the saved serialized artifact, not semantic field extraction or a fresh UI observation. Match `offset`, `context_start`, and exclusive `context_end`, together with `total_chars`, describe zero-based Unicode-character positions in that same saved text, not byte offsets or decoded JSON-string positions. Slice reads use the existing `artifact_path`, `offset`, and `length` arguments; no `artifact_id`/`limit` aliases or duplicate offset names are introduced.
+
+`read_file` resolves a relative path exactly once against the explicitly supplied resolved `workspace_base`; an absolute path is resolved directly. The resulting path must be inside an allowed read root after symlink resolution. Read-root ordering and file existence never select a different base, and a missing path has no first-root fallback. The Workspace base itself is not an allowed root unless separately authorized. Artifact helper relative paths remain current-run-relative, and absolute artifact references remain opaque returned references: callers copy them without rewriting episode or Run identifiers. Current-run containment is enforced independently of FileOps permissions and is not relaxed for misspelled identifiers.
 
 Search responses and tool descriptions give actionable bounded recovery guidance: read the matched field from its reported offset with `read_artifact_slice`, continue beyond a returned context window from `context_end` when it is below `total_chars`, and refine a query or request more matches when match selection is truncated. Slice continuation uses `offset + length` only when `has_more_after` is true. Repeating an identical search does not advance its window.
 

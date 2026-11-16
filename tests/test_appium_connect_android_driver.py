@@ -17,7 +17,7 @@ from fsq_agent.core.evidence import ArtifactStore
 from fsq_agent.core.harness._android import AndroidHarness
 from fsq_agent.core.harness._appium_connect_android_driver import AppiumConnectAndroidDriver
 from fsq_agent.core.harness._driver_tools import _discover_driver_capability_definitions
-from fsq_agent.models import AndroidAssertWithAIParams, ConfigurationError, ExecutableStep, HarnessContext, ReplayPolicy
+from fsq_agent.models import AndroidAssertWithAIParams, ConfigurationError, ExecutableStep, HarnessContext, ReplayPolicy, ToolExecutionError
 
 
 class TargetError(RuntimeError):
@@ -120,6 +120,9 @@ class FakeElement:
         self.session.calls.append(("inspect", self.by, self.value, self.raw_id, attributes))
         written = any(call[0] == "replace_element_value" for call in self.session.calls)
         error_code = self.session.post_write_inspect_code if written else self.session.inspect_code
+        binding = attributes == ("type", "id", "package", "bounds")
+        if binding and self.session.binding_code is not None:
+            raise TargetError(self.session.binding_code)
         if error_code is not None:
             if error_code == "exception":
                 raise RuntimeError("submitted-private observed-private private backend payload")
@@ -132,6 +135,8 @@ class FakeElement:
         state_map["text"] = ("value", self.session.text)
         if written:
             state_map.update(self.session.post_write_attrs)
+        if binding:
+            state_map.update(self.session.binding_attrs)
         attr_list = tuple(_attr_obs(name, val, state) for name, (state, val) in state_map.items() if not attributes or name in attributes)
         return SimpleNamespace(attributes=attr_list)
 
@@ -186,6 +191,14 @@ class FakeDevice:
     def __init__(self, session: FakeSession) -> None:
         self.session = session
 
+    def display_size(self, *, control: object | None = None) -> Any:
+        del control
+        self.session._record_thread()
+        self.session.calls.append(("display_size",))
+        if self.session.display_error is not None:
+            raise self.session.display_error
+        return SimpleNamespace(width=self.session.display[0], height=self.session.display[1])
+
     def activate_app(self, app_id: str, *, control: object | None = None) -> None:
         del control
         self.session._record_thread()
@@ -205,9 +218,9 @@ class FakeDevice:
         self.session.calls.append(("back",))
 
     def press_keycode(self, keycode: int, *, metastate: int | None = None, flags: int | None = None, control: object | None = None) -> None:
-        del metastate, flags, control
+        del flags, control
         self.session._record_thread()
-        self.session.calls.append(("press_keycode", keycode))
+        self.session.calls.append(("press_keycode", keycode) if metastate is None else ("press_keycode", keycode, metastate))
 
     def tap_at(self, x: int, y: int, *, control: object | None = None) -> None:
         del control
@@ -260,6 +273,10 @@ class FakeSession:
         self.inspect_code: str | None = None
         self.post_write_inspect_code: str | None = None
         self.click_code: str | None = None
+        self.binding_code: str | None = None
+        self.binding_attrs: dict[str, tuple[str, object]] = {}
+        self.display: tuple[object, object] = (1080, 2400)
+        self.display_error: BaseException | None = None
         self.quit_error: BaseException | None = None
         self.calls: list[tuple[Any, ...]] = []
         self.thread_ids: set[int] = set()
@@ -271,6 +288,7 @@ class FakeSession:
             "enabled": ("value", True),
             "displayed": ("value", True),
             "password": ("value", False),
+            "desc": ("value", "Input description"),
             "bounds": ("value", _bounds(0, 0, 100, 50)),
             "checked": ("value", False),
             "selected": ("value", False),
@@ -398,7 +416,7 @@ def test_owned_managed_lifecycle_closes_session_before_exiting_managed_scope(mon
     import appium_connect_agent.runtime as aca_runtime
 
     events: list[tuple[Any, ...]] = []
-    session = FakeSession()
+    session = FakeSession(observation=_tree_observation(height=2209))
     orig_quit = session.quit
 
     def tracked_quit(*, control: object | None = None) -> None:
@@ -450,6 +468,9 @@ def test_owned_managed_lifecycle_closes_session_before_exiting_managed_scope(mon
 
     driver = AppiumConnectAndroidDriver(app_id="com.example.app", serial="device-01")
     assert driver.launch_app({})["status"] == "passed"
+    assert driver.context()["screen_size"] == (1080, 2400)
+    assert driver.tap_at({"point": {"x": 1, "y": 2}})["status"] == "passed"
+    assert driver.swipe({"direction": "up"})["status"] == "passed"
     driver.close()
     # Second close is idempotent.
     driver.close()
@@ -461,6 +482,8 @@ def test_owned_managed_lifecycle_closes_session_before_exiting_managed_scope(mon
     assert events[1][2] == "device-01"
     worker_tids = {item[-1] for item in events}
     assert len(worker_tids) == 1
+    assert session.thread_ids == worker_tids
+    assert threading.get_ident() not in worker_tids
 
 
 def test_locator_translation_handles_standard_id_short_id_raw_id_accessibility_compound_and_injection_safe_xpath() -> None:
@@ -557,6 +580,7 @@ def test_short_id_restoration_in_ui_snapshot_session_fallback_and_input_text_bou
             False,
         ),
         ("element", "id", "com.google.android.calculator:id/formula", False),
+        ("element", "id", "com.google.android.calculator:id/formula", False),
     ]
 
     # Without a bound app_id, bare local id falls back to raw_id=True.
@@ -614,6 +638,7 @@ def test_press_key_maps_back_named_keys_keycodes_and_rejects_unknown_keys() -> N
 
 def test_point_tap_and_swipe_support_scaling_directional_swipe_and_reject_malformed_inputs() -> None:
     session = FakeSession(observation=_tree_observation(width=540, height=1200))
+    session.display = (540, 1200)
     driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
     try:
         tap_plain = driver.tap_at({"point": {"x": 320, "y": 640}})
@@ -633,9 +658,12 @@ def test_point_tap_and_swipe_support_scaling_directional_swipe_and_reject_malfor
     finally:
         driver.close()
 
-    assert tap_plain == {"status": "passed", "output": {"point": {"x": 320, "y": 640}}}
-    assert tap_scaled == {"status": "passed", "output": {"point": {"x": 50, "y": 100}}}
-    assert swipe_points == {"status": "passed", "output": {"start": {"x": 400, "y": 950}, "end": {"x": 100, "y": 950}}}
+    assert tap_plain["status"] == "passed"
+    assert tap_plain["output"] == {"point": {"x": 320, "y": 640}}
+    assert tap_scaled["status"] == "passed"
+    assert tap_scaled["output"] == {"point": {"x": 50, "y": 100}}
+    assert swipe_points["status"] == "passed"
+    assert swipe_points["output"] == {"start": {"x": 400, "y": 950}, "end": {"x": 100, "y": 950}}
     assert swipe_dir == {"status": "passed", "output": {"direction": "up"}}
     assert bad_tap["failure_category"] == "configuration_error"
     assert bad_swipe["failure_category"] == "configuration_error"
@@ -764,8 +792,11 @@ def test_input_text_inspects_editability_focuses_replaces_and_verifies_exact_rea
 
     assert result == {"status": "passed", "output": None}
     assert session.text == text
-    op_names = [call[0] for call in session.calls]
-    assert op_names == ["element", "inspect", "click", "replace_element_value", "inspect"]
+    assert sum(call[0] == "replace_element_value" for call in session.calls) == 1
+    assert [call[1:4] for call in session.calls if call[0] in {"click", "replace_element_value"}] == [
+        ("id", "com.example.app:id/input", False),
+        ("id", "com.example.app:id/input", False),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -791,14 +822,15 @@ def test_input_text_rejects_non_editable_or_disabled_targets_without_side_effect
 
     assert result["status"] == "failed"
     assert result["failure_category"] == "target_resolution_error"
-    assert result["metadata"] == {"reason": "invalid_input_target"}
+    assert result["metadata"]["reason"] == "invalid_input_target"
+    assert result["metadata"]["stage"] == "pre_inspection"
     assert not any(call[0] in {"click", "replace_element_value"} for call in session.calls)
     assert "submitted-private" not in str(result)
 
 
 @pytest.mark.parametrize(
     "password_attr",
-    [("value", True), ("missing", None), ("unknown", None)],
+    [("value", True), ("missing", None), ("unknown", None), ("value", 0)],
 )
 def test_input_text_requires_explicit_unmasked_password_false(password_attr: tuple[str, object]) -> None:
     session = FakeSession()
@@ -810,7 +842,8 @@ def test_input_text_requires_explicit_unmasked_password_false(password_attr: tup
         driver.close()
 
     assert result["status"] == "failed"
-    assert result["metadata"] == {"reason": "verification_unavailable"}
+    assert result["metadata"]["reason"] == "verification_unavailable"
+    assert result["metadata"]["stage"] == "pre_inspection"
     assert not any(call[0] in {"click", "replace_element_value"} for call in session.calls)
 
 
@@ -824,7 +857,8 @@ def test_input_text_cannot_pass_by_matching_mask_characters(mask: str) -> None:
         driver.close()
 
     assert result["status"] == "failed"
-    assert result["metadata"] == {"reason": "verification_unavailable"}
+    assert result["metadata"]["reason"] == "verification_unavailable"
+    assert result["metadata"]["stage"] == "post_verification"
     assert mask not in str(result)
 
 
@@ -846,10 +880,10 @@ def test_input_text_does_not_reresolve_mutated_text_locators(locator_params: dic
     finally:
         driver.close()
 
-    assert result["status"] == "failed"
-    assert result["metadata"] == {"reason": "verification_unavailable"}
+    assert result == {"status": "passed", "output": None}
     assert session.text == "replacement"
-    assert sum(call[0] == "inspect" for call in session.calls) == 1
+    inspections = [call for call in session.calls if call[0] == "inspect"]
+    assert inspections[-1][1:4] == ("id", "com.example.app:id/input", False)
 
 
 @pytest.mark.parametrize(
@@ -893,7 +927,8 @@ def test_input_text_postcondition_and_backend_errors_are_secret_safe_and_never_r
 
     assert result.status == "failed"
     assert result.failure_category == "action_error"
-    assert result.metadata == {"reason": reason}
+    assert result.metadata["reason"] == reason
+    assert result.metadata["stage"] == ("write" if reason == "entry_backend_error" else "post_verification")
     assert result.output is None
     dumped = result.model_dump_json()
     assert all(secret not in dumped for secret in ("submitted-private", "observed-private", "private backend payload", "params"))
@@ -918,7 +953,8 @@ def test_input_text_structural_xpath_without_resource_id_requires_stable_bounds(
 
     if layout_changed:
         assert result["status"] == "failed"
-        assert result["metadata"] == {"reason": "verification_unavailable"}
+        assert result["metadata"]["reason"] == "verification_unavailable"
+        assert result["metadata"]["stage"] == "post_verification"
     else:
         assert result == {"status": "passed", "output": None}
 
@@ -1021,7 +1057,7 @@ def test_runner_step_execution_and_ai_assertion_metadata(tmp_path: Any) -> None:
         step = ExecutableStep(step_id="launch", action_name="launch_app", params={}, kind="setup")
         result = runner.run_step("run-1", step)
         assert result.status == "failed"
-        assert result.error_message == "Android backend operation failed (RuntimeError)."
+        assert result.error_message == "Android backend operation failed."
         assert "app start rejected" not in str(result.error_message)
     finally:
         harness.close()
@@ -1043,3 +1079,402 @@ def test_driver_raises_configuration_error_when_appium_connect_agent_missing(mon
         assert "Reinstall or repair fsq-agent" in str(exc_info.value.context.get("action", ""))
     finally:
         driver.close()
+
+
+def test_context_and_all_pointer_modes_use_fresh_physical_display_not_viewport() -> None:
+    session = FakeSession(observation=_tree_observation(height=2209))
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.context()["screen_size"] == (1080, 2400)
+    assert driver.swipe({"direction": "up"})["status"] == "passed"
+    session.display = (540, 1200)
+    assert driver.context()["screen_size"] == (540, 1200)
+    assert driver.tap_at({"point": {"x": 1080, "y": 2400}, "reference_screen_size": {"width": 1080, "height": 2400}})["output"] == {"point": {"x": 539, "y": 1199}}
+    assert driver.swipe({"start": {"x": 0, "y": 0}, "end": {"x": 539, "y": 1199}})["status"] == "passed"
+    assert ("swipe_between", 540, 1800, 540, 600, 200) in session.calls
+    assert sum(call[0] == "display_size" for call in session.calls) == 5
+    assert sum(call[0] == "observe_tree" for call in session.calls) == 2
+
+
+@pytest.mark.parametrize("display", [(True, 2400), (1080.0, 2400), (0, 2400), (1080, 2147483648), (1080, None)])
+def test_invalid_physical_display_never_falls_back_or_sends_pointer(display: tuple[object, object]) -> None:
+    session = FakeSession()
+    session.display = display
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    with pytest.raises(ToolExecutionError):
+        driver.context()
+    for action, payload in ((driver.tap_at, {"point": {"x": 1, "y": 2}}), (driver.swipe, {"direction": "up"})):
+        assert action(payload)["status"] == "failed"
+    assert not any(call[0] in {"tap_at", "swipe_between", "take_screenshot"} for call in session.calls)
+
+
+def test_missing_or_failed_display_api_is_explicit_and_never_uses_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    monkeypatch.setattr(session.device, "display_size", None)
+    assert driver.swipe({"direction": "up"})["status"] == "failed"
+    assert session.calls == []
+    monkeypatch.undo()
+    session.display_error = CommandError("operation_timeout", "private-display-canary")
+    assert driver.tap_at({"point": {"x": 1, "y": 2}})["status"] == "failed"
+    assert all(call[0] != "observe_tree" for call in session.calls)
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [
+        ("up", (60, 99, 60, 20)),
+        ("down", (60, 20, 60, 99)),
+        ("left", (109, 60, 10, 60)),
+        ("right", (10, 60, 109, 60)),
+    ],
+)
+def test_element_swipe_uses_unique_current_bounds_and_single_public_gesture(direction: str, expected: tuple[int, ...]) -> None:
+    session = FakeSession()
+    session.element_attrs["bounds"] = ("value", _bounds(10, 20, 110, 100))
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.swipe({"target": "List", "direction": direction, "percent": None})["status"] == "passed"
+    assert [call for call in session.calls if call[0] == "swipe_between"] == [("swipe_between", *expected, 200)]
+    assert [call[-1] for call in session.calls if call[0] == "inspect"] == [("bounds",)]
+    assert not any(call[0] == "observe_tree" for call in session.calls)
+
+
+def test_element_swipe_fraction_is_center_symmetric() -> None:
+    session = FakeSession()
+    session.element_attrs["bounds"] = ("value", _bounds(10, 20, 111, 101))
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.swipe({"locator": {"resourceId": "list"}, "direction": "left", "percent": 0.5})["status"] == "passed"
+    assert ("swipe_between", 85, 60, 35, 60, 200) in session.calls
+
+
+@pytest.mark.parametrize("bounds", [_bounds(0, 0, 0, 10), _bounds(0, 0, 1, 10), _bounds(-1, 0, 10, 10), _bounds(0, 0, 1081, 10), _bounds(0, 0, 10, 2401), None])
+def test_element_swipe_rejects_degenerate_or_offscreen_bounds(bounds: object) -> None:
+    session = FakeSession()
+    session.element_attrs["bounds"] = ("value", bounds)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.swipe({"target": "List", "direction": "left"})["status"] == "failed"
+    assert not any(call[0] == "swipe_between" for call in session.calls)
+
+
+@pytest.mark.parametrize("code", ["target_ambiguous", "operation_timeout"])
+def test_element_swipe_never_retries_failed_inspection(code: str) -> None:
+    session = FakeSession()
+    session.inspect_code = code
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.swipe({"target": "List", "direction": "up"})["status"] == "failed"
+    assert sum(call[0] == "inspect" for call in session.calls) == 1
+    assert not any(call[0] == "swipe_between" for call in session.calls)
+
+
+def test_text_navigation_keys_and_ctrl_end_are_one_modified_event() -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    for key in ("MoveEnd", "move_end", "End", "MoveHome", "move_home", "Home", "Ctrl+End"):
+        assert driver.press_key({"key": key})["status"] == "passed"
+    before = list(session.calls)
+    for key in ("Ctrl+Home", "Ctrl+Bogus", "Alt+End", "Ctrl+End+Home"):
+        assert driver.press_key({"key": key})["failure_category"] == "configuration_error"
+    assert session.calls == before
+    assert [call for call in session.calls if call[0] == "press_keycode"] == [
+        ("press_keycode", 123),
+        ("press_keycode", 123),
+        ("press_keycode", 123),
+        ("press_keycode", 122),
+        ("press_keycode", 122),
+        ("press_keycode", 3),
+        ("press_keycode", 123, 4096),
+    ]
+
+
+@pytest.mark.parametrize("raw_id", ["com.example.app:id/input", "custom/raw-id", "bare-id"])
+def test_input_binds_exact_observed_id_before_mutation_and_verifies_after_layout_move(raw_id: str) -> None:
+    session = FakeSession(text="original")
+    session.element_attrs["id"] = ("value", raw_id)
+    session.post_write_attrs["bounds"] = ("value", _bounds(0, 100, 100, 150))
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.input_text({"target": "original", "text": "中文 café replacement"})["status"] == "passed"
+    raw = raw_id != "com.example.app:id/input"
+    assert ("element", "id", raw_id, raw) in session.calls
+    writes = [call for call in session.calls if call[0] == "replace_element_value"]
+    assert len(writes) == 1
+    assert writes[0][1:4] == ("id", raw_id, raw)
+    assert [call for call in session.calls if call[0] == "inspect"][-1][1:4] == ("id", raw_id, raw)
+
+
+@pytest.mark.parametrize("field,value", [("type", "android.widget.AutoCompleteTextView"), ("package", "other.package"), ("id", "other:id/input"), ("bounds", _bounds(1, 0, 101, 50))])
+def test_input_identity_binding_rejects_changed_target_before_any_write(field: str, value: object) -> None:
+    session = FakeSession()
+    session.binding_attrs[field] = ("value", value)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    result = driver.input_text({"locator": {"className": "android.widget.EditText"}, "text": "private-canary"})
+    assert result["status"] == "failed"
+    assert not any(call[0] in {"click", "replace_element_value"} for call in session.calls)
+    assert "private-canary" not in str(result)
+
+
+def test_duplicate_observed_id_and_no_id_text_target_fail_before_write() -> None:
+    session = FakeSession()
+    session.binding_code = "target_ambiguous"
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.input_text({"target": "Loaded", "text": "replacement"})["status"] == "failed"
+    session.binding_code = None
+    session.element_attrs["id"] = ("missing", None)
+    assert driver.input_text({"target": "Loaded", "text": "replacement"})["status"] == "failed"
+    session.inspect_code = "target_ambiguous"
+    assert driver.input_text({"locator": {"className": "android.widget.EditText"}, "text": "replacement"})["status"] == "failed"
+    assert not any(call[0] in {"click", "replace_element_value"} for call in session.calls)
+
+
+def test_input_safe_diagnostics_allow_only_enumerated_sdk_facts(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    failure = CommandError("operation_timeout", "message-secret-canary")
+    failure.request_state = "response_unknown"
+    failure.completed_steps = ("target_resolved", "secret-canary", "action_completed")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(FakeElement, "replace_element_value", fail)
+    result = driver.input_text({"target": "Loaded", "text": "input-secret-canary"})
+    assert result["metadata"] == {
+        "reason": "entry_backend_error",
+        "stage": "write",
+        "backend_code": "operation_timeout",
+        "request_state": "response_unknown",
+        "completed_steps": ["target_resolved", "action_completed"],
+        "session_state": "active",
+    }
+    assert "canary" not in str(result)
+    failure.code = "code-secret-canary"
+    failure.request_state = "request-secret-canary"
+    assert "canary" not in str(driver.input_text({"target": "Loaded", "text": "input-secret-canary"}))
+
+
+@pytest.mark.parametrize("error", [RuntimeError, CancelledError])
+def test_diagnostic_session_getter_failure_does_not_replace_primary_input_failure(error: type[BaseException], monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        monkeypatch.setattr(session, "session_info", lambda: (_ for _ in ()).throw(error("getter-canary")))
+        raise CommandError("operation_timeout", "primary-canary")
+
+    monkeypatch.setattr(FakeElement, "replace_element_value", fail)
+    result = driver.input_text({"target": "Loaded", "text": "input-canary"})
+    assert result["metadata"]["backend_code"] == "operation_timeout"
+    assert "session_state" not in result["metadata"]
+    assert "canary" not in str(result)
+
+
+@pytest.mark.parametrize("password", [("value", True), ("unknown", None), ("missing", None), ("value", 0)])
+def test_inspect_never_requests_protected_or_unknown_password_text(password: tuple[str, object]) -> None:
+    from fsq_agent.models import AndroidInspectElementParams
+
+    session = FakeSession(text="protected-text-canary")
+    session.element_attrs["password"] = password
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    result = driver.inspect_element(AndroidInspectElementParams(target="Input"))
+    assert result["attributes"]["text"] == {"state": "unknown", "value": None}
+    assert result["attributes"]["desc"] == {"state": "value", "value": "Input description"}
+    assert "protected-text-canary" not in str(result)
+    assert all("text" not in call[-1] for call in session.calls if call[0] == "inspect")
+
+
+def test_inspect_preserves_full_safe_values_states_and_serializable_bounds() -> None:
+    from fsq_agent.models import AndroidInspectElementParams
+
+    path = "/storage/emulated/0/" + "long-directory/" * 25 + "file.txt"
+    session = FakeSession(text=path)
+    session.element_attrs.update({"desc": ("value", path), "checked": ("not_applicable", None), "focused": ("unknown", None)})
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    harness = AndroidHarness(driver=driver, ai_assertion_evaluator=SimpleNamespace(close=lambda: None))
+    actions = {schema.name: schema for schema in harness.action_space()}
+    assert "assert_with_ai" in actions
+    assert actions["inspect_element"].fsq_action_name == "inspectElement"
+    assert "reference_screen_size" not in actions["tap_at"].params_json_schema["properties"]
+    result = driver.inspect_element(AndroidInspectElementParams(target="Path", attributes=["text", "desc", "bounds", "checked", "focused"]))
+    assert result == {
+        "attributes": {
+            "text": {"state": "value", "value": path},
+            "desc": {"state": "value", "value": path},
+            "bounds": {"state": "value", "value": {"x": 0, "y": 0, "width": 100, "height": 50}},
+            "checked": {"state": "not_applicable", "value": None},
+            "focused": {"state": "unknown", "value": None},
+        }
+    }
+    assert next(call[-1] for call in session.calls if call[0] == "inspect") == ("password",)
+    result = harness.invoke_action(
+        ExecutableStep(step_id="inspect", kind="observation", action_name="inspectElement", params={"target": "Path", "attributes": ["text"]}), HarnessContext(platform="android")
+    )
+    assert result.status == "passed"
+    assert result.output["attributes"]["text"]["value"] == path
+
+
+def test_inspection_password_and_safe_attributes_share_one_total_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fsq_agent.models import AndroidInspectElementParams
+
+    now = [100.0]
+    budgets = []
+    original = FakeElement.inspect
+
+    def inspect(element: FakeElement, **kwargs: object) -> object:
+        result = original(element, **kwargs)
+        now[0] += 6.0
+        return result
+
+    monkeypatch.setattr("fsq_agent.drivers.android._appium_connect.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(FakeElement, "inspect", inspect)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=FakeSession())
+    monkeypatch.setattr(driver, "_operation_control", budgets.append)
+    driver.inspect_element(AndroidInspectElementParams(target="Input"))
+    assert budgets == [10.0, 4.0]
+
+
+def test_closed_driver_context_and_input_are_distinct_safe_local_failures() -> None:
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", serial="never-connect")
+    driver.close()
+    with pytest.raises(ToolExecutionError) as closed:
+        driver.context()
+    assert closed.value.context["reason"] == "closed"
+    result = driver.input_text({"target": "Input", "text": "closed-input-canary"})
+    assert result["metadata"]["reason"] == "closed"
+    assert result["metadata"]["stage"] == "pre_inspection"
+    assert "canary" not in str(result)
+    assert driver._executor is None
+    assert driver._session is None
+
+
+@pytest.mark.parametrize("operation", ["display", "element_bounds", "inspect_password", "input_write"])
+def test_new_public_operations_preserve_cancellation_without_retries(operation: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fsq_agent.models import AndroidInspectElementParams
+
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+
+    def cancelled(*args: object, **kwargs: object) -> None:
+        raise CancelledError
+
+    if operation == "display":
+        session.display_error = CancelledError()
+        action, payload = driver.swipe, {"direction": "up"}
+    elif operation == "input_write":
+        monkeypatch.setattr(FakeElement, "replace_element_value", cancelled)
+        action, payload = driver.input_text, {"target": "Loaded", "text": "private"}
+    else:
+        monkeypatch.setattr(FakeElement, "inspect", cancelled)
+        action, payload = (driver.swipe, {"target": "List", "direction": "up"}) if operation == "element_bounds" else (driver.inspect_element, AndroidInspectElementParams(target="Input"))
+    with pytest.raises(CancelledError):
+        action(payload)
+    assert not any(call[0] in {"tap_at", "swipe_between", "replace_element_value"} for call in session.calls)
+
+
+@pytest.mark.parametrize("bounds", [_bounds(0, 0, 100, 50), _bounds(0, 0, 101, 50)])
+def test_element_swipe_tiny_fraction_fails_without_expanding_distance(bounds: object) -> None:
+    session = FakeSession()
+    session.element_attrs["bounds"] = ("value", bounds)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.swipe({"target": "List", "direction": "left", "percent": 0.0001})["status"] == "failed"
+    assert not any(call[0] == "swipe_between" for call in session.calls)
+
+
+def test_inspect_without_text_does_not_read_password_or_unselected_attributes() -> None:
+    from fsq_agent.models import AndroidInspectElementParams
+
+    session = FakeSession()
+    session.element_attrs["enabled"] = ("unknown", None)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.inspect_element(AndroidInspectElementParams(target="Input", attributes=["enabled"])) == {"attributes": {"enabled": {"state": "unknown", "value": None}}}
+    assert [call[-1] for call in session.calls if call[0] == "inspect"] == [("enabled",)]
+
+
+def test_input_preinspection_failure_keeps_safe_backend_stage_without_write() -> None:
+    session = FakeSession()
+    session.inspect_code = "operation_timeout"
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    result = driver.input_text({"target": "Input", "text": "input-canary"})
+    assert result["metadata"]["backend_code"] == "operation_timeout"
+    assert result["metadata"]["stage"] == "pre_inspection"
+    assert not any(call[0] in {"click", "replace_element_value"} for call in session.calls)
+    assert "canary" not in str(result)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"direction": "up", "start": {"x": 1, "y": 2}, "end": {"x": 3, "y": 4}},
+        {"target": "List", "start": {"x": 1, "y": 2}, "end": {"x": 3, "y": 4}},
+        {"direction": "up", "percent": 0.5},
+        {"target": "List", "direction": "up", "percent": float("nan")},
+        {"target": "List", "direction": "up", "percent": True},
+        {"target": "List", "direction": "up", "duration": 60001},
+        {"start": {"x": 1, "y": 2}, "end": {"x": 3, "y": 4}, "percent": 0.5},
+    ],
+)
+def test_direct_swipe_call_cannot_bypass_models_owned_modes(payload: dict[str, object]) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.swipe(payload)["failure_category"] == "configuration_error"
+    assert session.calls == []
+
+
+def test_online_gesture_schemas_exclude_replay_reference_without_removing_internal_aliases() -> None:
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=FakeSession())
+    schemas = {schema.name: schema for schema in AndroidHarness(driver=driver).action_space()}
+    for name in ("tap_at", "swipe"):
+        assert "reference_screen_size" not in schemas[name].params_json_schema["properties"]
+    definitions = {definition.name: definition for definition in _discover_driver_capability_definitions(driver, platform="android")}
+    assert definitions["tap_at"].fsq_command_alias == "tapAt"
+    assert definitions["swipe"].fsq_command_alias == "swipe"
+    assert definitions["inspect_element"].step_kind == "observation"
+
+
+def test_element_swipe_pixel_quantization_never_expands_requested_span() -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    assert driver.swipe({"target": "List", "direction": "left", "percent": 0.03})["status"] == "passed"
+    assert [call for call in session.calls if call[0] == "swipe_between"] == [("swipe_between", 50, 25, 49, 25, 200)]
+
+
+@pytest.mark.parametrize("strict_reference", [False, True])
+@pytest.mark.parametrize("action_name", ["tap_at", "swipe"])
+def test_coordinate_recording_uses_action_display_not_earlier_context(action_name: str, strict_reference: bool, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession(observation=_tree_observation(height=2209))
+    display_sizes = iter(((1080, 2400), (540, 1200), (270, 600)))
+    original_display_size = session.device.display_size
+
+    def display_size(*, control: object | None = None) -> Any:
+        session.display = next(display_sizes)
+        return original_display_size(control=control)
+
+    monkeypatch.setattr(session.device, "display_size", display_size)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    harness = AndroidHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path))
+    registry = CapabilityRegistry()
+    for definition in _discover_driver_capability_definitions(driver, platform="android"):
+        registry.register(definition)
+    params = {"point": {"x": 400, "y": 1000}} if action_name == "tap_at" else {"start": {"x": 50, "y": 100}, "end": {"x": 400, "y": 1000}}
+    if strict_reference:
+        params["reference_screen_size"] = {"width": 1080, "height": 2400}
+    expected_replay = {**params, "reference_screen_size": {"width": 1080, "height": 2400} if strict_reference else {"width": 540, "height": 1200}}
+    expected_pointer = ("tap_at", 200, 500) if strict_reference else ("tap_at", 400, 1000)
+    if action_name == "swipe":
+        expected_pointer = ("swipe_between", 25, 50, 200, 500, 200) if strict_reference else ("swipe_between", 50, 100, 400, 1000, 200)
+    runner = StepRunner(harness, capability_registry=registry)
+    try:
+        result = runner.run_step("changing-display", ExecutableStep(step_id="coordinate", kind="action", action_name=action_name, params=params))
+        assert result.status == "passed"
+        assert [call for call in session.calls if call[0] in {"tap_at", "swipe_between"}] == [expected_pointer]
+        assert sum(call[0] == "display_size" for call in session.calls) == 3
+        execution = runner.last_capability_execution_result
+        assert execution is not None
+        assert execution.safe_replay_params == expected_replay
+        invoke = next(report for report in result.phase_reports if report.phase == "invoke")
+        assert invoke.metadata["safe_replay_params"] == expected_replay
+        event = next(event for event in runner.events if event.event_type == "action_result")
+        assert event.payload["metadata"]["safe_replay_params"] == expected_replay
+        expected_output = {"point": {"x": expected_pointer[1], "y": expected_pointer[2]}}
+        if action_name == "swipe":
+            expected_output = {"start": {"x": expected_pointer[1], "y": expected_pointer[2]}, "end": {"x": expected_pointer[3], "y": expected_pointer[4]}}
+        assert execution.output == expected_output
+    finally:
+        harness.close()

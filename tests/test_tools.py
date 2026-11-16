@@ -38,6 +38,117 @@ async def test_agent_tool_file_ops_are_scoped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_provider_forwards_workspace_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fsq_agent._capability_bootstrap import build_agent_tool_provider
+
+    workspace = tmp_path / "W"
+    cases = workspace / "cases" / "android"
+    cases.mkdir(parents=True)
+    (cases / "076.fsq.yaml").write_text("bootstrap case", encoding="utf-8")
+    provider = build_agent_tool_provider(workspace_base=workspace, read_roots=[cases], write_root=workspace / ".fsq" / "runs" / "android" / "run-1" / "artifacts")
+    adapter = AgentToolAdapter(_registry(provider))
+    read_tool = next(tool for tool in adapter.build_tools() if tool.name == "read_file")
+    monkeypatch.chdir(tmp_path)
+
+    output = await read_tool.invoke(ToolCall(name="read_file", arguments={"path": "cases/android/076.fsq.yaml"}, call_id="workspace-read"))
+
+    assert json.loads(output)["result"]["output"]["output"] == "bootstrap case"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["034.fsq.yaml", "076.fsq.yaml"])
+async def test_file_reads_use_workspace_paths_after_cwd_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str) -> None:
+    workspace = tmp_path / "W"
+    cases = workspace / "cases" / "android"
+    cases.mkdir(parents=True)
+    target = cases / filename
+    target.write_text("canonical case", encoding="utf-8")
+    file_ops = FileOps(workspace_base=workspace, read_roots=[cases], write_root=workspace / ".fsq" / "runs" / "android" / "run-1" / "artifacts")
+    monkeypatch.chdir(tmp_path)
+
+    relative = await file_ops.read_text({"path": f"cases/android/{filename}"})
+    absolute = await file_ops.read_text({"path": str(target)})
+
+    assert relative.status == absolute.status == "success"
+    assert relative.output == absolute.output == "canonical case"
+
+
+@pytest.mark.asyncio
+async def test_file_reads_do_not_search_roots_or_invent_missing_prefixes(tmp_path: Path) -> None:
+    workspace = tmp_path / "W"
+    cases = workspace / "cases" / "android"
+    knowledge = workspace / "knowledge" / "android"
+    for root, content in [(cases, "case copy"), (knowledge, "knowledge copy")]:
+        root.mkdir(parents=True)
+        (root / "shared.md").write_text(content, encoding="utf-8")
+    file_ops = FileOps(workspace_base=workspace, read_roots=[knowledge, cases])
+
+    with pytest.raises(ToolExecutionError, match="outside the allowed read roots"):
+        await file_ops.read_text({"path": "shared.md"})
+    assert (await file_ops.read_text({"path": "cases/android/shared.md"})).output == "case copy"
+    assert (await file_ops.read_text({"path": "knowledge/android/shared.md"})).output == "knowledge copy"
+    missing = await file_ops.read_text({"path": "cases/android/missing.yaml"})
+    assert missing.status == "failed"
+    assert str(cases / "missing.yaml") in missing.error
+    assert str(knowledge / "cases") not in missing.error
+
+
+@pytest.mark.asyncio
+async def test_file_read_base_does_not_authorize_config_traversal_or_symlinks(tmp_path: Path) -> None:
+    workspace = tmp_path / "W"
+    cases = workspace / "cases" / "android"
+    cases.mkdir(parents=True)
+    config = workspace / ".fsq" / "config" / "config.android.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("private configuration", encoding="utf-8")
+    (workspace / "root.txt").write_text("private root", encoding="utf-8")
+    (cases / "escape.yaml").symlink_to(config)
+    file_ops = FileOps(workspace_base=workspace, read_roots=[cases], write_root=cases / "output")
+
+    for path in ["root.txt", ".fsq/config/config.android.yaml", "cases/android/../../root.txt", "cases/android/escape.yaml", str(config)]:
+        with pytest.raises(ToolExecutionError, match="outside the allowed read roots"):
+            await file_ops.read_text({"path": path})
+    with pytest.raises(ToolExecutionError, match="outside the allowed write root"):
+        await file_ops.write_text({"path": "../unauthorized.txt", "content": "blocked"})
+
+
+@pytest.mark.asyncio
+async def test_file_default_base_is_cwd_not_first_read_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = tmp_path / "cases" / "android"
+    cases.mkdir(parents=True)
+    (cases / "034.fsq.yaml").write_text("case", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    file_ops = FileOps(read_roots=[cases])
+    monkeypatch.chdir(cases)
+
+    assert (await file_ops.read_text({"path": "cases/android/034.fsq.yaml"})).output == "case"
+    with pytest.raises(ToolExecutionError, match="outside the allowed read roots"):
+        await file_ops.read_text({"path": "034.fsq.yaml"})
+    assert (await FileOps(root=cases).read_text({"path": "034.fsq.yaml"})).output == "case"
+
+
+def test_artifact_paths_remain_run_relative_and_reject_wrong_run_ids(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "W" / ".fsq" / "runs" / "android"
+    store = ToolArtifactStore(runs_dir, "069_correctID", LocalToolOutputSettings())
+    artifact = store.write("ui_snapshot", "saved observation")
+    assert artifact is not None
+    relative = str(artifact.relative_to(runs_dir / "069_correctID"))
+    for path in [str(artifact), relative]:
+        assert store.read_slice(path, 0, 1000)["content"] == store.read_text(str(artifact))
+        assert len(store.search(path, "saved observation", True, 1, 10)["matches"]) == 1
+    wrong = runs_dir / "069_wrongID" / relative
+    wrong.parent.mkdir(parents=True)
+    wrong.write_text("other run", encoding="utf-8")
+    escaped = runs_dir / "069_correctID" / "escape.json"
+    escaped.symlink_to(wrong)
+    for path in [str(wrong), f"../069_wrongID/{relative}", str(escaped)]:
+        with pytest.raises(ToolExecutionError, match="current run directory"):
+            store.read_slice(path, 0, 100)
+        with pytest.raises(ToolExecutionError, match="current run directory"):
+            store.search(path, "other", True, 1, 10)
+
+
+@pytest.mark.asyncio
 async def test_agent_tool_file_writes_are_scoped_to_active_run(tmp_path: Path) -> None:
     runs_dir = tmp_path / "cases"
     provider = _provider(tmp_path / "shared-artifacts", runs_dir=runs_dir)

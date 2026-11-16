@@ -56,6 +56,7 @@ def _platform_capability_definitions(platform: HarnessPlatform, *, include_ai_as
 
 def build_agent_tool_provider(
     *,
+    workspace_base: Path | None = None,
     read_roots: list[Path] | None = None,
     write_root: Path | None = None,
     runtime_secret_settings: Any = None,
@@ -64,7 +65,7 @@ def build_agent_tool_provider(
     run_id: str = "",
 ) -> DefaultAgentToolProvider:
     return DefaultAgentToolProvider(
-        FileOps(read_roots=read_roots, write_root=write_root),
+        FileOps(workspace_base=workspace_base, read_roots=read_roots, write_root=write_root),
         runtime_secret_settings=runtime_secret_settings,
         local_tool_output_settings=local_tool_output_settings,
         runs_dir=runs_dir,

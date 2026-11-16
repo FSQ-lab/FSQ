@@ -7,6 +7,8 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 ### Added
 
 - Android harness policy accepts optional `uiautomator2_wait_for_idle_timeout_ms` for owned Session creation: `None` leaves the SDK keyword omitted, and explicit built-in integers in `0..9007199254740991` retain their exact value, including zero. Borrowed Sessions reject an initial override. Ordinary defaults and Workspace v2 YAML remain unchanged.
+- Android `inspect_element` / `inspectElement` reads complete safe attributes from one uniquely resolved element without compact-snapshot clipping, preserving explicit unavailable states and protecting password text.
+- Android swipes support mutually exclusive display-direction, explicit-point, and Element-direction modes. Element gestures use current bounds and a finite distance fraction with a full-span default.
 
 ### Fixed
 
@@ -21,11 +23,17 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 - The bundled Android harness skill preserves requested foreground, timer/activity, draft, and settings terminal states instead of routinely killing the application after final verification. Explicit user/lifecycle closure or restart remains supported; runtime session disposal is not a business application kill action.
 - Responses streaming Agent turns retry bounded pre-commit transport, timeout, rate-limit, service, and incomplete-stream failures without multiplying SDK retries or replaying accepted tool effects. Old streams settle before retry, cancellation remains effective, and deterministic authentication/schema/refusal/output failures are not repaired by additional model requests.
 - Exhausted streamed turns retain safe neutral failure categories, reasons, HTTP status, and sanitized causal diagnostics; failed runner records and `run_failed` events preserve allowlisted engine fields without changing infrastructure failures into budget-generated inconclusive results.
+- Android coordinate context, display gestures, and replay scaling use the SDK's public physical `Device.display_size()` without viewport, screenshot, offset, or cached-size fallbacks; coordinate recordings preserve the physical reference actually used by the invocation. Replay-only `reference_screen_size` is omitted from online schemas and rejected before online execution, while Strict recording and replay retain it.
+- Workspace-relative `read_file` paths resolve once against an explicit Workspace base, independently of read permissions, rather than searching roots or inventing a `cases/android` prefix. Artifact current-Run containment remains unchanged.
+- Android End/MoveEnd and MoveHome key aliases retain text-navigation semantics; `Ctrl+End` sends one control-modified event. Text-entry verification binds a stable observed resource identity before writing and rechecks that identity after replacement without replaying input.
+- Android input failures preserve safe operation stage, SDK request/completion facts, and local lifecycle state without leaking input or backend messages. Closed and pending-cleanup failures remain distinct, with quarantine and primary-versus-evidence failure precedence preserved.
+- Android and shared guidance reserve `assert_with_ai` for pure visual assertions, not locating/driving or approximating exact accessible state. Slider, filename-extension, and collection-deletion guidance requires precise readback, complete object identity, and preservation of the authorized root container.
 
 ### Integration status
 
 - SDK terminal-disposal consumption is validated separately from distribution readiness. The immutable SDK dependency is unchanged; source-overlay verification does not establish a newly packaged SDK or an evaluation-ready candidate.
 - Initial-idle policy consumption requires the reviewed SDK API through an explicit local-wheel override for isolated validation. The public SDK dependency pin is unchanged; this does not establish public installability, a device-observed idle value, or repair of the Pause inspection scenario.
+- Physical-display integration consumes the explicitly locked AIF-12 SDK wheel for isolated source-overlay verification; the distribution's public SDK pin is unchanged. This is not a public-pin clean-install, device, model, or benchmark qualification.
 
 ## [0.3.2] - 2026-10-21
 

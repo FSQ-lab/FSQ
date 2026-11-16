@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 StepPhase: TypeAlias = Literal["prepare", "invoke", "settle", "finalize"]
 RunnerStatus: TypeAlias = Literal["pending", "running", "passed", "failed", "skipped", "cancelled", "incomplete"]
@@ -235,7 +236,7 @@ class AndroidTapAtParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Tap Android screen coordinates."})
 
     point: AndroidPoint = Field(description="Android screen point to tap.")
-    reference_screen_size: AndroidScreenSize | None = Field(default=None, description="Original screen size for proportional replay of recorded coordinates.")
+    reference_screen_size: SkipJsonSchema[AndroidScreenSize | None] = Field(default=None, description="Original screen size for proportional replay of recorded coordinates.")
 
     def replay_params(self, context: object) -> dict[str, object]:
         return _android_coordinate_replay(self.model_dump(mode="json", exclude_none=True), context)
@@ -254,7 +255,7 @@ class AndroidInputTextParams(_AndroidTargetParams):
 class AndroidPressKeyParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Press one Android key."})
 
-    key: str = Field(description="Non-empty Android key name such as Back, Home, Enter, or a backend-supported key string.")
+    key: str = Field(description="Android key name, including Back, system Home, Enter, MoveEnd/End (123), MoveHome (122), or Ctrl+End (one control-modified MoveEnd event).")
 
     @model_validator(mode="after")
     def _require_key(self) -> "AndroidPressKeyParams":
@@ -264,13 +265,28 @@ class AndroidPressKeyParams(BaseModel):
 
 
 class AndroidSwipeParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Swipe by direction or both start and end Android screen points."})
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Provide exactly one swipe mode: full-screen direction, both start and end points, or target/non-empty locator plus direction. Only element mode accepts percent; replay references are internal point-mode parameters."
+        },
+    )
 
-    direction: AndroidSwipeDirection | None = Field(default=None, description="Swipe direction to use instead of explicit start and end points.")
-    start: AndroidPoint | None = Field(default=None, description="Start point for a coordinate swipe. Requires end when used.")
-    end: AndroidPoint | None = Field(default=None, description="End point for a coordinate swipe. Requires start when used.")
-    reference_screen_size: AndroidScreenSize | None = Field(default=None, description="Original screen size for proportional replay of recorded swipe coordinates.")
-    duration: int | None = Field(default=None, ge=1, description="Optional swipe duration in milliseconds.")
+    direction: AndroidSwipeDirection | None = Field(default=None, description="Full-screen swipe direction, or element-relative direction when target/locator is supplied.")
+    target: str | None = Field(default=None, description="Android semantic target for an element-relative swipe. Requires direction.")
+    locator: AndroidLocator | None = Field(default=None, description="Non-empty Android locator for an element-relative swipe. Requires direction.")
+    start: AndroidPoint | None = Field(default=None, description="Start point for a coordinate swipe. Requires end; cannot mix with direction or target/locator.")
+    end: AndroidPoint | None = Field(default=None, description="End point for a coordinate swipe. Requires start.")
+    percent: float | None = Field(
+        default=None,
+        strict=True,
+        gt=0,
+        le=1,
+        allow_inf_nan=False,
+        description="Element-only finite fraction of the usable bounds axis, greater than zero and at most one. Omitted/null means 1.0; other modes require null/omission.",
+    )
+    reference_screen_size: SkipJsonSchema[AndroidScreenSize | None] = Field(default=None, description="Original screen size for proportional replay of recorded swipe coordinates.")
+    duration: int | None = Field(default=None, strict=True, ge=1, le=60000, description="Optional swipe duration in milliseconds, from 1 through 60000.")
 
     def replay_params(self, context: object) -> dict[str, object]:
         params = self.model_dump(mode="json", exclude_none=True)
@@ -278,11 +294,22 @@ class AndroidSwipeParams(BaseModel):
 
     @model_validator(mode="after")
     def _require_direction_or_points(self) -> "AndroidSwipeParams":
-        has_direction = self.direction is not None
-        has_points = self.start is not None and self.end is not None
-        if has_direction or has_points:
+        has_target = self.target is not None or self.locator is not None
+        has_points = self.start is not None or self.end is not None
+        if has_points:
+            if self.start is None or self.end is None or self.direction is not None or has_target or self.percent is not None:
+                raise ValueError("point swipe requires both start and end without direction, target, locator, or percent")
             return self
-        raise ValueError("requires direction or both start and end points")
+        if self.reference_screen_size is not None:
+            raise ValueError("reference_screen_size is only valid for point-based Strict/Replay")
+        if self.direction is None:
+            raise ValueError("requires a direction or both start and end points")
+        if has_target:
+            if not ((isinstance(self.target, str) and self.target.strip()) or (self.locator is not None and self.locator.has_value())):
+                raise ValueError("element swipe requires target or non-empty locator")
+        elif self.percent is not None:
+            raise ValueError("percent is only valid for element swipes")
+        return self
 
 
 def _android_coordinate_replay(params: dict[str, object], context: object) -> dict[str, object]:
@@ -296,6 +323,25 @@ def _android_coordinate_replay(params: dict[str, object], context: object) -> di
 
 class AndroidUiTreeParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Read the current compact Android UI hierarchy. No parameters are accepted."})
+
+
+class AndroidInspectElementParams(_AndroidTargetParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Inspect one uniquely resolved Android target or non-empty locator. Returns full safe values and explicit observation states; protected or unknown-password text is unavailable."
+        },
+    )
+
+    attributes: tuple[Literal["id", "text", "desc", "type", "package", "bounds", "enabled", "displayed", "checked", "selected", "clickable", "focused"], ...] = Field(
+        default=("text", "desc"), min_length=1, description="Non-empty, duplicate-free safe attribute selection. Text is read only after password is explicitly false."
+    )
+
+    @model_validator(mode="after")
+    def _require_unique_attributes(self) -> "AndroidInspectElementParams":
+        if len(set(self.attributes)) != len(self.attributes):
+            raise ValueError("attributes must not contain duplicates")
+        return self
 
 
 class AndroidPerformActionsParams(BaseModel):
@@ -353,9 +399,16 @@ class AndroidAssertStateParams(BaseModel):
 
 
 class AndroidAssertWithAIParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Evaluate an explicit Android visual assertion with AI."})
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Evaluate a pure visual appearance, image, or Canvas assertion. Never use for grounding or visual driving, replacing available exact accessibility text/SeekBar values/checked/selected assertions, or overriding contradictory structural evidence."
+        },
+    )
 
-    prompt: str = Field(description="Non-empty visual assertion prompt to evaluate against current evidence.")
+    prompt: str = Field(
+        description="Non-empty pure visual appearance/image/Canvas assertion. Not for grounding, visual driving, replacing available exact accessibility/state evidence, or overriding contradictory evidence."
+    )
     optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
 
     @model_validator(mode="after")
@@ -577,6 +630,7 @@ ANDROID_ACTION_DEFINITIONS: tuple[AndroidActionDefinition, ...] = (
     AndroidActionDefinition("longPressOn", "long_press_on", AndroidLongPressOnParams, "action"),
     AndroidActionDefinition("swipe", "swipe", AndroidSwipeParams, "action"),
     AndroidActionDefinition("uiTree", "ui_snapshot", AndroidUiTreeParams, "observation"),
+    AndroidActionDefinition("inspectElement", "inspect_element", AndroidInspectElementParams, "observation"),
     AndroidActionDefinition("assertWithAI", "assert_with_ai", AndroidAssertWithAIParams, "assertion"),
 )
 ANDROID_ACTION_DEFINITIONS_BY_NAME: dict[str, AndroidActionDefinition] = {definition.fsq_action_name: definition for definition in ANDROID_ACTION_DEFINITIONS}

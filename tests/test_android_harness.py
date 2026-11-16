@@ -338,7 +338,7 @@ def test_android_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> Non
             return AIAssertionResult(
                 status="passed",
                 passed=True,
-                explanation="The expected page is visible.",
+                explanation="The custom-drawn icon is blue.",
                 provider="fake",
                 model="fake-model",
                 artifact_refs=[request.screenshot_artifact_ref] if request.screenshot_artifact_ref else [],
@@ -354,7 +354,7 @@ def test_android_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> Non
     context = harness.get_context()
 
     schemas = {schema.name: schema for schema in harness.action_space()}
-    result = harness.invoke_action(_step("assertWithAI", {"prompt": "Verify Bing homepage"}), context)
+    result = harness.invoke_action(_step("assertWithAI", {"prompt": "Verify that the custom-drawn icon is blue."}), context)
 
     assert "assert_with_ai" in schemas
     assert schemas["assert_with_ai"].metadata["owner"] == "driver"
@@ -363,7 +363,7 @@ def test_android_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> Non
     assert result.metadata["ai_assertion"]["provider"] == "fake"
     assert result.artifact_refs[0].kind == "screenshot"
     assert (tmp_path / result.artifact_refs[0].path).read_bytes() == b"fake-png"
-    assert evaluator.requests[0].prompt == "Verify Bing homepage"
+    assert evaluator.requests[0].prompt == "Verify that the custom-drawn icon is blue."
     assert evaluator.requests[0].screenshot_artifact_ref == result.artifact_refs[0]
     assert driver.calls == [("context", None), ("screenshot", None)]
 

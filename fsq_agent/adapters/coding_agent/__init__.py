@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 def create_coding_agent_runtime(settings: Settings, *, harness_factory: Any | None = None) -> CodingAgentRuntime:
     knowledge = settings.agent_context.knowledge
     file_ops = FileOps(
+        workspace_base=settings.workspace.root_dir,
         read_roots=[settings.cases.dir, knowledge.root_dir, knowledge.skills.dir, knowledge.pre_plan.dir or knowledge.root_dir, settings.output.root_dir],
         write_root=settings.output.root_dir / "artifacts",
     )

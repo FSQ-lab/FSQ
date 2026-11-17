@@ -18,6 +18,11 @@ Use when `harness.platform` is Android. This skill contains Android-specific sta
 - Re-evaluate stale or missing targets with a fresh `ui_snapshot` before retrying the same semantic action.
 - Do not invent abstract Android targets such as an outside blank area. If a menu or dialog must be dismissed and no concrete target is exposed, use the requested semantic key action such as `Back`, then verify the UI state.
 - For Android key actions, use the requested semantic key string only. Do not mix key names with backend-native key codes.
+- Use `inspect_with_ai` in `mode: "extract"` to read genuinely pixel-only image, chart, map, or Canvas content; it is an observation, not a pass/fail assertion.
+- Use `inspect_with_ai` in `mode: "locate"` only for inaccessible targets, or targets still unresolved after a fresh structural observation and locator refinement. Complex, clipped, or ambiguous accessibility output alone is not permission to skip that refinement.
+- Inspection takes `prompt`, optional `mode` (default `extract`), optional direct image `region: {left, top, right, bottom}`, and `max_candidates` (default 5). Region bounds use half-open image pixels; candidates remain in full-image coordinates. Extract returns no executable candidates.
+- Inspection never acts automatically. Only a current SDK-returned candidate's `pointer_center` may be passed to an explicit `tap_at` or explicit-point `swipe`; never use `image_bounds`, `pointer_bounds` corners, screenshot scaling, guessed offsets, or historical candidate coordinates as action points. Refresh observation after UI changes and verify the resulting action structurally where possible.
+- Host privacy/upload permission is independent and denied by default for inspection as for visual assertion. A failure reason is an operational non-success, not an assertion verdict; do not retry around privacy, geometry, provider, or budget refusal.
 
 ## Verification and Assertion Rules
 
@@ -31,7 +36,7 @@ Use when `harness.platform` is Android. This skill contains Android-specific sta
 - Visual assertion arguments are `assertion`, required `surface` (`custom_canvas`, `image_content`, `map_view`, or `appearance`), and optionally `region: {kind: image_rect, rect: {left, right, top, bottom}}`. Rectangles use half-open screenshot-image pixels, not pointer coordinates. Element regions and accessibility-bounds crops are unsupported. Omit `region` only with a nonblank `full_screen_reason` explaining why the whole image is necessary; that reason grants no privacy/upload permission.
 - `unknown` is not False and `not_applicable` is not a negative assertion. Use genuine visual evidence only when the property is visual and structural semantics cannot decide it; otherwise report unverified. Host privacy/upload permission is independent and denied by default, not something the model may supply or override.
 - Interpret `outcome=passed|failed|inconclusive`, not callback completion or the compatibility boolean alone. Inconclusive is incomplete/unverified, never passed or assertion failed; preserve its reason, including provider, privacy, capture, budget, or geometry refusal. An optional assertion does not make uncertainty pass, and historical recorded verdicts are not offline replay evidence.
-- Exact color values/color-space semantics and claims of the same display/frame are unverified. Appearance such as a blue-looking icon may be visually evaluated, but does not establish an exact color value. Never derive UI-driving coordinates or actions from a visual result.
+- Exact color values/color-space semantics and claims of the same display/frame are unverified. Appearance such as a blue-looking icon may be visually evaluated, but does not establish an exact color value. Never derive UI-driving coordinates or actions from an assertion result; only the separate SDK-backed inspection can return current pointer centers.
 
 ## Argument Rules
 

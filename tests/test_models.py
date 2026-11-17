@@ -100,7 +100,6 @@ def test_agent_runtime_settings_defaults_to_safe_offline_mode() -> None:
     assert settings.prompt.task_template_path is None
     assert settings.prompt.variables == {}
     assert settings.local_tool_output.always_write_artifact is True
-    assert settings.local_tool_output.recent_inline_output_count == 3
     assert settings.local_tool_output.full_output_max_chars == 30000
     assert settings.local_tool_output.total_inline_output_max_chars == 60000
 

@@ -19,6 +19,8 @@ Runner must not import adapters, Application, Agent SDK types, concrete harnesse
 
 Both symbols are exported from `core.runner` and re-exported from `core` with identical object identity.
 
+`StepRunner(..., capture_action_before=True)` controls only automatic prepare evidence for action-kind steps, including inherited CommonTool actions. Dynamic nonrecorded composition passes False; default, recorded, and Strict composition retain True. Disabled action-before capture omits screenshot and UI snapshot but never skips prepare validation/context/hooks/cancellation, settling, or existing finalize eligibility. Other step-kind policies and explicit/invoke-produced artifacts are unchanged. Effective evidence requirements are established before step start and retained in recovery/reports; deliberately unrequired capture is not a missing-artifact failure.
+
 ## Internal Structure
 
 - `__init__.py`: public exports.

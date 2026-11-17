@@ -123,7 +123,8 @@ class DynamicExecutionService:
             lifecycle.heartbeat(run_dir)
             heartbeat = asyncio.create_task(self._heartbeat(run_dir))
             recorder = EvidenceRecorder(run_id=metadata.run_id, output_dir=run_dir, secret_values=secret_values)
-            outcome = await self._agent.run_in_context(safe_task, lifecycle.context(run_dir, metadata), request.event_sink, evidence_sink=recorder, cancellation_check=check_cancellation)
+            context = lifecycle.context(run_dir, metadata).model_copy(update={"capture_action_before": request.record})
+            outcome = await self._agent.run_in_context(safe_task, context, request.event_sink, evidence_sink=recorder, cancellation_check=check_cancellation)
             _validate_outcome_identity(outcome, safe_task)
             check_cancellation()
             try:

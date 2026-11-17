@@ -417,6 +417,24 @@ class VisualRect(BaseModel):
     bottom: int
 
 
+class AndroidInspectWithAIParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    prompt: str = Field(min_length=1, max_length=4096, description="Read or locate visual content in the current Android image without performing an action.")
+    mode: Literal["extract", "locate"] = "extract"
+    region: VisualRect | None = Field(default=None, description="Optional half-open region in full-image coordinates.")
+    max_candidates: int = Field(default=5, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _validate_inspection(self) -> "AndroidInspectWithAIParams":
+        if "\x00" in self.prompt or len(self.prompt.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank UTF-8 prompt of at most 4096 bytes without NUL")
+        region = self.region
+        if region is not None and not (0 <= region.left < region.right and 0 <= region.top < region.bottom):
+            raise ValueError("requires a nonempty nonnegative image region")
+        return self
+
+
 class VisualRegion(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -729,6 +747,7 @@ ANDROID_ACTION_DEFINITIONS: tuple[AndroidActionDefinition, ...] = (
     AndroidActionDefinition("swipe", "swipe", AndroidSwipeParams, "action"),
     AndroidActionDefinition("uiTree", "ui_snapshot", AndroidUiTreeParams, "observation"),
     AndroidActionDefinition("inspectElement", "inspect_element", AndroidInspectElementParams, "observation"),
+    AndroidActionDefinition("inspectWithAI", "inspect_with_ai", AndroidInspectWithAIParams, "observation"),
     AndroidActionDefinition("assertWithAI", "assert_with_ai", AndroidAssertWithAIParams, "assertion"),
 )
 ANDROID_ACTION_DEFINITIONS_BY_NAME: dict[str, AndroidActionDefinition] = {definition.fsq_action_name: definition for definition in ANDROID_ACTION_DEFINITIONS}

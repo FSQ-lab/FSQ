@@ -8,6 +8,8 @@ from typing import Protocol, runtime_checkable
 from fsq_agent.models import (
     AIAssertionRequest,
     AIAssertionResult,
+    AIVisualInspectionRequest,
+    AIVisualInspectionResult,
     EvidenceArtifactRef,
     ExecutableStep,
     FailureCategory,
@@ -24,6 +26,13 @@ class AIAssertionEvaluatorProtocol(Protocol):
     def close(self) -> None: ...
 
     def evaluate(self, request: AIAssertionRequest, *, cancellation_check: Callable[[], None] | None = None) -> AIAssertionResult: ...
+
+
+@runtime_checkable
+class AIVisualInspectionEvaluatorProtocol(Protocol):
+    def close(self) -> None: ...
+
+    def inspect(self, request: AIVisualInspectionRequest, *, cancellation_check: Callable[[], None] | None = None) -> AIVisualInspectionResult: ...
 
 
 @runtime_checkable

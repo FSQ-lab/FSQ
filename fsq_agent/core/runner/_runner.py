@@ -60,6 +60,7 @@ class StepRunner:
         runtime_secret_store: RuntimeSecretResolver | None = None,
         evidence_sink: EvidenceJournalSink | None = None,
         cancellation_check: CancellationCheck | None = None,
+        capture_action_before: bool = True,
     ) -> None:
         self.harness = harness
         self.capability_registry = capability_registry
@@ -67,6 +68,7 @@ class StepRunner:
         self.runtime_secret_store = runtime_secret_store
         self.evidence_sink = evidence_sink
         self.cancellation_check = cancellation_check
+        self.capture_action_before = capture_action_before
         self._identities: set[str] = set()
         self._source_occurrences: dict[str, int] = {}
         redaction_values = getattr(runtime_secret_store, "redaction_values", None)
@@ -158,7 +160,7 @@ class StepRunner:
         if capability is None:
             return EvidencePolicy(capture_after=False)
         if step.kind == "action":
-            capture_before = True
+            capture_before = self.capture_action_before
             capture_after = True
         elif step.kind == "assertion":
             capture_before = True

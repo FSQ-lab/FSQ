@@ -11,6 +11,7 @@ from fsq_agent.models import (
     AndroidAssertWithAIParams,
     AndroidInputTextParams,
     AndroidInspectElementParams,
+    AndroidInspectWithAIParams,
     AndroidKillAppParams,
     AndroidLaunchAppParams,
     AndroidLongPressOnParams,
@@ -58,3 +59,5 @@ class AndroidDriverInterface(DriverObservationInterface, Protocol):
     def ui_snapshot(self, params: AndroidUiTreeParams) -> dict[str, object]: ...
 
     def inspect_element(self, params: AndroidInspectElementParams) -> dict[str, object]: ...
+
+    def inspect_with_ai(self, params: AndroidInspectWithAIParams) -> dict[str, object]: ...

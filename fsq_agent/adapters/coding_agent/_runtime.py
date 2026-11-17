@@ -140,8 +140,9 @@ class _ToolOutputBudgetFilter:
         remaining_inline_chars = self.max_total_inline_chars
         inline_entry_ids: set[int] = set()
         recent_entries = entries[-self.recent_inline_outputs :] if self.recent_inline_outputs else ()
+        projected = {entry.entry_id: self._project_output(entry.output) for entry in recent_entries}
         for entry in reversed(recent_entries):
-            output_chars = len(entry.output)
+            output_chars = len(projected[entry.entry_id])
             if output_chars <= self.max_output_chars and output_chars <= remaining_inline_chars:
                 inline_entry_ids.add(entry.entry_id)
                 remaining_inline_chars -= output_chars
@@ -149,6 +150,8 @@ class _ToolOutputBudgetFilter:
         replacements: dict[int, str] = {}
         for entry in entries:
             if entry.entry_id in inline_entry_ids:
+                if projected[entry.entry_id] != entry.output:
+                    replacements[entry.entry_id] = projected[entry.entry_id]
                 continue
             display_name = entry.tool_name or "tool"
             artifact_path = self._artifact_path_for(entry)
@@ -157,6 +160,72 @@ class _ToolOutputBudgetFilter:
             else:
                 replacements[entry.entry_id] = f"[Historical {display_name} output omitted because artifact storage is unavailable. Content chars: {len(entry.output)}.]"
         return replacements
+
+    @staticmethod
+    def _project_output(output: str) -> str:
+        try:
+            payload = json.loads(output)
+        except (ValueError, TypeError):
+            return output
+        if not isinstance(payload, dict) or not isinstance(payload.get("tool_name"), str):
+            return output
+        result = payload.get("result")
+        if not isinstance(result, dict) or not isinstance(payload.get("status"), str) or ("output" not in result and payload.get("tool_origin") not in ("platform", "common", "agent_tool")):
+            return output
+        # Project only recognized FSQ envelopes; never traverse business output.
+        repeated = {
+            "result",
+            "runner_result",
+            "metadata",
+            "schema_metadata",
+            "tool_origin",
+            "platform",
+            "driver_method",
+            "fsq_action_name",
+            "capability_name",
+            "executor_kind",
+            "step_kind",
+            "replay",
+            "safe_replay_params",
+            "model_output",
+        }
+        compact = {key: value for key, value in payload.items() if key not in repeated and value is not None}
+        if "output" in result:
+            compact["output"] = result["output"]
+        if result.get("error") and not compact.get("error_message"):
+            compact["error_message"] = result["error"]
+        for key in ("duration_ms", "error_message", "failure_category"):
+            if key not in compact and result.get(key) is not None:
+                compact[key] = result[key]
+        metadata = result.get("metadata")
+        if isinstance(metadata, dict):
+            diagnostics = {key: value for key, value in metadata.items() if key not in repeated and key != "tool_name" and value is not None}
+            if diagnostics:
+                compact["diagnostics"] = diagnostics
+        if "artifact_refs" not in compact and isinstance(result.get("artifact_refs"), list):
+            compact["artifact_refs"] = result["artifact_refs"]
+        runner = payload.get("runner_result")
+        if isinstance(runner, dict):
+            for key in ("action_status", "failure_category", "error_message", "evidence_errors", "skip_reason", "blocked_by_step"):
+                value = runner.get(key)
+                if value is not None and value != [] and key not in compact:
+                    compact[key] = value
+            phases = runner.get("phase_reports")
+            if isinstance(phases, list):
+                errors = []
+                for phase in phases:
+                    if not isinstance(phase, dict) or phase.get("status") not in ("failed", "incomplete", "cancelled"):
+                        continue
+                    error = {key: phase[key] for key in ("phase", "status", "failure_category", "error_message") if key in phase and phase[key] is not None}
+                    metadata = phase.get("metadata")
+                    if isinstance(metadata, dict):
+                        details = {key: value for key, value in metadata.items() if key not in repeated and key not in ("harness_output", "harness_metadata")}
+                        if details:
+                            error["metadata"] = details
+                    errors.append(error)
+                if errors:
+                    compact["phase_errors"] = errors
+        return json.dumps(compact, ensure_ascii=False, default=str, separators=(",", ":"))
 
     def _artifact_path_for(self, entry: ToolOutputEntry) -> str | None:
         call_id = entry.call_id or ""
@@ -340,6 +409,7 @@ class DefaultCodingAgentRuntime:
                     platform=self.settings.harness.platform,
                     evidence_sink=evidence_sink,
                     cancellation_check=cancellation_check,
+                    capture_action_before=context.capture_action_before,
                 )
                 self._harness_tool_names = harness_adapter.tool_names
                 self._harness_tool_schemas = harness_adapter.schemas_by_name

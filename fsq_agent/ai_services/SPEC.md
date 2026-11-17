@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Own FSQ visual assertion, completed-Case suggestion, and Quick Test intent analysis over neutral model calls. The services prepare business inputs, supply private model-facing schemas and parsers, and convert validated parsed objects into FSQ results. They do not own supplier authentication, SDK objects, installed-application discovery, Workspace persistence, platform actions, Case execution, candidate publication, or reports.
+Own FSQ visual assertion/inspection, completed-Case suggestion, and Quick Test intent analysis over neutral model calls. Services prepare inputs, supply private strict output schemas/parsers, and convert validated objects into FSQ results. They do not own supplier authentication, SDK objects, platform capture/coordinate conversion, installed-application discovery, persistence, platform actions, Case execution, candidate publication, or reports.
 
 ## Dependencies
 
@@ -17,6 +17,7 @@ Own FSQ visual assertion, completed-Case suggestion, and Quick Test intent analy
 ## Public Interface
 
 - `AIAssertionEvaluator`: synchronous `evaluate(request: AIAssertionRequest) -> AIAssertionResult` and `close()` operations, with an optional trusted cooperative cancellation collaborator for Android visual evaluation. The serializable request contains no live callbacks or SDK objects.
+- `AIAssertionEvaluator.inspect(request: AIVisualInspectionRequest, *, cancellation_check=None) -> AIVisualInspectionResult` implements a separate observation-only protocol using the same configured model-session lifecycle and reasoning effort, without new constructor/factory/resolver parameters. A private implementation owns its strict summary/image-bounds schema. It validates authorized current-frame input, requested mode/region/candidate bounds and budget, performs at most one tool-free `Model.complete` request using `ImageContent` and a Pydantic output contract, and rejects invalid/refused/late output without repair/retries. Extract has no candidates; locate image bounds use full-image coordinates, never model-generated pointer coordinates. SDK adapter code constructs physical pointer results. Cancellation and primary/cleanup precedence are preserved; errors remain safe neutral engine failures, not assertion verdicts.
 - `CaseSuggestionAnalyzer`: synchronous `analyze(*, parsed_case, execution_report) -> CaseSuggestionAnalysis` over completed execution facts.
 - `CaseSuggestionAnalysis`: immutable summary, suggestion entries, and optional candidate Case YAML.
 - `build_ai_assertion_evaluator(settings)` and `build_case_suggestion_analyzer(settings)`: create services from the selected supplier without inference.
@@ -60,6 +61,7 @@ At a natural-language token boundary, the labels `URL`, `URI`, `网址`, `地址
 - `__init__.py`: public service, factory, result, and readiness exports.
 - `_factory.py`: configured service construction and safe suggestion readiness.
 - `_ai_assertion.py`: private assertion output model/schema/parser, screenshot/text input preparation, prompting, timing, and parsed-verdict result construction.
+- `_visual_inspection.py`: private strict observation output/schema/parser and neutral model-request/evaluation implementation; no SDK import or coordinate mapping.
 - `_case_suggestion.py`: private suggestion output models/schema/parser, read-only completed-Case prompting, and immutable service result conversion.
 - `_quick_test.py`: private intent/inferred-hint output schemas, language-aware provenance parser, and the exported `QuickTestIntentAnalyzer` and immutable `QuickTestIntent` (including its typed `inferred_hint`); `_factory.py` exports `build_quick_test_intent_analyzer`.
 - `_web_addresses.py`: private implementation of the exported `QuickTestWebAddressParser`; owns deterministic Web boundaries, syntax validation, and complete-reference comparison shared by intent analysis and Application.

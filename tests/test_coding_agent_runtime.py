@@ -2209,7 +2209,6 @@ def test_runtime_builds_neutral_request_with_one_tool_output_budget(monkeypatch:
 
     assert request.tracing_enabled is False
     input_filter = request.tool_output_filter
-    assert input_filter.recent_inline_outputs == 3
     assert input_filter.max_output_chars == 30000
     assert input_filter.max_total_inline_chars == 60000
     assert not hasattr(request, "trimming")
@@ -2241,26 +2240,19 @@ def test_provider_session_preserves_azure_connection_values_for_neutral_access()
     assert not hasattr(session, "create_agents_provider")
 
 
-def test_runtime_tool_count_filter_keeps_only_three_small_recent_outputs(tmp_path: Path) -> None:
+def test_runtime_tool_count_filter_keeps_twenty_small_recent_outputs(tmp_path: Path) -> None:
     output_settings = OutputSettings()
     output_settings.runs_dir = tmp_path / "runs"
     settings = Settings(agent_runtime=AgentRuntimeSettings(), output=output_settings)
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
     input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
-    entries = (
-        ToolOutputEntry(1, "1", "read_file", "old output"),
-        ToolOutputEntry(3, "2", "read_file", "recent 1"),
-        ToolOutputEntry(5, "3", "read_file", "recent 2"),
-        ToolOutputEntry(7, "4", "read_file", "recent 3"),
-    )
+    entries = tuple(ToolOutputEntry(index, str(index), "read_file", f"output {index}") for index in range(1, 22))
 
     filtered = input_filter(entries)
 
     assert filtered[1].startswith("[Historical read_file output stored as artifact.")
-    assert "old output" not in filtered[1]
-    assert 3 not in filtered
-    assert 5 not in filtered
-    assert 7 not in filtered
+    assert "output 1" not in filtered[1]
+    assert all(entry.entry_id not in filtered for entry in entries[1:])
 
 
 def test_runtime_tool_count_filter_enforces_total_inline_budget(tmp_path: Path) -> None:
@@ -2312,6 +2304,7 @@ async def test_file_helper_context_filter_preserves_complete_artifact(tmp_path: 
     content = "x" * 40000 + "TAIL"
     (settings.agent_context.knowledge.root_dir / "large.txt").write_text(content, encoding="utf-8")
     runtime = create_coding_agent_runtime(settings)
+    settings.agent_runtime.local_tool_output.recent_inline_output_count = 3
     tools = runtime.tool_factory.build_tools(run_id="run-1", task_id="task-1")
     read_tool = next(tool for tool in tools if tool.name == "read_file")
     search_tool = next(tool for tool in tools if tool.name == "search_artifact")
@@ -2597,3 +2590,128 @@ async def test_harness_callback_preserves_permitted_additional_properties(additi
     assert result["status"] == "passed"
     assert harness.steps[0].params == arguments
     assert "invoke:tap_on:session-1" in harness.calls
+
+
+@pytest.mark.asyncio
+async def test_model_projection_preserves_business_result_and_raw_runner_evidence(tmp_path: Path) -> None:
+    harness = _FakeHarness()
+    adapter = HarnessToolAdapter(harness, run_id="run-1")
+    tool = adapter.build_tools()[0]
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "Downloads"}, call_id="tap"))
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
+    input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
+    entry = ToolOutputEntry(1, "tap", tool.name, raw)
+
+    projected = json.loads(input_filter((entry,))[1])
+    original = json.loads(raw)
+
+    assert projected["output"] == original["result"]["output"]
+    assert projected["status"] == "passed"
+    assert projected["runner_step_id"] == original["runner_step_id"]
+    assert projected["artifact_refs"] == original["artifact_refs"]
+    assert "runner_result" not in projected
+    assert "result" not in projected
+    assert entry.output == raw
+    assert original["runner_result"]["phase_reports"][0]["phase"] == "prepare"
+    assert not list((tmp_path / "runs" / "run-1" / "artifacts" / "tools").glob("*.json"))
+
+
+def test_model_projection_budgets_business_output_not_duplicate_metadata(tmp_path: Path) -> None:
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
+    input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
+    raw = json.dumps(
+        {
+            "tool_name": "ui_snapshot",
+            "status": "passed",
+            "tool_origin": "platform",
+            "result": {"output": {"xml": "<hierarchy/>"}, "metadata": {"schema_metadata": {"description": "x" * 40000}}},
+            "runner_result": {"status": "passed", "phase_reports": []},
+        }
+    )
+
+    replacements = input_filter((ToolOutputEntry(1, "snapshot", "ui_snapshot", raw),))
+
+    assert json.loads(replacements[1])["output"] == {"xml": "<hierarchy/>"}
+    assert not list((tmp_path / "runs" / "run-1" / "artifacts" / "tools").glob("*.json"))
+    input_filter.max_output_chars = 10
+    reference = input_filter((ToolOutputEntry(1, "snapshot", "ui_snapshot", raw),))[1]
+    assert "Artifact path:" in reference
+    artifacts = list((tmp_path / "runs" / "run-1" / "artifacts" / "tools").glob("*.json"))
+    assert json.loads(artifacts[0].read_text())["content"] == raw
+
+
+def test_model_projection_preserves_incomplete_assertion_and_evidence_failure(tmp_path: Path) -> None:
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    input_filter = _test_request(DefaultCodingAgentRuntime(settings, _EmptyToolFactory()), run_id="run-1").tool_output_filter
+    unavailable = {"kind": "screenshot", "availability": "failed", "unavailable_reason": "capture_failed", "path": None}
+    output = {"outcome": "inconclusive", "reason": "privacy_blocked", "deterministic_conflict": False, "capture": {"pointer_mapping": "unverified"}}
+    raw = json.dumps(
+        {
+            "tool_name": "assert_with_ai",
+            "tool_origin": "platform",
+            "status": "incomplete",
+            "result": {"output": output, "metadata": {"harness_metadata": {"outcome": "inconclusive", "reason": "privacy_blocked"}}},
+            "artifact_refs": [unavailable],
+            "runner_result": {
+                "action_status": "incomplete",
+                "evidence_errors": [{"message": "capture_failed"}],
+                "phase_reports": [{"phase": "prepare", "status": "failed", "failure_category": "artifact_error", "error_message": "capture_failed"}],
+            },
+        }
+    )
+
+    projected = json.loads(input_filter((ToolOutputEntry(1, "assert", "assert_with_ai", raw),))[1])
+
+    assert projected["status"] == "incomplete"
+    assert projected["output"] == output
+    assert projected["artifact_refs"] == [unavailable]
+    assert projected["evidence_errors"] == [{"message": "capture_failed"}]
+    assert projected["phase_errors"][0]["failure_category"] == "artifact_error"
+    assert projected["diagnostics"]["harness_metadata"]["reason"] == "privacy_blocked"
+
+
+@pytest.mark.parametrize("raw", ["not JSON", "[1,2]", '{"tool_name":"business","status":"passed","result":{"answer":42}}'])
+def test_model_projection_leaves_unrecognized_content_unchanged(raw: str) -> None:
+    input_filter = _test_request(DefaultCodingAgentRuntime(Settings(), _EmptyToolFactory())).tool_output_filter
+    assert input_filter((ToolOutputEntry(1, "unrelated", "read_file", raw),)) == {}
+
+
+@pytest.mark.asyncio
+async def test_verifier_receives_original_observation_when_compact_history_stays_inline(tmp_path: Path) -> None:
+    marker = "VERIFIED_VALUE_BEYOND_PROGRESS_PREVIEW"
+    observed_text = "x" * 2000 + marker + "y" * 14000
+
+    class FullObservationHarness(_FakeHarness):
+        def invoke_action(self, step: Any, context: HarnessContext) -> HarnessActionResult:
+            return HarnessActionResult(status="passed", action_name=step.action_name, output={"text": observed_text})
+
+    harness = FullObservationHarness(tool_name="inspect_element", driver_method="inspect_element", fsq_action_name="inspectElement")
+    adapter = HarnessToolAdapter(harness, run_id="run-1")
+    tool = next(binding for binding in adapter.build_tools() if binding.name == "inspect_element")
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "editor"}, call_id="read-full"))
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
+    input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
+    projected = input_filter((ToolOutputEntry(1, "read-full", tool.name, raw),))[1]
+    assert len(raw) > input_filter.max_output_chars
+    assert json.loads(projected)["output"]["text"] == observed_text
+    assert not list((tmp_path / "runs" / "run-1" / "artifacts" / "tools").glob("*.json"))
+
+    event = runtime._map_stream_event(AgentEvent(kind="tool_output", call_id="read-full", tool_name=tool.name, output=raw), "run-1", "verify")
+    assert marker not in event.tool_output_preview
+    events_path = tmp_path / "runs" / "run-1" / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(event.model_dump_json() + "\n", encoding="utf-8")
+    task = Task(id="verify", description="Inspect the editor.", verification_goal=f"The editor contains {marker}.")
+    bundle = VerificationEvidenceBuilder().build(task, [], events_path=events_path)
+    execution = bundle.tool_calls[0]["runner_result"]
+    invoked = next(phase for phase in execution["phase_reports"] if phase["phase"] == "invoke")
+    assert invoked["metadata"]["harness_output"]["text"] == observed_text
+    assert execution["status"] == "passed"
+    assert json.loads(events_path.read_text(encoding="utf-8"))["payload"]["runner_result"] == execution

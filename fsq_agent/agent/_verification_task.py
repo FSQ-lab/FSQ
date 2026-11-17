@@ -97,7 +97,7 @@ class VerificationEvidenceBuilder:
         if not events_path or not events_path.exists():
             return []
         starts: dict[str, dict[str, Any]] = {}
-        calls: list[ToolCallRecord] = []
+        calls: list[dict[str, Any]] = []
         for line in events_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -116,24 +116,27 @@ class VerificationEvidenceBuilder:
             start_payload = start.get("payload") if isinstance(start.get("payload"), dict) else {}
             event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
             tool_name = str(start.get("tool_name") or event.get("tool_name") or "unknown")
-            calls.append(
-                ToolCallRecord(
-                    tool_call_id=call_id,
-                    tool_name=tool_name,
-                    tool_origin=self._tool_origin(tool_name, start_payload.get("tool_origin") or event_payload.get("tool_origin")),
-                    status="failed" if event_type == "tool_call_failed" else "completed",
-                    arguments=start.get("tool_arguments"),
-                    output_preview=event.get("tool_output_preview"),
-                    artifact_path=event_payload.get("artifact_path"),
-                    error=event.get("message") if event_type == "tool_call_failed" else None,
-                    started_sequence=start.get("sequence"),
-                    completed_sequence=event.get("sequence"),
-                    started_at=start.get("timestamp"),
-                    completed_at=event.get("timestamp"),
-                    duration_ms=event.get("duration_ms"),
-                )
-            )
-        return [call.model_dump(mode="json") for call in calls]
+            record = ToolCallRecord(
+                tool_call_id=call_id,
+                tool_name=tool_name,
+                tool_origin=self._tool_origin(tool_name, start_payload.get("tool_origin") or event_payload.get("tool_origin")),
+                status="failed" if event_type == "tool_call_failed" else "completed",
+                arguments=start.get("tool_arguments"),
+                output_preview=event.get("tool_output_preview"),
+                artifact_path=event_payload.get("artifact_path"),
+                error=event.get("message") if event_type == "tool_call_failed" else None,
+                started_sequence=start.get("sequence"),
+                completed_sequence=event.get("sequence"),
+                started_at=start.get("timestamp"),
+                completed_at=event.get("timestamp"),
+                duration_ms=event.get("duration_ms"),
+            ).model_dump(mode="json")
+            runner_result = event_payload.get("runner_result")
+            if isinstance(runner_result, dict):
+                # Durable execution facts must not depend on main-model retention.
+                record["runner_result"] = runner_result
+            calls.append(record)
+        return calls
 
     def _load_artifacts(self, report_dir: Path | None) -> list[dict[str, Any]]:
         if not report_dir:

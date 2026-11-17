@@ -282,6 +282,29 @@ class AndroidHarness:
     def _prepare_driver_ai_assertion_tool_invocation(self, step: ExecutableStep, context: HarnessContext) -> None:
         binding, self._visual_assertion_capture = self._visual_assertion_capture, None
         policy = None
+        capability = self._capability_for(step.action_name)
+        if capability is not None and capability.name == "inspect_with_ai":
+            sequence = self.artifact_store.allocate_capture_sequence() if self.artifact_store is not None else 1
+            identity = {
+                "run_id": step.metadata.get("run_id") or (self.artifact_store.run_dir.name if self.artifact_store else "unallocated"),
+                "step_id": step.step_id,
+                "step_execution_id": step.step_execution_id or step.step_id,
+                "action_name": capability.name,
+                "params": step.params,
+                "capture_sequence": sequence,
+            }
+            context = context.model_copy(update={"metadata": {**context.metadata, "capture_invocation": identity}})
+            try:
+                resolved = self._visual_assertion_policy_resolver(context, sequence) if self._visual_assertion_policy_resolver is not None else None
+            except Exception:  # noqa: BLE001 - incompatible host authorization must fail closed without exposing its error.
+                resolved = None
+            policy = resolved if isinstance(resolved, AndroidVisualAssertionPolicy) else AndroidVisualAssertionPolicy()
+            policy = policy.model_copy(
+                update={
+                    "provider_available": False if self._visual_assertion_provider_available is False else policy.provider_available,
+                    "budget": AssertionBudget(**{name: min(getattr(policy.budget, name), getattr(self._visual_assertion_budget, name)) for name in AssertionBudget.model_fields}),
+                }
+            )
         if binding is not None:
             current = binding.invocation
             refs = step.metadata.get("prepared_artifacts", [])
@@ -333,9 +356,9 @@ class AndroidHarness:
 
     def _validation_errors(self, error: ValidationError) -> list[dict[str, object]]:
         try:
-            return error.errors(include_url=False, include_context=False)
+            return error.errors(include_url=False, include_context=False, include_input=False)
         except TypeError:
-            return error.errors()
+            return [{key: value for key, value in item.items() if key != "input"} for item in error.errors()]
 
     def _result_from_driver_output(self, action_name: str, output: object) -> HarnessActionResult:
         if not isinstance(output, dict) or "status" not in output:

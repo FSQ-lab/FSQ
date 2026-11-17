@@ -19,7 +19,9 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 
 from fsq_agent.agent_engine import EngineError, ImageContent, Message, ModelRequest, OutputContract, TextContent
-from fsq_agent.models import AIAssertionRequest, AIAssertionResult, ConfigurationError
+from fsq_agent.models import AIAssertionRequest, AIAssertionResult, AIVisualInspectionRequest, AIVisualInspectionResult, ConfigurationError
+
+from ._visual_inspection import inspect_visual
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -122,6 +124,16 @@ class AIAssertionEvaluator:
 
     def close(self) -> None:
         self.session.close_sync()
+
+    def inspect(self, request: AIVisualInspectionRequest, *, cancellation_check: Callable[[], None] | None = None) -> AIVisualInspectionResult:
+        if not self._evaluation_lock.acquire(blocking=False):
+            if cancellation_check is not None:
+                cancellation_check()
+            raise EngineError("runtime", "Visual inspection concurrency budget exceeded.", reason="budget_exceeded")
+        try:
+            return inspect_visual(self.session, request, reasoning_effort=self._reasoning_effort, cancellation_check=cancellation_check)
+        finally:
+            self._evaluation_lock.release()
 
     def _evaluate_android(self, request: AIAssertionRequest, *, cancellation_check: Callable[[], None] | None) -> AIAssertionResult:
         started = time.monotonic()

@@ -25,6 +25,7 @@ from fsq_agent.models._core import (
     AndroidElementState,
     AndroidInputTextParams,
     AndroidInspectElementParams,
+    AndroidInspectWithAIParams,
     AndroidKillAppParams,
     AndroidLaunchAppParams,
     AndroidLocator,
@@ -214,6 +215,7 @@ from fsq_agent.models._tools import (
     ToolDefinition,
     ToolResult,
 )
+from fsq_agent.models._visual_inspection import AIVisualCandidate, AIVisualInspectionRequest, AIVisualInspectionResult, VisualImageBounds
 
 from ._runs import DynamicAgentOutcome, RunArtifactIndex, RunExecutionContext, RunExecutionResult, RunMetadata, RunResultSummary, RunRuntime, RunSource, RunStepCounts
 
@@ -230,6 +232,9 @@ __all__ = [
     "WEB_ACTION_DEFINITIONS_BY_NAME",
     "AIAssertionRequest",
     "AIAssertionResult",
+    "AIVisualCandidate",
+    "AIVisualInspectionRequest",
+    "AIVisualInspectionResult",
     "AgentContextSettings",
     "AgentFinalOutput",
     "AgentKnowledgeSettings",
@@ -252,6 +257,7 @@ __all__ = [
     "AndroidHarnessSettings",
     "AndroidInputTextParams",
     "AndroidInspectElementParams",
+    "AndroidInspectWithAIParams",
     "AndroidKillAppParams",
     "AndroidLaunchAppParams",
     "AndroidLocator",
@@ -390,6 +396,7 @@ __all__ = [
     "VerificationResult",
     "VerificationStatus",
     "VisualExpectation",
+    "VisualImageBounds",
     "VisualRect",
     "VisualRegion",
     "WaitMsParams",

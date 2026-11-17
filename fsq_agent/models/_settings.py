@@ -25,7 +25,7 @@ class LocalToolOutputSettings(BaseModel):
     artifact_enabled: bool = True
     always_write_artifact: bool = True
     artifact_subdir: str = "artifacts/tools"
-    recent_inline_output_count: int = Field(default=3, ge=0)
+    recent_inline_output_count: int = Field(default=20, ge=0)
     full_output_max_chars: int = Field(default=30000, ge=1)
     total_inline_output_max_chars: int = Field(default=60000, ge=1)
     historical_output_mode: Literal["artifact_reference"] = "artifact_reference"

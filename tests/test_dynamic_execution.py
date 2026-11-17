@@ -387,6 +387,63 @@ async def test_execution_repeated_tasks_allocate_distinct_runs(tmp_path: Path) -
     assert len(list(settings.output.runs_dir.glob("*/run.json"))) == 2
 
 
+def test_run_context_action_before_capture_defaults_enabled_and_immutable(tmp_path) -> None:
+    from pydantic import ValidationError
+
+    from fsq_agent.models import RunExecutionContext
+
+    context = RunExecutionContext(run_id="allocated", platform="web", run_dir=tmp_path)
+
+    assert context.capture_action_before is True
+    with pytest.raises(ValidationError, match="frozen"):
+        context.capture_action_before = False
+
+
+@pytest.mark.parametrize("record", [False, True])
+async def test_dynamic_derives_immutable_capture_policy_without_changing_allocated_identity(tmp_path, monkeypatch, record) -> None:
+    from pydantic import ValidationError
+
+    from fsq_agent.execution.runs import RunLifecycleService
+
+    settings = _settings(tmp_path)
+    allocated = []
+    received = []
+    recordings = []
+    original_context = RunLifecycleService.context
+
+    def allocate_context(run_dir, metadata):
+        context = original_context(run_dir, metadata)
+        allocated.append(context)
+        return context
+
+    class ContextAgent(_Agent):
+        async def run_in_context(self, task, context, *args, **kwargs):
+            received.append(context)
+            with pytest.raises(ValidationError, match="frozen"):
+                context.capture_action_before = not record
+            return await super().run_in_context(task, context, *args, **kwargs)
+
+    def make_recording(**kwargs):
+        recordings.append(kwargs["result"])
+        return SimpleNamespace(status="recorded", publication_status="not_requested", publication_errors=[], published_case_path=None)
+
+    monkeypatch.setattr(RunLifecycleService, "context", staticmethod(allocate_context))
+    result = await DynamicExecutionService(agent=ContextAgent(settings), recording_service=SimpleNamespace(record=make_recording)).execute(
+        DynamicExecutionRequest(task=Task(description="Observe one allocated Run"), settings=settings, record=record)
+    )
+
+    assert len(allocated) == len(received) == 1
+    assert allocated[0].capture_action_before is True
+    assert received[0].capture_action_before is record
+    assert received[0].model_dump(exclude={"capture_action_before"}) == allocated[0].model_dump(exclude={"capture_action_before"})
+    assert received[0].run_dir is allocated[0].run_dir
+    assert received[0].provenance is allocated[0].provenance
+    assert received[0].run_id == result.task_result.report.run_id
+    assert received[0].run_dir == settings.output.runs_dir / result.task_result.report.run_id
+    assert len(recordings) == int(record)
+    assert len(list(settings.output.runs_dir.glob("*/run.json"))) == 1
+
+
 @pytest.mark.parametrize("callback_fails", [False, True])
 @pytest.mark.parametrize("status", ["success", "failed"])
 async def test_report_callback_cannot_mutate_authoritative_result(tmp_path: Path, callback_fails: bool, status: str) -> None:

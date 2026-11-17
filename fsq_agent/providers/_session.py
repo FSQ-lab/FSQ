@@ -143,8 +143,10 @@ def _check_call_control(deadline_monotonic: float | None, cancellation_check: Ca
 
 def _run_async_sync(coro):
     try:
-        asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
+        loop = None
+    if loop is None:
         return asyncio.run(coro)
     with ThreadPoolExecutor(max_workers=1) as executor:
         return executor.submit(lambda: asyncio.run(coro)).result()

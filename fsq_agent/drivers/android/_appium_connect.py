@@ -21,6 +21,7 @@ from pydantic import BaseModel, ValidationError
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _android_driver_tool
+from fsq_agent.drivers.android._visual_inspection import _run_visual_inspection
 from fsq_agent.models import (
     AndroidAssertNotVisibleParams,
     AndroidAssertStateParams,
@@ -29,6 +30,7 @@ from fsq_agent.models import (
     AndroidHarnessSettings,
     AndroidInputTextParams,
     AndroidInspectElementParams,
+    AndroidInspectWithAIParams,
     AndroidKillAppParams,
     AndroidLaunchAppParams,
     AndroidLongPressOnParams,
@@ -991,6 +993,15 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
     )
     def assert_with_ai(self, params: AndroidAssertWithAIParams) -> dict[str, object]:
         return self._run_ai_assertion_tool(params)
+
+    @_android_driver_tool(
+        "inspectWithAI",
+        description="Read current pixel content with extract, or locate an inaccessible target after accessibility refinement. Read-only; only SDK pointer_center may feed an explicit tap_at/swipe. Not an assertion.",
+    )
+    def inspect_with_ai(self, params: AndroidInspectWithAIParams) -> dict[str, object]:
+        if not isinstance(params, AndroidInspectWithAIParams):
+            params = AndroidInspectWithAIParams.model_validate(params)
+        return _run_visual_inspection(self, params)
 
     def screenshot(self, params: object | None = None) -> bytes:
         options = params if isinstance(params, dict) else {}

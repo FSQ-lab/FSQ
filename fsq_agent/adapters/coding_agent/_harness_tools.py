@@ -26,6 +26,7 @@ class HarnessToolAdapter:
         platform: HarnessPlatform = "android",
         evidence_sink: EvidenceJournalSink | None = None,
         cancellation_check=None,
+        capture_action_before: bool = True,
     ) -> None:
         self.cancellation_check = cancellation_check
         self.harness = harness
@@ -38,6 +39,7 @@ class HarnessToolAdapter:
             runtime_secret_store=runtime_secret_store,
             evidence_sink=evidence_sink,
             cancellation_check=cancellation_check,
+            capture_action_before=capture_action_before,
         )
         self.reserved_tool_names = reserved_tool_names or set()
         self._counter = itertools.count(1)

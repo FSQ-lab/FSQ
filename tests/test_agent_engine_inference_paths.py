@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import asyncio
+import base64
 import builtins
 import hashlib
 import io
@@ -23,6 +24,9 @@ from fsq_agent.models import (
     AgentFinalOutput,
     AgentRuntimeSettings,
     AIAssertionRequest,
+    AIVisualCandidate,
+    AIVisualInspectionRequest,
+    AIVisualInspectionResult,
     ConfigurationError,
     GoalPrePlan,
     HarnessArtifactRef,
@@ -31,6 +35,8 @@ from fsq_agent.models import (
     PlanningError,
     RunExecutionContext,
     Task,
+    VisualImageBounds,
+    VisualRect,
 )
 from fsq_agent.providers import build_model_provider_session, test_model_provider_connection
 
@@ -64,11 +70,32 @@ async def _run_main(runtime, task, run_id):
     )
 
 
-@pytest.mark.parametrize("path", ["pre_plan", "main", "verification", "assertion", "connection", "suggestion", "quick_test"])
+def _inspection_request(mode: str) -> AIVisualInspectionRequest:
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 30), "white").save(buffer, format="PNG")
+    image = buffer.getvalue()
+    now = time.monotonic_ns()
+    return AIVisualInspectionRequest(
+        prompt="Read the heading" if mode == "extract" else "Locate the heading",
+        mode=mode,
+        region=VisualRect(left=3, top=4, right=30, bottom=25),
+        max_candidates=2,
+        png_bytes=image,
+        image_width=40,
+        image_height=30,
+        image_sha256=hashlib.sha256(image).hexdigest(),
+        capture_started_monotonic_ns=now - 2,
+        capture_finished_monotonic_ns=now - 1,
+        upload_authorized=True,
+        frame_sensitivity="non_sensitive",
+    )
+
+
+@pytest.mark.parametrize("path", ["pre_plan", "main", "verification", "assertion", "connection", "suggestion", "quick_test", "inspection_extract", "inspection_locate"])
 @pytest.mark.parametrize("failure_kind", [None, "incomplete", "failed", "refusal"])
 @pytest.mark.parametrize("provider", ["azure_openai", "openai", "deepseek", "google_gemini", "github_copilot", "kimi"])
 @pytest.mark.parametrize("effort", ["low", "high"])
-async def test_seven_inference_paths_use_real_engine_without_sdk_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, path: str, failure_kind: str | None, provider: str, effort: str) -> None:
+async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, path: str, failure_kind: str | None, provider: str, effort: str) -> None:
     settings = Settings(agent_runtime=AgentRuntimeSettings(provider=provider, tracing_enabled=False, reasoning_effort=effort))
     settings.agent_runtime.base_url = "https://api.openai.com/v1/" if provider == "openai" else "https://model.example.test/openai/v1/"
     if provider == "deepseek":
@@ -106,6 +133,12 @@ async def test_seven_inference_paths_use_real_engine_without_sdk_import(monkeypa
             }
         ),
     }
+    inspection_candidates = [
+        {"label": "Heading", "image_bounds": {"x": 4, "y": 5, "width": 10, "height": 8}, "confidence": None},
+        {"label": "Subheading", "image_bounds": {"x": 16, "y": 14, "width": 8, "height": 6}, "confidence": 0.9},
+    ]
+    results["inspection_extract"] = json.dumps({"summary": "Readable heading", "candidates": []})
+    results["inspection_locate"] = json.dumps({"summary": "Found headings", "candidates": inspection_candidates})
 
     def respond(request: httpx.Request) -> httpx.Response:
         if provider == "google_gemini":
@@ -221,6 +254,38 @@ async def test_seven_inference_paths_use_real_engine_without_sdk_import(monkeypa
         assert result.passed is (failure_kind is None)
         assert result.status == ("error" if failure_kind else "passed")
         assert payloads[0]["input"][0]["content"][1]["type"] == ("image" if provider == "google_gemini" else "input_image")
+    elif path in {"inspection_extract", "inspection_locate"}:
+        request = _inspection_request(path.removeprefix("inspection_"))
+        evaluator = build_ai_assertion_evaluator(settings)
+        if failure_kind is not None:
+            with pytest.raises(EngineError) as failure:
+                evaluator.inspect(request)
+            if failure_kind in {"refusal", "incomplete"}:
+                assert failure.value.category == failure_kind
+            assert "private" not in str(failure.value)
+        else:
+            result = evaluator.inspect(request)
+            candidates = (
+                ()
+                if request.mode == "extract"
+                else (
+                    AIVisualCandidate(label="Heading", image_bounds=VisualImageBounds(x=4, y=5, width=10, height=8), confidence=None),
+                    AIVisualCandidate(label="Subheading", image_bounds=VisualImageBounds(x=16, y=14, width=8, height=6), confidence=0.9),
+                )
+            )
+            assert type(result) is AIVisualInspectionResult
+            assert result == AIVisualInspectionResult(summary="Readable heading" if request.mode == "extract" else "Found headings", candidates=candidates)
+            assert set(result.model_dump()) == {"summary", "candidates"}
+            assert all(type(candidate) is AIVisualCandidate for candidate in result.candidates)
+        assert len(payloads[0]["input"]) == 1
+        content = payloads[0]["input"][0]["content"]
+        assert len(content) == 2
+        assert content[0]["type"] == ("text" if provider == "google_gemini" else "input_text")
+        encoded_image = base64.b64encode(request.png_bytes).decode("ascii")
+        if provider == "google_gemini":
+            assert content[1] == {"type": "image", "mime_type": "image/png", "data": encoded_image}
+        else:
+            assert content[1] == {"type": "input_image", "image_url": f"data:image/png;base64,{encoded_image}"}
     elif path == "connection":
         monkeypatch.setattr("fsq_agent.providers._connection_test.refresh_provider_settings", lambda *args: settings)
         if failure_kind is not None:
@@ -266,7 +331,7 @@ async def test_seven_inference_paths_use_real_engine_without_sdk_import(monkeypa
         if provider == "kimi":
             assert "include" not in payloads[0]
             assert "verbosity" not in payloads[0].get("text", {})
-    if path in {"assertion", "connection", "suggestion", "quick_test"}:
+    if path in {"assertion", "connection", "suggestion", "quick_test", "inspection_extract", "inspection_locate"}:
         assert not payloads[0].get("tools")
         assert not payloads[0].get("stream")
         output_format = payloads[0].get("response_format") if provider == "google_gemini" else payloads[0].get("text", {}).get("format")
@@ -279,6 +344,8 @@ async def test_seven_inference_paths_use_real_engine_without_sdk_import(monkeypa
                 "assertion": {"passed", "explanation", "confidence"},
                 "suggestion": {"summary", "suggestions", "candidate_case_yaml"},
                 "quick_test": {"sufficient", "reason", "application_name", "explicit_reference", "inferred_hint"},
+                "inspection_extract": {"summary", "candidates"},
+                "inspection_locate": {"summary", "candidates"},
             }[path]
             assert set(schema["properties"]) == expected
             assert set(schema["required"]) == expected
@@ -288,6 +355,25 @@ async def test_seven_inference_paths_use_real_engine_without_sdk_import(monkeypa
                 assert set(hint_schema["properties"]) == {"kind", "value"}
                 assert set(hint_schema["required"]) == {"kind", "value"}
                 assert hint_schema["additionalProperties"] is False
+            elif path in {"inspection_extract", "inspection_locate"}:
+                if provider == "google_gemini":
+                    assert output_format["mime_type"] == "application/json"
+                else:
+                    assert output_format["strict"] is True
+                candidate_ref = schema["properties"]["candidates"]["items"]["$ref"]
+                candidate_schema = schema["$defs"][candidate_ref.removeprefix("#/$defs/")]
+                assert set(candidate_schema["properties"]) == {"label", "image_bounds", "confidence"}
+                assert set(candidate_schema["required"]) == {"label", "image_bounds", "confidence"}
+                assert candidate_schema["additionalProperties"] is False
+                confidence_schema = candidate_schema["properties"]["confidence"]
+                assert {branch["type"] for branch in confidence_schema["anyOf"]} == {"number", "null"}
+                assert "default" not in confidence_schema
+                bounds_ref = candidate_schema["properties"]["image_bounds"]["$ref"]
+                bounds_schema = schema["$defs"][bounds_ref.removeprefix("#/$defs/")]
+                assert set(bounds_schema["properties"]) == {"x", "y", "width", "height"}
+                assert set(bounds_schema["required"]) == {"x", "y", "width", "height"}
+                assert bounds_schema["additionalProperties"] is False
+                assert all(field["type"] == "integer" for field in bounds_schema["properties"].values())
     assert clients
     assert all(client.is_closed for client in clients)
     if provider == "github_copilot":
@@ -651,6 +737,30 @@ def test_assertion_invalid_output_through_real_clients(structured_session, text)
     assert result.passed is False
     assert result.metadata["engine_error"]["category"] == "invalid_output"
     assert len(payloads) == 1
+
+
+@pytest.mark.parametrize("outcome", ["malformed", "fenced_json", "executable", "pointer_center", "nested_pointer", "missing_confidence"])
+def test_inspection_invalid_output_through_real_clients(structured_session, outcome):
+    session, control, payloads = structured_session
+    candidate = {"label": "Heading", "image_bounds": {"x": 4, "y": 5, "width": 10, "height": 8}, "confidence": None}
+    value = {"summary": "Found heading", "candidates": [candidate]}
+    if outcome == "executable":
+        value["action"] = {"name": "tap", "x": 9, "y": 9}
+    elif outcome == "pointer_center":
+        candidate["pointer_center"] = {"x": 9, "y": 9}
+    elif outcome == "nested_pointer":
+        candidate["image_bounds"]["pointer_center"] = {"x": 9, "y": 9}
+    elif outcome == "missing_confidence":
+        del candidate["confidence"]
+    text = json.dumps(value)
+    control["text"] = "not JSON" if outcome == "malformed" else f"```json\n{text}\n```" if outcome == "fenced_json" else text
+    with pytest.raises(EngineError) as failure:
+        AIAssertionEvaluator(session, reasoning_effort="high").inspect(_inspection_request("locate"))
+    assert failure.value.category == "invalid_output"
+    assert "private" not in str(failure.value)
+    assert len(payloads) == 1
+    assert not payloads[0].get("tools")
+    assert not payloads[0].get("stream")
 
 
 @pytest.mark.parametrize(

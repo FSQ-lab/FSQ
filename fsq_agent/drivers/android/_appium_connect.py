@@ -135,7 +135,6 @@ ANDROID_INSPECT_INPUT_POST_ATTRIBUTES = (
     "text",
     "bounds",
 )
-ANDROID_PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 ANDROID_LOCAL_RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ANDROID_STANDARD_RESOURCE_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:id/[A-Za-z_][A-Za-z0-9_]*$")
 # Only these structural XPath forms are demonstrably independent of the text being replaced.
@@ -554,8 +553,24 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             if any(before.get(field) != bound.get(field) for field in ANDROID_INPUT_BINDING_ATTRIBUTES):
                 return self._input_failure(None, "verification_unavailable", "identity_binding", "Input target identity changed before entry.")
         elif not self._input_locator_is_text_independent(data):
-            return self._input_failure(None, "verification_unavailable", "identity_binding", "Input target has no stable text-independent identity.")
+            rectangle = tuple(getattr(before_bounds, field, None) for field in ("x", "y", "width", "height"))
+            if not all(_is_strict_int(value) for value in rectangle) or rectangle[2] <= 0 or rectangle[3] <= 0:
+                return self._input_failure(None, "verification_unavailable", "identity_binding", "Input target has no usable geometric identity.")
+            x, y, width, height = rectangle
+            bounds_xml = f"[{x},{y}][{x + width},{y + height}]"
+            anchor = f"//*[@class={_xpath_literal(class_name)} and @package={_xpath_literal(before_package)} and @bounds={_xpath_literal(bounds_xml)}]"
+            try:
+                element = session.element("xpath", anchor)
+                bound = self._attributes_dict(element.inspect(attributes=ANDROID_INPUT_BINDING_ATTRIBUTES, control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS)))
+            except Exception as exc:  # noqa: BLE001 - Binding failure must precede all input side effects.
+                self._propagate_if_cancelled(exc)
+                return self._input_failure(exc, "verification_unavailable", "identity_binding", "Input target geometric identity could not be established.")
+            if self._attr_raw_id(bound) is not None or any(before.get(field) != bound.get(field) for field in ("type", "package", "bounds")):
+                return self._input_failure(None, "verification_unavailable", "identity_binding", "Input target geometric identity changed before entry.")
 
+        no_id_verification_message = (
+            "Text entry was sent, but post-entry verification could not re-anchor the target because it has no resource-id; its bounds may have shifted. Inspect UI state before re-entering."
+        )
         try:
             element.click(wait_timeout_seconds=2.0, control=self._operation_control(10.0))
             element.replace_element_value(text, wait_timeout_seconds=5.0, control=self._operation_control(15.0))
@@ -571,15 +586,18 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             after = self._attributes_dict(inspection)
         except Exception as exc:  # noqa: BLE001 - Sanitize observed text from SDK/client failures; preserve cancellation below.
             self._propagate_if_cancelled(exc)
-            return self._input_failure(exc, "verification_unavailable", "post_verification", "Text entry acceptance could not be read.")
+            message = no_id_verification_message if before_id is None else "Text entry acceptance could not be read."
+            return self._input_failure(exc, "verification_unavailable", "post_verification", message)
 
         if (
             not self._input_text_is_readable(after)
             or self._attr_value(after, "enabled") is not True
-            or any(before.get(field) != after.get(field) for field in ANDROID_INPUT_IDENTITY_FIELDS)
+            or any(before.get(field) != after.get(field) for field in ("type", "package"))
+            or self._attr_raw_id(after) != before_id
             or (before.get("bounds") != after.get("bounds") and before_id is None)
         ):
-            return self._input_failure(None, "verification_unavailable", "post_verification", "Text entry acceptance cannot be verified on the original target.")
+            message = no_id_verification_message if before_id is None else "Text entry acceptance cannot be verified on the original target."
+            return self._input_failure(None, "verification_unavailable", "post_verification", message)
 
         if self._attr_value(after, "text") != text:
             return self._input_failure(None, "entry_mismatch", "post_verification", "Text entry did not match the requested replacement.")
@@ -628,7 +646,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
     @staticmethod
     def _attr_raw_id(attrs: dict[str, tuple[str, object]]) -> str | None:
         entry = attrs.get("id")
-        if entry is not None and entry[0] == "value" and isinstance(entry[1], str) and entry[1].strip():
+        if entry is not None and entry[0] == "value" and isinstance(entry[1], str) and entry[1].strip() not in {"", "null"}:
             return entry[1]
         return None
 
@@ -644,7 +662,9 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         if isinstance(locator, dict):
             xpath = locator.get("xpath")
             if isinstance(xpath, str) and xpath.strip():
-                return ANDROID_TEXT_INDEPENDENT_XPATH.fullmatch(xpath) is not None
+                positional = re.fullmatch(r"\((.+)\)\[\d+\]", xpath)
+                structural = positional.group(1) if positional is not None else xpath
+                return ANDROID_TEXT_INDEPENDENT_XPATH.fullmatch(structural) is not None
             populated = self._populated_locator_fields(locator)
             if populated:
                 return "text" not in populated
@@ -1118,11 +1138,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
 
         id_obs = getattr(node, "id", None)
         if getattr(id_obs, "state", None) == "value" and isinstance(id_obs.value, str) and id_obs.value:
-            id_val = id_obs.value
-            if ":" not in id_val and ANDROID_LOCAL_RESOURCE_ID_PATTERN.fullmatch(id_val) is not None and pkg_val is not None and ANDROID_PACKAGE_NAME_PATTERN.fullmatch(pkg_val) is not None:
-                attributes["resource-id"] = f"{pkg_val}:id/{id_val}"
-            else:
-                attributes["resource-id"] = id_val
+            attributes["resource-id"] = id_obs.value
         for field_name, xml_attr in (("text", "text"), ("desc", "content-desc")):
             obs = getattr(node, field_name, None)
             if getattr(obs, "state", None) == "value" and isinstance(obs.value, str) and obs.value:
@@ -1349,17 +1365,14 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             return None
         return OperationControl(timeout_seconds=timeout_seconds)
 
-    def _valid_bound_app_id(self, session: Any) -> str | None:
-        info_fn = getattr(session, "session_info", None)
-        if callable(info_fn):
-            info = info_fn()
-            target_app_id = getattr(info, "target_app_id", None)
-            if isinstance(target_app_id, str) and ANDROID_PACKAGE_NAME_PATTERN.fullmatch(target_app_id) is not None:
-                return target_app_id
-        candidate = (self.app_id or "").strip()
-        if candidate and ANDROID_PACKAGE_NAME_PATTERN.fullmatch(candidate) is not None:
-            return candidate
-        return None
+    @staticmethod
+    def _resource_id_predicate(resource_id: str) -> str:
+        raw = _xpath_literal(resource_id)
+        if ANDROID_LOCAL_RESOURCE_ID_PATTERN.fullmatch(resource_id) is not None:
+            # SDK TreeNode.id localizes native ids using the node's own package, not the Session target.
+            suffix = _xpath_literal(f":id/{resource_id}")
+            return f"(@resource-id=concat(@package, {suffix}) or @resource-id={raw})"
+        return f"@resource-id={raw}"
 
     def _resolve_element(self, session: Any, params: dict[str, object], *, locator_key: str = "locator") -> Any:
         locator = params.get(locator_key)
@@ -1375,28 +1388,15 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                     resource_id = populated["resourceId"]
                     if ANDROID_STANDARD_RESOURCE_ID.fullmatch(resource_id) is not None:
                         return session.element("id", resource_id, raw_id=False)
-                    if ":" not in resource_id and ANDROID_LOCAL_RESOURCE_ID_PATTERN.fullmatch(resource_id) is not None:
-                        bound_app_id = self._valid_bound_app_id(session)
-                        if bound_app_id is not None:
-                            info_fn = getattr(session, "session_info", None)
-                            session_target = getattr(info_fn(), "target_app_id", None) if callable(info_fn) else None
-                            if isinstance(session_target, str) and ANDROID_PACKAGE_NAME_PATTERN.fullmatch(session_target) is not None:
-                                return session.element("id", resource_id, raw_id=False)
-                            return session.element("id", f"{bound_app_id}:id/{resource_id}", raw_id=False)
+                    if ANDROID_LOCAL_RESOURCE_ID_PATTERN.fullmatch(resource_id) is not None:
+                        return session.element("xpath", f"//*[{self._resource_id_predicate(resource_id)}]")
                     return session.element("id", resource_id, raw_id=True)
                 if set(populated) == {"accessibilityId"}:
                     return session.element("accessibility id", populated["accessibilityId"])
                 if populated:
                     predicates: list[str] = []
                     if "resourceId" in populated:
-                        res_id = populated["resourceId"]
-                        app_id = (self.app_id or "").strip()
-                        if ":" not in res_id and ANDROID_LOCAL_RESOURCE_ID_PATTERN.fullmatch(res_id) is not None and ANDROID_PACKAGE_NAME_PATTERN.fullmatch(app_id) is not None:
-                            full_lit = _xpath_literal(f"{app_id}:id/{res_id}")
-                            raw_lit = _xpath_literal(res_id)
-                            predicates.append(f"(@resource-id={full_lit} or @resource-id={raw_lit})")
-                        else:
-                            predicates.append(f"@resource-id={_xpath_literal(res_id)}")
+                        predicates.append(self._resource_id_predicate(populated["resourceId"]))
                     if "accessibilityId" in populated:
                         predicates.append(f"@content-desc={_xpath_literal(populated['accessibilityId'])}")
                     if "text" in populated:
@@ -1418,7 +1418,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         for key in ("resourceId", "accessibilityId", "text", "className"):
             value = locator.get(key)
             if isinstance(value, str) and value.strip():
-                result[key] = value
+                result[key] = value.strip() if key == "resourceId" else value
         return result
 
     def _display_size(self, session: Any) -> tuple[int, int]:

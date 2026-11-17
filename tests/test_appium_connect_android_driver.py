@@ -505,13 +505,13 @@ def test_locator_translation_handles_standard_id_short_id_raw_id_accessibility_c
     element_calls = [call for call in session.calls if call[0] == "element"]
     assert element_calls == [
         ("element", "id", "com.example.app:id/login", False),
-        ("element", "id", "digit_7", False),
+        ("element", "xpath", "//*[(@resource-id=concat(@package, ':id/digit_7') or @resource-id='digit_7')]", False),
         ("element", "id", "nonstandard/id-1", True),
         ("element", "accessibility id", "Open menu", False),
         (
             "element",
             "xpath",
-            """//*[(@resource-id='com.example.app:id/digit_7' or @resource-id='digit_7') and @text=concat('Say ', "'", 'hi', "'", ' and "bye"')]""",
+            """//*[(@resource-id=concat(@package, ':id/digit_7') or @resource-id='digit_7') and @text=concat('Say ', "'", 'hi', "'", ' and "bye"')]""",
             False,
         ),
         ("element", "xpath", """//*[@text="Sign 'In'"]""", False),
@@ -519,7 +519,7 @@ def test_locator_translation_handles_standard_id_short_id_raw_id_accessibility_c
     ]
 
 
-def test_short_id_restoration_in_ui_snapshot_session_fallback_and_input_text_bounds_binding() -> None:
+def test_observed_ids_in_ui_snapshot_session_fallback_and_input_text_bounds_binding() -> None:
     tree = _tree_observation(
         roots=(
             _tree_node(
@@ -551,7 +551,7 @@ def test_short_id_restoration_in_ui_snapshot_session_fallback_and_input_text_bou
             ),
         ),
     )
-    # Session without target_app_id falls back to driver.app_id when normalizing short resourceId.
+    # Short ids resolve independently of the Session target or driver package.
     session = FakeSession(observation=tree, target_app_id=None)
     session.element_attrs["id"] = ("value", "com.google.android.calculator:id/formula")
     session.element_attrs["package"] = ("value", "com.google.android.calculator")
@@ -567,25 +567,25 @@ def test_short_id_restoration_in_ui_snapshot_session_fallback_and_input_text_bou
 
     root = ElementTree.fromstring(str(snap["xml"]))  # noqa: S314
     assert [child.attrib.get("resource-id") for child in root] == [
-        "com.google.android.calculator:id/digit_7",
+        "digit_7",
         "android:id/button1",
         "custom/raw-id",
     ]
     assert input_res == {"status": "passed", "output": None}
     element_calls = [call for call in session.calls if call[0] == "element"]
     assert element_calls == [
-        ("element", "id", "com.google.android.calculator:id/digit_7", False),
+        ("element", "xpath", "//*[(@resource-id=concat(@package, ':id/digit_7') or @resource-id='digit_7')]", False),
         (
             "element",
             "xpath",
-            "//*[(@resource-id='com.google.android.calculator:id/digit_7' or @resource-id='digit_7') and @text='7']",
+            "//*[(@resource-id=concat(@package, ':id/digit_7') or @resource-id='digit_7') and @text='7']",
             False,
         ),
-        ("element", "id", "com.google.android.calculator:id/formula", False),
+        ("element", "xpath", "//*[(@resource-id=concat(@package, ':id/formula') or @resource-id='formula')]", False),
         ("element", "id", "com.google.android.calculator:id/formula", False),
     ]
 
-    # Without a bound app_id, bare local id falls back to raw_id=True.
+    # Without a bound app_id, a bare local id is matched exactly without Settings changes.
     unbound_session = FakeSession(target_app_id=None)
     unbound_driver = AppiumConnectAndroidDriver(app_id=None, session=unbound_session)
     try:
@@ -593,7 +593,7 @@ def test_short_id_restoration_in_ui_snapshot_session_fallback_and_input_text_bou
     finally:
         unbound_driver.close()
     assert [call for call in unbound_session.calls if call[0] == "element"] == [
-        ("element", "id", "digit_7", True),
+        ("element", "xpath", "//*[(@resource-id=concat(@package, ':id/digit_7') or @resource-id='digit_7')]", False),
     ]
 
 
@@ -937,11 +937,13 @@ def test_input_text_postcondition_and_backend_errors_are_secret_safe_and_never_r
     assert sum(call[0] == "replace_element_value" for call in session.calls) == 1
 
 
-@pytest.mark.parametrize("resource_id", [None, ""])
+@pytest.mark.parametrize("resource_id", [None, "", " \t ", "null", " null "])
 @pytest.mark.parametrize("layout_changed", [False, True])
+@pytest.mark.parametrize("locator", [{"xpath": "//android.widget.EditText[1]"}, {"xpath": "(//android.widget.EditText)[1]"}, {"className": "android.widget.EditText"}, {"accessibilityId": "Name"}])
 def test_input_text_structural_xpath_without_resource_id_requires_stable_bounds(
     resource_id: str | None,
     layout_changed: bool,
+    locator: dict[str, str],
 ) -> None:
     session = FakeSession()
     session.element_attrs["id"] = ("value", resource_id) if resource_id is not None else ("missing", None)
@@ -949,7 +951,7 @@ def test_input_text_structural_xpath_without_resource_id_requires_stable_bounds(
         session.post_write_attrs["bounds"] = ("value", _bounds(186, 1209, 943, 1346))
     driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
     try:
-        result = driver.input_text({"text": "Unicode 中文", "locator": {"xpath": "//android.widget.EditText[1]"}})
+        result = driver.input_text({"text": "Unicode 中文", "locator": locator})
     finally:
         driver.close()
 
@@ -1213,13 +1215,10 @@ def test_input_identity_binding_rejects_changed_target_before_any_write(field: s
     assert "private-canary" not in str(result)
 
 
-def test_duplicate_observed_id_and_no_id_text_target_fail_before_write() -> None:
+def test_duplicate_observed_id_and_ambiguous_no_id_target_fail_before_write() -> None:
     session = FakeSession()
     session.binding_code = "target_ambiguous"
     driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
-    assert driver.input_text({"target": "Loaded", "text": "replacement"})["status"] == "failed"
-    session.binding_code = None
-    session.element_attrs["id"] = ("missing", None)
     assert driver.input_text({"target": "Loaded", "text": "replacement"})["status"] == "failed"
     session.inspect_code = "target_ambiguous"
     assert driver.input_text({"locator": {"className": "android.widget.EditText"}, "text": "replacement"})["status"] == "failed"
@@ -1541,3 +1540,184 @@ def test_input_text_slow_inspection_within_operation_budget_preserves_single_ver
     assert stages == ["pre_inspection", "identity_binding", "post_verification"]
     assert sum(call[0] == "click" for call in session.calls) == 1
     assert sum(call[0] == "replace_element_value" for call in session.calls) == 1
+
+
+@pytest.mark.parametrize("locator_params", [{"target": "First name"}, {"locator": {"text": "First name"}}, {"locator": {"xpath": "//android.widget.EditText[@text='First name']"}}])
+@pytest.mark.parametrize("resource_id", [None, "null", " \t", " null "])
+def test_no_id_text_target_binds_exact_geometry_before_single_verified_replacement(locator_params: dict[str, object], resource_id: str | None) -> None:
+    session = FakeSession(text="First name")
+    session.element_attrs["id"] = ("missing", None) if resource_id is None else ("value", resource_id)
+    session.element_attrs["bounds"] = ("value", _bounds(137, 858, 933, 1007))
+    # SDK versions may report the same absent id differently after entry.
+    session.post_write_attrs["id"] = ("missing", None)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        result = driver.input_text({**locator_params, "text": "Hugo"})
+    finally:
+        driver.close()
+    assert result == {"status": "passed", "output": None}
+    assert session.text == "Hugo"
+    anchor = "//*[@class='android.widget.EditText' and @package='com.example.app' and @bounds='[137,858][933,1007]']"
+    writes = [call for call in session.calls if call[0] == "replace_element_value"]
+    assert writes == [("replace_element_value", "xpath", anchor, False, "Hugo")]
+    inspections = [call for call in session.calls if call[0] == "inspect"]
+    assert inspections[-1][1:4] == ("xpath", anchor, False)
+    assert not any(call[0] == "element" and call[1] == "id" for call in session.calls)
+
+
+@pytest.mark.parametrize(
+    "binding_code,binding_attrs",
+    [
+        ("target_not_found", {}),
+        ("target_ambiguous", {}),
+        (None, {"type": ("value", "android.widget.AutoCompleteTextView")}),
+        (None, {"package": ("value", "other.package")}),
+        (None, {"bounds": ("value", _bounds(1, 0, 101, 50))}),
+        (None, {"id": ("value", "com.example.app:id/new")}),
+    ],
+)
+def test_no_id_geometric_binding_failure_never_clicks_or_writes(binding_code: str | None, binding_attrs: dict[str, tuple[str, object]]) -> None:
+    session = FakeSession(text="First name")
+    session.element_attrs["id"] = ("value", "null")
+    session.binding_code = binding_code
+    session.binding_attrs = binding_attrs
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        result = driver.input_text({"target": "First name", "text": "private-canary"})
+    finally:
+        driver.close()
+    assert result["metadata"]["reason"] == "verification_unavailable"
+    assert result["metadata"]["stage"] == "identity_binding"
+    assert not any(call[0] in {"click", "replace_element_value"} for call in session.calls)
+    assert "private-canary" not in str(result)
+
+
+@pytest.mark.parametrize(
+    "post_code,post_attrs,reason",
+    [
+        ("target_not_found", {}, "verification_unavailable"),
+        ("target_ambiguous", {}, "verification_unavailable"),
+        (None, {"bounds": ("value", _bounds(0, 100, 100, 150))}, "verification_unavailable"),
+        (None, {"type": ("value", "android.widget.AutoCompleteTextView")}, "verification_unavailable"),
+        (None, {"package": ("value", "other.package")}, "verification_unavailable"),
+        (None, {"id": ("value", "new-id")}, "verification_unavailable"),
+        (None, {"enabled": ("value", False)}, "verification_unavailable"),
+        (None, {"password": ("value", True)}, "verification_unavailable"),
+        (None, {"text": ("missing", None)}, "verification_unavailable"),
+        (None, {"text": ("value", "wrong-private")}, "entry_mismatch"),
+    ],
+)
+def test_no_id_post_entry_failure_is_explicit_and_never_retries(post_code: str | None, post_attrs: dict[str, tuple[str, object]], reason: str) -> None:
+    session = FakeSession(text="First name")
+    session.element_attrs["id"] = ("value", "null")
+    session.post_write_inspect_code = post_code
+    session.post_write_attrs = post_attrs
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        result = driver.input_text({"target": "First name", "text": "private-canary"})
+    finally:
+        driver.close()
+    assert result["status"] == "failed"
+    assert result["metadata"]["reason"] == reason
+    assert result["metadata"]["stage"] == "post_verification"
+    assert sum(call[0] == "replace_element_value" for call in session.calls) == 1
+    if reason == "verification_unavailable":
+        assert "Text entry was sent" in str(result)
+        assert "before re-entering" in str(result)
+    assert all(value not in str(result) for value in ("private-canary", "wrong-private", "First name"))
+
+
+@pytest.mark.parametrize("compound", [False, True])
+@pytest.mark.parametrize("resource_id", ["com.example.app:id/btn_record", "answer", "custom/raw-id"])
+def test_resource_id_surrounding_whitespace_does_not_change_resolution(resource_id: str, compound: bool) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    suffix = {"className": "android.widget.EditText"} if compound else {}
+    try:
+        assert driver.tap_on({"locator": {"resourceId": resource_id, **suffix}})["status"] == "passed"
+        assert driver.tap_on({"locator": {"resourceId": f" \t{resource_id} \n", **suffix}})["status"] == "passed"
+    finally:
+        driver.close()
+    clicks = [call for call in session.calls if call[0] == "click"]
+    assert clicks[0] == clicks[1]
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_snapshot_preserves_webview_and_nonstandard_bare_ids_without_fabricated_package(monkeypatch: pytest.MonkeyPatch, fallback: bool) -> None:
+    session = FakeSession(
+        observation=_tree_observation(
+            roots=(
+                _tree_node(resource_id="url_bar", package="com.android.chrome"),
+                _tree_node(
+                    tag="android.webkit.WebView",
+                    package="com.android.chrome",
+                    children=(
+                        _tree_node(
+                            resource_id="taskColors",
+                            package="com.android.chrome",
+                            children=(
+                                _tree_node(tag="android.widget.EditText", resource_id="answer", package="com.android.chrome"),
+                                _tree_node(tag="android.widget.Button", resource_id="button", package="com.android.chrome"),
+                            ),
+                        ),
+                    ),
+                ),
+                _tree_node(resource_id="slider", package="com.android.systemui"),
+                _tree_node(resource_id="customBare", package="com.example.other"),
+            ),
+        ),
+    )
+    driver = AppiumConnectAndroidDriver(app_id="com.android.chrome", session=session)
+    if fallback:
+
+        def fail_compaction(attributes: dict[str, str]) -> bool:
+            raise RuntimeError("local compaction failure")
+
+        monkeypatch.setattr(driver, "_has_ui_snapshot_signal", fail_compaction)
+    try:
+        snapshot = driver.ui_snapshot({})
+    finally:
+        driver.close()
+    root = ElementTree.fromstring(str(snapshot["xml"]))  # noqa: S314
+    assert [node.attrib["resource-id"] for node in root.iter() if "resource-id" in node.attrib] == ["url_bar", "taskColors", "answer", "button", "slider", "customBare"]
+    assert snapshot["compaction"]["applied"] is not fallback
+
+
+def test_compound_short_id_uses_node_package_instead_of_session_or_driver_package() -> None:
+    session = FakeSession(target_app_id="com.android.chrome")
+    driver = AppiumConnectAndroidDriver(app_id="com.example.other", session=session)
+    try:
+        assert driver.tap_on({"locator": {"resourceId": " answer ", "className": "android.widget.EditText"}})["status"] == "passed"
+    finally:
+        driver.close()
+    assert ("element", "xpath", "//*[(@resource-id=concat(@package, ':id/answer') or @resource-id='answer') and @class='android.widget.EditText']", False) in session.calls
+
+
+@pytest.mark.parametrize("app_id", [None, "com.dimowner.audiorecorder", "com.android.settings"])
+@pytest.mark.parametrize("target_app_id", [None, "com.android.settings"])
+@pytest.mark.parametrize("local_id", ["slider", "url_bar", "answer"])
+def test_short_id_resolution_covers_other_package_windows_without_bound_app(app_id: str | None, target_app_id: str | None, local_id: str) -> None:
+    session = FakeSession(target_app_id=target_app_id)
+    driver = AppiumConnectAndroidDriver(app_id=app_id, session=session)
+    try:
+        assert driver.tap_on({"locator": {"resourceId": local_id}})["status"] == "passed"
+    finally:
+        driver.close()
+    assert ("element", "xpath", f"//*[(@resource-id=concat(@package, ':id/{local_id}') or @resource-id='{local_id}')]", False) in session.calls
+
+
+@pytest.mark.parametrize("stage", ["binding", "post"])
+def test_no_id_geometric_inspection_preserves_cancellation(stage: str) -> None:
+    session = FakeSession(text="First name")
+    session.element_attrs["id"] = ("missing", None)
+    if stage == "binding":
+        session.binding_code = "operation_cancelled"
+    else:
+        session.post_write_inspect_code = "operation_cancelled"
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        with pytest.raises(CancelledError):
+            driver.input_text({"target": "First name", "text": "private-canary"})
+    finally:
+        driver.close()
+    assert sum(call[0] == "replace_element_value" for call in session.calls) == (0 if stage == "binding" else 1)

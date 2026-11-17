@@ -1721,3 +1721,394 @@ def test_no_id_geometric_inspection_preserves_cancellation(stage: str) -> None:
     finally:
         driver.close()
     assert sum(call[0] == "replace_element_value" for call in session.calls) == (0 if stage == "binding" else 1)
+
+
+_NUMERIC_ATTRIBUTES = ("type", "id", "package", "enabled", "focused", "password", "text", "bounds")
+
+
+def _numeric_command_error(code: str = "command_failed", state: str = "response_received") -> BaseException:
+    from appium_connect_agent.automation import CommandError as SDKCommandError
+
+    return SDKCommandError(code, "operation-private-canary", state)
+
+
+class NumericElement(FakeElement):
+    def inspect(self, *, attributes=(), wait_timeout_seconds=None, control=None):
+        session = self.session
+        observation = super().inspect(attributes=attributes, wait_timeout_seconds=wait_timeout_seconds, control=control)
+        overrides = {}
+        if attributes == _NUMERIC_ATTRIBUTES:
+            session.recovery_reads += 1
+            session.recovery_controls.append(control.timeout_seconds)
+            overrides.update(session.recovery_overrides.get(session.recovery_reads, {}))
+            if session.recovery_reads in session.inspect_errors:
+                raise session.inspect_errors[session.recovery_reads]
+        elif session.cleared or session.ordinary_success:
+            overrides.update(session.final_overrides)
+        attrs = {attr.name: attr for attr in observation.attributes}
+        attrs.update({name: _attr_obs(name, value, state) for name, (state, value) in overrides.items()})
+        return SimpleNamespace(attributes=tuple(attrs.values()))
+
+    def click(self, *, wait_timeout_seconds=15.0, control=None):
+        session = self.session
+        super().click(wait_timeout_seconds=wait_timeout_seconds, control=control)
+        session.actions.append(("click", self, wait_timeout_seconds, control.timeout_seconds))
+        if session.click_error is not None:
+            raise session.click_error
+        if session.cleared:
+            session.element_attrs["focused"] = ("value", session.refocus)
+            if session.refocus_text is not None:
+                session.text = session.refocus_text
+
+    def replace_element_value(self, text, *, wait_timeout_seconds=15.0, control=None):
+        session = self.session
+        session.calls.append(("replace_element_value", self.by, self.value, self.raw_id, text))
+        session.actions.append(("replace", self, wait_timeout_seconds, control.timeout_seconds))
+        if session.replace_error is not None:
+            raise session.replace_error
+        session.text = text
+
+    def clear(self, *, wait_timeout_seconds=5.0, control=None):
+        session = self.session
+        session.actions.append(("clear", self, wait_timeout_seconds, control.timeout_seconds))
+        if session.clear_error is not None:
+            raise session.clear_error
+        session.cleared = True
+        session.text = session.baseline
+        session.element_attrs["focused"] = session.clear_focus
+
+
+class NumericDevice(FakeDevice):
+    def press_keycode(self, keycode, *, control=None):
+        session = self.session
+        session.calls.append(("press_keycode", keycode))
+        session.actions.append(("key", keycode, control.timeout_seconds))
+        if len([action for action in session.actions if action[0] == "key"]) == session.fail_key:
+            raise session.key_error
+        session.typed += {69: "-", 56: "."}.get(keycode, str(keycode - 7))
+        session.text = session.typed + (", " + session.baseline if session.composed and session.baseline else "")
+
+
+class NumericSession(FakeSession):
+    def __init__(self):
+        super().__init__(text="original-private-canary")
+        self.device = NumericDevice(self)
+        self.actions = []
+        self.recovery_reads = 0
+        self.recovery_controls = []
+        self.recovery_overrides = {}
+        self.inspect_errors = {}
+        self.final_overrides = {}
+        self.replace_error = _numeric_command_error()
+        self.click_error = None
+        self.clear_error = None
+        self.key_error = _numeric_command_error(state="response_unknown")
+        self.fail_key = None
+        self.cleared = False
+        self.ordinary_success = False
+        self.clear_focus = ("value", True)
+        self.refocus = True
+        self.refocus_text = None
+        self.baseline = "placeholder-private-canary"
+        self.typed = ""
+        self.composed = True
+
+    def element(self, by, value, *, raw_id=False):
+        super().element(by, value, raw_id=raw_id)
+        return NumericElement(self, by, value, raw_id=raw_id)
+
+
+def _numeric_input(session, text="20250", *, no_id=False):
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        locator = {"className": "android.widget.EditText"} if no_id else {"resourceId": "com.example.app:id/input"}
+        return driver.input_text({"text": text, "locator": locator})
+    finally:
+        driver.close()
+
+
+def _numeric_action_names(session):
+    return [action[0] for action in session.actions]
+
+
+def _assert_numeric_secret_safe(result, session):
+    secrets = (session.baseline, "original-private-canary", "operation-private-canary", "observed-private-canary")
+    assert all(secret not in str(result) for secret in secrets if secret)
+
+
+@pytest.mark.parametrize("baseline", ["", "placeholder-private-canary"])
+@pytest.mark.parametrize("composed", [False, True])
+@pytest.mark.parametrize("text,keycodes", [("20250", [9, 7, 9, 12, 7]), ("-12.5", [69, 8, 9, 56, 12]), ("", [])])
+def test_numeric_recovery_clears_once_and_verifies_exact_or_placeholder_composed_readback(composed, text, keycodes, baseline):
+    session = NumericSession()
+    session.composed = composed
+    session.baseline = baseline
+    result = _numeric_input(session, text)
+    assert result == {"status": "passed", "output": None}
+    assert _numeric_action_names(session) == ["click", "replace", "clear"] + ["key"] * len(keycodes)
+    assert [action[1] for action in session.actions if action[0] == "key"] == keycodes
+    assert all(action[2] == 10.0 for action in session.actions if action[0] == "key")
+    assert session.actions[2][2:] == (5.0, 15.0)
+    assert session.actions[0][1] is session.actions[1][1] is session.actions[2][1]
+    assert session.actions[2][1].by == "id"
+    assert session.actions[2][1].value == "com.example.app:id/input"
+    assert session.recovery_reads == 2
+    assert session.recovery_controls == [25.0] * session.recovery_reads
+    expected_text = text + (", " + baseline if composed and baseline else "") if text else baseline
+    assert session.text == expected_text
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("text", ["hello", "\uff11\uff12", "\u0661\u0662", "12 3", "+12", "12\n"])
+def test_numeric_recovery_never_handles_other_input_characters(text):
+    session = NumericSession()
+    result = _numeric_input(session, text)
+    assert result["status"] == "failed"
+    assert _numeric_action_names(session) == ["click", "replace"]
+    assert session.recovery_reads == 0
+    assert text not in str(result)
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("failure", ["response_unknown", "not_sent", "wrong_code", "wrong_type", "missing_state"])
+def test_numeric_recovery_requires_received_public_sdk_command_rejection(failure):
+    session = NumericSession()
+    if failure in {"response_unknown", "not_sent"}:
+        session.replace_error = _numeric_command_error(state=failure)
+    elif failure == "wrong_code":
+        session.replace_error = _numeric_command_error(code="operation_timeout")
+    elif failure == "wrong_type":
+        session.replace_error = RuntimeError("observed-private-canary")
+        session.replace_error.code = "command_failed"
+        session.replace_error.request_state = "response_received"
+    else:
+        from appium_connect_agent.automation import CommandError as SDKCommandError
+
+        class MissingStateCommandError(SDKCommandError):
+            def __getattribute__(self, name):
+                if name == "request_state":
+                    raise AttributeError(name)
+                return super().__getattribute__(name)
+
+        session.replace_error = MissingStateCommandError("command_failed", "operation-private-canary", "response_received")
+    result = _numeric_input(session)
+    assert result["status"] == "failed"
+    assert _numeric_action_names(session) == ["click", "replace"]
+    assert session.recovery_reads == 0
+    _assert_numeric_secret_safe(result, session)
+
+
+def test_numeric_recovery_does_not_handle_click_rejection_or_ordinary_composed_readback():
+    session = NumericSession()
+    session.click_error = _numeric_command_error()
+    result = _numeric_input(session)
+    assert result["status"] == "failed"
+    assert _numeric_action_names(session) == ["click"]
+    assert session.recovery_reads == 0
+
+    session = NumericSession()
+    session.replace_error = None
+    session.ordinary_success = True
+    session.final_overrides = {"text": ("value", "20250, " + session.baseline)}
+    result = _numeric_input(session)
+    assert result["metadata"]["reason"] == "entry_mismatch"
+    assert _numeric_action_names(session) == ["click", "replace"]
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("read", [1, 2])
+@pytest.mark.parametrize(
+    "field,observation",
+    [
+        ("type", ("value", "android.widget.AutoCompleteTextView")),
+        ("id", ("value", "other:id/input")),
+        ("package", ("value", "other.package")),
+        ("enabled", ("value", False)),
+        ("enabled", ("unknown", None)),
+        ("password", ("value", True)),
+        ("password", ("missing", None)),
+        ("text", ("unknown", None)),
+    ],
+)
+def test_numeric_recovery_unprovable_target_stops_before_next_side_effect(read, field, observation):
+    session = NumericSession()
+    session.recovery_overrides[read] = {field: observation}
+    result = _numeric_input(session)
+    assert result["metadata"]["reason"] == "verification_unavailable"
+    assert result["metadata"]["stage"] == ("numeric_clear" if read == 1 else "numeric_focus")
+    assert _numeric_action_names(session) == ["click", "replace"] + ([] if read == 1 else ["clear"])
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("focus", [("value", False), ("unknown", None), ("value", 1)])
+@pytest.mark.parametrize("outcome", ["success", "unfocused", "baseline_changed", "identity_changed"])
+def test_numeric_recovery_refocuses_at_most_once_and_proves_baseline_and_target(focus, outcome):
+    session = NumericSession()
+    session.clear_focus = focus
+    session.refocus = outcome != "unfocused"
+    if outcome == "baseline_changed":
+        session.refocus_text = "observed-private-canary"
+    if outcome == "identity_changed":
+        session.recovery_overrides[3] = {"id": ("value", "other:id/input")}
+    result = _numeric_input(session, "2")
+    expected = ["click", "replace", "clear", "click"] + (["key"] if outcome == "success" else [])
+    assert _numeric_action_names(session) == expected
+    assert session.actions[0][1] is session.actions[3][1]
+    assert session.actions[0][2:] == session.actions[3][2:]
+    if outcome == "success":
+        assert result["status"] == "passed"
+    else:
+        assert result["metadata"]["reason"] == "verification_unavailable"
+        assert result["metadata"]["stage"] == "numeric_focus"
+    _assert_numeric_secret_safe(result, session)
+
+
+def test_numeric_recovery_dispatches_contiguous_keys_without_per_character_inspection():
+    session = NumericSession()
+    result = _numeric_input(session)
+    assert result["status"] == "passed"
+    key_positions = [index for index, call in enumerate(session.calls) if call[0] == "press_keycode"]
+    assert len(key_positions) == 5
+    assert key_positions == list(range(key_positions[0], key_positions[0] + 5))
+    assert session.recovery_reads == 2
+    assert _numeric_action_names(session) == ["click", "replace", "clear"] + ["key"] * 5
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("read", [1, 2])
+@pytest.mark.parametrize("no_id", [False, True])
+def test_numeric_recovery_geometry_is_mandatory_only_without_real_resource_identity(read, no_id):
+    session = NumericSession()
+    if no_id:
+        session.element_attrs["id"] = ("missing", None)
+    session.recovery_overrides[read] = {"bounds": ("value", _bounds(10, 10, 110, 60))}
+    result = _numeric_input(session, "2", no_id=no_id)
+    if no_id:
+        assert result["metadata"]["reason"] == "verification_unavailable"
+        assert "key" not in _numeric_action_names(session)
+    else:
+        assert result["status"] == "passed"
+        assert _numeric_action_names(session) == ["click", "replace", "clear", "key"]
+    for action in session.actions:
+        if action[0] in {"click", "replace", "clear"}:
+            assert action[1] is session.actions[0][1]
+
+
+@pytest.mark.parametrize("stage", ["preclear", "clear", "after_clear", "key"])
+@pytest.mark.parametrize("cancel", [False, True])
+def test_numeric_recovery_errors_and_cancellation_stop_without_repeats(stage, cancel):
+    session = NumericSession()
+    error = CancelledError("observed-private-canary") if cancel else _numeric_command_error(state="response_unknown")
+    if stage == "preclear":
+        session.inspect_errors[1] = error
+    elif stage == "clear":
+        session.clear_error = error
+    elif stage == "after_clear":
+        session.inspect_errors[2] = error
+    else:
+        session.fail_key = 2
+        session.key_error = error
+    if cancel:
+        with pytest.raises(CancelledError):
+            _numeric_input(session)
+    else:
+        result = _numeric_input(session)
+        assert result["status"] == "failed"
+        assert result["metadata"]["stage"] == ("numeric_keycode" if stage == "key" else "numeric_focus" if stage == "after_clear" else "numeric_clear")
+        assert result["metadata"]["reason"] == ("verification_unavailable" if stage in {"preclear", "after_clear"} else "entry_backend_error")
+        assert result["metadata"]["request_state"] == "response_unknown"
+        assert "inspect" in str(result).lower()
+        _assert_numeric_secret_safe(result, session)
+    assert _numeric_action_names(session) == ["click", "replace"] + ([] if stage == "preclear" else ["clear"]) + (["key", "key"] if stage == "key" else [])
+    if stage == "key":
+        assert [action[1] for action in session.actions if action[0] == "key"] == [9, 7]
+
+
+@pytest.mark.parametrize("observed", ["20250, wrong-private-canary", "20250 ", "2025", "020250", "20,250", "20250, ", "observed-private-canary"])
+def test_numeric_recovery_rejects_all_other_readback_formats_without_secret_leaks(observed):
+    session = NumericSession()
+    session.final_overrides["text"] = ("value", observed)
+    result = _numeric_input(session)
+    assert result["metadata"]["reason"] == "entry_mismatch"
+    assert _numeric_action_names(session) == ["click", "replace", "clear"] + ["key"] * 5
+    assert observed not in str(result)
+    assert "20250" not in str(result)
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("no_id", [False, True])
+@pytest.mark.parametrize(
+    "field,observation",
+    [
+        ("type", ("value", "android.widget.AutoCompleteTextView")),
+        ("id", ("value", "other:id/input")),
+        ("package", ("value", "other.package")),
+        ("enabled", ("value", False)),
+        ("password", ("unknown", None)),
+        ("text", ("missing", None)),
+        ("bounds", ("value", _bounds(10, 10, 110, 60))),
+    ],
+)
+def test_numeric_recovery_final_verification_still_requires_safe_original_target(no_id, field, observation):
+    session = NumericSession()
+    if no_id:
+        session.element_attrs["id"] = ("missing", None)
+    session.final_overrides[field] = observation
+    result = _numeric_input(session, no_id=no_id)
+    assert _numeric_action_names(session) == ["click", "replace", "clear"] + ["key"] * 5
+    if field == "bounds" and not no_id:
+        assert result["status"] == "passed"
+    else:
+        assert result["metadata"]["reason"] == "verification_unavailable"
+        assert result["metadata"]["stage"] == "post_verification"
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_numeric_recovery_failed_refocus_click_never_enters_key_dispatch(cancel):
+    session = NumericSession()
+    session.clear_focus = ("value", False)
+    error = CancelledError("observed-private-canary") if cancel else _numeric_command_error(state="response_unknown")
+
+    class RefocusFailingElement(NumericElement):
+        def click(self, **kwargs):
+            if self.session.cleared:
+                self.session.click_error = error
+            super().click(**kwargs)
+
+    def element(by, value, *, raw_id=False):
+        return RefocusFailingElement(session, by, value, raw_id=raw_id)
+
+    session.element = element
+    if cancel:
+        with pytest.raises(CancelledError):
+            _numeric_input(session)
+    else:
+        result = _numeric_input(session)
+        assert result["status"] == "failed"
+        assert result["metadata"]["stage"] == "numeric_focus"
+        assert result["metadata"]["reason"] == "entry_backend_error"
+        assert result["metadata"]["request_state"] == "response_unknown"
+        _assert_numeric_secret_safe(result, session)
+    assert _numeric_action_names(session) == ["click", "replace", "clear", "click"]
+
+
+@pytest.mark.parametrize("read", [1, 2, 3])
+@pytest.mark.parametrize("code", ["target_not_found", "target_ambiguous"])
+def test_numeric_recovery_thrown_identity_proof_is_verification_unavailable(read: int, code: str) -> None:
+    from appium_connect_agent.automation import TargetError as SDKTargetError
+
+    session = NumericSession()
+    if read == 3:
+        session.clear_focus = ("value", False)
+    session.inspect_errors[read] = SDKTargetError(code, "operation-private-canary", "response_received")
+    result = _numeric_input(session)
+    assert result["status"] == "failed"
+    assert result["metadata"]["reason"] == "verification_unavailable"
+    assert result["metadata"]["stage"] == ("numeric_clear" if read == 1 else "numeric_focus")
+    assert result["metadata"]["backend_code"] == code
+    assert result["metadata"]["request_state"] == "response_received"
+    assert _numeric_action_names(session) == ["click", "replace"] + (["clear"] if read >= 2 else []) + (["click"] if read == 3 else [])
+    assert session.recovery_reads == read
+    assert "Inspect UI state before re-entering" in str(result)
+    _assert_numeric_secret_safe(result, session)

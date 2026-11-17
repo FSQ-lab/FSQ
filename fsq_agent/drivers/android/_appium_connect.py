@@ -135,6 +135,7 @@ ANDROID_INSPECT_INPUT_POST_ATTRIBUTES = (
     "text",
     "bounds",
 )
+ANDROID_INSPECT_INPUT_NUMERIC_ATTRIBUTES = ("type", "id", "package", "enabled", "focused", "password", "text", "bounds")
 ANDROID_LOCAL_RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ANDROID_STANDARD_RESOURCE_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:id/[A-Za-z_][A-Za-z0-9_]*$")
 # Only these structural XPath forms are demonstrably independent of the text being replaced.
@@ -573,10 +574,22 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         )
         try:
             element.click(wait_timeout_seconds=2.0, control=self._operation_control(10.0))
+        except Exception as exc:  # noqa: BLE001 - Click rejection must never initiate replacement recovery.
+            self._propagate_if_cancelled(exc)
+            return self._input_failure(exc, "entry_backend_error", "write", "Text entry backend failed; acceptance is unknown.")
+
+        numeric_baseline: str | None = None
+        try:
             element.replace_element_value(text, wait_timeout_seconds=5.0, control=self._operation_control(15.0))
         except Exception as exc:  # noqa: BLE001 - Never expose submitted text from SDK/client failures; preserve cancellation below.
             self._propagate_if_cancelled(exc)
-            return self._input_failure(exc, "entry_backend_error", "write", "Text entry backend failed; acceptance is unknown.")
+            if not self._can_recover_numeric_input(exc, text):
+                return self._input_failure(exc, "entry_backend_error", "write", "Text entry backend failed; acceptance is unknown.")
+            numeric_baseline, recovery_failure = self._recover_numeric_input(session, element, before, text)
+            if recovery_failure is not None:
+                return recovery_failure
+
+        recovery_warning = " Inspect UI state before re-entering." if numeric_baseline is not None else ""
 
         try:
             inspection = element.inspect(
@@ -587,21 +600,80 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         except Exception as exc:  # noqa: BLE001 - Sanitize observed text from SDK/client failures; preserve cancellation below.
             self._propagate_if_cancelled(exc)
             message = no_id_verification_message if before_id is None else "Text entry acceptance could not be read."
-            return self._input_failure(exc, "verification_unavailable", "post_verification", message)
+            return self._input_failure(exc, "verification_unavailable", "post_verification", message + (recovery_warning if before_id is not None else ""))
 
-        if (
-            not self._input_text_is_readable(after)
-            or self._attr_value(after, "enabled") is not True
-            or any(before.get(field) != after.get(field) for field in ("type", "package"))
-            or self._attr_raw_id(after) != before_id
-            or (before.get("bounds") != after.get("bounds") and before_id is None)
-        ):
+        if not self._input_target_is_safe(before, after):
             message = no_id_verification_message if before_id is None else "Text entry acceptance cannot be verified on the original target."
-            return self._input_failure(None, "verification_unavailable", "post_verification", message)
+            return self._input_failure(None, "verification_unavailable", "post_verification", message + (recovery_warning if before_id is not None else ""))
 
-        if self._attr_value(after, "text") != text:
-            return self._input_failure(None, "entry_mismatch", "post_verification", "Text entry did not match the requested replacement.")
+        observed = self._attr_value(after, "text")
+        matches = observed == text
+        if numeric_baseline is not None:
+            if not text:
+                matches = matches or observed == numeric_baseline
+            elif numeric_baseline:
+                matches = matches or observed == text + ", " + numeric_baseline
+        if not matches:
+            return self._input_failure(None, "entry_mismatch", "post_verification", "Text entry did not match the requested replacement." + recovery_warning)
         return self._passed()
+
+    @staticmethod
+    def _can_recover_numeric_input(exc: Exception, text: str) -> bool:
+        if getattr(exc, "code", None) != "command_failed" or getattr(exc, "request_state", None) != "response_received" or any(character not in "0123456789.-" for character in text):
+            return False
+        try:
+            from appium_connect_agent.automation import CommandError
+        except ImportError:
+            return False
+        return isinstance(exc, CommandError)
+
+    def _input_target_is_safe(self, before: dict[str, tuple[str, object]], observed: dict[str, tuple[str, object]]) -> bool:
+        before_id = self._attr_raw_id(before)
+        return (
+            self._input_text_is_readable(observed)
+            and self._attr_value(observed, "enabled") is True
+            and all(before.get(field) == observed.get(field) for field in ("type", "package"))
+            and self._attr_raw_id(observed) == before_id
+            and (before_id is not None or before.get("bounds") == observed.get("bounds"))
+        )
+
+    def _recover_numeric_input(self, session: Any, element: Any, before: dict[str, tuple[str, object]], text: str) -> tuple[str | None, dict[str, object] | None]:
+        message = "Numeric text entry acceptance is unknown. Inspect UI state before re-entering."
+        stage = "numeric_clear"
+        reason = "verification_unavailable"
+        try:
+            observed = self._attributes_dict(element.inspect(attributes=ANDROID_INSPECT_INPUT_NUMERIC_ATTRIBUTES, control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS)))
+            if not self._input_target_is_safe(before, observed):
+                return None, self._input_failure(None, "verification_unavailable", stage, message)
+            reason = "entry_backend_error"
+            element.clear(wait_timeout_seconds=5.0, control=self._operation_control(15.0))
+
+            stage = "numeric_focus"
+            reason = "verification_unavailable"
+            observed = self._attributes_dict(element.inspect(attributes=ANDROID_INSPECT_INPUT_NUMERIC_ATTRIBUTES, control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS)))
+            if not self._input_target_is_safe(before, observed):
+                return None, self._input_failure(None, "verification_unavailable", stage, message)
+            baseline = self._attr_value(observed, "text")
+            if not isinstance(baseline, str):
+                return None, self._input_failure(None, "verification_unavailable", stage, message)
+            if self._attr_value(observed, "focused") is not True:
+                reason = "entry_backend_error"
+                element.click(wait_timeout_seconds=2.0, control=self._operation_control(10.0))
+                reason = "verification_unavailable"
+                observed = self._attributes_dict(element.inspect(attributes=ANDROID_INSPECT_INPUT_NUMERIC_ATTRIBUTES, control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS)))
+                if not self._input_target_is_safe(before, observed) or self._attr_value(observed, "focused") is not True or self._attr_value(observed, "text") != baseline:
+                    return None, self._input_failure(None, "verification_unavailable", stage, message)
+
+            # Focus was verified above, not locked atomically across subsequent device commands.
+            stage = "numeric_keycode"
+            reason = "entry_backend_error"
+            for character in text:
+                keycode = 69 if character == "-" else 56 if character == "." else ord(character) - ord("0") + 7
+                session.device.press_keycode(keycode, control=self._operation_control(10.0))
+        except Exception as exc:  # noqa: BLE001 - Never replay a possibly accepted clear, click, or key; sanitize all SDK failures.
+            self._propagate_if_cancelled(exc)
+            return None, self._input_failure(exc, reason, stage, message)
+        return baseline, None
 
     def _input_failure(self, exc: Exception | None, reason: str, stage: str, message: str, *, failure_category: str = "action_error") -> dict[str, object]:
         metadata = self._safe_diagnostics(exc, stage=stage)

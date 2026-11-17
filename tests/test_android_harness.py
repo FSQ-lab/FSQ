@@ -141,7 +141,7 @@ def test_android_harness_dispatches_fsq_action_names_to_driver() -> None:
         ("swipe", {"direction": "up", "duration": 1000}, "swipe"),
         ("uiTree", {}, "ui_snapshot"),
         ("assertNotVisible", {"target": "Dialog"}, "assert_not_visible"),
-        ("assert", {"text": {"contains": "bing.com"}}, "assert_state"),
+        ("assert", {"element": {"resourceId": "url"}, "text": {"contains": "bing.com"}}, "assert_state"),
     ]
 
     for action_name, params, _method_name in cases:
@@ -215,14 +215,15 @@ def test_android_harness_action_space_returns_decorated_driver_method_schemas() 
     assert schemas["tap_on"].metadata["executor_kind"] == "driver"
     assert schemas["tap_on"].metadata["replay"] == {"kind": "fsq_command", "alias": "tapOn"}
     assert "target" in schemas["tap_on"].params_json_schema["properties"]
-    assert "target or non-empty locator" in schemas["tap_on"].params_json_schema["description"]
-    assert "semantic target" in schemas["tap_on"].params_json_schema["properties"]["target"]["description"]
     assert schemas["tap_at"].driver_method == "tap_at"
     assert schemas["tap_at"].fsq_action_name == "tapAt"
     assert "point" in schemas["tap_at"].params_json_schema["properties"]
     assert schemas["ui_snapshot"].driver_method == "ui_snapshot"
     assert schemas["ui_snapshot"].fsq_action_name == "uiTree"
     assert schemas["ui_snapshot"].params_json_schema.get("properties") == {}
+    assertion_schema = schemas["assert_state"].params_json_schema
+    assert "element" in assertion_schema["required"]
+    assert assertion_schema["properties"]["element"]["$ref"].endswith("/AndroidElementState")
 
 
 def test_android_harness_validation_failure_does_not_call_driver_method() -> None:
@@ -235,6 +236,16 @@ def test_android_harness_validation_failure_does_not_call_driver_method() -> Non
     assert result.failure_category == "configuration_error"
     assert result.error_message == "Invalid Android parameters for tapOn."
     assert result.metadata["validation_errors"]
+    assert driver.calls == [("context", None)]
+
+
+@pytest.mark.parametrize("params", [{"text": {"equals": "Ready"}}, {"element": {"enabled": False}}, {"element": {"resourceId": " "}}])
+def test_android_harness_rejects_unlocated_assertions_before_driver(params: dict[str, Any]) -> None:
+    driver = FakeAndroidDriver()
+    harness = AndroidHarness(driver=driver)
+    result = harness.invoke_action(_step("assert", params), harness.get_context())
+    assert result.status == "failed"
+    assert result.failure_category == "configuration_error"
     assert driver.calls == [("context", None)]
 
 

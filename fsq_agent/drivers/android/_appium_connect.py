@@ -11,6 +11,7 @@ import time
 from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from datetime import datetime
 from math import ceil, floor
 from pathlib import Path
 from threading import Event
@@ -62,7 +63,6 @@ MAX_COORDINATE_VALUE = 2_147_483_647
 MAX_PORT_BIND_ATTEMPTS = 3
 
 ANDROID_STATE_ASSERTION_FIELDS = ("enabled", "checked", "selected", "clickable", "focused")
-ANDROID_LOCATOR_FIELDS = ("resourceId", "accessibilityId", "text", "className", "xpath")
 ANDROID_EDITABLE_CLASSES = frozenset(
     {
         "android.widget.EditText",
@@ -78,6 +78,7 @@ ANDROID_SAFE_BACKEND_CODES = frozenset(
         "invalid_request",
         "command_failed",
         "operation_timeout",
+        "condition_timeout",
         "operation_cancelled",
         "target_not_found",
         "target_ambiguous",
@@ -85,6 +86,7 @@ ANDROID_SAFE_BACKEND_CODES = frozenset(
         "target_not_enabled",
         "target_stale",
         "session_not_active",
+        "session_invalid",
         "session_closed",
         "session_uncertain",
         "session_disposed",
@@ -97,6 +99,7 @@ ANDROID_SAFE_BACKEND_CODES = frozenset(
         "connection_closed",
         "cleanup_failed",
         "source_settings_invalid",
+        "source_invalid",
         "unsupported_operation",
         "unsupported_platform",
         "invalid_response",
@@ -175,6 +178,14 @@ ANDROID_KEYCODE_MAP: dict[str, int] = {
     "backspace": 67,
     "menu": 82,
     "search": 84,
+    "mediaplaypause": 85,
+    "media_play_pause": 85,
+    "mediastop": 86,
+    "media_stop": 86,
+    "mediaplay": 126,
+    "media_play": 126,
+    "mediapause": 127,
+    "media_pause": 127,
     "page_up": 92,
     "page_down": 93,
     "escape": 111,
@@ -468,7 +479,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._tap_on_impl(params))
 
     def _tap_on_impl(self, params: AndroidTapOnParams) -> dict[str, object]:
-        data = self._param_data(params)
+        data = AndroidTapOnParams.model_validate(params).model_dump(mode="json", exclude_none=True)
         session = self._ensure_session()
         element = self._resolve_element(session, data)
         element.click(
@@ -499,7 +510,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._long_press_on_impl(params))
 
     def _long_press_on_impl(self, params: AndroidLongPressOnParams) -> dict[str, object]:
-        data = self._param_data(params)
+        data = AndroidLongPressOnParams.model_validate(params).model_dump(mode="json", exclude_none=True)
         session = self._ensure_session()
         element = self._resolve_element(session, data)
         element.long_click(
@@ -514,7 +525,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._input_text_impl(params))
 
     def _input_text_impl(self, params: AndroidInputTextParams) -> dict[str, object]:
-        data = self._param_data(params)
+        data = AndroidInputTextParams.model_validate(params).model_dump(mode="json", exclude_none=True)
         text = data.get("text")
         if not isinstance(text, str):
             return self._configuration_error("inputText requires a string text parameter.")
@@ -578,7 +589,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             element.click(wait_timeout_seconds=2.0, control=self._operation_control(10.0))
         except Exception as exc:  # noqa: BLE001 - Click rejection must never initiate replacement recovery.
             self._propagate_if_cancelled(exc)
-            return self._input_failure(exc, "entry_backend_error", "write", "Text entry backend failed; acceptance is unknown.")
+            return self._input_failure(exc, "entry_backend_error", "pre_focus_click", "Input focus click failed; inspect UI state before re-entering.")
 
         numeric_baseline: str | None = None
         try:
@@ -586,7 +597,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         except Exception as exc:  # noqa: BLE001 - Never expose submitted text from SDK/client failures; preserve cancellation below.
             self._propagate_if_cancelled(exc)
             if not self._can_recover_numeric_input(exc, text):
-                return self._input_failure(exc, "entry_backend_error", "write", "Text entry backend failed; acceptance is unknown.")
+                return self._input_failure(exc, "entry_backend_error", "replace_value", "Text entry backend failed; acceptance is unknown.")
             numeric_baseline, recovery_failure = self._recover_numeric_input(session, element, before, text)
             if recovery_failure is not None:
                 return recovery_failure
@@ -703,6 +714,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             except Exception as exc:  # noqa: BLE001
                 self._propagate_if_cancelled(exc)
                 code = getattr(exc, "code", None)
+                if not self._target_error_is_definitive(exc):
+                    return None, self._input_failure(exc, "entry_backend_error", "pre_inspection", "Input target inspection failed.")
                 if code == "target_ambiguous":
                     return None, self._input_failure(
                         exc, "target_ambiguous", "pre_inspection", "Target locator matched multiple Android elements; refine the locator.", failure_category="target_resolution_error"
@@ -870,7 +883,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._assert_visible_impl(params))
 
     def _assert_visible_impl(self, params: AndroidAssertVisibleParams) -> dict[str, object]:
-        data = self._param_data(params)
+        data = AndroidAssertVisibleParams.model_validate(params).model_dump(mode="json", exclude_none=True)
         session = self._ensure_session()
         element = self._resolve_element(session, data)
         deadline = time.monotonic() + DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS
@@ -886,13 +899,15 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             except Exception as exc:
                 self._propagate_if_cancelled(exc)
                 code = getattr(exc, "code", None)
+                if not self._target_error_is_definitive(exc):
+                    raise
                 if code == "target_ambiguous":
-                    return self._target_ambiguous()
+                    return self._target_ambiguous(exc)
                 if code != "target_not_found":
                     raise
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return self._target_missing(data)
+                return self._target_missing()
             time.sleep(min(DEFAULT_POLL_INTERVAL_SECONDS, remaining))
 
     @_android_driver_tool("assertNotVisible", description="Assert that an Android UI target is not visible.")
@@ -900,11 +915,12 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._assert_not_visible_impl(params))
 
     def _assert_not_visible_impl(self, params: AndroidAssertNotVisibleParams) -> dict[str, object]:
-        data = self._param_data(params)
+        data = AndroidAssertNotVisibleParams.model_validate(params).model_dump(mode="json", exclude_none=True)
         session = self._ensure_session()
         element = self._resolve_element(session, data)
         deadline = time.monotonic() + DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS
         while True:
+            ambiguity_error: Exception | None = None
             try:
                 inspection = element.inspect(
                     attributes=("displayed",),
@@ -916,12 +932,17 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             except Exception as exc:
                 self._propagate_if_cancelled(exc)
                 code = getattr(exc, "code", None)
+                if not self._target_error_is_definitive(exc):
+                    raise
                 if code == "target_not_found":
                     return self._passed()
                 if code != "target_ambiguous":
                     raise
+                ambiguity_error = exc
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                if ambiguity_error is not None:
+                    return self._target_ambiguous(ambiguity_error)
                 return self._failed("assertion_error", "Target is visible.")
             time.sleep(min(DEFAULT_POLL_INTERVAL_SECONDS, remaining))
 
@@ -930,16 +951,16 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._assert_state_impl(params))
 
     def _assert_state_impl(self, params: AndroidAssertStateParams) -> dict[str, object]:
-        data = self._param_data(params)
+        data = AndroidAssertStateParams.model_validate(params).model_dump(mode="json", exclude_none=True)
         session = self._ensure_session()
         expected_text = data.get("text")
-        element_payload = data.get("element")
-        expected_states = self._expected_element_states(element_payload) if isinstance(element_payload, dict) else {}
+        element_payload = data["element"]
+        expected_states = self._expected_element_states(element_payload)
         attributes = ("text",) if isinstance(expected_text, dict) else tuple(expected_states) or ("enabled",)
         element = self._resolve_element(session, data, locator_key="element")
-        attrs, resolution_error = self._wait_for_assert_attributes(element, data, attributes)
+        attrs, resolution_error = self._wait_for_assert_attributes(element, attributes)
         if resolution_error is not None or attrs is None:
-            return resolution_error or self._target_missing(data)
+            return resolution_error or self._target_missing()
 
         if isinstance(expected_text, dict):
             actual = self._attr_value(attrs, "text")
@@ -953,27 +974,23 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 return self._passed({"text": actual})
             return self._failed("assertion_error", "Text assertion failed.", output={"text": actual})
 
-        if isinstance(element_payload, dict):
-            if expected_states:
-                passed: dict[str, bool] = {}
-                for field, expected in expected_states.items():
-                    actual = self._attr_value(attrs, field)
-                    if actual is not expected:
-                        return self._failed(
-                            "assertion_error",
-                            "Element state assertion failed.",
-                            output={"field": field, "expected": expected, "actual": actual},
-                        )
-                    passed[field] = expected
-                return self._passed(passed)
-            if self._has_locator(element_payload):
-                return self._passed({"exists": True})
-        return self._configuration_error("assert requires a text or supported element state assertion.")
+        if expected_states:
+            passed: dict[str, bool] = {}
+            for field, expected in expected_states.items():
+                actual = self._attr_value(attrs, field)
+                if actual is not expected:
+                    return self._failed(
+                        "assertion_error",
+                        "Element state assertion failed.",
+                        output={"field": field, "expected": expected, "actual": actual},
+                    )
+                passed[field] = expected
+            return self._passed(passed)
+        return self._passed({"exists": True})
 
     def _wait_for_assert_attributes(
         self,
         element: Any,
-        data: dict[str, object],
         attributes: tuple[str, ...],
     ) -> tuple[dict[str, tuple[str, object]] | None, dict[str, object] | None]:
         deadline = time.monotonic() + DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS
@@ -987,13 +1004,15 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             except Exception as exc:
                 self._propagate_if_cancelled(exc)
                 code = getattr(exc, "code", None)
+                if not self._target_error_is_definitive(exc):
+                    raise
                 if code == "target_ambiguous":
-                    return None, self._target_ambiguous()
+                    return None, self._target_ambiguous(exc)
                 if code != "target_not_found":
                     raise
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return None, self._target_missing(data)
+                return None, self._target_missing()
             time.sleep(min(DEFAULT_POLL_INTERVAL_SECONDS, remaining))
 
     @_android_driver_tool(
@@ -1078,7 +1097,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         description=(
             "Return a compact Android UI hierarchy XML snapshot synthesized from public TreeObservation. "
             "Layout-only wrapper nodes and empty/default attributes are removed, and long text/content-desc "
-            "attributes are clipped to the first 50 characters."
+            "attributes are clipped to the first 50 characters. Includes fresh device_local_time with UTC offset/weekday or explicit unavailability; tree and clock reads are not atomic."
         ),
     )
     def ui_snapshot(self, params: AndroidUiTreeParams) -> dict[str, object]:
@@ -1088,7 +1107,20 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
     def _ui_snapshot_impl(self) -> dict[str, object]:
         session = self._ensure_session()
         observation = session.observe_tree(control=self._operation_control(20.0))
-        return self._serialize_tree_observation(observation)
+        snapshot = self._serialize_tree_observation(observation)
+        snapshot["device_local_time"] = self._device_local_time(session)
+        return snapshot
+
+    def _device_local_time(self, session: Any) -> dict[str, object]:
+        try:
+            clock = session.device.device_time(control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS))
+            local = datetime.fromisoformat(clock.iso_local)
+            if local.utcoffset() is None:
+                raise ValueError("Device clock offset is unavailable.")  # noqa: TRY301 - Invalid responses share the optional-clock failure boundary.
+            return {"status": "available", "local_datetime": clock.iso_local, "iso_weekday": local.isoweekday(), "source": "android_device"}
+        except Exception as exc:  # noqa: BLE001 - Optional clock failure must preserve the observed tree without leaking backend text.
+            self._propagate_if_cancelled(exc)
+            return {"status": "unavailable", "reason": "device_time_unavailable", "source": "android_device", "diagnostics": self._safe_diagnostics(exc, stage="device_time")}
 
     @_android_driver_tool(
         "inspectElement",
@@ -1390,6 +1422,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             return self._run_on_worker(func)
         except _LocatorConfigurationError as exc:
             return self._configuration_error(str(exc))
+        except ValidationError:
+            return self._configuration_error("Invalid Android automation request parameters.")
         except ConfigurationError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1403,11 +1437,17 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
 
         if cls_name in {"InvalidRequestError", "ElementValidationError"}:
             return self._failed("configuration_error", "Invalid Android automation request parameters.", metadata=metadata)
-        if cls_name == "TargetError":
+        if cls_name == "TargetError" and self._target_error_is_definitive(exc):
             if code == "target_ambiguous":
-                return self._target_ambiguous()
-            return self._failed("target_resolution_error", "Target was not found.", metadata=metadata)
+                return self._target_ambiguous(exc)
+            if code == "target_not_found":
+                return self._failed("target_resolution_error", "Target was not found.", metadata=metadata)
         return self._failed("action_error", "Android backend operation failed.", metadata=metadata)
+
+    def _target_error_is_definitive(self, exc: Exception) -> bool:
+        if getattr(exc, "request_state", None) == "response_unknown":
+            return False
+        return self._safe_diagnostics(exc).get("session_state") == "active"
 
     def _safe_diagnostics(self, exc: Exception | None = None, *, stage: str | None = None) -> dict[str, object]:
         metadata: dict[str, object] = {}
@@ -1424,6 +1464,9 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             request_state = getattr(exc, "request_state", None)
             if isinstance(request_state, str) and request_state in {"not_sent", "response_received", "response_unknown"}:
                 metadata["request_state"] = request_state
+            operation_id = getattr(exc, "operation_id", None)
+            if isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id) is not None:
+                metadata["operation_id"] = operation_id
             steps = getattr(exc, "completed_steps", None)
             if isinstance(steps, (tuple, list)):
                 metadata["completed_steps"] = list(dict.fromkeys(step for step in steps[: len(ANDROID_SAFE_COMPLETED_STEPS)] if isinstance(step, str) and step in ANDROID_SAFE_COMPLETED_STEPS))
@@ -1498,7 +1541,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                     return session.element("xpath", f"//*[{' and '.join(predicates)}]")
             fallback = params.get("target")
             if isinstance(fallback, str) and fallback.strip():
-                return session.element("xpath", f"//*[@text={_xpath_literal(fallback.strip())}]")
+                literal = _xpath_literal(fallback.strip())
+                return session.element("xpath", f"//*[@text={literal} or (not(//*[@text={literal}]) and @content-desc={literal})]")
         except ValueError as exc:
             raise _LocatorConfigurationError("Invalid Android locator syntax or length.") from exc
 
@@ -1621,10 +1665,6 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return {field: value for field in ANDROID_STATE_ASSERTION_FIELDS if type(value := element.get(field)) is bool}
 
     @staticmethod
-    def _has_locator(element: dict[str, object]) -> bool:
-        return any(isinstance(element.get(field), str) and str(element[field]).strip() for field in ANDROID_LOCATOR_FIELDS)
-
-    @staticmethod
     def _param_data(params: BaseModel | dict[str, object]) -> dict[str, object]:
         if isinstance(params, BaseModel):
             return params.model_dump(mode="json", exclude_none=True)
@@ -1661,14 +1701,14 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             executor.shutdown(wait=True)
             self._executor = None
 
-    def _target_missing(self, params: dict[str, object]) -> dict[str, object]:
-        return self._failed("target_resolution_error", "Target was not found.", metadata={"params": params})
+    def _target_missing(self) -> dict[str, object]:
+        return self._failed("target_resolution_error", "Target was not found.", metadata={"reason": "target_missing", **self._safe_diagnostics()})
 
-    def _target_ambiguous(self) -> dict[str, object]:
+    def _target_ambiguous(self, exc: Exception | None = None) -> dict[str, object]:
         return self._failed(
             "target_resolution_error",
             "Target locator matched multiple Android elements; refine the locator.",
-            metadata={"reason": "target_ambiguous"},
+            metadata={"reason": "target_ambiguous", **self._safe_diagnostics(exc)},
         )
 
     def _configuration_error(self, message: str) -> dict[str, object]:

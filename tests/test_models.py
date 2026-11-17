@@ -2,15 +2,16 @@
 # Licensed under the MIT License.
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 from fsq_agent import models
+from fsq_agent.agent_engine._schema import ensure_strict_json_schema
 from fsq_agent.models import (
     AgentFinalOutput,
     AgentRuntimeSettings,
     AgentTaskInput,
     AndroidHarnessSettings,
-    AndroidInputTextParams,
     AndroidSwipeParams,
     ExecutionStep,
     GoalPrePlan,
@@ -137,7 +138,6 @@ def test_models_public_surface_does_not_export_removed_tool_execution_settings()
 
 def test_capability_parameter_schemas_include_llm_facing_guidance() -> None:
     wait_schema = WaitMsParams.model_json_schema()
-    android_text_schema = AndroidInputTextParams.model_json_schema()
     android_swipe_schema = AndroidSwipeParams.model_json_schema()
     web_wait_schema = WebWaitForParams.model_json_schema()
     windows_click_schema = WindowsClickOnParams.model_json_schema()
@@ -148,12 +148,6 @@ def test_capability_parameter_schemas_include_llm_facing_guidance() -> None:
 
     assert "Wait without touching platform state" in wait_schema["description"]
     assert "milliseconds" in wait_schema["properties"]["duration_ms"]["description"]
-
-    assert "target or non-empty locator" in android_text_schema["description"]
-    assert "runtimeSecret" in android_text_schema["properties"]["textType"]["description"]
-    assert "text to enter" in android_text_schema["properties"]["text"]["description"]
-    assert "semantic target" in android_text_schema["properties"]["target"]["description"]
-    assert "structured Android locator" in android_text_schema["properties"]["locator"]["description"]
 
     assert "exactly one" in android_swipe_schema["description"]
     assert "reference_screen_size" not in android_swipe_schema["properties"]
@@ -179,6 +173,60 @@ def test_capability_parameter_schemas_include_llm_facing_guidance() -> None:
     assert "COMMAND" in macos_press_key_schema["properties"]["modifiers"]["description"]
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         MacOSLaunchAppParams(environment={"APP_MODE": "test"})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"text": {"equals": "Ready"}},
+        {"element": None},
+        {"element": {}},
+        {"element": {"enabled": False}},
+        {"element": {"resourceId": " \t", "checked": True}},
+        {"element": {"xpath": " "}, "text": {"contains": "Ready"}},
+    ],
+)
+def test_android_assert_requires_a_real_element_locator(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        models.AndroidAssertStateParams.model_validate(payload)
+
+
+def test_android_assert_schema_requires_nonnullable_element_and_preserves_false_states() -> None:
+    schema = models.AndroidAssertStateParams.model_json_schema()
+    assert "element" in schema["required"]
+    assert schema["properties"]["element"]["$ref"].endswith("/AndroidElementState")
+    params = models.AndroidAssertStateParams(element={"resourceId": "control", "enabled": False})
+    assert params.model_dump(mode="json", exclude_none=True) == {"element": {"resourceId": "control", "enabled": False}}
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(
+    ("element", "accepted"),
+    [
+        ({}, False),
+        ({"enabled": False}, False),
+        ({"resourceId": None, "accessibilityId": None, "text": None, "className": None, "xpath": None}, False),
+        *[({name: ""}, False) for name in ("resourceId", "accessibilityId", "text", "className", "xpath")],
+        *[({name: " \t\n", "checked": False}, False) for name in ("resourceId", "accessibilityId", "text", "className", "xpath")],
+        ({"resourceId": "control", "enabled": False}, True),
+        ({"accessibilityId": "Control", "checked": False}, True),
+        ({"text": "Ready", "selected": False}, True),
+        ({"className": "android.widget.TextView", "clickable": False}, True),
+        ({"xpath": "//*[@text='Ready']", "focused": False}, True),
+        ({"resourceId": "control", "text": "Ready", "enabled": False}, True),
+        ({"resourceId": "  ", "accessibilityId": "Control", "checked": False}, True),
+    ],
+)
+def test_android_assert_schema_requires_a_nonblank_locator_after_strict_projection(element: dict[str, object], accepted: bool, strict: bool) -> None:
+    schema = models.AndroidAssertStateParams.model_json_schema()
+    payload = models.AndroidAssertStateParams(element={"resourceId": "control"}).model_dump(mode="json") if strict else {}
+    element_payload = models.AndroidElementState().model_dump(mode="json") if strict else {}
+    element_payload.update(element)
+    payload["element"] = element_payload
+    if strict:
+        schema = ensure_strict_json_schema(schema)
+    assert Draft202012Validator(schema).is_valid(payload) is accepted
 
 
 def test_android_replay_references_are_hidden_but_validated_and_serialized() -> None:

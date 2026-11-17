@@ -785,6 +785,51 @@ async def test_agent_run_preplans_goal_only_task_before_execution(tmp_path: Path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("caller_actions", [[], ["  Caller action\nKeep spacing.  ", "Caller action", "Caller action"]])
+async def test_agent_preserves_complete_planning_notes_and_caller_actions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caller_actions: list[str]) -> None:
+    _stub_provider_refresh(monkeypatch)
+    notes = "Keep every observed identity and field.\n" + "Repeated observations retain multiplicity. " * 400
+    pre_plan = GoalPrePlan(
+        goal="Collect entries",
+        verification_goal="Requested entries are collected.",
+        key_actions=[
+            {"step_id": 1, "action": "  Collect entries.  ", "notes": f"  {notes}  "},
+            {"step_id": 2, "action": "   ", "notes": "Do not turn this into an action."},
+            {"step_id": 3, "action": "Finish collection.", "notes": " \n "},
+            {"step_id": 4, "action": "Verify collection.", "notes": "  Preserve the destination.  "},
+        ],
+    )
+    runtime = _GoalRunRuntime()
+
+    async def run_pre_plan(*args, **kwargs):
+        return pre_plan
+
+    monkeypatch.setattr(runtime, "run_pre_plan", run_pre_plan)
+    agent = FsqAgent(
+        _settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"),
+        Verifier(),
+        _Reporter(),
+        _KnowledgeLoader(),
+        _SkillLoader(),
+        runtime,
+    )
+    task = Task(name="Collect entries", description="Collect entries", key_actions=caller_actions)
+
+    outcome = await _run_in_context(agent, task, "planning-notes")
+
+    expected_actions = caller_actions or [
+        f"Key action 1: Collect entries.\nNotes: {notes.strip()}",
+        "Key action 3: Finish collection.",
+        "Key action 4: Verify collection.\nNotes: Preserve the destination.",
+    ]
+    assert runtime.last_task is not None
+    assert runtime.last_task.key_actions == expected_actions
+    assert outcome.task.key_actions == expected_actions
+    assert runtime.last_task.verification_goal == pre_plan.verification_goal
+    assert task.key_actions == caller_actions
+
+
+@pytest.mark.asyncio
 async def test_agent_run_refreshes_provider_before_pre_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     knowledge_dir = tmp_path / "knowledge"
     knowledge_dir.mkdir(parents=True)

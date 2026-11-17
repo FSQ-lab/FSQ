@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 from fsq_agent._capability_bootstrap import build_capability_registry
-from fsq_agent.adapters.coding_agent._harness_tools import HarnessToolAdapter
+from fsq_agent.adapters.coding_agent._harness_tools import HarnessToolAdapter, _validated_write_budget
 from fsq_agent.agent import CodingAgentPolicy
 from fsq_agent.agent_engine import (
     AgentEngine,
@@ -156,10 +156,27 @@ class _ToolOutputBudgetFilter:
             display_name = entry.tool_name or "tool"
             artifact_path = self._artifact_path_for(entry)
             if artifact_path:
-                replacements[entry.entry_id] = f"[Historical {display_name} output stored as artifact. Artifact path: {artifact_path}. Content chars: {len(entry.output)}.]"
+                reference = f"[Historical {display_name} output stored as artifact. Artifact path: {artifact_path}. Content chars: {len(entry.output)}.]"
             else:
-                replacements[entry.entry_id] = f"[Historical {display_name} output omitted because artifact storage is unavailable. Content chars: {len(entry.output)}.]"
+                reference = f"[Historical {display_name} output omitted because artifact storage is unavailable. Content chars: {len(entry.output)}.]"
+            replacements[entry.entry_id] = self._budget_reference(entry.output, reference, artifact_path)
         return replacements
+
+    @staticmethod
+    def _budget_reference(output: str, reference: str, artifact_path: str | None) -> str:
+        try:
+            payload = json.loads(output)
+        except (ValueError, TypeError):
+            return reference
+        if not isinstance(payload, dict) or not isinstance(payload.get("tool_name"), str) or not isinstance(payload.get("status"), str) or not isinstance(payload.get("result"), dict):
+            return reference
+        receipt = _validated_write_budget(payload.get("write_budget"))
+        if receipt is None:
+            return reference
+        compact: dict[str, object] = {"write_budget": receipt, "history": reference}
+        if artifact_path:
+            compact["artifact"] = {"path": artifact_path}
+        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
     def _project_output(output: str) -> str:

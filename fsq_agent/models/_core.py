@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,7 +52,11 @@ WindowsMouseButton: TypeAlias = Literal["left", "right", "middle"]
 MacOSOrderDirection: TypeAlias = Literal["vertical", "horizontal"]
 
 TEXT_TYPE_DESCRIPTION = "Use literal for plain text; use runtimeSecret when text names an allowlisted runtime secret."
-ANDROID_TARGET_SCHEMA_DESCRIPTION = "Provide target or non-empty locator. Prefer a semantic target from the current Android UI snapshot; use locator when target text is unavailable."
+ANDROID_TARGET_SCHEMA_DESCRIPTION = (
+    "Provide target or non-empty locator. A usable explicit locator is authoritative. "
+    "A bare target matches trimmed exact text first, then exact content description only when no text matches; duplicates are errors. "
+    "Prefer current structured locators; use locator.resourceId for short resource ids, not raw XPath."
+)
 WEB_LOCATOR_SCHEMA_DESCRIPTION = "Provide one semantic locator using a role and optional name, within scope, or final-result index."
 WINDOWS_TARGET_SCHEMA_DESCRIPTION = "Provide a non-empty locator. The target field is descriptive only and is not used for Windows control lookup."
 MACOS_TARGET_SCHEMA_DESCRIPTION = "Provide target, non-empty locator, or point. Prefer target or locator for UI elements and point only for coordinate-based actions."
@@ -177,11 +182,16 @@ class AndroidLocator(BaseModel):
     )
 
     # Names mirror the authored Android locator payload contract.
-    resourceId: str | None = Field(default=None, description="Android resource id to match.")  # noqa: N815
+    resourceId: str | None = Field(  # noqa: N815
+        default=None, description="Exact Android resource id; surrounding whitespace is trimmed. Prefer this field for a short id: it matches the bare id or its node-package-qualified form."
+    )
     accessibilityId: str | None = Field(default=None, description="Android accessibility id or content description to match.")  # noqa: N815
     text: str | None = Field(default=None, description="Visible Android text to match.")
     className: str | None = Field(default=None, description="Android class name to match.")  # noqa: N815
-    xpath: str | None = Field(default=None, description="XPath expression for Android UI hierarchy lookup.")
+    xpath: str | None = Field(
+        default=None,
+        description="Exact raw XPath, passed unchanged without id expansion. A short @resource-id predicate is not package-aware; prefer resourceId for short ids, or use the exact observed qualified id in XPath.",
+    )
 
     def has_value(self) -> bool:
         return any(isinstance(value, str) and value.strip() for value in self.model_dump().values())
@@ -211,7 +221,9 @@ class AndroidScreenSize(BaseModel):
 class _AndroidTargetParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": ANDROID_TARGET_SCHEMA_DESCRIPTION})
 
-    target: str | None = Field(default=None, description="Android semantic target from the current UI snapshot.")
+    target: str | None = Field(
+        default=None, description="Exact trimmed Android text, with exact content-description fallback only when no text matches. A non-empty structured locator takes precedence."
+    )
     locator: AndroidLocator | None = Field(default=None, description="Optional structured Android locator. Provide at least one populated locator field.")
 
     @model_validator(mode="after")
@@ -265,7 +277,9 @@ class AndroidInputTextParams(_AndroidTargetParams):
 class AndroidPressKeyParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Press one Android key."})
 
-    key: str = Field(description="Android key name, including Back, system Home, Enter, MoveEnd/End (123), MoveHome (122), or Ctrl+End (one control-modified MoveEnd event).")
+    key: str = Field(
+        description="Android key name: Back, system Home, Enter, MoveEnd/End (123), MoveHome (122), Ctrl+End (one modified event), MediaPlayPause (85), MediaPlay (126), MediaPause (127), MediaStop (86), or Space (62). Names are case-insensitive; media keys also accept standard underscore forms. Delivery does not verify playback state."
+    )
 
     @model_validator(mode="after")
     def _require_key(self) -> "AndroidPressKeyParams":
@@ -388,24 +402,35 @@ class AndroidElementState(AndroidLocator):
     clickable: bool | None = Field(default=None, description="Expected clickable state.")
     focused: bool | None = Field(default=None, description="Expected focused state.")
 
-    def has_state_assertion(self) -> bool:
-        return any(value is not None for value in [self.enabled, self.checked, self.selected, self.clickable, self.focused])
+
+def _assertion_element_schema(schema: dict[str, Any]) -> None:
+    properties = AndroidElementState.model_json_schema()["properties"]
+    # Complete object alternatives preserve compound locators and states under strict conversion.
+    alternatives = []
+    for name in AndroidLocator.model_fields:
+        variant_properties = deepcopy(properties)
+        variant_properties[name] = {"type": "string", "pattern": r"\S"}
+        alternatives.append({"type": "object", "properties": variant_properties, "required": [name], "additionalProperties": False})
+    schema["anyOf"] = alternatives
 
 
 class AndroidAssertStateParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Assert Android text or element locator/state. Provide text or element."})
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Assert existence, text, or state on one uniquely located Android element. Required element must contain a non-empty locator. Optional text predicates take precedence over state predicates."
+        },
+    )
 
-    element: AndroidElementState | None = Field(default=None, description="Android locator plus optional expected state values.")
-    text: AndroidTextAssertion | None = Field(default=None, description="Visible text assertion.")
+    element: AndroidElementState = Field(description="Required Android element with a non-empty locator and optional expected state values.", json_schema_extra=_assertion_element_schema)
+    text: AndroidTextAssertion | None = Field(default=None, description="Text predicates applied only to the located element; take precedence over state predicates.")
     optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
 
     @model_validator(mode="after")
     def _require_assertion(self) -> "AndroidAssertStateParams":
-        if self.text is not None:
+        if self.element.has_value():
             return self
-        if self.element is not None and (self.element.has_value() or self.element.has_state_assertion()):
-            return self
-        raise ValueError("requires text assertion or element locator/state assertion")
+        raise ValueError("requires element with a non-empty supported locator")
 
 
 class VisualRect(BaseModel):

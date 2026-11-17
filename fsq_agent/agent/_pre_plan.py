@@ -49,6 +49,17 @@ part of the sequence, and the final click can open the answer form rather than r
 actually observed valid sequence, compute the requested answer, and complete any required authorized submission.
 Do not invent an extra item or abandon submission solely because the UI transitioned to the form. Truly missing or
 contradictory observations remain unverified; planning cannot claim observations or success before execution.
+Preserve an explicitly requested complete filename exactly, including an explicit absence of extension. A default .md
+suffix is not equivalent. Plan complete saved-name/destination verification in the actual file-list/file-management view,
+not an editor title that may hide extensions; never add a save/rename that violates a draft or no-save restriction.
+Put execution-critical qualifications in the same key action's notes; preserve observed facts rather than inventing them.
+Account for supplied write_budget max/remaining limits with read-only observation and only goal-required commit reserves.
+For cross-screen collection, retain identities, relevant fields, unresolved facts, and coverage with multiplicity but no
+overlap double count. Prune only when a goal-defined predicate is disproved; unequal durations can still contribute to
+sum/subset tasks. Reanchor after paging/deletion and continue feasible requested coverage while adequate budget remains.
+For location search, use the core name with country/region constraints and expand the current general radius until a
+candidate, observed terminal/unchanged/blocked range, or supplied limit before narrow category tabs. No unchanged cycles
+or hidden coordinates. Verified input is not rewritten merely because its display clips; distinguish uncertain acceptance.
 Use result.to_page_id values from page element operations when describing navigation between pages.
 If optional project or page knowledge is incomplete or absent, still return the best concise contiguous plan and add
 warnings only when missing knowledge materially affects planning confidence. You may skip at most one consecutive

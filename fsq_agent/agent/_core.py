@@ -211,7 +211,11 @@ class FsqAgent:
 
         reference_type, reference_text = self._planning_reference_for_task(task)
         pre_plan = await self._run_pre_plan(reference_type, reference_text, skills, run_id, emitter)
-        generated_key_actions = [f"Key action {index}: {action.action.strip()}" for index, action in enumerate(pre_plan.key_actions, start=1) if action.action.strip()]
+        generated_key_actions = [
+            f"Key action {index}: {action.action.strip()}" + (f"\nNotes: {action.notes.strip()}" if action.notes.strip() else "")
+            for index, action in enumerate(pre_plan.key_actions, start=1)
+            if action.action.strip()
+        ]
         key_actions = list(task.key_actions) or generated_key_actions
         verification_goal = pre_plan.verification_goal.strip()
         payload = {

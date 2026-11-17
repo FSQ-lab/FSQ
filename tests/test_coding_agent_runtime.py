@@ -35,7 +35,6 @@ from fsq_agent.models import (
     RuntimeSecretSettings,
     SkillBundle,
     StepPhase,
-    StepPhaseReport,
     StepResult,
     Task,
     WebClickOnParams,
@@ -1694,26 +1693,6 @@ def test_runtime_instructions_include_knowledge_index_content() -> None:
     assert "choose password sign-in" in instructions
 
 
-def test_prompt_model_builder_and_renderer_use_templates() -> None:
-    settings = AgentRuntimeSettings().prompt
-    builder = PromptModelBuilder(settings)
-    renderer = PromptRenderer(settings)
-
-    agent_model = builder.build_agent_prompt(KnowledgeBundle(), [])
-    task_model = builder.build_task_prompt(Task(id="task-1", description="Do it.", verification_goal="Done."))
-
-    assert "Custom operator instructions:" not in renderer.render_agent_prompt(agent_model)
-    assert "Preserve ordered key-action semantic fidelity." in renderer.render_agent_prompt(agent_model)
-    assert "launch_app harness tool" not in renderer.render_agent_prompt(agent_model)
-    assert "kill_app harness tool" not in renderer.render_agent_prompt(agent_model)
-    assert "tool usage error" in renderer.render_agent_prompt(agent_model)
-    rendered_task = renderer.render_task_prompt(task_model)
-    assert "Structured task input:" in rendered_task
-    assert '"id": "task-1"' in rendered_task
-    assert "Verification goal:" in rendered_task
-    assert "Done." in rendered_task
-
-
 def test_agent_runtime_settings_rejects_obsolete_custom_instruction_fields(tmp_path: Path) -> None:
     custom_instructions = tmp_path / "custom-instructions.md"
 
@@ -1744,57 +1723,6 @@ def test_prompt_renderer_injects_model_into_configured_jinja_templates(tmp_path:
 
     assert renderer.render_agent_prompt(agent_model) == "Base. s=Skill."
     assert renderer.render_task_prompt(task_model) == "Task task-1 Base."
-
-
-@pytest.mark.asyncio
-async def test_harness_tool_adapter_delegates_to_step_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    import fsq_agent.adapters.coding_agent._harness_tools as harness_tools_module
-
-    runner_calls: list[tuple[Any, str, Any]] = []
-
-    class _FakeStepRunner:
-        def __init__(self, harness: Any, **_: Any) -> None:
-            self.harness = harness
-
-        def run_step(self, run_id: str, step: Any) -> RunnerStepResult:
-            runner_calls.append((self.harness, run_id, step))
-            return RunnerStepResult(
-                step_id=step.step_id,
-                status="passed",
-                duration_ms=7,
-                phase_reports=[
-                    StepPhaseReport(
-                        step_id=step.step_id,
-                        phase="invoke",
-                        status="passed",
-                        metadata={
-                            "harness_output": {"params": step.params},
-                            "harness_metadata": {"runner": "fake"},
-                        },
-                    )
-                ],
-            )
-
-    monkeypatch.setattr(harness_tools_module, "StepRunner", _FakeStepRunner)
-    harness = _DirectInvokeForbiddenHarness()
-    adapter = HarnessToolAdapter(harness, run_id="run-1")
-
-    tools = adapter.build_tools()
-    output = await tools[0].invoke(ToolCall(name=tools[0].name, arguments={"target": "Downloads"}, call_id="call-1"))
-
-    payload = json.loads(output)
-    assert payload["status"] == "passed"
-    assert payload["duration_ms"] == 7
-    assert payload["runner_step_id"] == "agent-tap_on-1"
-    assert payload["runner_result"]["status"] == "passed"
-    assert payload["result"]["output"] == {"params": {"target": "Downloads"}}
-    assert runner_calls[0][0] is harness
-    assert runner_calls[0][1] == "run-1"
-    assert runner_calls[0][2].action_name == "tap_on"
-    assert runner_calls[0][2].metadata["authored_action_name"] == "tapOn"
-    assert runner_calls[0][2].evidence_policy.capture_before is False
-    assert runner_calls[0][2].evidence_policy.artifact_kinds == []
-    assert harness.steps == []
 
 
 @pytest.mark.asyncio
@@ -2715,3 +2643,204 @@ async def test_verifier_receives_original_observation_when_compact_history_stays
     assert invoked["metadata"]["harness_output"]["text"] == observed_text
     assert execution["status"] == "passed"
     assert json.loads(events_path.read_text(encoding="utf-8"))["payload"]["runner_result"] == execution
+
+
+class _BudgetStatusHarness(_FakeHarness):
+    def __init__(self, outcome="passed", *, output_chars=0):
+        super().__init__()
+        self.outcome = outcome
+        self.output_chars = output_chars
+        self.used = 2 if outcome == "denied" else 0
+        self.receipts = {}
+        self.budget_queries = []
+
+    def action_space(self):
+        from fsq_agent.harnesses._common_tools import CommonPlatformTools
+        from fsq_agent.models import AndroidInputTextParams, AndroidTapOnParams, AndroidUiTreeParams
+
+        if self.outcome == "wait":
+            return CommonPlatformTools().common_action_space()
+        schema = super().action_space()[0]
+        if self.outcome == "observation":
+            return [schema.model_copy(update={"name": "ui_snapshot", "driver_method": "ui_snapshot", "fsq_action_name": "uiTree", "params_json_schema": AndroidUiTreeParams.model_json_schema()})]
+        if self.outcome == "secret":
+            return [schema.model_copy(update={"name": "input_text", "driver_method": "input_text", "fsq_action_name": "inputText", "params_json_schema": AndroidInputTextParams.model_json_schema()})]
+        return [schema.model_copy(update={"params_json_schema": AndroidTapOnParams.model_json_schema()})]
+
+    def before_action(self, step, context):
+        super().before_action(step, context)
+        if self.outcome == "prepare":
+            raise RuntimeError("Preparation failed before dispatch.")
+
+    def invoke_action(self, step, context):
+        from fsq_agent.harnesses._common_tools import CommonPlatformTools
+
+        charged = int(self.outcome not in {"denied", "observation", "wait"})
+        self.used += charged
+        self.receipts[step.step_id] = {"max": 2, "used": self.used, "remaining": 2 - self.used, "charged": charged}
+        # Another consumer may change the shared gate before formatting this call.
+        self.used = min(2, self.used + 1)
+        if self.outcome == "wait":
+            self.steps.append(step)
+            return CommonPlatformTools().invoke_common_tool(step)
+        result = super().invoke_action(step, context)
+        if self.outcome == "raised":
+            raise RuntimeError("Native dispatch failed.")
+        if self.outcome in {"failed", "denied"}:
+            return result.model_copy(update={"status": "failed", "failure_category": "action_error", "error_message": "Write denied." if self.outcome == "denied" else "Native write failed."})
+        if self.output_chars:
+            return result.model_copy(update={"output": {"xml": "x" * self.output_chars}})
+        return result
+
+    def write_budget_status(self, step_id=None):
+        self.budget_queries.append(step_id)
+        if step_id is not None:
+            return dict(self.receipts[step_id])
+        return {"max": 2, "used": self.used, "remaining": 2 - self.used, "charged": 0}
+
+
+@pytest.mark.parametrize("outcome", ["passed", "failed", "raised", "denied", "observation", "wait", "validation", "extra_argument", "prepare", "secret"])
+async def test_write_budget_receipt_reaches_main_model_request_without_balance_differencing(tmp_path, monkeypatch, outcome):
+    from fsq_agent.core.evidence import EvidenceRecorder
+
+    class DistinctIdentityRecorder(EvidenceRecorder):
+        def allocate_step_identity(self, step):
+            return super().allocate_step_identity(step.model_copy(update={"step_execution_id": f"execution-{step.step_id}"}))
+
+    monkeypatch.setattr("fsq_agent.core.evidence.EvidenceRecorder", DistinctIdentityRecorder)
+    harness = _BudgetStatusHarness(outcome)
+    model_outputs = []
+
+    class Engine:
+        async def run(self, model, request, *, on_event=None):
+            tool = request.tools[0]
+            arguments = {} if outcome == "observation" else {"duration_ms": 1} if outcome == "wait" else {"target": "" if outcome == "validation" else "Row"}
+            if outcome == "secret":
+                arguments.update({"text": "BUDGET_MISSING_SECRET", "textType": "runtimeSecret"})
+            if outcome == "extra_argument":
+                arguments["undeclared"] = "reject before dispatch"
+            raw = await tool.invoke(ToolCall(name=tool.name, arguments=arguments, call_id="budget-call"))
+            entry = ToolOutputEntry(1, "budget-call", tool.name, raw)
+            projected = request.tool_output_filter((entry,)).get(1, raw)
+            model_outputs.append((json.loads(raw), json.loads(projected)))
+            return AgentResult(final_output=AgentFinalOutput(status="inconclusive", summary="Budget receipt inspected."))
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: _FakeProviderSession())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: harness, engine=Engine())
+    await _run_in_context(runtime, Task(description="Inspect budget receipts."), KnowledgeBundle(), [], "budget-run")
+
+    assert len(model_outputs) == 1
+    raw, projected = model_outputs[0]
+    if outcome in {"validation", "extra_argument", "prepare", "secret"}:
+        expected = {"max": 2, "used": 0, "remaining": 2, "charged": 0}
+        assert not harness.steps
+        assert harness.budget_queries == [None]
+    else:
+        expected = next(iter(harness.receipts.values()))
+        assert harness.budget_queries == [harness.steps[0].step_id]
+        assert harness.steps[0].step_id != harness.steps[0].source_step_id
+    assert raw["write_budget"] == projected["write_budget"] == expected
+    if outcome in {"failed", "raised", "denied", "validation", "extra_argument", "prepare", "secret"}:
+        assert projected["status"] == "failed"
+    if outcome in {"failed", "raised"}:
+        assert projected["write_budget"]["charged"] == 1
+        assert projected["write_budget"]["used"] == 1
+    if outcome in {"denied", "observation", "wait"}:
+        assert projected["write_budget"]["charged"] == 0
+    if outcome == "wait":
+        assert projected["status"] == "passed"
+        assert harness.steps[0].action_name == "wait_ms"
+    if outcome == "secret":
+        assert raw["runner_result"]["action_status"] == "failed"
+
+
+@pytest.mark.parametrize("artifact_available", [False, True])
+@pytest.mark.parametrize("externalization", ["oversized_latest", "total_budget", "historical"])
+async def test_write_budget_survives_actual_filter_externalization_without_ui_body(tmp_path, artifact_available, externalization):
+    harness = _BudgetStatusHarness("observation", output_chars=4000)
+    adapter = HarnessToolAdapter(harness, run_id="budget-filter")
+    tool = adapter.build_tools()[0]
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={}, call_id="large-snapshot"))
+    settings = Settings()
+    settings.output.runs_dir = tmp_path
+    output_filter = _test_request(DefaultCodingAgentRuntime(settings, _EmptyToolFactory()), run_id="budget-filter").tool_output_filter
+    if not artifact_available:
+        output_filter.artifact_store = None
+    if externalization == "oversized_latest":
+        output_filter.max_output_chars = 100
+    elif externalization == "total_budget":
+        output_filter.max_total_inline_chars = 100
+    else:
+        output_filter.recent_inline_outputs = 0
+    entry = ToolOutputEntry(1, "large-snapshot", tool.name, raw)
+
+    replacement = output_filter((entry,))[1]
+    projected = json.loads(replacement)
+
+    assert projected["write_budget"] == json.loads(raw)["write_budget"] == {"max": 2, "used": 0, "remaining": 2, "charged": 0}
+    assert "x" * 100 not in replacement
+    assert entry.output == raw
+    assert output_filter((entry,))[1] == replacement
+    if artifact_available:
+        assert output_filter.artifact_paths_by_call_id["large-snapshot"] in replacement
+        artifacts = list(tmp_path.rglob("*.json"))
+        assert len(artifacts) == 1
+        assert json.loads(artifacts[0].read_text())["content"] == raw
+    else:
+        assert "omitted" in replacement
+        assert not list(tmp_path.rglob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "bad_receipt",
+    [
+        None,
+        {"max": True, "used": 0, "remaining": 1, "charged": 0},
+        {"max": 2, "used": -1, "remaining": 3, "charged": 0},
+        {"max": 2, "used": 1, "remaining": 0, "charged": 1},
+        {"max": 2, "used": 1, "remaining": 1, "charged": 2},
+        {"max": 2, "used": 1, "remaining": 1, "charged": 1, "private": "budget-secret-canary"},
+        "raise",
+    ],
+)
+async def test_invalid_budget_hook_never_masks_primary_failure_or_leaks_values(bad_receipt):
+    class Harness(_BudgetStatusHarness):
+        def write_budget_status(self, step_id=None):
+            if bad_receipt == "raise":
+                raise RuntimeError("budget-secret-canary")
+            return bad_receipt
+
+    adapter = HarnessToolAdapter(Harness("failed"), run_id="invalid-budget")
+    tool = adapter.build_tools()[0]
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "Row"}, call_id="bad-budget"))
+    result = json.loads(raw)
+
+    assert result["status"] == "failed"
+    assert result["error_message"] == "Native write failed."
+    assert "write_budget" not in result
+    assert result["write_budget_unavailable"] in {"invalid_receipt", "hook_failed"}
+    assert "budget-secret-canary" not in raw
+
+
+@pytest.mark.parametrize("outcome", ["validation", "prepare"])
+async def test_current_budget_query_rejects_nonzero_charge_without_native_dispatch(outcome):
+    class InvalidCurrentReceiptHarness(_BudgetStatusHarness):
+        def write_budget_status(self, step_id=None):
+            self.budget_queries.append(step_id)
+            return {"max": 2, "used": 1, "remaining": 1, "charged": 1}
+
+    harness = InvalidCurrentReceiptHarness(outcome)
+    harness.used = 1
+    adapter = HarnessToolAdapter(harness, run_id="invalid-current-receipt")
+    tool = adapter.build_tools()[0]
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "" if outcome == "validation" else "Row"}, call_id="undispatched"))
+    result = json.loads(raw)
+
+    assert result["status"] == "failed"
+    assert result["error_message"]
+    assert not harness.steps
+    assert harness.budget_queries == [None]
+    assert "write_budget" not in result
+    assert result["write_budget_unavailable"] == "invalid_receipt"

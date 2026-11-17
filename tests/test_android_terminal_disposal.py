@@ -840,7 +840,16 @@ def test_minimal_inspection_still_rejects_ambiguous_target(managed_driver: _Isol
     managed_driver.mode("inspect", selector=_ASSERT_SELECTOR, attributes={"enabled": True}, match_count=2)
     result = managed_driver.driver.assert_state({"element": {**_ASSERT_LOCATOR, "enabled": True}})
     assert result["status"] == "failed"
-    assert result["metadata"] == {"reason": "target_ambiguous"}
+    metadata = result["metadata"]
+    assert set(metadata) == {"reason", "backend_code", "request_state", "session_state", "operation_id", "completed_steps"}
+    assert metadata["reason"] == "target_ambiguous"
+    assert metadata["backend_code"] == "target_ambiguous"
+    assert metadata["request_state"] == "response_received"
+    assert metadata["session_state"] == "active"
+    assert metadata["completed_steps"] == []
+    operation_id = metadata["operation_id"]
+    assert len(operation_id) == 32
+    assert all(character in "0123456789abcdef" for character in operation_id)
     assert not any("/attribute/" in event.get("path", "") for event in managed_driver.events())
 
 

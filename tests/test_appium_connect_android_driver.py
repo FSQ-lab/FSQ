@@ -4,8 +4,14 @@
 from __future__ import annotations
 
 import builtins
+import json
+import subprocess
+import sys
 import threading
 from asyncio import CancelledError
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from xml.etree import ElementTree
@@ -394,7 +400,7 @@ def test_driver_context_launch_kill_screenshot_and_ui_snapshot() -> None:
         assert driver.screenshot() == b"\x89PNG\r\n\x1a\nfake-png"
 
         snapshot = driver.ui_snapshot({})
-        assert set(snapshot) == {"xml", "coverage", "compaction"}
+        assert set(snapshot) == {"xml", "coverage", "compaction", "device_local_time"}
         assert snapshot["coverage"]["status"] == "partial"
         assert snapshot["coverage"]["reason"] == "semantic_compaction"
         assert snapshot["coverage"]["source_nodes"] == 2
@@ -514,7 +520,7 @@ def test_locator_translation_handles_standard_id_short_id_raw_id_accessibility_c
             """//*[(@resource-id=concat(@package, ':id/digit_7') or @resource-id='digit_7') and @text=concat('Say ', "'", 'hi', "'", ' and "bye"')]""",
             False,
         ),
-        ("element", "xpath", """//*[@text="Sign 'In'"]""", False),
+        ("element", "xpath", """//*[@text="Sign 'In'" or (not(//*[@text="Sign 'In'"]) and @content-desc="Sign 'In'")]""", False),
         ("element", "xpath", "//android.widget.Button[@text='Hold']", False),
     ]
 
@@ -612,7 +618,7 @@ def test_tap_on_and_assert_surface_ambiguous_targets_distinctly() -> None:
     for res in (tap_result, vis_result, state_result):
         assert res["status"] == "failed"
         assert res["failure_category"] == "target_resolution_error"
-        assert res["metadata"] == {"reason": "target_ambiguous"}
+        assert res["metadata"] == {"reason": "target_ambiguous", "backend_code": "target_ambiguous", "session_state": "active"}
 
 
 def test_press_key_maps_back_named_keys_keycodes_and_rejects_unknown_keys() -> None:
@@ -930,7 +936,7 @@ def test_input_text_postcondition_and_backend_errors_are_secret_safe_and_never_r
     assert result.status == "failed"
     assert result.failure_category == "action_error"
     assert result.metadata["reason"] == reason
-    assert result.metadata["stage"] == ("write" if reason == "entry_backend_error" else "post_verification")
+    assert result.metadata["stage"] == ("replace_value" if reason == "entry_backend_error" else "post_verification")
     assert result.output is None
     dumped = result.model_dump_json()
     assert all(secret not in dumped for secret in ("submitted-private", "observed-private", "private backend payload", "params"))
@@ -1239,7 +1245,7 @@ def test_input_safe_diagnostics_allow_only_enumerated_sdk_facts(monkeypatch: pyt
     result = driver.input_text({"target": "Loaded", "text": "input-secret-canary"})
     assert result["metadata"] == {
         "reason": "entry_backend_error",
-        "stage": "write",
+        "stage": "replace_value",
         "backend_code": "operation_timeout",
         "request_state": "response_unknown",
         "completed_steps": ["target_resolved", "action_completed"],
@@ -2204,3 +2210,437 @@ def test_numeric_recovery_cancelled_focus_poll_never_dispatches_keys(numeric_foc
     assert caught.value is interruption
     assert _numeric_action_names(session) == ["click", "replace", "clear", "click"]
     assert numeric_focus_clock.sleeps == [0.25]
+
+
+@pytest.mark.parametrize(
+    "key,keycode",
+    [
+        ("MediaPlayPause", 85),
+        ("media_play_pause", 85),
+        ("KEYCODE_MEDIA_PLAY_PAUSE", 85),
+        ("mEdIaPlAy", 126),
+        ("MEDIA_PLAY", 126),
+        ("MediaPause", 127),
+        ("media_pause", 127),
+        ("MediaStop", 86),
+        ("media_stop", 86),
+        ("Space", 62),
+    ],
+)
+def test_media_keys_send_one_public_key_event(key: str, keycode: int) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        result = driver.press_key({"key": key})
+    finally:
+        driver.close()
+    assert result["status"] == "passed"
+    assert session.calls == [("press_keycode", keycode)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"text": {"equals": "private-canary"}},
+        {"element": None},
+        {"element": {}},
+        {"element": {"enabled": False}},
+        {"element": {"resourceId": " \t", "checked": True}},
+        {"element": {"xpath": " "}, "text": {"contains": "private-canary"}},
+    ],
+)
+def test_direct_assertion_rejects_unlocated_requests_before_any_sdk_use(payload: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    monkeypatch.setattr(session, "session_info", lambda: pytest.fail("Malformed assertion reached the SDK"))
+    try:
+        result = driver.assert_state(payload)
+    finally:
+        driver.close()
+    assert result["failure_category"] == "configuration_error"
+    assert session.calls == []
+    assert "private-canary" not in str(result)
+
+
+@pytest.mark.parametrize(
+    "payload,attributes,expected",
+    [
+        ({"element": {"resourceId": "input", "enabled": False}, "text": {"equals": "Loaded"}}, ("text",), {"text": "Loaded"}),
+        ({"element": {"resourceId": "input", "focused": False, "checked": False, "enabled": False}}, ("enabled", "checked", "focused"), {"enabled": False, "checked": False, "focused": False}),
+        ({"element": {"resourceId": "input"}}, ("enabled",), {"exists": True}),
+    ],
+)
+def test_located_assertions_read_only_active_predicates(payload: dict[str, object], attributes: tuple[str, ...], expected: dict[str, object]) -> None:
+    session = FakeSession()
+    session.element_attrs["enabled"] = ("value", False)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        result = driver.assert_state(payload)
+    finally:
+        driver.close()
+    assert result == {"status": "passed", "output": expected}
+    assert [call[-1] for call in session.calls if call[0] == "inspect"] == [attributes]
+
+
+@pytest.mark.parametrize("method,stage,code", [("click", "pre_focus_click", "condition_timeout"), ("replace_element_value", "replace_value", "session_invalid")])
+@pytest.mark.parametrize("operation_id", ["0123456789abcdef0123456789abcdef", "A" * 32, "a" * 31, "secret-private-canary", None])
+def test_input_failure_preserves_only_safe_operation_id_and_actual_stage(method: str, stage: str, code: str, operation_id: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    failure = CommandError(code, "message-private-canary")
+    failure.operation_id = operation_id
+    failure.request_state = "response_unknown"
+    writes = []
+
+    def fail(*args, **kwargs):
+        writes.append(method)
+        raise failure
+
+    monkeypatch.setattr(FakeElement, method, fail)
+    try:
+        result = driver.input_text({"target": "Loaded", "text": "input-private-canary"})
+    finally:
+        driver.close()
+    metadata = result["metadata"]
+    assert metadata["stage"] == stage
+    assert metadata["backend_code"] == code
+    assert metadata["request_state"] == "response_unknown"
+    if operation_id == "0123456789abcdef0123456789abcdef":
+        assert metadata["operation_id"] == operation_id
+    else:
+        assert "operation_id" not in metadata
+    assert writes == [method]
+    assert not any(call[0] == "replace_element_value" for call in session.calls)
+    assert "canary" not in str(result)
+
+
+@pytest.mark.parametrize(
+    "method,payload",
+    [
+        ("tap_on", {"target": "private-canary"}),
+        ("assert_visible", {"target": "private-canary"}),
+        ("assert_not_visible", {"target": "private-canary"}),
+        ("assert_state", {"element": {"resourceId": "private-canary"}}),
+        ("input_text", {"target": "private-canary", "text": "input-private-canary"}),
+    ],
+)
+@pytest.mark.parametrize("code,state", [("target_not_found", "response_unknown"), ("target_ambiguous", "response_unknown"), ("condition_timeout", "response_unknown"), ("session_invalid", "not_sent")])
+def test_unknown_or_invalid_target_operations_never_become_ordinary_absence(method: str, payload: dict[str, object], code: str, state: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    failure = TargetError(code, "message-private-canary")
+    failure.request_state = state
+    failure.operation_id = "0123456789abcdef0123456789abcdef"
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(True)
+        raise failure
+
+    monkeypatch.setattr(FakeElement, "inspect", fail)
+    monkeypatch.setattr(FakeElement, "click", fail)
+    try:
+        result = getattr(driver, method)(payload)
+    finally:
+        driver.close()
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "action_error"
+    assert result["metadata"]["backend_code"] == code
+    assert result["metadata"]["request_state"] == state
+    assert result["metadata"]["operation_id"] == failure.operation_id
+    assert len(calls) == 1
+    assert "canary" not in str(result)
+
+
+@pytest.mark.parametrize("state", ["uncertain", "disposing", "disposed", "closed"])
+def test_nonactive_session_is_not_target_absence_or_implicitly_rebuilt(state: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    monkeypatch.setattr(session, "session_info", lambda: SimpleNamespace(state=state))
+    try:
+        result = driver.assert_not_visible({"target": "private-canary"})
+    finally:
+        driver.close()
+    assert result["failure_category"] == "action_error"
+    assert result["metadata"]["reason"] == "session_unavailable"
+    assert result["metadata"]["session_state"] == state
+    assert session.calls == []
+
+
+@contextmanager
+def _sdk_target_peer():
+    # The real SDK proves cardinality, selected-attribute requests, and write
+    # boundaries. This controlled peer supplies candidates; it is not an XPath evaluator.
+    from appium_connect_agent.automation import create_session
+    from appium_connect_agent.runtime import LocalSettings, Runtime
+
+    state = SimpleNamespace(candidate_ids=["first"], calls=[], mutations=[], disconnect=False)
+    state.nodes = {
+        element_id: {
+            "class": "android.widget.EditText",
+            "resource-id": f"com.example.app:id/{element_id}",
+            "package": "com.example.app",
+            "text": "Match",
+            "enabled": True,
+            "displayed": True,
+            "password": False,
+            "checked": False,
+            "checkable": True,
+            "focused": False,
+            "selected": False,
+            "clickable": True,
+        }
+        for element_id in ("first", "second")
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def respond(self, value):
+            body = json.dumps({"value": value}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            state.calls.append(("GET", self.path, None))
+            if self.path == "/status":
+                self.respond({"ready": True, "build": {"version": "3.7.0"}})
+                return
+            parts = self.path.split("/")
+            if len(parts) >= 6 and parts[3] == "element" and parts[4] in state.nodes:
+                node = state.nodes[parts[4]]
+                if parts[5] == "attribute":
+                    self.respond(node.get(parts[6]))
+                elif parts[5] == "rect":
+                    self.respond({"x": 0, "y": 0, "width": 100, "height": 50})
+                else:
+                    self.respond(node[parts[5]])
+                return
+            self.send_error(404)
+
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            state.calls.append(("POST", self.path, payload))
+            if self.path == "/session":
+                self.respond({"sessionId": "target-session", "capabilities": {"platformName": "Android", "appium:automationName": "UiAutomator2"}})
+            elif self.path == "/session/target-session/elements":
+                if state.disconnect:
+                    self.connection.shutdown(2)
+                    self.connection.close()
+                    return
+                candidates = state.candidate_ids if payload["using"] == "xpath" else [element_id for element_id, node in state.nodes.items() if node["resource-id"] == payload["value"]]
+                self.respond([{"element-6066-11e4-a52e-4f735466cecf": element_id} for element_id in candidates])
+            elif self.path == "/session/target-session/execute/sync":
+                action = payload["script"]
+                args = payload["args"][0]
+                state.mutations.append((action, args["elementId"]))
+                if action == "mobile: replaceElementValue":
+                    state.nodes[args["elementId"]]["text"] = args["text"]
+                self.respond(None)
+            else:
+                self.send_error(404)
+
+        def do_DELETE(self):
+            state.calls.append(("DELETE", self.path, None))
+            self.respond(None)
+
+        def log_message(self, fmt, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        runtime = Runtime(LocalSettings(server_url=f"http://127.0.0.1:{server.server_port}"))
+        with runtime.connect() as connection:
+            session = create_session(connection, "target-test-device")
+            driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+            state.calls.clear()
+            try:
+                yield state, driver
+            finally:
+                driver.close()
+                # External uncertainty retains its SDK reservation until process
+                # exit; only the isolated child scenario may leave it uncertain.
+                if session.session_info().state == "active":
+                    session.quit()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@pytest.fixture
+def sdk_target_peer():
+    with _sdk_target_peer() as peer:
+        yield peer
+
+
+@pytest.mark.parametrize("candidate_ids", [["first"], ["first", "second"]])
+def test_public_sdk_requires_unique_candidate_before_input_side_effects(sdk_target_peer, candidate_ids):
+    state, driver = sdk_target_peer
+    state.candidate_ids = candidate_ids
+    result = driver.input_text({"target": "Match", "text": "replacement-private-canary"})
+    if len(candidate_ids) == 1:
+        assert result["status"] == "passed"
+        assert state.mutations == [("mobile: clickGesture", "first"), ("mobile: replaceElementValue", "first")]
+        assert state.nodes["first"]["text"] == "replacement-private-canary"
+        assert state.nodes["second"]["text"] == "Match"
+    else:
+        assert result["failure_category"] == "target_resolution_error"
+        assert result["metadata"]["reason"] == "target_ambiguous"
+        assert result["metadata"]["request_state"] == "response_received"
+        assert len(result["metadata"]["operation_id"]) == 32
+        assert state.mutations == []
+        assert len(state.calls) == 1
+    lookups = [payload for method, path, payload in state.calls if method == "POST" and path.endswith("/elements")]
+    assert sum(payload["using"] == "xpath" for payload in lookups) == 1
+    assert "canary" not in str(result)
+
+
+@pytest.mark.parametrize("field", ["enabled", "displayed"])
+def test_public_sdk_unusable_unique_input_candidate_never_falls_through_to_another(sdk_target_peer, field):
+    state, driver = sdk_target_peer
+    state.nodes["first"][field] = False
+    result = driver.input_text({"target": "Match", "text": "replacement-private-canary"})
+    assert result["metadata"]["reason"] == "invalid_input_target"
+    assert state.mutations == []
+    assert len([path for method, path, _ in state.calls if method == "POST" and path.endswith("/elements")]) == 1
+    assert state.nodes["second"]["text"] == "Match"
+
+
+@pytest.mark.parametrize(
+    "payload,attribute_paths",
+    [
+        ({"element": {"resourceId": "com.example.app:id/first", "enabled": False}, "text": {"equals": "Match"}}, ["text"]),
+        ({"element": {"resourceId": "com.example.app:id/first", "focused": False, "checked": False}}, ["attribute/checkable", "attribute/checked", "attribute/focused"]),
+        ({"element": {"resourceId": "com.example.app:id/first"}}, ["attribute/enabled"]),
+    ],
+)
+def test_public_sdk_located_assertion_fetches_only_required_attributes(sdk_target_peer, payload, attribute_paths):
+    state, driver = sdk_target_peer
+    result = driver.assert_state(payload)
+    assert result["status"] == "passed"
+    assert [path.split("/element/first/")[1] for method, path, _ in state.calls if method == "GET"] == attribute_paths
+    assert len([path for method, path, _ in state.calls if method == "POST" and path.endswith("/elements")]) == 1
+    assert state.mutations == []
+
+
+def _exercise_unknown_target_response():
+    with _sdk_target_peer() as (state, driver):
+        state.disconnect = True
+        result = driver.assert_not_visible({"target": "private-canary"})
+        assert result["status"] == "failed"
+        assert result["failure_category"] == "action_error"
+        assert result["metadata"]["request_state"] == "response_unknown"
+        assert result["metadata"]["session_state"] == "uncertain"
+        assert len(result["metadata"]["operation_id"]) == 32
+        before = len(state.calls)
+        next_result = driver.assert_state({"element": {"resourceId": "com.example.app:id/first"}})
+        assert next_result["failure_category"] == "action_error"
+        assert next_result["metadata"]["reason"] == "session_unavailable"
+        assert len(state.calls) == before
+        assert state.mutations == []
+        assert "canary" not in str(result)
+
+
+def test_public_sdk_unknown_inspection_response_fences_session_without_action_or_reconnect():
+    # An external connection cannot authorize terminal managed disposal. Keep
+    # its intentionally quarantined Session and reservation inside one child.
+    source = Path(__file__).resolve()
+    completed = subprocess.run(  # noqa: S603 - Fixed interpreter and local helper; no shell or user input.
+        [sys.executable, "-c", 'import runpy, sys; runpy.run_path(sys.argv[1])["_exercise_unknown_target_response"]()', str(source)],
+        cwd=source.parents[1],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_public_sdk_explicit_locator_is_authoritative_over_ambiguous_bare_target(sdk_target_peer):
+    state, driver = sdk_target_peer
+    state.candidate_ids = ["first", "second"]
+    result = driver.input_text({"target": "Match", "locator": {"resourceId": "com.example.app:id/second"}, "text": "replacement-private-canary"})
+    assert result["status"] == "passed"
+    assert state.nodes["first"]["text"] == "Match"
+    assert state.nodes["second"]["text"] == "replacement-private-canary"
+    assert state.mutations == [("mobile: clickGesture", "second"), ("mobile: replaceElementValue", "second")]
+
+
+def test_public_sdk_zero_candidates_never_writes_or_falls_back_to_another(sdk_target_peer, monkeypatch):
+    state, driver = sdk_target_peer
+    state.candidate_ids = []
+    monkeypatch.setattr("fsq_agent.drivers.android._appium_connect.DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS", 0.0)
+    result = driver.input_text({"target": "Match", "text": "replacement-private-canary"})
+    assert result["failure_category"] == "target_resolution_error"
+    assert result["metadata"]["reason"] == "target_missing"
+    assert result["metadata"]["backend_code"] == "target_not_found"
+    assert state.mutations == []
+    assert len(state.calls) == 1
+    assert "canary" not in str(result)
+
+
+def test_public_sdk_condition_timeout_is_operational_not_absence(sdk_target_peer, monkeypatch):
+    state, driver = sdk_target_peer
+    state.nodes["first"]["enabled"] = False
+    monkeypatch.setattr("fsq_agent.drivers.android._appium_connect.DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS", 0.01)
+    result = driver.tap_on({"target": "Match"})
+    assert result["failure_category"] == "action_error"
+    assert result["metadata"]["backend_code"] == "condition_timeout"
+    assert result["metadata"]["request_state"] in {"not_sent", "response_received"}
+    assert result["metadata"]["session_state"] == "active"
+    assert state.mutations == []
+
+
+@pytest.mark.parametrize(
+    "method,payload",
+    [
+        ("tap_on", {}),
+        ("tap_on", {"locator": {"resourceId": " "}}),
+        ("long_press_on", {"target": " "}),
+        ("assert_visible", {"locator": {"unknown": "private-canary"}}),
+        ("assert_not_visible", {"target": 12}),
+        ("input_text", {"target": "Match", "text": None}),
+    ],
+)
+def test_direct_target_actions_reject_malformed_parameters_before_sdk(method, payload, monkeypatch):
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    monkeypatch.setattr(session, "session_info", lambda: pytest.fail("Malformed parameters reached the SDK"))
+    try:
+        result = getattr(driver, method)(payload)
+    finally:
+        driver.close()
+    assert result["failure_category"] == "configuration_error"
+    assert session.calls == []
+    assert "canary" not in str(result)
+
+
+def test_not_visible_duplicate_retains_safe_ambiguity_diagnostics(monkeypatch):
+    session = FakeSession()
+    session.inspect_code = "target_ambiguous"
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    monkeypatch.setattr("fsq_agent.drivers.android._appium_connect.DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS", 0.0)
+    try:
+        result = driver.assert_not_visible({"target": "private-canary"})
+    finally:
+        driver.close()
+    assert result["failure_category"] == "target_resolution_error"
+    assert result["metadata"] == {"reason": "target_ambiguous", "backend_code": "target_ambiguous", "session_state": "active"}
+    assert "canary" not in str(result)
+
+
+def test_public_sdk_invalid_attribute_response_keeps_safe_backend_code(sdk_target_peer):
+    state, driver = sdk_target_peer
+    state.nodes["first"]["enabled"] = "response-private-canary"
+    result = driver.assert_state({"element": {"resourceId": "com.example.app:id/first", "enabled": True}})
+    assert result["failure_category"] == "action_error"
+    assert result["metadata"]["backend_code"] == "source_invalid"
+    assert result["metadata"]["request_state"] == "response_received"
+    assert result["metadata"]["session_state"] == "active"
+    assert state.mutations == []
+    assert "canary" not in str(result)

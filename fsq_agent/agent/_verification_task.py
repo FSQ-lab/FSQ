@@ -55,6 +55,7 @@ class VerificationEvidenceBuilder:
                 "For visual assertions such as assertWithAI, do not re-inspect screenshot pixels. Verify that execution evidence contains the backend AI assertion tool result, including verdict metadata and screenshot artifact references, and that no supplied evidence contradicts that result.",
                 "Android visual outcome=inconclusive or Runner status=incomplete is an unverified assertion, never a negative verdict inferred from passed=false. A completed tool callback or summary envelope is transport success, not business success. Optional metadata cannot waive the unresolved assertion. Preserve its safe reason; do not rejudge its pixels. Only independently proven failures justify failure when an assertion remains unverified.",
                 "Do not transform key actions into independent final verification requirements.",
+                "When verification_goal requests a complete filename, preserve it literally, including no extension. A default .md suffix is not equivalent. Require supplied actual file-list/file-management evidence of full saved name and destination, not a title hiding extensions. Explicit draft/no-save restrictions win; do not infer a save requirement from action notes.",
             ],
         )
 
@@ -196,6 +197,7 @@ Rules:
 - Mark the verification_goal as satisfied only when the supplied evidence supports it.
 - Mark the verification_goal as unmet only when the supplied evidence proves the required action/state did not occur or a permanent execution failure prevents it.
 - If evidence is insufficient or ambiguous, explain it in evidence/errors and use status=inconclusive unless the verification_goal is proven unmet.
+- When verification_goal explicitly requests a complete filename, including an extensionless name, treat it as exact identity: a default .md suffix is not equivalent. Verify full saved name and destination from actual file-list/file-management evidence, not a hidden-extension title. Missing identity evidence is inconclusive, not proof of a match. Explicit draft/no-save restrictions win; generated notes do not authorize a save or add final goals.
 - For visual assertions such as assertWithAI, do not re-inspect screenshot pixels. The execution stage evaluates authored visual assertions through the active backend AI assertion tool. Verify that execution records contain the AI assertion result, verdict metadata, and screenshot artifact reference, that the main agent's structured output reports the corresponding result, and that no supplied evidence contradicts that result.
 - Final status must be success only when verification_goal is satisfied; failed only when verification_goal is proven unmet; inconclusive when verification_goal is not proven either way.
 

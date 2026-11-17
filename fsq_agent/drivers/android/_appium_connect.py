@@ -662,8 +662,17 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 reason = "entry_backend_error"
                 element.click(wait_timeout_seconds=2.0, control=self._operation_control(10.0))
                 reason = "verification_unavailable"
-                observed = self._attributes_dict(element.inspect(attributes=ANDROID_INSPECT_INPUT_NUMERIC_ATTRIBUTES, control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS)))
-                if not self._input_target_is_safe(before, observed) or self._attr_value(observed, "focused") is not True or self._attr_value(observed, "text") != baseline:
+                focus_deadline = time.monotonic() + 2.0
+                while time.monotonic() < focus_deadline:
+                    observed = self._attributes_dict(element.inspect(attributes=ANDROID_INSPECT_INPUT_NUMERIC_ATTRIBUTES, control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS)))
+                    if not self._input_target_is_safe(before, observed) or self._attr_value(observed, "text") != baseline:
+                        return None, self._input_failure(None, "verification_unavailable", stage, message)
+                    if self._attr_value(observed, "focused") is True:
+                        break
+                    remaining = focus_deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(DEFAULT_POLL_INTERVAL_SECONDS, remaining))
+                else:
                     return None, self._input_failure(None, "verification_unavailable", stage, message)
 
             # Focus was verified above, not locked atomically across subsequent device commands.

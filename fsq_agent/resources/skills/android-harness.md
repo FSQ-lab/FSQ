@@ -5,10 +5,16 @@ Use when `harness.platform` is Android. This skill contains Android-specific sta
 ## Case Lifecycle
 
 - Start each Android case with `launch_app` before the main business path.
-- Collect the final required verification while preserving the user's requested business terminal state, including the foreground page or application, running timers or activities, unsent or unsaved drafts, and system settings.
+- Collect the final required verification while preserving the user's requested business terminal state, including the foreground page or application, running timers or activities, explicitly requested unsent or unsaved drafts, and system settings.
 - Do not routinely call `kill_app` at the end of a task. Use it only when the user goal or explicit lifecycle instructions require closing or restarting the application.
 - Automation-session and managed-service cleanup is owned by the runtime through `harness.close()`; killing the business application is not session cleanup.
 - Do not report lifecycle actions as satisfying a business key action unless the case explicitly tests launch or kill behavior.
+
+## Form Completion and Observed Sequences
+
+- Stop with an unsaved, unsubmitted, or unsent form only when the goal explicitly requires it, such as "do not save", "without submitting", "leave as draft", or "unsent". Explicit restrictions override normal completion.
+- Otherwise, when creating an entry, applying settings, or answering an interactive form/challenge needs a clear Submit / Save / Done / OK control to take effect, include that task-required action and verify the resulting state. Do not invent "without submitting" because the goal omits "click Submit". This does not authorize unrelated or destructive confirmations.
+- Count requested clicks separately from observed sequence values. Include the initially displayed item when it belongs to the actual valid sequence, observe the subsequent values, and treat a final transition to the answer form as normal progression rather than proof of a missing extra value. Use the complete observed valid sequence, calculate, submit when required, and verify the result; do not guess genuinely missing or contradictory observations.
 
 ## Observation and Locator Rules
 

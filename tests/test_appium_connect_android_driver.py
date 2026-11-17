@@ -1942,7 +1942,7 @@ def test_numeric_recovery_unprovable_target_stops_before_next_side_effect(read, 
 
 @pytest.mark.parametrize("focus", [("value", False), ("unknown", None), ("value", 1)])
 @pytest.mark.parametrize("outcome", ["success", "unfocused", "baseline_changed", "identity_changed"])
-def test_numeric_recovery_refocuses_at_most_once_and_proves_baseline_and_target(focus, outcome):
+def test_numeric_recovery_refocuses_at_most_once_and_proves_baseline_and_target(focus, outcome, numeric_focus_clock):
     session = NumericSession()
     session.clear_focus = focus
     session.refocus = outcome != "unfocused"
@@ -2112,3 +2112,95 @@ def test_numeric_recovery_thrown_identity_proof_is_verification_unavailable(read
     assert session.recovery_reads == read
     assert "Inspect UI state before re-entering" in str(result)
     _assert_numeric_secret_safe(result, session)
+
+
+@pytest.fixture
+def numeric_focus_clock(monkeypatch):
+    import fsq_agent.drivers.android._appium_connect as implementation
+
+    clock = SimpleNamespace(now=0.0, sleeps=[])
+
+    def sleep(seconds):
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(implementation, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    return clock
+
+
+@pytest.mark.parametrize("focus", [("value", False), ("unknown", None)])
+def test_numeric_recovery_waits_for_async_focus_without_repeating_click(focus, numeric_focus_clock):
+    session = NumericSession()
+    session.clear_focus = focus
+    session.recovery_overrides[3] = {"focused": focus}
+    result = _numeric_input(session, "7")
+    assert result["status"] == "passed"
+    assert _numeric_action_names(session) == ["click", "replace", "clear", "click", "key"]
+    assert session.typed == "7"
+    assert numeric_focus_clock.sleeps == [0.25]
+    assert session.recovery_controls == [25.0] * 4
+    _assert_numeric_secret_safe(result, session)
+
+
+def test_numeric_recovery_focus_window_expires_without_extra_reads_or_keys(numeric_focus_clock):
+    session = NumericSession()
+    session.clear_focus = ("value", False)
+    session.refocus = False
+    result = _numeric_input(session, "7")
+    assert result["metadata"]["stage"] == "numeric_focus"
+    assert result["metadata"]["reason"] == "verification_unavailable"
+    assert _numeric_action_names(session) == ["click", "replace", "clear", "click"]
+    assert numeric_focus_clock.now == 2.0
+    assert numeric_focus_clock.sleeps == [0.25] * 8
+    assert session.recovery_reads == 10
+    assert session.recovery_controls == [25.0] * 10
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("change", [{"text": ("value", "observed-private-canary")}, {"id": ("value", "other:id/input")}, {"password": ("value", True)}, {"enabled": ("value", False)}])
+def test_numeric_recovery_aborts_changed_target_during_focus_wait(change, numeric_focus_clock):
+    session = NumericSession()
+    session.clear_focus = ("value", False)
+    session.recovery_overrides[3] = {"focused": ("value", False)}
+    session.recovery_overrides[4] = change
+    result = _numeric_input(session, "7")
+    assert result["metadata"]["stage"] == "numeric_focus"
+    assert result["metadata"]["reason"] == "verification_unavailable"
+    assert _numeric_action_names(session) == ["click", "replace", "clear", "click"]
+    assert numeric_focus_clock.sleeps == [0.25]
+    _assert_numeric_secret_safe(result, session)
+
+
+@pytest.mark.parametrize("focused", [False, True])
+def test_numeric_recovery_allows_normal_budget_for_inflight_focus_read(focused, numeric_focus_clock):
+    session = NumericSession()
+    session.clear_focus = ("value", False)
+
+    class SlowFocusElement(NumericElement):
+        def inspect(self, **kwargs):
+            if kwargs.get("attributes") == _NUMERIC_ATTRIBUTES and self.session.recovery_reads >= 2:
+                assert kwargs["control"].timeout_seconds == 25.0
+                numeric_focus_clock.now += 3.0
+            return super().inspect(**kwargs)
+
+    session.refocus = focused
+    session.element = lambda by, value, raw_id=False: SlowFocusElement(session, by, value, raw_id=raw_id)
+    result = _numeric_input(session, "7")
+    assert _numeric_action_names(session) == ["click", "replace", "clear", "click"] + (["key"] if focused else [])
+    assert result["status"] == ("passed" if focused else "failed")
+    assert session.recovery_reads == 3
+    assert numeric_focus_clock.sleeps == []
+    _assert_numeric_secret_safe(result, session)
+
+
+def test_numeric_recovery_cancelled_focus_poll_never_dispatches_keys(numeric_focus_clock):
+    session = NumericSession()
+    session.clear_focus = ("value", False)
+    session.recovery_overrides[3] = {"focused": ("value", False)}
+    interruption = CancelledError("observed-private-canary")
+    session.inspect_errors[4] = interruption
+    with pytest.raises(CancelledError) as caught:
+        _numeric_input(session, "7")
+    assert caught.value is interruption
+    assert _numeric_action_names(session) == ["click", "replace", "clear", "click"]
+    assert numeric_focus_clock.sleeps == [0.25]

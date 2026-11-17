@@ -38,6 +38,17 @@ Return only the structured GoalPrePlan output. Key actions should be actionable,
 verification_goal must be exactly one concise string describing the final user-visible outcome that evidence must prove.
 Do not turn intermediate operations into final verification requirements. Do not add unrelated product, account,
 network, performance, visual-regression, or accessibility checks unless explicitly requested by the input.
+Preserve an unsaved, unsubmitted, or unsent terminal state only when the goal explicitly requests that restriction or
+a draft state, for example "do not save", "without submitting", "leave as draft", or "unsent". Such restrictions win.
+Otherwise, when creating an entry, applying settings, or answering an interactive form/challenge requires a clear
+Submit, Save, Done, or OK control to make the requested result effective, include that task-required completion action
+and verify the resulting state. The goal need not literally say "click Submit". Never invent "without submitting"
+or an unsaved-draft goal merely because those words are absent. Do not authorize unrelated or destructive confirmations.
+For click-to-reveal sequences, count requested clicks separately from observed values: the initial visible item can be
+part of the sequence, and the final click can open the answer form rather than reveal another item. Use the complete
+actually observed valid sequence, compute the requested answer, and complete any required authorized submission.
+Do not invent an extra item or abandon submission solely because the UI transitioned to the form. Truly missing or
+contradictory observations remain unverified; planning cannot claim observations or success before execution.
 Use result.to_page_id values from page element operations when describing navigation between pages.
 If optional project or page knowledge is incomplete or absent, still return the best concise contiguous plan and add
 warnings only when missing knowledge materially affects planning confidence. You may skip at most one consecutive

@@ -383,10 +383,15 @@ def test_real_action_timeout_quarantines_without_reconnect_or_cleanup(managed_dr
     driver = managed_driver.driver
     assert driver.launch_app({})["status"] == "passed"
     owner = _observe_owner(managed_driver)
-    with pytest.raises(aca_automation.OperationTimeoutError) as timed_out:
+    with pytest.raises(ToolExecutionError) as timed_out:
         driver.screenshot()
     assert driver._session is owner.session
-    assert timed_out.value.request_state == "response_unknown"
+    assert timed_out.value.context["capture_diagnostics"] == {
+        "backend_code": "operation_timeout",
+        "request_state": "response_unknown",
+        "session_state": "uncertain",
+        "stage": "screenshot",
+    }
     assert owner.session.session_info().state == "uncertain"
     assert os.getpgid(owner.pid) == owner.group_id
     assert owner.drain.is_alive()

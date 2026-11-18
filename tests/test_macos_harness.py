@@ -582,6 +582,7 @@ class FakeMacSession:
         self.lifecycle_calls.append(("quit", None))
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_appium_connect_macos_driver_uses_independent_new_command_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_kwargs: dict[str, object] = {}
 

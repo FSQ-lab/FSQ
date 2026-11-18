@@ -239,6 +239,7 @@ def test_macos_target_requires_ready_managed_appium_runtime(tmp_path: Path, monk
     assert "managed Appium runtime" in message
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_macos_prerequisites_report_each_ready_component_in_stable_order(tmp_path: Path, monkeypatch) -> None:
     app = tmp_path / "Example.app"
     app.mkdir()
@@ -372,6 +373,16 @@ def test_macos_bundle_mismatch_does_not_fall_back_when_app_plist_is_unreadable(t
 
 
 @pytest.fixture
+def ready_macos_runtime(monkeypatch):
+    from fsq_agent.models import PlatformPrerequisiteCheck
+
+    monkeypatch.setattr(
+        "fsq_agent.environments.providers._macos._check_macos_appium_connect_runtime",
+        lambda: PlatformPrerequisiteCheck(identifier="appium_connect_runtime", status="ready", message="Isolated host runtime fixture."),
+    )
+
+
+@pytest.fixture
 def macos_probe_environment(tmp_path: Path, monkeypatch):
     developer = tmp_path / "CustomTools.app" / "Contents" / "Developer"
     builder = developer / "usr" / "bin" / "xcodebuild"
@@ -401,6 +412,7 @@ def macos_probe_environment(tmp_path: Path, monkeypatch):
     )
 
 
+@pytest.mark.usefixtures("ready_macos_runtime")
 def test_custom_active_xcode_satisfies_installation_and_developer_checks(macos_probe_environment) -> None:
     service = PlatformRuntimeService()
     checks = service.check_prerequisites(macos_probe_environment)
@@ -409,6 +421,7 @@ def test_custom_active_xcode_satisfies_installation_and_developer_checks(macos_p
     assert service.check_target_availability(macos_probe_environment, checks)[0] is True
 
 
+@pytest.mark.usefixtures("ready_macos_runtime")
 def test_macos_prerequisites_accept_executable_target(macos_probe_environment, tmp_path: Path) -> None:
     executable = tmp_path / "application"
     executable.write_bytes(b"")
@@ -422,6 +435,7 @@ def test_macos_prerequisites_accept_executable_target(macos_probe_environment, t
     assert service.check_target_availability(macos_probe_environment)[0] is True
 
 
+@pytest.mark.usefixtures("ready_macos_runtime")
 @pytest.mark.parametrize("plist_content", [plistlib.dumps([]), b"not a plist", plistlib.dumps({"CFBundleIdentifier": 7})])
 def test_bad_plist_keeps_other_diagnostics(macos_probe_environment, plist_content: bytes) -> None:
     (macos_probe_environment.harness.macos.app_path / "Contents" / "Info.plist").write_bytes(plist_content)
@@ -432,6 +446,7 @@ def test_bad_plist_keeps_other_diagnostics(macos_probe_environment, plist_conten
     assert all(item.status == "ready" for item in checks[:-1])
 
 
+@pytest.mark.usefixtures("ready_macos_runtime")
 @pytest.mark.parametrize(
     ("helper", "identifier"),
     [
@@ -452,6 +467,7 @@ def test_individual_probe_error_does_not_discard_other_checks(macos_probe_enviro
     assert "private probe detail" not in str(checks)
 
 
+@pytest.mark.usefixtures("ready_macos_runtime")
 def test_executable_in_bundle_checks_its_own_identity(macos_probe_environment, monkeypatch) -> None:
     bundle = macos_probe_environment.harness.macos.app_path
     executable = bundle / "Contents" / "MacOS" / "Example"
@@ -467,6 +483,7 @@ def test_executable_in_bundle_checks_its_own_identity(macos_probe_environment, m
     assert checks[-1].status == "unavailable"
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_macos_runtime_prerequisite_distinguishes_damaged_and_conflict_states(macos_probe_environment, monkeypatch, tmp_path: Path) -> None:
     conflict_root = tmp_path / "conflict-managed-root"
     conflict_root.mkdir()
@@ -495,6 +512,7 @@ def test_macos_runtime_prerequisite_distinguishes_damaged_and_conflict_states(ma
     assert incompatible_checks["appium_connect_runtime"].code == "macos.mac2_driver_incompatible"
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_managed_runtime_repair_commands_construct_valid_runtime_signatures() -> None:
     from appium_connect_agent.contracts import LocalSettings
     from appium_connect_agent.runtime import InstallRequest, Runtime
@@ -513,6 +531,7 @@ def test_managed_runtime_repair_commands_construct_valid_runtime_signatures() ->
         assert "Runtime()" not in command
 
 
+@pytest.mark.usefixtures("macos_android_sdk")
 def test_macos_appium_connect_runtime_probe_is_zero_subprocess_zero_network_and_preserves_managed_root(macos_probe_environment, monkeypatch, tmp_path: Path) -> None:
     import os
     import socket
@@ -586,6 +605,7 @@ def test_macos_appium_connect_runtime_probe_is_zero_subprocess_zero_network_and_
     assert after_snapshot == before_snapshot
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize(
     ("peer_range", "expected_status", "expected_code"),
     [

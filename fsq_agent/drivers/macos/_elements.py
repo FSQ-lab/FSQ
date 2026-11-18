@@ -3,30 +3,9 @@
 
 from xml.etree import ElementTree
 
-SOURCE_LIMIT = 8_000_000
-NODE_LIMIT = 10000
-DEPTH_LIMIT = 128
 TEXT_LIMIT = 50
 LOCATOR_LIMIT = 1024
 TEXT_FIELDS = ("identifier", "name", "label", "value", "title")
-
-
-def parse_source(source: str) -> ElementTree.Element:
-    if len(source) > SOURCE_LIMIT:
-        raise ValueError("source_limit")
-    normalized = source.upper()
-    if "<!DOCTYPE" in normalized or "<!ENTITY" in normalized:
-        raise ElementTree.ParseError("DTD and entity declarations are not allowed.")
-    root = ElementTree.fromstring(source)  # noqa: S314 -- DTD/entities rejected, source size bounded.
-    stack = [(root, 1)]
-    count = 0
-    while stack:
-        node, depth = stack.pop()
-        count += 1
-        if count > NODE_LIMIT or depth > DEPTH_LIMIT:
-            raise ValueError("tree_limit")
-        stack.extend((child, depth + 1) for child in node)
-    return root
 
 
 def candidate(node: ElementTree.Element) -> dict[str, object]:

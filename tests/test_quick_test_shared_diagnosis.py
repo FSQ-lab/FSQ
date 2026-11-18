@@ -35,20 +35,24 @@ def context():
 def pending_facts(*, failing=False):
     return (
         PlatformPrerequisiteCheck(
-            identifier="appium_cli",
+            identifier="appium_connect_runtime",
             status="unavailable" if failing else "ready",
-            code="fixture.appium",
-            message="Shared Appium fact.",
+            code="fixture.runtime",
+            message="Shared managed Appium fact.",
             action="Shared repair." if failing else None,
-            commands=("npm install -g appium",) if failing else (),
+            commands=(
+                "python -c \"from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import Runtime; Runtime(LocalSettings()).ensure_managed_driver('mac2')\"",
+            )
+            if failing
+            else (),
         ),
         PlatformPrerequisiteCheck(
-            identifier="appium_mac2_driver",
+            identifier="xcode_developer_directory",
             status="not_applicable",
             code="fixture.not_applicable",
             message="Original not-applicable fact.",
             action="Original action.",
-            commands=("appium driver doctor mac2",),
+            commands=(),
         ),
         PlatformPrerequisiteCheck(identifier="application_path", status="pending", code="environment.application_pending", message="Awaiting application identity."),
         PlatformPrerequisiteCheck(identifier="bundle_identifier", status="pending", code="environment.application_pending", message="Awaiting application identity."),
@@ -145,27 +149,24 @@ def test_android_unresolved_prerequisites_use_original_selection_and_skip_only_a
     assert next(item for item in selected if item.identifier == "application_installation").status == "pending"
 
 
-def test_macos_unresolved_prerequisites_preserve_blocked_facts_and_commands(monkeypatch):
+def test_macos_unresolved_prerequisites_preserve_managed_runtime_facts_and_commands(monkeypatch, tmp_path):
     from fsq_agent.environments.providers import _macos
 
     monkeypatch.setattr(_macos.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(_macos, "_active_developer_directory", lambda: Path("/Applications/Xcode.app/Contents/Developer"))
     monkeypatch.setattr(_macos, "_developer_directory_is_full_xcode", lambda path: True)
-    monkeypatch.setattr(_macos.shutil, "which", lambda name: None)
-    monkeypatch.setattr(_macos, "_endpoint_available", lambda endpoint: False)
+    monkeypatch.setattr(_macos, "_resolve_first_host_executable", lambda name: Path("/usr/local/bin/node") if name == "node" else None)
+    monkeypatch.setattr(_macos, "_managed_root", lambda: tmp_path / "absent-managed-root")
     monkeypatch.setattr(_macos, "_macos_application_path_available", lambda path: pytest.fail("No previous app path probe"))
     monkeypatch.setattr(_macos, "_macos_bundle_matches_target", lambda *args: pytest.fail("No previous bundle probe"))
     settings = Settings(harness={"platform": "macos"})
     settings.harness.macos.app_path = Path("/Previous.app")
     settings.harness.macos.bundle_id = "com.previous"
-    settings.harness.macos.appium_server_url = "http://127.0.0.1:4723"
     facts = PlatformRuntimeService().check_prerequisites(settings, application_pending=True)
     by_id = {item.identifier: item for item in facts}
-    assert by_id["appium_cli"].status == "unavailable"
-    assert by_id["appium_mac2_driver"].status == "not_applicable"
-    assert by_id["appium_mac2_driver"].commands == ("appium driver install mac2", "appium driver doctor mac2")
-    assert by_id["appium_endpoint"].status == "unavailable"
-    assert by_id["appium_endpoint"].commands == ("appium --address 127.0.0.1 --port 4723",)
+    assert by_id["appium_connect_runtime"].status == "unavailable"
+    assert by_id["appium_connect_runtime"].code == "macos.managed_runtime_uninitialized"
+    assert any("ensure_managed_driver('mac2')" in cmd for cmd in by_id["appium_connect_runtime"].commands)
     assert by_id["application_path"].status == "pending"
     assert by_id["bundle_identifier"].status == "pending"
 

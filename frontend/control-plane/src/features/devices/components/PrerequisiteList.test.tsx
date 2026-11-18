@@ -5,8 +5,8 @@ import { PrerequisiteList } from './PrerequisiteList';
 it('renders pending context separately from failed and not-applicable prerequisite facts', () => {
   render(<PrerequisiteList items={[
     { identifier: 'application_installation', status: 'pending', message: 'Application pending', commands: [] },
-    { identifier: 'appium_mac2_driver', status: 'not_applicable', message: 'Driver check blocked', commands: [] },
-    { identifier: 'appium_cli', status: 'error', message: 'CLI check failed', commands: [] },
+    { identifier: 'bundle_identifier', status: 'not_applicable', message: 'No bundle identifier configured', commands: [] },
+    { identifier: 'appium_connect_runtime', status: 'error', message: 'Managed runtime check failed', commands: [] },
   ]} />);
   expect(screen.getByText('Pending')).toBeVisible();
   expect(screen.getByText('Not applicable')).toBeVisible();
@@ -26,26 +26,27 @@ it('shows failures, distinguishes blocked checks, and collapses passed checks', 
   const copy = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{writeText:copy}});
   render(<PrerequisiteList items={[
-    {identifier:'appium_cli',status:'unavailable',message:'CLI missing',action:'Install Appium',commands:['npm install -g appium']},
-    {identifier:'appium_mac2_driver',status:'not_applicable',message:'Waiting for Appium',commands:[]},
+    {identifier:'appium_connect_runtime',status:'unavailable',message:'Managed runtime missing',action:'Initialize runtime',commands:['python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import InstallRequest, Runtime; Runtime(LocalSettings()).install(InstallRequest())"']},
+    {identifier:'bundle_identifier',status:'not_applicable',message:'Path identity used',commands:[]},
     {identifier:'xcode_installation',status:'ready',message:'Full Xcode is installed',commands:[]},
   ]} />);
-  expect(screen.getByText('CLI missing')).toBeVisible();
-  expect(screen.getByText('Waiting for Appium')).toBeVisible();
+  expect(screen.getByText('Managed runtime missing')).toBeVisible();
+  expect(screen.getByText('Path identity used')).toBeVisible();
   expect(screen.getByText('Full Xcode is installed')).not.toBeVisible();
-  await userEvent.click(screen.getByRole('button',{name:'Copy command: npm install -g appium'}));
-  expect(copy).toHaveBeenCalledWith('npm install -g appium');
-  const commandRow = screen.getByText('npm install -g appium').closest('.prerequisite-command')!;
-  expect(within(commandRow as HTMLElement).getByRole('status')).toHaveTextContent('Copied!');
+  const cmd = 'python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import InstallRequest, Runtime; Runtime(LocalSettings()).install(InstallRequest())"';
+  await userEvent.click(screen.getByRole('button',{name:`Copy command: ${cmd}`}));
+  expect(copy).toHaveBeenCalledWith(cmd);
+  const commandRow = screen.getByText(cmd).closest('.prerequisite-command')!;
   expect(within(commandRow as HTMLElement).getByRole('button')).toHaveAttribute('data-copy-state', 'copied');
 });
 
 it('keeps manual copying available on clipboard failure',async()=>{
   Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:vi.fn().mockRejectedValue(new Error('denied'))}});
-  render(<PrerequisiteList items={[{identifier:'appium_cli',status:'unavailable',message:'Missing',commands:['npm install -g appium']}]}/>);
-  await userEvent.click(screen.getByRole('button',{name:'Copy command: npm install -g appium'}));
+  const cmd = 'python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import Runtime; Runtime(LocalSettings()).ensure_managed_driver(\'mac2\')"';
+  render(<PrerequisiteList items={[{identifier:'appium_connect_runtime',status:'unavailable',message:'Missing',commands:[cmd]}]}/>);
+  await userEvent.click(screen.getByRole('button',{name:`Copy command: ${cmd}`}));
   expect(screen.getByRole('status')).toHaveTextContent('Copy failed');
-  expect(screen.getByText('npm install -g appium')).toBeVisible();
+  expect(screen.getByText(cmd)).toBeVisible();
 });
 
 it('shows local pending feedback and restores the icon after two seconds', async () => {
@@ -53,9 +54,10 @@ it('shows local pending feedback and restores the icon after two seconds', async
   let finish!: () => void;
   const pending = new Promise<void>((resolve) => { finish = resolve; });
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn().mockReturnValue(pending) } });
-  const view = render(<PrerequisiteList items={[{ identifier: 'appium_cli', status: 'unavailable', message: 'Missing', commands: ['npm install -g appium'] }]} />);
+  const cmd = 'python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import Runtime; Runtime(LocalSettings()).ensure_managed_driver(\'mac2\')"';
+  const view = render(<PrerequisiteList items={[{ identifier: 'appium_connect_runtime', status: 'unavailable', message: 'Missing', commands: [cmd] }]} />);
   try {
-    const button = screen.getByRole('button', { name: 'Copy command: npm install -g appium' });
+    const button = screen.getByRole('button', { name: `Copy command: ${cmd}` });
     fireEvent.click(button);
     expect(button).toBeDisabled();
     expect(screen.getByRole('status')).toHaveTextContent('Copying…');
@@ -71,7 +73,7 @@ it('shows local pending feedback and restores the icon after two seconds', async
 it('keeps feedback scoped to each command when clipboard requests resolve out of order', async () => {
   const resolve: (() => void)[] = [];
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn(() => new Promise<void>(done => resolve.push(done))) } });
-  const view = render(<PrerequisiteList items={[{ identifier: 'mac2', status: 'unavailable', message: 'Missing', commands: ['appium driver install mac2', 'appium driver doctor mac2'] }]} />);
+  const view = render(<PrerequisiteList items={[{ identifier: 'appium_connect_runtime', status: 'unavailable', message: 'Missing', commands: ['python -c "Runtime(LocalSettings()).cleanup_installation()"', 'python -c "Runtime(LocalSettings()).install(InstallRequest())"'] }]} />);
   const buttons = screen.getAllByRole('button');
   fireEvent.click(buttons[0]);
   fireEvent.click(buttons[1]);

@@ -25,8 +25,12 @@ MAX_MANAGED_RECORD_BYTES = 64 * 1024
 MAX_MANAGED_METADATA_BYTES = 1024 * 1024
 ALLOWED_MANAGED_ROOT_ENTRIES = frozenset({"managed.json", "appium", "driver-home", "records", "cache", "tmp"})
 SAFE_BASE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9._~-]+$")
-MANAGED_INSTALL_PYTHON_COMMAND = 'python -c "from appium_connect_agent.runtime import InstallRequest, Runtime; Runtime().install(InstallRequest())"'
-MANAGED_CLEANUP_PYTHON_COMMAND = 'python -c "from appium_connect_agent.runtime import Runtime; Runtime().cleanup_installation()"'
+MANAGED_INSTALL_PYTHON_COMMAND = (
+    'python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import InstallRequest, Runtime; Runtime(LocalSettings()).install(InstallRequest())"'
+)
+MANAGED_CLEANUP_PYTHON_COMMAND = (
+    'python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import Runtime; Runtime(LocalSettings()).cleanup_installation()"'
+)
 ERRORS = {
     "adb_missing": ("ADB is unavailable.", "Install Android SDK Platform-Tools and make adb available on PATH."),
     "adb_server_unavailable": ("The existing ADB server is unavailable.", "Start ADB manually at the configured local endpoint, then recheck."),

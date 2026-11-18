@@ -76,7 +76,7 @@ def test_core_public_exports_follow_strict_boundary() -> None:
         "AppiumConnectAndroidDriver",
         "PlaywrightWebDriver",
         "PywinautoWindowsDriver",
-        "AppiumMac2Driver",
+        "AppiumConnectMacOSDriver",
         "DefaultCapabilityDefinitionFactory",
         "DefaultDriverFactory",
         "DefaultHarnessFactory",

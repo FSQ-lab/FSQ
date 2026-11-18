@@ -191,32 +191,14 @@ env: {{}}
     return workspace
 
 
-def test_load_workspace_platform_settings_macos_appium_url_reads_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = _macos_workspace(tmp_path, "macos-env-url")
+def test_load_workspace_platform_settings_macos_uses_appium_connect_agent_preset_and_ignores_url_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = _macos_workspace(tmp_path, "macos-preset")
     monkeypatch.setenv("FSQ_MACOS_APPIUM_SERVER_URL", "http://appium.example:4777")
 
     settings = load_workspace_platform_settings(workspace, "macos")
 
-    assert settings.harness.macos.appium_server_url == "http://appium.example:4777"
-
-
-def test_load_workspace_platform_settings_macos_appium_url_defaults_to_preset(
-    tmp_path: Path,
-) -> None:
-    workspace = _macos_workspace(tmp_path, "macos-preset-url")
-
-    settings = load_workspace_platform_settings(workspace, "macos")
-
-    assert settings.harness.macos.appium_server_url == "http://127.0.0.1:4723"
-
-
-def test_load_workspace_platform_settings_macos_ignores_blank_appium_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = _macos_workspace(tmp_path, "macos-blank-env")
-    monkeypatch.setenv("FSQ_MACOS_APPIUM_SERVER_URL", "   ")
-
-    settings = load_workspace_platform_settings(workspace, "macos")
-
-    assert settings.harness.macos.appium_server_url == "http://127.0.0.1:4723"
+    assert settings.harness.macos.backend == "appium_connect_agent"
+    assert not hasattr(settings.harness.macos, "appium_server_url")
 
 
 def test_validate_runtime_settings_rejects_workspace_macos_path_that_is_not_bundle_or_executable(
@@ -231,7 +213,7 @@ def test_validate_runtime_settings_rejects_workspace_macos_path_that_is_not_bund
         """
 harness:
  platform: macos
- macos: {backend: appium_mac2, appium_server_url: "http://127.0.0.1:4723"}
+ macos: {backend: appium_connect_agent}
 """,
         encoding="utf-8",
     )
@@ -556,7 +538,6 @@ harness:
     assert settings.harness.windows.backend_kind == "uia"
     assert settings.harness.windows.window_title_re is None
     assert settings.harness.windows.launch_args == []
-    assert settings.harness.macos.appium_server_url is None
     assert settings.harness.macos.bundle_id is None
     assert settings.harness.macos.app_path is None
 
@@ -736,8 +717,7 @@ def test_load_settings_accepts_macos_harness_yaml_and_runtime_target(tmp_path: P
 harness:
   platform: macos
   macos:
-    backend: appium_mac2
-    appium_server_url: "http://127.0.0.1:4723"
+    backend: appium_connect_agent
     page_source_max_depth: 8
     action_timeout_seconds: 15
     new_command_timeout_seconds: 420
@@ -753,16 +733,15 @@ harness:
     validate_runtime_settings(settings)
     validate_strict_core_settings(settings)
     assert settings.harness.platform == "macos"
-    assert settings.harness.macos.backend == "appium_mac2"
+    assert settings.harness.macos.backend == "appium_connect_agent"
     assert settings.harness.macos.page_source_max_depth == 8
     assert settings.harness.macos.action_timeout_seconds == 15
     assert settings.harness.macos.new_command_timeout_seconds == 420
-    assert settings.harness.macos.appium_server_url == "http://127.0.0.1:4723"
     assert settings.harness.macos.bundle_id == "com.example.MacApp"
     assert settings.harness.macos.app_path == app_path
 
 
-def test_load_settings_accepts_macos_appium_server_url_from_yaml(tmp_path: Path) -> None:
+def test_load_settings_rejects_removed_macos_appium_server_url_key(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         _base_config(
@@ -771,16 +750,15 @@ def test_load_settings_accepts_macos_appium_server_url_from_yaml(tmp_path: Path)
 harness:
   platform: macos
   macos:
-    backend: appium_mac2
+    backend: appium_connect_agent
     appium_server_url: http://127.0.0.1:4723
 """,
         ),
         encoding="utf-8",
     )
 
-    settings = load_settings(config_path)
-
-    assert settings.harness.macos.appium_server_url == "http://127.0.0.1:4723"
+    with pytest.raises(ConfigurationError):
+        load_settings(config_path)
 
 
 def test_validate_runtime_settings_rejects_missing_macos_settings(tmp_path: Path) -> None:
@@ -792,17 +770,13 @@ def test_validate_runtime_settings_rejects_missing_macos_settings(tmp_path: Path
 harness:
   platform: macos
   macos:
-    backend: appium_mac2
+    backend: appium_connect_agent
 """,
         ),
         encoding="utf-8",
     )
     settings = load_settings(config_path)
 
-    with pytest.raises(ConfigurationError, match=r"harness\.macos\.appium_server_url"):
-        validate_runtime_settings(settings)
-
-    settings.harness.macos.appium_server_url = "http://127.0.0.1:4723"
     with pytest.raises(ConfigurationError, match="app identity"):
         validate_runtime_settings(settings)
 

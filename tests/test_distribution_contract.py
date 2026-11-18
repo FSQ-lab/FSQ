@@ -87,10 +87,11 @@ def test_default_distribution_contract() -> None:
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
-    for name in ("playwright", "pywinauto", "pillow", "Appium-Python-Client", "selenium"):
+    for name in ("playwright", "pywinauto", "pillow"):
         assert any(dependency.startswith(f"{name}==") for dependency in dependencies)
     assert any(dependency.startswith("appium-connect-agent @ git+https://github.com/FSQ-lab/appium-connect-agent.git@") for dependency in dependencies)
-    assert not any(dependency.startswith("uiautomator2") for dependency in dependencies)
+    for retired in ("uiautomator2", "Appium-Python-Client", "selenium"):
+        assert not any(dependency.startswith(retired) for dependency in dependencies)
     assert set(metadata["optional-dependencies"]) == {"dev"}
     assert metadata["scripts"] == {
         "fsq": "fsq_agent.adapters.cli:main",

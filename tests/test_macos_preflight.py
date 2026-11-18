@@ -29,7 +29,7 @@ def diagnosis(*, ready=True, provider=True):
             )
         },
         commands={"case_test": ok if ready else bad, "case_test_suggest": ok if ready and provider else bad, "case_create": ok if ready and provider else bad},
-        prerequisites=[DoctorPrerequisite(identifier="appium_endpoint", status="ready" if ready else "unavailable", message="Endpoint status.", commands=[])],
+        prerequisites=[DoctorPrerequisite(identifier="appium_connect_runtime", status="ready" if ready else "unavailable", message="Managed runtime status.", commands=[])],
     )
 
 
@@ -68,7 +68,7 @@ def test_start_failure_does_not_execute_or_leave_busy(monkeypatch, tmp_path):
     code, payload = server._start_run({"workspaceName": "test", "platform": "macos", "mode": "explore", "targetId": "macos-app", "goal": "Open Edge"})
     assert code == 400
     assert payload["code"] == "macos_preflight_failed"
-    assert payload["details"]["prerequisites"][0]["identifier"] == "appium_endpoint"
+    assert payload["details"]["prerequisites"][0]["identifier"] == "appium_connect_runtime"
     assert not any(tmp_path.iterdir())
     assert server.state.bootstrap()["busy"] is False
 

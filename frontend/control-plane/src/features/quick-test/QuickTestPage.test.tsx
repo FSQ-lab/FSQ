@@ -29,8 +29,8 @@ afterEach(() => vi.restoreAllMocks());
 const props = { active: true, onCaseManager: vi.fn(), onOpenReport: vi.fn() };
 it.each(['android', 'macos'] as const)('F001: directly reuses %s pending diagnostics, copy, passed disclosure, guide and recheck', async platform => {
   const diagnostics = quickDiagnostics(platform, platform === 'android' ? 'serial' : null);
-  const command = platform === 'android' ? 'adb start-server' : 'appium driver install mac2';
-  diagnostics.prerequisites.push({ identifier: platform === 'android' ? 'adb_server' : 'appium_mac2_driver', status: 'unavailable', code: 'runtime.missing', message: 'Independent runtime check failed.', action: 'Install manually.', commands: [command] });
+  const command = platform === 'android' ? 'adb start-server' : 'python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import Runtime; Runtime(LocalSettings()).ensure_managed_driver(\'mac2\')"';
+  diagnostics.prerequisites.push({ identifier: platform === 'android' ? 'adb_server' : 'appium_connect_runtime', status: 'unavailable', code: 'runtime.missing', message: 'Independent runtime check failed.', action: 'Install manually.', commands: [command] });
   diagnostics.commands.prepare = { status: 'unavailable', code: 'runtime.missing', message: 'Independent runtime check failed.', action: 'Install manually.' };
   const user = userEvent.setup();
   const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
@@ -55,7 +55,7 @@ it.each(['android', 'macos'] as const)('F001: directly reuses %s pending diagnos
   expect(copy).toHaveBeenCalledWith(command);
   expect(within(environment).getByText('Copied!')).toBeVisible();
   await user.click(within(environment).getByText('Show passed checks (1)'));
-  expect(within(environment).getByText(platform === 'android' ? 'ADB CLI' : 'Appium CLI')).toBeVisible();
+  expect(within(environment).getByText(platform === 'android' ? 'ADB CLI' : 'Full Xcode')).toBeVisible();
   expect(within(environment).getByText(/Checked at/)).toBeInTheDocument();
   const guide = within(environment).getByText(/installation and troubleshooting/, { selector: 'summary' });
   await user.click(guide);

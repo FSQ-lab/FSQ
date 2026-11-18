@@ -6,7 +6,6 @@ from __future__ import annotations
 import platform
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import urlparse
 
 from fsq_agent.environments.providers._android import ANDROID_RUNTIME_PROVIDER, android_prerequisites
 from fsq_agent.environments.providers._macos import MACOS_RUNTIME_PROVIDER, _macos_prerequisites
@@ -114,7 +113,6 @@ def _target_configuration_valid(settings, service: PlatformRuntimeService) -> bo
     if selected == "macos":
         executable = settings.harness.macos.app_path
         has_identity = bool((settings.harness.macos.bundle_id or "").strip()) or executable is not None
-        endpoint = urlparse(settings.harness.macos.appium_server_url or "")
         path_valid = executable is None or (Path(executable).exists() and (Path(executable).suffix.casefold() == ".app" or Path(executable).is_file()))
-        return has_identity and path_valid and endpoint.scheme in {"http", "https"} and bool(endpoint.hostname) and endpoint.port is not None
+        return has_identity and path_valid
     return False

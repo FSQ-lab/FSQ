@@ -17,7 +17,7 @@ from fsq_agent.capabilities import (
 )
 from fsq_agent.core import CapabilityRegistry, CommonPlatformTools
 from fsq_agent.core.harness._appium_connect_android_driver import AppiumConnectAndroidDriver
-from fsq_agent.core.harness._appium_mac2_driver import AppiumMac2Driver
+from fsq_agent.core.harness._appium_connect_macos_driver import AppiumConnectMacOSDriver
 from fsq_agent.core.harness._driver_tools import _discover_driver_capability_definitions
 from fsq_agent.core.harness._playwright_driver import PlaywrightWebDriver
 from fsq_agent.models import CapabilityDefinition, ConfigurationError, ReplayPolicy
@@ -285,13 +285,13 @@ def test_playwright_web_driver_declarations_keep_catalog_backed_metadata() -> No
     assert definitions["assert_with_ai"].metadata["driver_method"] == "assert_with_ai"
 
 
-def test_appium_mac2_driver_declarations_keep_catalog_backed_metadata() -> None:
+def test_appium_connect_macos_driver_declarations_keep_catalog_backed_metadata() -> None:
     definitions = {
         definition.name: definition
         for definition in _discover_driver_capability_definitions(
-            AppiumMac2Driver,
+            AppiumConnectMacOSDriver,
             platform="macos",
-            metadata={"driver_class": "AppiumMac2Driver", "backend": "appium_mac2"},
+            metadata={"driver_class": "AppiumConnectMacOSDriver", "backend": "appium_connect_agent"},
         )
     }
 
@@ -299,7 +299,7 @@ def test_appium_mac2_driver_declarations_keep_catalog_backed_metadata() -> None:
     assert click.executor_kind == "driver"
     assert click.owner == "driver"
     assert click.platform == "macos"
-    assert click.backend == "appium_mac2"
+    assert click.backend == "appium_connect_agent"
     assert click.metadata["driver_method"] == "click_on"
     assert click.metadata["fsq_action_name"] == "clickOn"
     assert click.replay == ReplayPolicy(kind="fsq_command", alias="clickOn")
@@ -342,7 +342,7 @@ def test_macos_registry_uses_macos_only_platform_capabilities_without_appium_imp
     assert "tap_on" not in definitions
     assert definitions["click_on"].executor_kind == "driver"
     assert definitions["click_on"].platform == "macos"
-    assert definitions["click_on"].backend == "appium_mac2"
+    assert definitions["click_on"].backend == "appium_connect_agent"
     assert definitions["click_on"].metadata["driver_method"] == "click_on"
     assert definitions["ui_snapshot"].replay == ReplayPolicy(kind="fsq_command", alias="uiSnapshot")
     assert definitions["ui_snapshot"].step_kind == "observation"

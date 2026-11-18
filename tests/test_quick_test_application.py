@@ -352,13 +352,13 @@ def test_missing_provider_prevents_inference_and_preserves_runtime_checks(monkey
         prepare_quick_test(request(ready))
 
 
-def test_targetless_context_honors_operator_appium_endpoint(ready, monkeypatch):
+def test_targetless_context_ignores_removed_macos_appium_endpoint_env(ready, monkeypatch):
     observed = []
     monkeypatch.setenv("FSQ_MACOS_APPIUM_SERVER_URL", "http://127.0.0.1:4799")
-    monkeypatch.setattr(PlatformRuntimeService, "check_prerequisites", lambda self, settings, **kwargs: observed.append(settings.harness.macos.appium_server_url) or ())
+    monkeypatch.setattr(PlatformRuntimeService, "check_prerequisites", lambda self, settings, **kwargs: observed.append(settings.harness.macos.backend) or ())
     context = get_quick_test_context(QuickTestContextRequest(platform="macos", user_config_root=ready))
     assert context.can_start
-    assert observed == ["http://127.0.0.1:4799"]
+    assert observed == ["appium_connect_agent"]
 
 
 def test_context_probe_errors_preserve_independent_provider_facts(ready, monkeypatch):

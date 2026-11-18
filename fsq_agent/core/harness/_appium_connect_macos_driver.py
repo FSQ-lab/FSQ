@@ -4,5 +4,5 @@
 import importlib
 import sys
 
-_canonical = importlib.import_module("fsq_agent.drivers.macos._appium_mac2")
+_canonical = importlib.import_module("fsq_agent.drivers.macos._appium_connect")
 sys.modules[__name__] = _canonical

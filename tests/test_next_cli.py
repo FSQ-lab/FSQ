@@ -101,7 +101,7 @@ def _doctor_result(tmp_path: Path, *, status: str = "partial") -> DoctorResult:
             DoctorPlatformResult(
                 platform="web",
                 status=status,
-                prerequisites=[DoctorPrerequisite(identifier="appium_cli", status="unavailable", message="Appium unavailable.", action="Install Appium.")],
+                prerequisites=[DoctorPrerequisite(identifier="appium_connect_runtime", status="unavailable", message="Managed runtime unavailable.", action="Initialize managed runtime.")],
                 checks=checks,
                 commands=commands,
             )
@@ -131,7 +131,7 @@ def test_doctor_human_output_shows_command_matrix_and_actions(tmp_path: Path, mo
     assert result.exit_code == 0
     assert "Workspace: checkout" in result.output
     assert "Prerequisites" in result.output
-    assert "Appium CLI" in result.output
+    assert "Managed Appium runtime" in result.output
     assert "fsq case test --suggest" in result.output
     assert "Provider unavailable." in result.output
     assert "Action: Configure Provider." in result.output

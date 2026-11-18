@@ -7,7 +7,7 @@ export function quickDiagnostics(platform: PlatformId = 'macos', targetId: strin
   return {
     workspaceName: null, platformId: platform, workspace: pending, platform: pending, provider: ready, target: platform === 'web' ? ready : pending, strict: pending,
     prerequisites: platform === 'android' || platform === 'macos' ? [
-      { identifier: platform === 'android' ? 'adb_cli' : 'appium_cli', ...ready, commands: [] },
+      { identifier: platform === 'android' ? 'adb_cli' : 'xcode_installation', ...ready, commands: [] },
       { identifier: 'application_installation', ...pending, commands: [] },
       { identifier: 'suggestion_analyzer', ...notApplicable, commands: [] },
     ] : [],

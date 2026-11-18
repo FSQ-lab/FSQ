@@ -140,20 +140,25 @@ def test_doctor_projects_macos_prerequisites_and_collects_actions(tmp_path: Path
         "fsq_agent.application.doctor.PlatformRuntimeService.check_prerequisites",
         lambda *_args: (
             PlatformPrerequisiteCheck(identifier="xcode_installation", status="unavailable", message="Full Xcode is unavailable.", action="Install full Xcode from the Mac App Store."),
-            PlatformPrerequisiteCheck(identifier="appium_cli", status="unavailable", message="Appium CLI is unavailable.", action="Install Appium CLI with npm."),
+            PlatformPrerequisiteCheck(
+                identifier="appium_connect_runtime",
+                status="unavailable",
+                message="Managed Appium runtime is uninitialized.",
+                action="Initialize the managed Appium runtime.",
+            ),
         ),
     )
 
     result = diagnose_workspace(DoctorRequest(current_directory=tmp_path))
 
-    assert [item.identifier for item in result.platforms[0].prerequisites] == ["xcode_installation", "appium_cli"]
-    assert result.actions[:2] == ("Install full Xcode from the Mac App Store.", "Install Appium CLI with npm.")
+    assert [item.identifier for item in result.platforms[0].prerequisites] == ["xcode_installation", "appium_connect_runtime"]
+    assert result.actions[:2] == ("Install full Xcode from the Mac App Store.", "Initialize the managed Appium runtime.")
 
 
 def test_doctor_reuses_one_prerequisite_snapshot_for_target_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _base(monkeypatch, tmp_path, [_platform("macos", tmp_path)])
     calls = []
-    facts = (PlatformPrerequisiteCheck(identifier="appium_endpoint", status="ready", message="ready"),)
+    facts = (PlatformPrerequisiteCheck(identifier="appium_connect_runtime", status="ready", message="ready"),)
     monkeypatch.setattr("fsq_agent.application.doctor.PlatformRuntimeService.check_prerequisites", lambda *_args: calls.append("prerequisites") or facts)
     monkeypatch.setattr(
         "fsq_agent.application.doctor.PlatformRuntimeService.check_target_availability",
@@ -431,15 +436,14 @@ def test_doctor_distinguishes_missing_target_from_untrusted_config(tmp_path: Pat
     monkeypatch.setattr("fsq_agent.environments._service.platform.system", lambda: "Darwin")
     monkeypatch.setattr("fsq_agent.environments.providers._macos._active_developer_directory", lambda: None)
     monkeypatch.setattr("fsq_agent.environments.providers._macos._full_xcode_path", lambda: None)
-    monkeypatch.setattr("fsq_agent.environments.providers._macos.shutil.which", lambda _name: None)
-    monkeypatch.setattr("fsq_agent.environments.providers._macos._endpoint_available", lambda _url: False)
+    monkeypatch.setattr("fsq_agent.environments.providers._macos._resolve_first_host_executable", lambda _name: None)
     monkeypatch.setattr(PlatformRuntimeService, "check", lambda _self, platform: PlatformRuntimeCheck(platform=platform, ready=True, status="ready", message="ready"))
 
     assert inspect_registered_workspace("checkout").platforms[0].status == "unavailable"
     result = diagnose_workspace(DoctorRequest(current_directory=tmp_path)).platforms[0]
     if defect == "missing_app":
         assert result.checks.configuration.status == "ready"
-        assert len(result.prerequisites) == 7
+        assert len(result.prerequisites) == 5
         assert next(item for item in result.prerequisites if item.identifier == "application_path").status == "unavailable"
     else:
         assert result.checks.configuration.status == "error"

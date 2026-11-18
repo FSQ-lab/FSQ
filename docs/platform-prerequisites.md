@@ -8,7 +8,7 @@ Provide an installed Chromium-family browser. Supported channels are `chromium`,
 
 ## Android
 
-ADB and Node.js (`^20.19.0 || ^22.12.0 || >=24.0.0`) must be on `PATH`, `JAVA_HOME` and `ANDROID_HOME`/`ANDROID_SDK_ROOT` must point to valid JDK and Android SDK installations, the managed Appium 3.7.0 + UiAutomator2 8.7.0 runtime root (`~/.appium-connect-agent/`) must be initialized via `Runtime().install(InstallRequest())`, an online authorized device must be visible to an existing local ADB server, and the target application must already be installed. Device connection, managed runtime preparation, and authorization remain operator responsibilities; FSQ does not connect, authorize, or install devices, runtimes, or applications during readiness checks.
+ADB and Node.js (`^20.19.0 || ^22.12.0 || >=24.0.0`) must be on `PATH`, `JAVA_HOME` and `ANDROID_HOME`/`ANDROID_SDK_ROOT` must point to valid JDK and Android SDK installations, the managed Appium 3.7.0 + UiAutomator2 8.7.0 runtime root (`~/.appium-connect-agent/`) must be initialized via `Runtime(LocalSettings()).install(InstallRequest())`, an online authorized device must be visible to an existing local ADB server, and the target application must already be installed. Device connection, managed runtime preparation, and authorization remain operator responsibilities; FSQ does not connect, authorize, or install devices, runtimes, or applications during readiness checks.
 
 ## Windows
 
@@ -16,7 +16,7 @@ Run on Windows with an existing application path and an interactive desktop sess
 
 ## macOS
 
-Run on macOS with full Xcode, Appium CLI, the Appium Mac2 driver, an already reachable Appium service, and an existing application identified by bundle id, application path, or both. Command Line Tools alone are insufficient.
+Run on macOS with full Xcode, Node.js (`^20.19.0 || ^22.12.0 || >=24.0.0`) on `PATH`, the managed Appium 3.7.0 + Mac2 driver runtime root (`~/.appium-connect-agent/`), and an existing application identified by bundle id, application path, or both. Command Line Tools alone are insufficient.
 
 1. Install full Xcode from the Mac App Store, launch it once, and complete Apple's requested setup.
 2. Select it as the active developer directory and accept its license when required. If Xcode is installed elsewhere, use that installation's `Contents/Developer` path:
@@ -26,24 +26,17 @@ Run on macOS with full Xcode, Appium CLI, the Appium Mac2 driver, an already rea
    sudo xcodebuild -license accept
    ```
 
-3. Install Appium and its Mac2 driver using the operator's approved Node/npm environment:
+3. Ensure Node.js (`^20.19.0 || ^22.12.0 || >=24.0.0`) is on `PATH`, then initialize the managed Appium 3.7.0 runtime and official Mac2 driver once in the FSQ Python environment when needed:
 
    ```bash
-   npm install -g appium
-   appium driver install mac2
-   appium driver doctor mac2
+   python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import InstallRequest, Runtime; Runtime(LocalSettings()).install(InstallRequest())"
+   python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import Runtime; Runtime(LocalSettings()).ensure_managed_driver('mac2')"
    ```
 
-4. Start the service at the configured endpoint (the default is `http://127.0.0.1:4723`):
-
-   ```bash
-   appium --address 127.0.0.1 --port 4723
-   ```
-
-5. Configure an existing application bundle or executable path, a bundle identifier, or both, then run `fsq doctor` from the registered Workspace root. For Microsoft Edge Stable, the usual values are `/Applications/Microsoft Edge.app` and `com.microsoft.edgemac`. When both are configured, the identifier must match the specified application's `Info.plist`; an executable inside a bundle uses the enclosing bundle's identity.
+4. Configure an existing application bundle or executable path, a bundle identifier, or both, then run `fsq doctor` from the registered Workspace root. For Microsoft Edge Stable, the usual values are `/Applications/Microsoft Edge.app` and `com.microsoft.edgemac`. When both are configured, the identifier must match the specified application's `Info.plist`; an executable inside a bundle uses the enclosing bundle's identity.
 
 Doctor still lists independent host checks if the configured application has been moved or uninstalled. Restore it or update its configured path. A damaged `Info.plist` affects the bundle identifier check without discarding the other results. An invalid Workspace document or mismatched Workspace identity must be repaired before target diagnosis.
 
-If macOS prompts for Accessibility or Automation access during an actual test, grant only the permissions appropriate for the operator's environment. Doctor does not trigger those prompts or claim that permission state is ready. It reports full Xcode, the active developer directory, Appium CLI, Mac2 driver, Appium endpoint, application path, and bundle identifier separately. FSQ does not install these dependencies, accept licenses, change system settings, grant permissions, start Appium, or launch the target during diagnosis.
+If macOS prompts for Accessibility or Automation access during an actual test, grant only the permissions appropriate for the operator's environment. Doctor does not trigger those prompts or claim that permission state is ready. It reports full Xcode, the active developer directory, the managed Appium + Mac2 runtime, application path, and bundle identifier separately. Normal execution starts and stops its own managed loopback Appium process and Mac2 session on demand; FSQ does not install these dependencies, accept licenses, change system settings, grant permissions, start Appium, or launch the target during diagnosis.
 
 Run `fsq doctor` from the exact registered Workspace root. Doctor does not authenticate interactively, invoke a model, launch a target, create an external session, or repair the host.

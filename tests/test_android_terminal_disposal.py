@@ -21,14 +21,12 @@ from fsq_agent.models import AndroidHarnessSettings, ToolExecutionError
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-aca_automation = pytest.importorskip("appium_connect_agent.automation", reason="Android lifecycle verification requires appium-connect-agent.")
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "darwin", reason="Real SDK managed ownership proof requires macOS and its trusted /usr/sbin/lsof."),
-    pytest.mark.skipif(
-        not callable(getattr(aca_automation.Session, "dispose", None)),
-        reason="Pinned SDK predates public Session.dispose; use the audited terminal-disposal SDK source on temporary PYTHONPATH without installing or upgrading it.",
-    ),
-]
+if sys.platform != "darwin":
+    pytest.skip("Real SDK managed ownership proof requires macOS and its trusted /usr/sbin/lsof.", allow_module_level=True)
+
+from appium_connect_agent import automation as aca_automation
+
+assert callable(aca_automation.Session.dispose), "The mandatory pinned SDK must provide public Session.dispose."
 
 # This is only a local wire peer. Runtime, Session, usage/generation authority,
 # account locking, process ownership proof, draining, and cleanup remain real SDK code.
@@ -37,6 +35,7 @@ import json
 import os
 import signal
 import socket
+import socketserver
 import sys
 import time
 from pathlib import Path
@@ -137,7 +136,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.respond(None)
     def log_message(self, format, *args):
         pass
-http.server.ThreadingHTTPServer((host, port), Handler).serve_forever()
+# HTTPServer.server_bind performs reverse DNS even for numeric loopback. A new
+# peer process must not spend its managed-startup budget in the host resolver.
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address
+
+LoopbackHTTPServer((host, port), Handler).serve_forever()
 """
 
 
@@ -384,7 +390,7 @@ def test_real_action_timeout_quarantines_without_reconnect_or_cleanup(managed_dr
     assert driver.launch_app({})["status"] == "passed"
     owner = _observe_owner(managed_driver)
     with pytest.raises(ToolExecutionError) as timed_out:
-        driver.screenshot()
+        driver.screenshot({"timeout_seconds": 0.25})
     assert driver._session is owner.session
     assert timed_out.value.context["capture_diagnostics"] == {
         "backend_code": "operation_timeout",

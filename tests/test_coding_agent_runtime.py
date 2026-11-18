@@ -2828,9 +2828,9 @@ async def test_write_budget_survives_actual_filter_externalization_without_ui_bo
     assert entry.output == raw
     assert output_filter((entry,))[1] == replacement
     if artifact_available:
-        assert output_filter.artifact_paths_by_call_id["large-snapshot"] in replacement
         artifacts = list(tmp_path.rglob("*.json"))
         assert len(artifacts) == 1
+        assert Path(projected["artifact"]["path"]) == artifacts[0]
         assert json.loads(artifacts[0].read_text())["content"] == raw
     else:
         assert "omitted" in replacement

@@ -87,10 +87,12 @@ async def test_file_reads_do_not_search_roots_or_invent_missing_prefixes(tmp_pat
         await file_ops.read_text({"path": "shared.md"})
     assert (await file_ops.read_text({"path": "cases/android/shared.md"})).output == "case copy"
     assert (await file_ops.read_text({"path": "knowledge/android/shared.md"})).output == "knowledge copy"
+    for root in (knowledge, cases):
+        decoy = root / "cases" / "android" / "missing.yaml"
+        decoy.parent.mkdir(parents=True)
+        decoy.write_text("wrong-prefix content", encoding="utf-8")
     missing = await file_ops.read_text({"path": "cases/android/missing.yaml"})
     assert missing.status == "failed"
-    assert str(cases / "missing.yaml") in missing.error
-    assert str(knowledge / "cases") not in missing.error
 
 
 @pytest.mark.asyncio

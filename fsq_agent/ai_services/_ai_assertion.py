@@ -64,6 +64,162 @@ class _AndroidInputError(Exception):
         super().__init__(code)
 
 
+def _read_android_capture_descriptor(descriptor: int, max_bytes: int) -> bytes:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        raise _AndroidInputError("artifact_containment_violation")
+    if info.st_size > max_bytes:
+        raise _AndroidInputError("budget_exceeded")
+    with os.fdopen(descriptor, "rb", closefd=False) as source:
+        return source.read(max_bytes + 1)
+
+
+def _read_windows_android_capture(run_dir: Path, relative: Path, max_bytes: int) -> bytes:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = (("length", wintypes.USHORT), ("maximum_length", wintypes.USHORT), ("buffer", wintypes.LPWSTR))
+
+    class _ObjectAttributes(ctypes.Structure):
+        _fields_ = (
+            ("length", wintypes.ULONG),
+            ("root_directory", wintypes.HANDLE),
+            ("object_name", ctypes.POINTER(_UnicodeString)),
+            ("attributes", wintypes.ULONG),
+            ("security_descriptor", wintypes.LPVOID),
+            ("security_quality_of_service", wintypes.LPVOID),
+        )
+
+    class _IoStatusBlock(ctypes.Structure):
+        # The first member is the pointer-sized NTSTATUS/Pointer union.
+        _fields_ = (("status", ctypes.c_void_p), ("information", ctypes.c_size_t))
+
+    class _AttributeTagInfo(ctypes.Structure):
+        _fields_ = (("attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD))
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create_file.restype = wintypes.HANDLE
+    open_relative = ntdll.NtCreateFile
+    open_relative.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.DWORD,
+        ctypes.POINTER(_ObjectAttributes),
+        ctypes.POINTER(_IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+    ]
+    open_relative.restype = wintypes.LONG
+    get_attributes = kernel32.GetFileInformationByHandleEx
+    get_attributes.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    get_attributes.restype = wintypes.BOOL
+    get_type = kernel32.GetFileType
+    get_type.argtypes = [wintypes.HANDLE]
+    get_type.restype = wintypes.DWORD
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    def check_handle(handle: int, *, directory: bool) -> None:
+        if get_type(handle) != 1:  # FILE_TYPE_DISK, never a device or pipe.
+            raise _AndroidInputError("artifact_containment_violation")
+        info = _AttributeTagInfo()
+        if not get_attributes(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):  # FileAttributeTagInfo
+            raise _AndroidInputError("capture_failed")
+        if info.attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT or bool(info.attributes & stat.FILE_ATTRIBUTE_DIRECTORY) != directory:
+            raise _AndroidInputError("artifact_containment_violation")
+
+    # OPEN_REPARSE_POINT inspects the Run itself, not a redirected target. Its
+    # ancestors are trusted, as with the POSIX Run-directory open below.
+    root = str(run_dir.absolute())
+    if "\x00" in root:
+        raise _AndroidInputError("artifact_containment_violation")
+    read_attributes, synchronize = 0x80, 0x100000
+    traverse, read_data = 0x20, 0x1
+    share_read, file_open = 0x1, 0x1
+    open_reparse_point, synchronous_io = 0x200000, 0x20
+    root_handle = create_file(root, read_attributes | traverse | synchronize, share_read, None, 3, 0x02000000 | 0x00200000, None)
+    if root_handle == wintypes.HANDLE(-1).value:
+        raise _AndroidInputError("capture_failed")
+    handles = [root_handle]
+    completed = False
+    try:
+        check_handle(root_handle, directory=True)
+        for index, component in enumerate(relative.parts):
+            name_buffer = ctypes.create_unicode_buffer(component)
+            name_length = ctypes.sizeof(name_buffer) - ctypes.sizeof(ctypes.c_wchar)
+            if name_length > 65532:
+                raise _AndroidInputError("artifact_containment_violation")
+            name = _UnicodeString(name_length, name_length + 2, ctypes.cast(name_buffer, wintypes.LPWSTR))
+            # RootDirectory anchors this single component to the preceding live
+            # handle. OBJ_DONT_REPARSE fails name parsing rather than following
+            # any reparse point; OPEN_REPARSE_POINT also lets us reject its tag.
+            attributes = _ObjectAttributes(ctypes.sizeof(_ObjectAttributes), handles[-1], ctypes.pointer(name), 0x40 | 0x1000, None, None)
+            handle, status = wintypes.HANDLE(), _IoStatusBlock()
+            directory = index < len(relative.parts) - 1
+            access = read_attributes | synchronize | (traverse if directory else read_data)
+            result = open_relative(ctypes.byref(handle), access, ctypes.byref(attributes), ctypes.byref(status), None, 0, share_read, file_open, open_reparse_point | synchronous_io, None, 0)
+            if result < 0:
+                if result & 0xFFFFFFFF in {0xC000050B, 0x8000002D, 0xC0000279}:  # Reparse encountered, stopped on symlink, unhandled tag.
+                    raise _AndroidInputError("artifact_containment_violation")
+                raise _AndroidInputError("capture_failed")
+            handles.append(handle.value)
+            check_handle(handle.value, directory=directory)
+        # No pathname is reopened after containment proof. The CRT takes sole
+        # ownership of the final handle; all parent handles stay pinned through
+        # the read, without FILE_SHARE_WRITE/DELETE permitting a replacement.
+        descriptor = msvcrt.open_osfhandle(handles[-1], os.O_RDONLY | os.O_BINARY | os.O_NOINHERIT)
+        handles.pop()
+        try:
+            image = _read_android_capture_descriptor(descriptor, max_bytes)
+        finally:
+            os.close(descriptor)
+        completed = True
+        return image
+    finally:
+        close_failed = False
+        for handle in reversed(handles):
+            if not close_handle(handle):
+                close_failed = True
+        if close_failed and completed:
+            raise _AndroidInputError("capture_failed")
+
+
+def _read_android_capture(run_dir: Path, relative: Path, max_bytes: int) -> bytes:
+    descriptors: list[int] = []
+    try:
+        if os.name == "nt":
+            return _read_windows_android_capture(run_dir, relative, max_bytes)
+        # Each component is relative to the trusted Run descriptor. No symlink
+        # is followed, and no escaping target is read before containment proof.
+        directory = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(directory)
+        for component in relative.parts[:-1]:
+            directory = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            descriptors.append(directory)
+        descriptor = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        descriptors.append(descriptor)
+        return _read_android_capture_descriptor(descriptor, max_bytes)
+    except OSError as exc:
+        import errno
+
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise _AndroidInputError("artifact_containment_violation") from None
+        raise _AndroidInputError("capture_failed") from None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 class AIAssertionEvaluator:
     def __init__(self, session: ModelProviderSession, *, reasoning_effort: ReasoningEffort = "mid") -> None:
         self.session = session
@@ -317,8 +473,8 @@ class AIAssertionEvaluator:
             raise _AndroidInputError("artifact_containment_violation")
         if any(ref.metadata.get(key, expected) != expected for key, expected in (("run_id", request.run_id), ("step_execution_id", request.step_id))):
             raise _AndroidInputError("artifact_containment_violation")
-        relative = Path(ref.path)
-        if relative.is_absolute() or not relative.parts or ".." in relative.parts or "\\" in str(relative) or ":" in str(relative):
+        relative = ref.path
+        if relative.anchor or not relative.parts or any(component == ".." or any(character in component for character in ("\\", ":", "\x00")) for component in relative.parts):
             raise _AndroidInputError("artifact_containment_violation")
         if request.screenshot_path is not None and Path(request.screenshot_path) != relative:
             raise _AndroidInputError("artifact_containment_violation")
@@ -335,33 +491,7 @@ class AIAssertionEvaluator:
             raise _AndroidInputError("budget_exceeded")
         if ref.availability != "available" or ref.kind != "screenshot" or not ref.sha256 or ref.size_bytes is None:
             raise _AndroidInputError("capture_failed")
-        # Open each component relative to the trusted Run descriptor with no symlink following.
-        # This also closes the resolve/open race and never reads an escaping target first.
-        descriptors: list[int] = []
-        try:
-            directory = os.open(request.run_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            descriptors.append(directory)
-            for component in relative.parts[:-1]:
-                directory = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-                descriptors.append(directory)
-            descriptor = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            descriptors.append(descriptor)
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode):
-                raise _AndroidInputError("artifact_containment_violation")
-            if info.st_size > budget.max_image_bytes:
-                raise _AndroidInputError("budget_exceeded")
-            with os.fdopen(os.dup(descriptor), "rb") as source:
-                image = source.read(budget.max_image_bytes + 1)
-        except OSError as exc:
-            import errno
-
-            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-                raise _AndroidInputError("artifact_containment_violation") from None
-            raise _AndroidInputError("capture_failed") from None
-        finally:
-            for descriptor in reversed(descriptors):
-                os.close(descriptor)
+        image = _read_android_capture(request.run_dir, relative, budget.max_image_bytes)
         if len(image) > budget.max_image_bytes:
             raise _AndroidInputError("budget_exceeded")
         digest = hashlib.sha256(image).hexdigest()

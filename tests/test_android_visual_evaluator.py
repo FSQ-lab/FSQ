@@ -5,6 +5,9 @@ import asyncio
 import hashlib
 import io
 import json
+import os
+import stat
+import subprocess
 import threading
 import time
 from dataclasses import replace
@@ -186,7 +189,7 @@ def test_android_rejects_missing_image_or_authorization_without_inference(image_
     assert session.requests == []
 
 
-@pytest.mark.parametrize("mode", ["absolute", "parent", "symlink", "cross_run", "path_mismatch"])
+@pytest.mark.parametrize("mode", ["absolute", "parent", "symlink", "parent_symlink", "run_symlink", "cross_run", "path_mismatch"])
 def test_android_artifact_containment_is_distinct_from_capture_failure(image_request, mode, tmp_path):
     ref = image_request.screenshot_artifact_ref
     if mode == "absolute":
@@ -199,6 +202,14 @@ def test_android_artifact_containment_is_distinct_from_capture_failure(image_req
         link = image_request.run_dir / "link.png"
         link.symlink_to(outside)
         ref = ref.model_copy(update={"path": Path("link.png")})
+    elif mode == "parent_symlink":
+        link = image_request.run_dir / "linked-artifacts"
+        link.symlink_to((image_request.run_dir / ref.path).parent, target_is_directory=True)
+        ref = ref.model_copy(update={"path": Path("linked-artifacts/screen.png")})
+    elif mode == "run_symlink":
+        link = tmp_path / "linked-run"
+        link.symlink_to(image_request.run_dir, target_is_directory=True)
+        image_request = image_request.model_copy(update={"run_dir": link})
     elif mode == "cross_run":
         image_request = image_request.model_copy(update={"capture": image_request.capture.model_copy(update={"run_id": "another-run"})})
     else:
@@ -211,6 +222,162 @@ def test_android_artifact_containment_is_distinct_from_capture_failure(image_req
     assert result.error_code == "artifact_containment_violation"
     assert result.outcome == "inconclusive"
     assert session.requests == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        Path("/artifacts/screen.png"),
+        Path(r"\artifacts\screen.png"),
+        Path(r"C:artifacts\screen.png"),
+        Path("C:/artifacts/screen.png"),
+        Path(r"\\localhost\share\screen.png"),
+        Path("artifacts/screen.png:stream"),
+        Path("artifacts/screen.png\x00ignored"),
+        Path("artifacts/../screen.png"),
+        Path(),
+    ],
+)
+def test_android_rejects_unsafe_native_path_forms_before_upload(image_request, path):
+    ref = image_request.screenshot_artifact_ref.model_copy(update={"path": path})
+    request = image_request.model_copy(update={"screenshot_path": path, "screenshot_artifact_ref": ref})
+    session = _Session()
+    result = AIAssertionEvaluator(session).evaluate(request)
+    assert result.outcome == "inconclusive"
+    assert result.error_code == "artifact_containment_violation"
+    assert result.metadata["provider_upload_occurred"] is False
+    assert session.requests == []
+    assert session.closed
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX treats a literal backslash as filename data, not a native separator")
+def test_android_rejects_existing_posix_backslash_component_before_upload(image_request):
+    path = Path(r"artifacts\screen.png")
+    (image_request.run_dir / path).write_bytes((image_request.run_dir / image_request.screenshot_path).read_bytes())
+    ref = image_request.screenshot_artifact_ref.model_copy(update={"path": path})
+    session = _Session()
+    result = AIAssertionEvaluator(session).evaluate(image_request.model_copy(update={"screenshot_path": path, "screenshot_artifact_ref": ref}))
+    assert result.error_code == "artifact_containment_violation"
+    assert session.requests == []
+    assert session.closed
+
+
+@pytest.mark.parametrize("mode", ["leaf_directory", "parent_file"])
+def test_android_rejects_non_regular_capture_components_before_upload(image_request, mode):
+    path = Path("artifacts") if mode == "leaf_directory" else image_request.screenshot_path / "child.png"
+    ref = image_request.screenshot_artifact_ref.model_copy(update={"path": path})
+    session = _Session()
+    result = AIAssertionEvaluator(session).evaluate(image_request.model_copy(update={"screenshot_path": path, "screenshot_artifact_ref": ref}))
+    assert result.error_code == "artifact_containment_violation"
+    assert session.requests == []
+    assert session.closed
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Native POSIX FIFO semantics")
+def test_android_rejects_fifo_capture_without_blocking_for_a_writer(image_request):
+    path = Path("artifacts/fifo.png")
+    os.mkfifo(image_request.run_dir / path)
+    ref = image_request.screenshot_artifact_ref.model_copy(update={"path": path})
+    session = _Session()
+    result = AIAssertionEvaluator(session).evaluate(image_request.model_copy(update={"screenshot_path": path, "screenshot_artifact_ref": ref}))
+    assert result.error_code == "artifact_containment_violation"
+    assert session.requests == []
+    assert session.closed
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows junction and reparse-point semantics")
+@pytest.mark.parametrize("location", ["run", "parent", "leaf"])
+def test_android_windows_junctions_are_rejected_without_upload_and_released(image_request, tmp_path, location):
+    root = image_request.run_dir
+    relative = image_request.screenshot_path
+    if location == "run":
+        junction, target = tmp_path / "junction-run", root
+        root = junction
+    elif location == "parent":
+        junction, target = root / "junction-artifacts", (root / relative).parent
+        relative = Path("junction-artifacts/screen.png")
+    else:
+        junction, target = root / "junction.png", (root / relative).parent
+        relative = Path("junction.png")
+    command = Path(os.environ["SYSTEMROOT"]) / "System32" / "cmd.exe"
+    subprocess.run(  # noqa: S603 - Fixed Windows command; both junction paths belong to this isolated pytest directory.
+        [str(command), "/d", "/c", "mklink", "/J", str(junction), str(target)], check=True, capture_output=True, timeout=5
+    )
+    try:
+        assert junction.lstat().st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+        now = time.monotonic_ns()
+        capture = image_request.capture.model_copy(update={"host_capture_started_monotonic_ns": now - 1000, "host_capture_finished_monotonic_ns": now})
+        ref = image_request.screenshot_artifact_ref.model_copy(update={"path": relative})
+        request = image_request.model_copy(update={"run_dir": root, "screenshot_path": relative, "screenshot_artifact_ref": ref, "capture": capture})
+        session = _Session()
+        result = AIAssertionEvaluator(session).evaluate(request)
+        assert result.outcome == "inconclusive"
+        assert result.error_code == "artifact_containment_violation"
+        assert session.requests == []
+        assert session.closed
+    finally:
+        # A leaked no-delete-share handle would prevent this real removal.
+        junction.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows handle sharing and replacement semantics")
+@pytest.mark.parametrize("location", ["run", "parent", "leaf"])
+def test_android_windows_capture_is_pinned_through_read_and_released(image_request, monkeypatch, tmp_path, location):
+    root = image_request.run_dir
+    source_path = root / image_request.screenshot_path
+    pixels = source_path.read_bytes()
+    target = {"run": root, "parent": source_path.parent, "leaf": source_path}[location]
+    replacement = tmp_path / "moved-capture"
+    real_fdopen = os.fdopen
+    attempted = False
+
+    def open_while_replacing(*args, **kwargs):
+        nonlocal attempted
+        source = real_fdopen(*args, **kwargs)
+        try:
+            if not attempted:
+                attempted = True
+                # Only the Python read boundary is instrumented. All handle
+                # opens, metadata queries, renames, and reads use the real OS.
+                with pytest.raises(PermissionError):
+                    target.rename(replacement)
+        except BaseException:
+            source.close()
+            raise
+        return source
+
+    monkeypatch.setattr(os, "fdopen", open_while_replacing)
+    session = _Session()
+    result = AIAssertionEvaluator(session).evaluate(image_request)
+    assert attempted
+    assert result.outcome == "passed"
+    assert len(session.requests) == 1
+    assert session.requests[0].input[0].content[1].data == pixels
+    assert session.closed
+    target.rename(replacement)
+    assert replacement.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows handle cleanup after rejected captures")
+@pytest.mark.parametrize("mode,code", [("missing", "capture_failed"), ("oversized", "budget_exceeded"), ("integrity", "capture_failed")])
+def test_android_windows_rejected_capture_releases_all_handles(image_request, tmp_path, mode, code):
+    root = image_request.run_dir
+    source = root / image_request.screenshot_path
+    if mode == "missing":
+        source.unlink()
+    else:
+        source.write_bytes(source.read_bytes() + b"extra")
+        if mode == "oversized":
+            image_request = image_request.model_copy(update={"budget": AssertionBudget(max_image_bytes=image_request.screenshot_artifact_ref.size_bytes)})
+    session = _Session()
+    result = AIAssertionEvaluator(session).evaluate(image_request)
+    assert result.error_code == code
+    assert session.requests == []
+    assert session.closed
+    if source.exists():
+        source.rename(source.with_name("released.png"))
+    source.parent.rename(root / "released-artifacts")
+    root.rename(tmp_path / "released-run")
 
 
 @pytest.mark.parametrize(

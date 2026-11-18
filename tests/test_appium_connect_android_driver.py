@@ -12,6 +12,7 @@ from asyncio import CancelledError
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from types import SimpleNamespace
 from typing import Any
 from xml.etree import ElementTree
@@ -609,6 +610,7 @@ def test_idle_liveness_is_bounded_owner_thread_preflight_not_a_business_write(ow
     assert session.calls[-1] == ("quit",)
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_idle_interval_starts_after_operation_completion(android_clock, monkeypatch):
     session = FakeSession()
     original_back = session.device.back
@@ -630,6 +632,7 @@ def test_idle_interval_starts_after_operation_completion(android_clock, monkeypa
         driver.close()
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("quarantined", [False, True])
 def test_probe_failure_never_dispatches_or_retries_the_requested_write(android_clock, quarantined):
     session = FakeSession()
@@ -661,6 +664,7 @@ def test_probe_failure_never_dispatches_or_retries_the_requested_write(android_c
         driver.close()
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_probe_cancellation_propagates_before_the_business_operation(android_clock):
     session = FakeSession()
     driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
@@ -2688,11 +2692,14 @@ def test_nonactive_session_is_not_target_absence_or_implicitly_rebuilt(state: st
 
 
 @contextmanager
-def _sdk_target_peer():
+def _sdk_target_peer(account_home: Path):
     # The real SDK proves cardinality, selected-attribute requests, and write
     # boundaries. This controlled peer supplies candidates; it is not an XPath evaluator.
     from appium_connect_agent.automation import create_session
-    from appium_connect_agent.runtime import LocalSettings, Runtime
+    from appium_connect_agent.runtime import LocalSettings, OperationControl, Runtime, _coordination
+
+    account_home = account_home.resolve()
+    account_home.mkdir(mode=0o700)
 
     state = SimpleNamespace(candidate_ids=["first"], calls=[], mutations=[], disconnect=False, dead_probes=0, dead_operations=0, sessions=0)
     state.nodes = {
@@ -2712,6 +2719,13 @@ def _sdk_target_peer():
         }
         for element_id in ("first", "second")
     }
+
+    class LoopbackHTTPServer(ThreadingHTTPServer):
+        def server_bind(self):
+            # HTTPServer's hostname lookup is unrelated to this numeric wire peer
+            # and can outlast the subprocess's entire deadline on macOS runners.
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, value, status=200):
@@ -2780,32 +2794,38 @@ def _sdk_target_peer():
         def log_message(self, fmt, *args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server = LoopbackHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
     try:
-        runtime = Runtime(LocalSettings(server_url=f"http://127.0.0.1:{server.server_port}"))
-        with runtime.connect() as connection:
-            session = create_session(connection, "target-test-device", app_id="com.example.app", auto_launch=False, no_reset=True)
-            driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
-            state.calls.clear()
-            try:
-                yield state, driver
-            finally:
-                driver.close()
-                # External uncertainty retains its SDK reservation until process
-                # exit; only the isolated child scenario may leave it uncertain.
-                if session.session_info().state == "active":
-                    session.quit()
+        # Isolate only the account filesystem boundary, as in the managed peer.
+        # Real SDK mutex/flock, usage, reservations, and Session state stay intact.
+        with pytest.MonkeyPatch.context() as account_patch:
+            account_patch.setattr(_coordination, "_account_home", lambda: account_home)
+            account_patch.setenv("HOME", str(account_home))
+            runtime = Runtime(LocalSettings(server_url=f"http://127.0.0.1:{server.server_port}"))
+            with runtime.connect(control=OperationControl(timeout_seconds=5.0)) as connection:
+                session = create_session(connection, "target-test-device", app_id="com.example.app", auto_launch=False, no_reset=True, control=OperationControl(timeout_seconds=5.0))
+                driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+                state.calls.clear()
+                try:
+                    yield state, driver
+                finally:
+                    driver.close()
+                    # External uncertainty retains its SDK reservation until process
+                    # exit; only the isolated child scenario may leave it uncertain.
+                    if session.session_info().state == "active":
+                        session.quit(control=OperationControl(timeout_seconds=5.0))
     finally:
         server.shutdown()
         server.server_close()
-        thread.join()
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "The isolated target wire peer did not stop."
 
 
 @pytest.fixture
-def sdk_target_peer(macos_android_sdk):
-    with _sdk_target_peer() as peer:
+def sdk_target_peer(macos_android_sdk, tmp_path):
+    with _sdk_target_peer(tmp_path / "account") as peer:
         yield peer
 
 
@@ -2898,8 +2918,8 @@ def test_public_sdk_located_assertion_fetches_only_required_attributes(sdk_targe
     assert state.mutations == []
 
 
-def _exercise_unknown_target_response():
-    with _sdk_target_peer() as (state, driver):
+def _exercise_unknown_target_response(account_home: Path):
+    with _sdk_target_peer(account_home) as (state, driver):
         state.disconnect = True
         result = driver.assert_not_visible({"target": "private-canary"})
         assert result["status"] == "failed"
@@ -2914,15 +2934,30 @@ def _exercise_unknown_target_response():
         assert len(state.calls) == before
         assert state.mutations == []
         assert "canary" not in str(result)
+        session_state = driver._session.session_info().state
+    return {
+        "request_state": result["metadata"]["request_state"],
+        "session_state": session_state,
+        "fenced_reason": next_result["metadata"]["reason"],
+        "requests": [(method, path) for method, path, _ in state.calls],
+        "mutations": state.mutations,
+        "session_creations": state.sessions,
+    }
 
 
 @pytest.mark.usefixtures("macos_android_sdk")
-def test_public_sdk_unknown_inspection_response_fences_session_without_action_or_reconnect():
+def test_public_sdk_unknown_inspection_response_fences_session_without_action_or_reconnect(tmp_path):
     # An external connection cannot authorize terminal managed disposal. Keep
     # its intentionally quarantined Session and reservation inside one child.
     source = Path(__file__).resolve()
     completed = subprocess.run(  # noqa: S603 - Fixed interpreter and local helper; no shell or user input.
-        [sys.executable, "-c", 'import runpy, sys; runpy.run_path(sys.argv[1])["_exercise_unknown_target_response"]()', str(source)],
+        [
+            sys.executable,
+            "-c",
+            'import json, runpy, sys; from pathlib import Path; print(json.dumps(runpy.run_path(sys.argv[1])["_exercise_unknown_target_response"](Path(sys.argv[2]))))',
+            str(source),
+            str(tmp_path / "child-account"),
+        ],
         cwd=source.parents[1],
         capture_output=True,
         text=True,
@@ -2930,6 +2965,14 @@ def test_public_sdk_unknown_inspection_response_fences_session_without_action_or
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert json.loads(completed.stdout) == {
+        "request_state": "response_unknown",
+        "session_state": "uncertain",
+        "fenced_reason": "session_unavailable",
+        "requests": [["POST", "/session/target-session/elements"]],
+        "mutations": [],
+        "session_creations": 1,
+    }
 
 
 def test_public_sdk_explicit_locator_is_authoritative_over_ambiguous_bare_target(sdk_target_peer):

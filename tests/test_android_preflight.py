@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import json
+import os
 import socket
 import struct
 from pathlib import Path
@@ -562,12 +563,6 @@ def test_appium_connect_runtime_prerequisite_distinguishes_readonly_managed_stat
             0o600,
         ),
         (
-            "loose-perms-service",
-            "service.json",
-            {"schema": 1, "state": "stopped", "operation_id": "svc-1", "host": "127.0.0.1", "port": 4723, "base_path": ""},
-            0o644,
-        ),
-        (
             "malformed-install",
             "installation.json",
             {"schema": 1, "state": "complete", "combination_id": "macos-android-uiautomator2"},
@@ -611,3 +606,22 @@ def test_appium_connect_runtime_prerequisite_distinguishes_readonly_managed_stat
     monkeypatch.setattr(_android, "_resolve_first_host_executable", lambda _name: None)
     node_missing = PlatformRuntimeService().check_prerequisites(settings("one"))
     assert node_missing[1].code == "android.node_missing"
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX owner/group permission bits are unavailable on this host.")
+def test_managed_runtime_prerequisites_reject_loose_record_permissions(monkeypatch, tmp_path):
+    monkeypatch.setattr(_android, "discover_android_devices", lambda **kwargs: AndroidDeviceDiscoveryResult(devices=[AndroidDevice(serial="one", state="device")]))
+    monkeypatch.setattr(_android, "package_status", lambda *args, **kwargs: "installed")
+    root = _create_ready_managed_root(tmp_path / "nonprivate-service-record")
+    record = root / "records" / "service.json"
+    record.write_text(
+        json.dumps({"schema": 1, "state": "stopped", "operation_id": "svc-1", "host": "127.0.0.1", "port": 4723, "base_path": ""}),
+        encoding="utf-8",
+    )
+    record.chmod(0o644)
+    monkeypatch.setattr(_android, "_managed_root", lambda: root)
+
+    fact = PlatformRuntimeService().check_prerequisites(settings("one"))[1]
+
+    assert fact.status == "unavailable"
+    assert fact.code == "android.managed_runtime_recovery_required"

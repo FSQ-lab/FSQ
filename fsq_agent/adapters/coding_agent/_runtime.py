@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 from fsq_agent._capability_bootstrap import build_capability_registry
-from fsq_agent.adapters.coding_agent._harness_tools import HarnessToolAdapter
+from fsq_agent.adapters.coding_agent._harness_tools import HarnessToolAdapter, _validated_write_budget
 from fsq_agent.agent import CodingAgentPolicy
 from fsq_agent.agent_engine import (
     AgentEngine,
@@ -54,32 +54,70 @@ _RUNTIME_TOOL_NAMES = {
     "read_knowledge_index",
     "read_knowledge_page",
 }
+_ENGINE_FAILURE_CATEGORIES = {
+    "authentication",
+    "cleanup",
+    "closed",
+    "configuration",
+    "evidence",
+    "incompatible_model",
+    "incomplete",
+    "invalid_output",
+    "lifecycle",
+    "max_turns",
+    "rate_limit",
+    "refusal",
+    "runtime",
+    "timeout",
+    "unavailable",
+}
+_ENGINE_FAILURE_REASONS = {
+    "connection_error",
+    "read_error",
+    "remote_protocol_error",
+    "incomplete_read",
+    "timeout",
+    "rate_limit",
+    "service_unavailable",
+    "stream_error",
+    "stream_incomplete",
+}
 
 
-def _runtime_failure_metadata(exc: BaseException) -> dict[str, str]:
+def _runtime_failure_metadata(exc: BaseException) -> dict[str, str | int]:
+    metadata: dict[str, str | int]
     if isinstance(exc, EngineError) and exc.category == "evidence":
-        return {
+        metadata = {
             "failure_category": "artifact_error",
             "failure_reason": "evidence_persistence",
             "failure_summary": "Agent runtime stopped because durable execution evidence failed.",
         }
-    if isinstance(exc, EngineError) and exc.category == "incomplete" and exc.reason == "content_filter":
-        return {
+    elif isinstance(exc, EngineError) and exc.category == "incomplete" and exc.reason == "content_filter":
+        metadata = {
             "failure_category": "provider_content_filter",
             "failure_reason": "content_filter",
             "failure_summary": "Agent runtime execution ended with an incomplete provider response due to content filtering.",
         }
-    if isinstance(exc, EngineError) and exc.category == "incomplete":
-        return {
+    elif isinstance(exc, EngineError) and exc.category == "incomplete":
+        metadata = {
             "failure_category": "provider_response_incomplete",
             "failure_reason": "incomplete",
             "failure_summary": "Agent runtime execution ended with an incomplete provider response.",
         }
-    return {
-        "failure_category": "agent_runtime_error",
-        "failure_reason": "agent_runtime_error",
-        "failure_summary": "Agent runtime execution failed before producing structured verification output.",
-    }
+    else:
+        metadata = {
+            "failure_category": "agent_runtime_error",
+            "failure_reason": "agent_runtime_error",
+            "failure_summary": "Agent runtime execution failed before producing structured verification output.",
+        }
+    if isinstance(exc, EngineError):
+        if isinstance(exc.category, str) and exc.category in _ENGINE_FAILURE_CATEGORIES:
+            metadata["engine_category"] = exc.category
+        if isinstance(exc.reason, str) and exc.reason in _ENGINE_FAILURE_REASONS:
+            metadata["engine_reason"] = exc.reason
+        if type(exc.status_code) is int and 100 <= exc.status_code <= 599:
+            metadata["status_code"] = exc.status_code
+    return metadata
 
 
 class _ToolOutputBudgetFilter:
@@ -102,8 +140,9 @@ class _ToolOutputBudgetFilter:
         remaining_inline_chars = self.max_total_inline_chars
         inline_entry_ids: set[int] = set()
         recent_entries = entries[-self.recent_inline_outputs :] if self.recent_inline_outputs else ()
+        projected = {entry.entry_id: self._project_output(entry.output) for entry in recent_entries}
         for entry in reversed(recent_entries):
-            output_chars = len(entry.output)
+            output_chars = len(projected[entry.entry_id])
             if output_chars <= self.max_output_chars and output_chars <= remaining_inline_chars:
                 inline_entry_ids.add(entry.entry_id)
                 remaining_inline_chars -= output_chars
@@ -111,14 +150,99 @@ class _ToolOutputBudgetFilter:
         replacements: dict[int, str] = {}
         for entry in entries:
             if entry.entry_id in inline_entry_ids:
+                if projected[entry.entry_id] != entry.output:
+                    replacements[entry.entry_id] = projected[entry.entry_id]
                 continue
             display_name = entry.tool_name or "tool"
             artifact_path = self._artifact_path_for(entry)
             if artifact_path:
-                replacements[entry.entry_id] = f"[Historical {display_name} output stored as artifact. Artifact path: {artifact_path}. Content chars: {len(entry.output)}.]"
+                reference = f"[Historical {display_name} output stored as artifact. Artifact path: {artifact_path}. Content chars: {len(entry.output)}.]"
             else:
-                replacements[entry.entry_id] = f"[Historical {display_name} output omitted because artifact storage is unavailable. Content chars: {len(entry.output)}.]"
+                reference = f"[Historical {display_name} output omitted because artifact storage is unavailable. Content chars: {len(entry.output)}.]"
+            replacements[entry.entry_id] = self._budget_reference(entry.output, reference, artifact_path)
         return replacements
+
+    @staticmethod
+    def _budget_reference(output: str, reference: str, artifact_path: str | None) -> str:
+        try:
+            payload = json.loads(output)
+        except (ValueError, TypeError):
+            return reference
+        if not isinstance(payload, dict) or not isinstance(payload.get("tool_name"), str) or not isinstance(payload.get("status"), str) or not isinstance(payload.get("result"), dict):
+            return reference
+        receipt = _validated_write_budget(payload.get("write_budget"))
+        if receipt is None:
+            return reference
+        compact: dict[str, object] = {"write_budget": receipt, "history": reference}
+        if artifact_path:
+            compact["artifact"] = {"path": artifact_path}
+        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _project_output(output: str) -> str:
+        try:
+            payload = json.loads(output)
+        except (ValueError, TypeError):
+            return output
+        if not isinstance(payload, dict) or not isinstance(payload.get("tool_name"), str):
+            return output
+        result = payload.get("result")
+        if not isinstance(result, dict) or not isinstance(payload.get("status"), str) or ("output" not in result and payload.get("tool_origin") not in ("platform", "common", "agent_tool")):
+            return output
+        # Project only recognized FSQ envelopes; never traverse business output.
+        repeated = {
+            "result",
+            "runner_result",
+            "metadata",
+            "schema_metadata",
+            "tool_origin",
+            "platform",
+            "driver_method",
+            "fsq_action_name",
+            "capability_name",
+            "executor_kind",
+            "step_kind",
+            "replay",
+            "safe_replay_params",
+            "model_output",
+        }
+        compact = {key: value for key, value in payload.items() if key not in repeated and value is not None}
+        if "output" in result:
+            compact["output"] = result["output"]
+        if result.get("error") and not compact.get("error_message"):
+            compact["error_message"] = result["error"]
+        for key in ("duration_ms", "error_message", "failure_category"):
+            if key not in compact and result.get(key) is not None:
+                compact[key] = result[key]
+        metadata = result.get("metadata")
+        if isinstance(metadata, dict):
+            diagnostics = {key: value for key, value in metadata.items() if key not in repeated and key != "tool_name" and value is not None}
+            if diagnostics:
+                compact["diagnostics"] = diagnostics
+        if "artifact_refs" not in compact and isinstance(result.get("artifact_refs"), list):
+            compact["artifact_refs"] = result["artifact_refs"]
+        runner = payload.get("runner_result")
+        if isinstance(runner, dict):
+            for key in ("action_status", "failure_category", "error_message", "evidence_errors", "skip_reason", "blocked_by_step"):
+                value = runner.get(key)
+                if value is not None and value != [] and key not in compact:
+                    compact[key] = value
+            phases = runner.get("phase_reports")
+            if isinstance(phases, list):
+                errors = []
+                for phase in phases:
+                    if not isinstance(phase, dict) or phase.get("status") not in ("failed", "incomplete", "cancelled"):
+                        continue
+                    error = {key: phase[key] for key in ("phase", "status", "failure_category", "error_message") if key in phase and phase[key] is not None}
+                    metadata = phase.get("metadata")
+                    if isinstance(metadata, dict):
+                        details = {key: value for key, value in metadata.items() if key not in repeated and key not in ("harness_output", "harness_metadata")}
+                        if details:
+                            error["metadata"] = details
+                    errors.append(error)
+                if errors:
+                    compact["phase_errors"] = errors
+        return json.dumps(compact, ensure_ascii=False, default=str, separators=(",", ":"))
 
     def _artifact_path_for(self, entry: ToolOutputEntry) -> str | None:
         call_id = entry.call_id or ""
@@ -173,6 +297,8 @@ class DefaultCodingAgentRuntime:
         self._harness_tool_names: set[str] = set()
         self._harness_tool_schemas: dict[str, Any] = {}
         self._stream_tool_calls: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._pending_cleanup: list[tuple[object, BaseException]] = []
+        self._turn_limit_result: tuple[str, StepResult] | None = None
 
     def _discover_agent_tool_names(self, tool_factory: AgentToolAdapter) -> set[str]:
         registry = getattr(tool_factory, "registry", None)
@@ -188,6 +314,13 @@ class DefaultCodingAgentRuntime:
             return list(list_providers())
         return None
 
+    def _raise_if_cleanup_pending(self) -> None:
+        if not self._pending_cleanup:
+            return
+        errors = [error for _, error in self._pending_cleanup]
+        cause = errors[0] if len(errors) == 1 else BaseExceptionGroup("Owned-resource cleanup remains pending", errors)
+        raise ConfigurationError("Runtime has unresolved owned-resource cleanup failure.") from cause
+
     async def run_task(
         self,
         task: Task,
@@ -200,6 +333,8 @@ class DefaultCodingAgentRuntime:
         evidence_sink=None,
         cancellation_check=None,
     ) -> list[StepResult]:
+        self._raise_if_cleanup_pending()
+        self._turn_limit_result = None
         if evidence_sink is None or context is None or context.run_id != run_id:
             raise ConfigurationError("Runtime execution requires an allocated context and evidence sink.")
         if cancellation_check is not None:
@@ -208,9 +343,10 @@ class DefaultCodingAgentRuntime:
         started = time.perf_counter()
         provider_session = None
         harness = None
-        primary_failure = False
+        primary_error: BaseException | None = None
         result = None
         usage_event_emitted = False
+        turn_limit_reached = False
         try:
             await self._emit(
                 event_sink,
@@ -290,6 +426,7 @@ class DefaultCodingAgentRuntime:
                     platform=self.settings.harness.platform,
                     evidence_sink=evidence_sink,
                     cancellation_check=cancellation_check,
+                    capture_action_before=context.capture_action_before,
                 )
                 self._harness_tool_names = harness_adapter.tool_names
                 self._harness_tool_schemas = harness_adapter.schemas_by_name
@@ -318,6 +455,7 @@ class DefaultCodingAgentRuntime:
                     tools=[*agent_tools, *harness_tools],
                     output_type=AgentFinalOutput,
                     run_id=run_id,
+                    final_turn_instructions=self.policy.final_turn_instructions,
                 )
                 await self._emit(
                     event_sink,
@@ -345,17 +483,55 @@ class DefaultCodingAgentRuntime:
                 if usage_event is not None:
                     usage_event_emitted = True
                     await self._emit(event_sink, usage_event)
+            except BaseExceptionGroup:
+                raise
             # Engine and provider packages raise implementation-specific exceptions that become failed steps.
             except Exception as exc:  # noqa: BLE001
-                primary_failure = True
-                duration_ms = int((time.perf_counter() - started) * 1000)
-                failure_metadata = _runtime_failure_metadata(exc)
-                error_message = self._replace_secret_values(str(exc), self._runtime_secret_values())
-                if result is not None and not usage_event_emitted:
-                    usage_event = self._dynamic_agent_token_usage_event(result, run_id, task.id)
-                    if usage_event is not None:
-                        usage_event_emitted = True
-                        await self._emit(event_sink, usage_event)
+                primary_error = exc
+                if isinstance(exc, EngineError) and exc.category == "max_turns":
+                    turn_limit_reached = True
+                else:
+                    duration_ms = int((time.perf_counter() - started) * 1000)
+                    failure_metadata = _runtime_failure_metadata(exc)
+                    error_message = self._replace_secret_values(str(exc), self._runtime_secret_values())
+                    if result is not None and not usage_event_emitted:
+                        usage_event = self._dynamic_agent_token_usage_event(result, run_id, task.id)
+                        if usage_event is not None:
+                            usage_event_emitted = True
+                            await self._emit(event_sink, usage_event)
+                    await self._emit(
+                        event_sink,
+                        RunEvent(
+                            run_id=run_id,
+                            task_id=task.id,
+                            type="run_failed",
+                            title="Agent run failed",
+                            message=error_message,
+                            duration_ms=duration_ms,
+                            payload=failure_metadata,
+                        ),
+                    )
+                    return [
+                        StepResult(
+                            step_id=1,
+                            status="failed",
+                            actual_outcome=failure_metadata["failure_summary"],
+                            duration_ms=duration_ms,
+                            error=error_message,
+                            tool_name="agent_runtime.runner",
+                            tool_output=failure_metadata,
+                        )
+                    ]
+        except BaseExceptionGroup as exc:
+            primary_error = exc
+            raise
+        # Runtime startup dependencies may fail with package-specific exceptions that become failed steps.
+        except Exception as exc:  # noqa: BLE001
+            primary_error = exc
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            failure_metadata = _runtime_failure_metadata(exc)
+            error_message = self._replace_secret_values(str(exc), self._runtime_secret_values())
+            try:
                 await self._emit(
                     event_sink,
                     RunEvent(
@@ -368,35 +544,9 @@ class DefaultCodingAgentRuntime:
                         payload=failure_metadata,
                     ),
                 )
-                return [
-                    StepResult(
-                        step_id=1,
-                        status="failed",
-                        actual_outcome=failure_metadata["failure_summary"],
-                        duration_ms=duration_ms,
-                        error=error_message,
-                        tool_name="agent_runtime.runner",
-                        tool_output=failure_metadata,
-                    )
-                ]
-        # Runtime startup dependencies may fail with package-specific exceptions that become failed steps.
-        except Exception as exc:  # noqa: BLE001
-            primary_failure = True
-            duration_ms = int((time.perf_counter() - started) * 1000)
-            failure_metadata = _runtime_failure_metadata(exc)
-            error_message = self._replace_secret_values(str(exc), self._runtime_secret_values())
-            await self._emit(
-                event_sink,
-                RunEvent(
-                    run_id=run_id,
-                    task_id=task.id,
-                    type="run_failed",
-                    title="Agent run failed",
-                    message=error_message,
-                    duration_ms=duration_ms,
-                    payload=failure_metadata,
-                ),
-            )
+            except BaseException as reporting_error:
+                primary_error = reporting_error
+                raise
             return [
                 StepResult(
                     step_id=1,
@@ -408,8 +558,8 @@ class DefaultCodingAgentRuntime:
                     tool_output=failure_metadata,
                 )
             ]
-        except BaseException:
-            primary_failure = True
+        except BaseException as exc:
+            primary_error = exc
             if result is not None and not usage_event_emitted:
                 usage_event = self._dynamic_agent_token_usage_event(result, run_id, task.id)
                 if usage_event is not None:
@@ -420,9 +570,38 @@ class DefaultCodingAgentRuntime:
                         logging.getLogger(__name__).warning("Cancellation diagnostics failed (%s)", type(diagnostic_error).__name__)
             raise
         finally:
-            await self._finish_cleanup(self._dispose_run(harness, provider_session), failed=primary_failure)
+            await self._finish_cleanup(self._dispose_run(harness, provider_session), primary_error=primary_error)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
+        if turn_limit_reached:
+            final_output = self._redact_runtime_secrets(
+                AgentFinalOutput(
+                    status="inconclusive",
+                    summary=f"Runtime-generated termination: main execution exhausted max_turns={self.settings.agent_runtime.max_turns} without a model final answer. Goal completion is unverified.",
+                    errors=["runtime_termination:max_turns"],
+                )
+            )
+            step = StepResult(
+                step_id=1,
+                status="success",
+                actual_outcome=self.policy.serialize_agent_final_output(final_output),
+                duration_ms=duration_ms,
+                tool_name="agent_runtime.runner",
+                tool_output=final_output.model_dump(mode="json"),
+            )
+            await self._emit(
+                event_sink,
+                RunEvent(
+                    run_id=run_id,
+                    task_id=task.id,
+                    type="run_failed",
+                    title="Agent run failed",
+                    message=final_output.summary,
+                    payload={"termination_reason": "max_turns", "summary_origin": "runtime", "status": "inconclusive"},
+                ),
+            )
+            self._turn_limit_result = (run_id, step)
+            return [step]
         if result is None:
             return [
                 StepResult(
@@ -490,6 +669,7 @@ class DefaultCodingAgentRuntime:
                 try:
                     harness.close()
                 except BaseException as cleanup_error:  # noqa: BLE001 - the caller has already timed out or cancelled.
+                    self._pending_cleanup.append((harness, cleanup_error))
                     logging.getLogger(__name__).warning("Late Harness disposal failed (%s)", type(cleanup_error).__name__)
 
         threading.Thread(target=build_harness, name=f"fsq-harness-setup-{run_id}", daemon=True).start()
@@ -500,7 +680,7 @@ class DefaultCodingAgentRuntime:
                 abandoned = True
                 harness, unclaimed = unclaimed, None
             if harness is not None:
-                await self._finish_cleanup(asyncio.to_thread(harness.close), failed=True)
+                await self._finish_cleanup(self._dispose_run(harness, None), primary_error=exc)
             if isinstance(exc, TimeoutError) and future.cancelled():
                 raise TimeoutError(f"Harness setup timed out after {timeout_seconds} seconds.") from exc
             raise
@@ -574,6 +754,7 @@ class DefaultCodingAgentRuntime:
         event_sink: RunEventSink | None = None,
         reference_type: str = "goal",
     ) -> GoalPrePlan:
+        self._raise_if_cleanup_pending()
         validate_runtime_settings(self.settings)
         task_id = "pre-plan"
         started = time.perf_counter()
@@ -589,6 +770,7 @@ class DefaultCodingAgentRuntime:
         )
         provider_session = build_model_provider_session(self.settings)
         result = None
+        primary_error: BaseException | None = None
         try:
             model = provider_session.get_model()
             request = self._build_request(
@@ -612,20 +794,28 @@ class DefaultCodingAgentRuntime:
             result = await self._run_agent(model, request, run_id, task_id, event_sink)
         except Exception as exc:
             duration_ms = int((time.perf_counter() - started) * 1000)
-            await self._emit(
-                event_sink,
-                RunEvent(
-                    run_id=run_id,
-                    task_id=task_id,
-                    type="run_failed",
-                    title="Pre-plan failed",
-                    message=self._replace_secret_values(str(exc), self._runtime_secret_values()),
-                    duration_ms=duration_ms,
-                ),
-            )
-            raise PlanningError("Goal pre-plan failed before producing structured output.", context={"error": str(exc)}) from exc
+            try:
+                await self._emit(
+                    event_sink,
+                    RunEvent(
+                        run_id=run_id,
+                        task_id=task_id,
+                        type="run_failed",
+                        title="Pre-plan failed",
+                        message=self._replace_secret_values(str(exc), self._runtime_secret_values()),
+                        duration_ms=duration_ms,
+                    ),
+                )
+            except BaseException as reporting_error:
+                primary_error = reporting_error
+                raise
+            primary_error = PlanningError("Goal pre-plan failed before producing structured output.", context={"error": str(exc)})
+            raise primary_error from exc
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
-            await self._close_provider_session(provider_session, failed=result is None)
+            await self._close_provider_session(provider_session, primary_error=primary_error)
 
         pre_plan = result.final_output
         if isinstance(pre_plan, GoalPrePlan):
@@ -749,6 +939,11 @@ class DefaultCodingAgentRuntime:
         events_path: Any = None,
         event_sink: RunEventSink | None = None,
     ) -> list[StepResult]:
+        self._raise_if_cleanup_pending()
+        termination = self._turn_limit_result
+        if termination is not None and termination[0] == run_id and any(step is termination[1] for step in execution_results):
+            self._turn_limit_result = None
+            return []
         validate_runtime_settings(self.settings)
         started = time.perf_counter()
         await self._emit(
@@ -765,6 +960,7 @@ class DefaultCodingAgentRuntime:
         evidence_input = self._replace_secret_values(evidence_input, self._runtime_secret_values())
         provider_session = build_model_provider_session(self.settings)
         result = None
+        primary_error: BaseException | None = None
         try:
             model = provider_session.get_model()
             request = self._build_request(
@@ -776,8 +972,12 @@ class DefaultCodingAgentRuntime:
                 run_id=run_id,
             )
             result = await self._run_agent(model, request, run_id, task.id, event_sink)
+        except BaseExceptionGroup as exc:
+            primary_error = exc
+            raise
         # Verifier engine/provider failures must become reportable verification step failures.
         except Exception as exc:  # noqa: BLE001
+            primary_error = exc
             duration_ms = int((time.perf_counter() - started) * 1000)
             return [
                 StepResult(
@@ -789,8 +989,11 @@ class DefaultCodingAgentRuntime:
                     tool_name="agent_runtime.verifier",
                 )
             ]
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
-            await self._close_provider_session(provider_session, failed=result is None)
+            await self._close_provider_session(provider_session, primary_error=primary_error)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         final_output = self.policy.coerce_agent_final_output(result.final_output) or str(result.final_output)
@@ -807,28 +1010,29 @@ class DefaultCodingAgentRuntime:
             )
         ]
 
-    async def _close_provider_session(self, session: ModelProviderSession, *, failed: bool) -> None:
-        await self._finish_cleanup(session.close(), failed=failed)
+    async def _close_provider_session(self, session: ModelProviderSession, *, primary_error: BaseException | None) -> None:
+        await self._finish_cleanup(self._dispose_run(None, session), primary_error=primary_error)
 
     async def _dispose_run(self, harness, session) -> None:
-        failure = None
+        errors = []
         if harness is not None:
             try:
                 await asyncio.to_thread(harness.close)
             except BaseException as exc:  # noqa: BLE001 - attempt Provider cleanup even after Harness failure.
-                failure = exc
+                self._pending_cleanup.append((harness, exc))
+                errors.append(exc)
         if session is not None:
             try:
                 await session.close()
-            except BaseException as exc:  # noqa: BLE001 - preserve the first disposal failure.
-                if failure is None:
-                    failure = exc
-                else:
-                    logging.getLogger(__name__).warning("Additional Provider disposal failed (%s)", type(exc).__name__)
-        if failure is not None:
-            raise failure
+            except BaseException as exc:  # noqa: BLE001 - preserve every owned-resource disposal failure.
+                self._pending_cleanup.append((session, exc))
+                errors.append(exc)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("Owned-resource cleanup failed", errors)
 
-    async def _finish_cleanup(self, operation, *, failed: bool) -> None:
+    async def _finish_cleanup(self, operation, *, primary_error: BaseException | None) -> None:
         async def capture_failure():
             try:
                 await operation
@@ -837,19 +1041,31 @@ class DefaultCodingAgentRuntime:
             return None
 
         cleanup = asyncio.create_task(capture_failure())
-        cancellation = None
+        cancellation: BaseException | None = None
         while not cleanup.done():
             try:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError as exc:
                 cancellation = cancellation or exc
         cleanup_error = cleanup.result()
-        if cleanup_error is not None:
-            if not failed and cancellation is None:
-                raise cleanup_error
-            logging.getLogger(__name__).warning("Runtime cleanup failed (%s)", type(cleanup_error).__name__)
-        if cancellation is not None and not failed:
+        if isinstance(primary_error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+            cancellation = primary_error
+            primary_error = None
+        if cancellation is not None:
+            causes = [primary_error] if primary_error is not None else []
+            if cleanup_error is not None:
+                causes.append(cleanup_error)
+            if cancellation.__cause__ is not None:
+                causes.insert(0, cancellation.__cause__)
+            if len(causes) == 1:
+                raise cancellation from causes[0]
+            if causes:
+                raise cancellation from BaseExceptionGroup("Runtime cancellation and cleanup failed", causes)
             raise cancellation
+        if cleanup_error is not None:
+            if primary_error is not None:
+                raise BaseExceptionGroup("Runtime execution and cleanup failed", [primary_error, cleanup_error]) from None
+            raise cleanup_error
 
     async def _emit(self, event_sink: RunEventSink | None, event: RunEvent) -> None:
         if not event_sink:
@@ -890,7 +1106,9 @@ class DefaultCodingAgentRuntime:
         export_api_key = os.getenv("OPENAI_API_KEY")
         return not bool(export_api_key and export_api_key.strip())
 
-    def _build_request(self, *, name: str, instructions: str, model_input: str, tools: list[ToolBinding], output_type: type[BaseModel], run_id: str = "") -> AgentRequest:
+    def _build_request(
+        self, *, name: str, instructions: str, model_input: str, tools: list[ToolBinding], output_type: type[BaseModel], run_id: str = "", final_turn_instructions: str | None = None
+    ) -> AgentRequest:
         local_output = self.settings.agent_runtime.local_tool_output
         artifact_store = ToolArtifactStore(self.settings.output.runs_dir, run_id, local_output) if run_id and local_output.artifact_enabled else None
         input_filter = _ToolOutputBudgetFilter(
@@ -910,6 +1128,7 @@ class DefaultCodingAgentRuntime:
             stream=True,
             tool_output_filter=input_filter,
             tracing_enabled=not self._tracing_disabled(),
+            final_turn_instructions=final_turn_instructions,
         )
 
     async def _run_agent(self, model: Model, request: AgentRequest, run_id: str, task_id: str, event_sink: RunEventSink | None) -> AgentResult:

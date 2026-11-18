@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Protocol
 
 from fsq_agent.ai_services import build_case_suggestion_analyzer
+from fsq_agent.application._case_test import _resolve_android_run_serial
+from fsq_agent.application._result_summary import _safe_text, primary_summary
 from fsq_agent.application.contracts import (
     ApplicationError,
     ApplicationErrorCategory,
@@ -68,6 +70,10 @@ async def create_case(
             message="A Coding Agent runtime is not configured.",
             action="Start this operation through a supported FSQ adapter.",
         )
+    if request.platform == "android" and not (getattr(getattr(settings.harness, "android", None), "serial", None) or "").strip():
+        resolved_serial = _resolve_android_run_serial(settings)
+        settings = settings.model_copy(deep=True)
+        settings.harness.android.serial = resolved_serial
     task = _task_from_goal(normalized_goal)
     try:
         execution = await DynamicExecutionService(agent=agent_factory(settings)).execute(
@@ -97,7 +103,7 @@ async def create_case(
         run_id=result.report.run_id,
         task_id=result.task_id,
         status=result.status,
-        summary=result.verification.summary,
+        summary=_safe_text(primary_summary(result), (*settings.runtime_secrets.private_values().values(), settings.agent_runtime.api_key)),
         report_path=result.report.path,
         candidate_case_path=candidate_case_path,
         case_name=execution.recording.case_name if execution.recording else None,

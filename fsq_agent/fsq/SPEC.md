@@ -61,7 +61,7 @@ Android command block:
 | `longPressOn: {...}` | `long_press_on` | validated `AndroidLongPressOnParams` dump |
 | `swipe: {...}` | `swipe` | validated `AndroidSwipeParams` dump |
 | `assert: {element: ..., text: ...}` | `assert_state` | validated `AndroidAssertStateParams` dump |
-| `assertWithAI: {prompt: ...}` | `assert_with_ai` | validated `AndroidAssertWithAIParams` dump |
+| `assertWithAI: {assertion: ..., surface: ..., region: ..., expect: ...}` | `assert_with_ai` | validated structured `AndroidAssertWithAIParams` dump; no prompt-only or visual-driving alias |
 | `inputText: {text: TEST_ACCOUNT_EMAIL, textType: runtimeSecret, ...}` | `input_text` | validated `AndroidInputTextParams` dump preserving `textType: runtimeSecret` for core runtime-secret resolution |
 
 Web command block:

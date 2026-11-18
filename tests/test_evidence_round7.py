@@ -79,7 +79,7 @@ def test_ai_invoke_failed_capture_is_acknowledged(tmp_path):
             return b"before"
 
     class Evaluator:
-        def evaluate(self, request):
+        def evaluate(self, request, *, cancellation_check=None):
             raise AssertionError("must not run without screenshot")
 
     recorder = EvidenceRecorder(run_id="run", output_dir=tmp_path)

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlsplit
 
+from fsq_agent.agent import Verifier
 from fsq_agent.config import list_workspace_registry
 from fsq_agent.core.evidence import EvidenceRecorder
 from fsq_agent.models import (
@@ -122,7 +123,8 @@ class DynamicExecutionService:
             lifecycle.heartbeat(run_dir)
             heartbeat = asyncio.create_task(self._heartbeat(run_dir))
             recorder = EvidenceRecorder(run_id=metadata.run_id, output_dir=run_dir, secret_values=secret_values)
-            outcome = await self._agent.run_in_context(safe_task, lifecycle.context(run_dir, metadata), request.event_sink, evidence_sink=recorder, cancellation_check=check_cancellation)
+            context = lifecycle.context(run_dir, metadata).model_copy(update={"capture_action_before": request.record})
+            outcome = await self._agent.run_in_context(safe_task, context, request.event_sink, evidence_sink=recorder, cancellation_check=check_cancellation)
             _validate_outcome_identity(outcome, safe_task)
             check_cancellation()
             try:
@@ -133,6 +135,9 @@ class DynamicExecutionService:
                     recorder.record_event(RunnerEvent(run_id=metadata.run_id, event_type="session_finish", payload={"capability_execution": "not_requested"}))
                     recorder.write_manifest()
                     bundle = lifecycle.read_evidence(run_dir)
+            verification = Verifier.reconcile_execution_evidence(outcome.verification, [step.model_dump(mode="json") for step in bundle.steps])
+            if verification is not outcome.verification:
+                outcome = outcome.model_copy(update={"verification": verification})
             web_evidence_gap = request.requires_web_search_evidence and outcome.verification.status == "success" and not _has_web_search_evidence(bundle, run_dir)
             if web_evidence_gap:
                 outcome = outcome.model_copy(

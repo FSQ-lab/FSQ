@@ -446,7 +446,14 @@ class _StrictLifecycleExecutor:
     def _skip_scope(self, prefix, reason, *, status="skipped"):
         bundle = self.recorder.build_bundle()
         recorded = {(step.source_step_id or step.step_id, step.invocation_path) for step in bundle.steps if not step.metadata.get("recovered_incomplete")}
-        blocker = next((step.step_execution_id for step in reversed(bundle.steps) if step.status == "failed"), None)
+        blocker = next(
+            (
+                step.step_execution_id
+                for step in reversed(bundle.steps)
+                if step.status in {"failed", "incomplete", "cancelled"} and step.step_execution_id is not None and step.metadata.get("hook_action_name") != "runCase"
+            ),
+            None,
+        )
         for step in bundle.planned_steps:
             key = (step.source_step_id or step.step_id, step.invocation_path)
             if step.invocation_path[: len(prefix)] != prefix or key in recorded:
@@ -797,10 +804,24 @@ class _StrictLifecycleExecutor:
         started_at: datetime,
         duration_ms: int,
     ) -> None:
-        status = "passed" if passed else "failed"
-        failure_category = None if passed else "action_error"
-        error_message = None if passed else f"Hook runCase failed: {target}"
+        child_prefix = (*tuple(metadata["invocation_path"]), "child")
+        children = [step for step in self.recorder.build_bundle().steps if step.invocation_path[: len(child_prefix)] == child_prefix and step.metadata.get("hook_action_name") != "runCase"]
+        blocking = next((step for state in ("cancelled", "failed", "incomplete") for step in children if step.status == state), None)
+        status = blocking.status if blocking is not None else "passed" if passed else "incomplete"
+        failure_category = blocking.failure_category if status == "failed" else None
+        error_message = blocking.error_message if blocking is not None else None
         phase_metadata = {**metadata, "target": target, "timing_measured": True, "structural": True}
+        if status == "incomplete":
+            phase_metadata["unresolved_children"] = [
+                {
+                    "step_execution_id": step.step_execution_id,
+                    "status": step.status,
+                    "reason": step.error_message,
+                    "assertions": [phase.metadata.get("harness_metadata", {}).get("ai_assertion") for phase in step.phase_reports if phase.metadata.get("harness_metadata", {}).get("ai_assertion")],
+                }
+                for step in children
+                if step.status == "incomplete"
+            ]
         result = RunnerStepResult(
             step_id=step_id,
             source_step_id=self._planned_hook_steps[tuple(metadata["invocation_path"])].source_step_id,
@@ -813,6 +834,7 @@ class _StrictLifecycleExecutor:
                 metadata={key: value for key, value in phase_metadata.items() if key != "hook_chain"},
             ),
             status=status,
+            blocked_by_step=blocking.step_execution_id if blocking is not None else None,
             started_at=started_at,
             ended_at=datetime.now(UTC),
             duration_ms=duration_ms,
@@ -831,7 +853,7 @@ class _StrictLifecycleExecutor:
             error_message=error_message,
             metadata=phase_metadata,
         )
-        if status != "passed":
+        if status == "failed":
             self.recorder.record_event(RunnerEvent(run_id=self.run_id, event_type="step_error", step_id=step_id, phase="invoke"))
         self.recorder.record_event(
             RunnerEvent(

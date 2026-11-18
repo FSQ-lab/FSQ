@@ -630,3 +630,49 @@ def test_planned_and_skipped_structural_hooks_are_retained_without_leaf_double_c
     assert structural[0].status == "skipped"
     assert structural[0].metadata["structural"] is True
     assert RunLifecycleService.load_result(run).counts.total == 3
+
+
+@pytest.mark.parametrize("phase", ["onCaseStart", "onCaseComplete"])
+def test_nested_incomplete_assertion_keeps_unresolved_container_and_blocker(tmp_path, phase):
+    child = tmp_path / "child.fsq.yaml"
+    child.write_text(
+        "schemaVersion: fsq.ai-test/v1\nname: Child\nplatform: android\n---\n- assertWithAI: {assertion: The logo is blue, surface: appearance, full_screen_reason: Logo fills the screen}\n"
+    )
+    root = tmp_path / "root.fsq.yaml"
+    root.write_text(f"schemaVersion: fsq.ai-test/v1\nname: Root\nplatform: android\n{phase}:\n- runCase: child.fsq.yaml\n---\n- launchApp: {{}}\n")
+
+    class UnresolvedHarness(LifecycleHarness):
+        def invoke_action(self, step, context):
+            if step.action_name == "assert_with_ai":
+                return HarnessActionResult(status="incomplete", action_name=step.action_name, metadata={"ai_assertion": {"outcome": "inconclusive", "error_code": "provider_unavailable"}})
+            return super().invoke_action(step, context)
+
+    settings = Settings(cases={"dir": tmp_path})
+    registry = build_capability_registry(platform="android")
+    recorder = EvidenceRecorder(run_id="nested", output_dir=tmp_path / "run")
+    run_strict_lifecycle_case(
+        case_path=root,
+        case=FsqCaseLoader().load_case(root),
+        settings=settings,
+        harness=UnresolvedHarness(),
+        output_dir=tmp_path / "run",
+        run_id="nested",
+        registry=registry,
+        registry_snapshot=registry.snapshot(),
+        recorder=recorder,
+        resolve_steps=lambda steps, _case: steps,
+        post_action_delay_seconds=PostActionDelaySettings(platform=0, common=0),
+    )
+    steps = recorder.build_bundle().steps
+    container = next(step for step in steps if step.metadata.get("hook_action_name") == "runCase")
+    child_result = next(step for step in steps if step.action_name == "assert_with_ai")
+    main = next(step for step in steps if step.action_name == "launch_app")
+    assert container.status == "incomplete"
+    assert container.failure_category is None
+    assert container.blocked_by_step == child_result.step_execution_id
+    if phase == "onCaseStart":
+        assert main.status == "skipped"
+        assert main.blocked_by_step == child_result.step_execution_id
+    else:
+        assert main.status == "passed"
+    assert "provider_unavailable" in str(container.metadata)

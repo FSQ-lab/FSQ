@@ -1,12 +1,15 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_serializer, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 StepPhase: TypeAlias = Literal["prepare", "invoke", "settle", "finalize"]
 RunnerStatus: TypeAlias = Literal["pending", "running", "passed", "failed", "skipped", "cancelled", "incomplete"]
@@ -49,7 +52,11 @@ WindowsMouseButton: TypeAlias = Literal["left", "right", "middle"]
 MacOSOrderDirection: TypeAlias = Literal["vertical", "horizontal"]
 
 TEXT_TYPE_DESCRIPTION = "Use literal for plain text; use runtimeSecret when text names an allowlisted runtime secret."
-ANDROID_TARGET_SCHEMA_DESCRIPTION = "Provide target or non-empty locator. Prefer a semantic target from the current Android UI snapshot; use locator when target text is unavailable."
+ANDROID_TARGET_SCHEMA_DESCRIPTION = (
+    "Provide target or non-empty locator. A usable explicit locator is authoritative. "
+    "A bare target matches trimmed exact text first, then exact content description only when no text matches; duplicates are errors. "
+    "Prefer current structured locators; use locator.resourceId for short resource ids, not raw XPath."
+)
 WEB_LOCATOR_SCHEMA_DESCRIPTION = "Provide one semantic locator using a role and optional name, within scope, or final-result index."
 WINDOWS_TARGET_SCHEMA_DESCRIPTION = "Provide a non-empty locator. The target field is descriptive only and is not used for Windows control lookup."
 MACOS_TARGET_SCHEMA_DESCRIPTION = "Provide target, non-empty locator, or point. Prefer target or locator for UI elements and point only for coordinate-based actions."
@@ -130,6 +137,15 @@ class HarnessContext(BaseModel):
     current_activity: str | None = None
     screen_size: tuple[int, int] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    _cancellation_check: Callable[[], None] | None = PrivateAttr(default=None)
+
+    @property
+    def cancellation_check(self) -> Callable[[], None] | None:
+        return self._cancellation_check
+
+    @cancellation_check.setter
+    def cancellation_check(self, value: Callable[[], None] | None) -> None:
+        self._cancellation_check = value
 
 
 class HarnessActionResult(BaseModel):
@@ -166,11 +182,16 @@ class AndroidLocator(BaseModel):
     )
 
     # Names mirror the authored Android locator payload contract.
-    resourceId: str | None = Field(default=None, description="Android resource id to match.")  # noqa: N815
+    resourceId: str | None = Field(  # noqa: N815
+        default=None, description="Exact Android resource id; surrounding whitespace is trimmed. Prefer this field for a short id: it matches the bare id or its node-package-qualified form."
+    )
     accessibilityId: str | None = Field(default=None, description="Android accessibility id or content description to match.")  # noqa: N815
     text: str | None = Field(default=None, description="Visible Android text to match.")
     className: str | None = Field(default=None, description="Android class name to match.")  # noqa: N815
-    xpath: str | None = Field(default=None, description="XPath expression for Android UI hierarchy lookup.")
+    xpath: str | None = Field(
+        default=None,
+        description="Exact raw XPath, passed unchanged without id expansion. A short @resource-id predicate is not package-aware; prefer resourceId for short ids, or use the exact observed qualified id in XPath.",
+    )
 
     def has_value(self) -> bool:
         return any(isinstance(value, str) and value.strip() for value in self.model_dump().values())
@@ -200,7 +221,9 @@ class AndroidScreenSize(BaseModel):
 class _AndroidTargetParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": ANDROID_TARGET_SCHEMA_DESCRIPTION})
 
-    target: str | None = Field(default=None, description="Android semantic target from the current UI snapshot.")
+    target: str | None = Field(
+        default=None, description="Exact trimmed Android text, with exact content-description fallback only when no text matches. A non-empty structured locator takes precedence."
+    )
     locator: AndroidLocator | None = Field(default=None, description="Optional structured Android locator. Provide at least one populated locator field.")
 
     @model_validator(mode="after")
@@ -235,7 +258,7 @@ class AndroidTapAtParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Tap Android screen coordinates."})
 
     point: AndroidPoint = Field(description="Android screen point to tap.")
-    reference_screen_size: AndroidScreenSize | None = Field(default=None, description="Original screen size for proportional replay of recorded coordinates.")
+    reference_screen_size: SkipJsonSchema[AndroidScreenSize | None] = Field(default=None, description="Original screen size for proportional replay of recorded coordinates.")
 
     def replay_params(self, context: object) -> dict[str, object]:
         return _android_coordinate_replay(self.model_dump(mode="json", exclude_none=True), context)
@@ -254,7 +277,9 @@ class AndroidInputTextParams(_AndroidTargetParams):
 class AndroidPressKeyParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Press one Android key."})
 
-    key: str = Field(description="Non-empty Android key name such as Back, Home, Enter, or a backend-supported key string.")
+    key: str = Field(
+        description="Android key name: Back, system Home, Enter, MoveEnd/End (123), MoveHome (122), Ctrl+End (one modified event), MediaPlayPause (85), MediaPlay (126), MediaPause (127), MediaStop (86), or Space (62). Names are case-insensitive; media keys also accept standard underscore forms. Delivery does not verify playback state."
+    )
 
     @model_validator(mode="after")
     def _require_key(self) -> "AndroidPressKeyParams":
@@ -264,13 +289,28 @@ class AndroidPressKeyParams(BaseModel):
 
 
 class AndroidSwipeParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Swipe by direction or both start and end Android screen points."})
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Provide exactly one swipe mode: full-screen direction, both start and end points, or target/non-empty locator plus direction. Only element mode accepts percent; replay references are internal point-mode parameters."
+        },
+    )
 
-    direction: AndroidSwipeDirection | None = Field(default=None, description="Swipe direction to use instead of explicit start and end points.")
-    start: AndroidPoint | None = Field(default=None, description="Start point for a coordinate swipe. Requires end when used.")
-    end: AndroidPoint | None = Field(default=None, description="End point for a coordinate swipe. Requires start when used.")
-    reference_screen_size: AndroidScreenSize | None = Field(default=None, description="Original screen size for proportional replay of recorded swipe coordinates.")
-    duration: int | None = Field(default=None, ge=1, description="Optional swipe duration in milliseconds.")
+    direction: AndroidSwipeDirection | None = Field(default=None, description="Full-screen swipe direction, or element-relative direction when target/locator is supplied.")
+    target: str | None = Field(default=None, description="Android semantic target for an element-relative swipe. Requires direction.")
+    locator: AndroidLocator | None = Field(default=None, description="Non-empty Android locator for an element-relative swipe. Requires direction.")
+    start: AndroidPoint | None = Field(default=None, description="Start point for a coordinate swipe. Requires end; cannot mix with direction or target/locator.")
+    end: AndroidPoint | None = Field(default=None, description="End point for a coordinate swipe. Requires start.")
+    percent: float | None = Field(
+        default=None,
+        strict=True,
+        gt=0,
+        le=1,
+        allow_inf_nan=False,
+        description="Element-only finite fraction of the usable bounds axis, greater than zero and at most one. Omitted/null means 1.0; other modes require null/omission.",
+    )
+    reference_screen_size: SkipJsonSchema[AndroidScreenSize | None] = Field(default=None, description="Original screen size for proportional replay of recorded swipe coordinates.")
+    duration: int | None = Field(default=None, strict=True, ge=1, le=60000, description="Optional swipe duration in milliseconds, from 1 through 60000.")
 
     def replay_params(self, context: object) -> dict[str, object]:
         params = self.model_dump(mode="json", exclude_none=True)
@@ -278,11 +318,22 @@ class AndroidSwipeParams(BaseModel):
 
     @model_validator(mode="after")
     def _require_direction_or_points(self) -> "AndroidSwipeParams":
-        has_direction = self.direction is not None
-        has_points = self.start is not None and self.end is not None
-        if has_direction or has_points:
+        has_target = self.target is not None or self.locator is not None
+        has_points = self.start is not None or self.end is not None
+        if has_points:
+            if self.start is None or self.end is None or self.direction is not None or has_target or self.percent is not None:
+                raise ValueError("point swipe requires both start and end without direction, target, locator, or percent")
             return self
-        raise ValueError("requires direction or both start and end points")
+        if self.reference_screen_size is not None:
+            raise ValueError("reference_screen_size is only valid for point-based Strict/Replay")
+        if self.direction is None:
+            raise ValueError("requires a direction or both start and end points")
+        if has_target:
+            if not ((isinstance(self.target, str) and self.target.strip()) or (self.locator is not None and self.locator.has_value())):
+                raise ValueError("element swipe requires target or non-empty locator")
+        elif self.percent is not None:
+            raise ValueError("percent is only valid for element swipes")
+        return self
 
 
 def _android_coordinate_replay(params: dict[str, object], context: object) -> dict[str, object]:
@@ -296,6 +347,25 @@ def _android_coordinate_replay(params: dict[str, object], context: object) -> di
 
 class AndroidUiTreeParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Read the current compact Android UI hierarchy. No parameters are accepted."})
+
+
+class AndroidInspectElementParams(_AndroidTargetParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Inspect one uniquely resolved Android target or non-empty locator. Returns full safe values and explicit observation states; protected or unknown-password text is unavailable."
+        },
+    )
+
+    attributes: tuple[Literal["id", "text", "desc", "type", "package", "bounds", "enabled", "displayed", "checked", "selected", "clickable", "focused"], ...] = Field(
+        default=("text", "desc"), min_length=1, description="Non-empty, duplicate-free safe attribute selection. Text is read only after password is explicitly false."
+    )
+
+    @model_validator(mode="after")
+    def _require_unique_attributes(self) -> "AndroidInspectElementParams":
+        if len(set(self.attributes)) != len(self.attributes):
+            raise ValueError("attributes must not contain duplicates")
+        return self
 
 
 class AndroidPerformActionsParams(BaseModel):
@@ -332,37 +402,161 @@ class AndroidElementState(AndroidLocator):
     clickable: bool | None = Field(default=None, description="Expected clickable state.")
     focused: bool | None = Field(default=None, description="Expected focused state.")
 
-    def has_state_assertion(self) -> bool:
-        return any(value is not None for value in [self.enabled, self.checked, self.selected, self.clickable, self.focused])
+
+def _assertion_element_schema(schema: dict[str, Any]) -> None:
+    properties = AndroidElementState.model_json_schema()["properties"]
+    # Complete object alternatives preserve compound locators and states under strict conversion.
+    alternatives = []
+    for name in AndroidLocator.model_fields:
+        variant_properties = deepcopy(properties)
+        variant_properties[name] = {"type": "string", "pattern": r"\S"}
+        alternatives.append({"type": "object", "properties": variant_properties, "required": [name], "additionalProperties": False})
+    schema["anyOf"] = alternatives
 
 
 class AndroidAssertStateParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Assert Android text or element locator/state. Provide text or element."})
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Assert existence, text, or state on one uniquely located Android element. Required element must contain a non-empty locator. Optional text predicates take precedence over state predicates."
+        },
+    )
 
-    element: AndroidElementState | None = Field(default=None, description="Android locator plus optional expected state values.")
-    text: AndroidTextAssertion | None = Field(default=None, description="Visible text assertion.")
+    element: AndroidElementState = Field(description="Required Android element with a non-empty locator and optional expected state values.", json_schema_extra=_assertion_element_schema)
+    text: AndroidTextAssertion | None = Field(default=None, description="Text predicates applied only to the located element; take precedence over state predicates.")
     optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
 
     @model_validator(mode="after")
     def _require_assertion(self) -> "AndroidAssertStateParams":
-        if self.text is not None:
+        if self.element.has_value():
             return self
-        if self.element is not None and (self.element.has_value() or self.element.has_state_assertion()):
-            return self
-        raise ValueError("requires text assertion or element locator/state assertion")
+        raise ValueError("requires element with a non-empty supported locator")
+
+
+class VisualRect(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    left: int
+    right: int
+    top: int
+    bottom: int
+
+
+class AndroidInspectWithAIParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    prompt: str = Field(min_length=1, max_length=4096, description="Read or locate visual content in the current Android image without performing an action.")
+    mode: Literal["extract", "locate"] = "extract"
+    region: VisualRect | None = Field(default=None, description="Optional half-open region in full-image coordinates.")
+    max_candidates: int = Field(default=5, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _validate_inspection(self) -> "AndroidInspectWithAIParams":
+        if "\x00" in self.prompt or len(self.prompt.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank UTF-8 prompt of at most 4096 bytes without NUL")
+        region = self.region
+        if region is not None and not (0 <= region.left < region.right and 0 <= region.top < region.bottom):
+            raise ValueError("requires a nonempty nonnegative image region")
+        return self
+
+
+class VisualRegion(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["image_rect"] = "image_rect"
+    rect: VisualRect
+
+
+class VisualExpectation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+
+    kind: Literal["visual_property", "exact_color", "display_identity"] = "visual_property"
+    property: str = Field(min_length=1)
+    value: str | bool | int | float | None
+    target: str | None = None
+    locator: AndroidLocator | None = None
+
+
+class DeterministicFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+
+    subject: str
+    property: str
+    value: str | bool | int | float | None
+    state: Literal["value", "unknown", "not_applicable", "missing"] = "value"
+    run_id: str
+    step_execution_id: str
+    observed_monotonic_ns: int
+    exact: bool = True
+
+
+class AssertionBudget(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+
+    timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    max_prompt_bytes: int = Field(default=16384, gt=0, le=16384)
+    max_image_bytes: int = Field(default=33554432, gt=0, le=33554432)
+    max_image_pixels: int = Field(default=64000000, gt=0, le=64000000)
+    max_image_height: int = Field(default=16384, gt=0, le=16384)
+    max_capture_age_ns: int = Field(default=2000000000, gt=0, le=60000000000)
+    max_capture_span_ns: int = Field(default=10000000000, gt=0, le=10000000000)
+
+
+class AndroidVisualAssertionPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    allow_provider_upload: bool = False
+    provider_available: bool | None = None
+    frame_sensitivity: Literal["unknown", "sensitive", "non_sensitive"] = "unknown"
+    budget: AssertionBudget = Field(default_factory=AssertionBudget)
+
+
+class HostCaptureEnvelopeV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    schema_version: Literal["host_capture_envelope/v1"] = "host_capture_envelope/v1"
+    source_tool: Literal["assert_with_ai"] = "assert_with_ai"
+    run_id: str
+    step_id: str
+    step_execution_id: str
+    capture_sequence: int = Field(ge=1)
+    sdk_session_id: str | None = None
+    host_capture_started_monotonic_ns: int
+    host_capture_finished_monotonic_ns: int
+    captured_wall_clock: str
+    display_query_monotonic_ns: int | None = None
+    png_sha256: str
+    png_size_bytes: int = Field(gt=0)
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+    display_width: int | None = None
+    display_height: int | None = None
+    pointer_mapping_state: Literal["unverified"] = "unverified"
+    region: VisualRect | None = None
 
 
 class AndroidAssertWithAIParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Evaluate an explicit Android visual assertion with AI."})
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Evaluate only an image-space visual assertion. Required assertion and surface; region is image_rect only, or omit it with full_screen_reason. Never locate/drive UI or replace exact accessibility facts."
+        },
+    )
 
-    prompt: str = Field(description="Non-empty visual assertion prompt to evaluate against current evidence.")
-    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+    assertion: str = Field(description="Pure visual appearance/image/Canvas expectation, not instructions or a UI action.")
+    surface: Literal["custom_canvas", "image_content", "map_view", "appearance"]
+    region: VisualRegion | None = None
+    expect: VisualExpectation | None = None
+    full_screen_reason: str | None = None
+    optional: bool | None = None
 
     @model_validator(mode="after")
     def _require_prompt(self) -> "AndroidAssertWithAIParams":
-        if self.prompt.strip():
-            return self
-        raise ValueError("requires non-empty prompt")
+        if not self.assertion.strip() or len(self.assertion.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank assertion of at most 4 KiB")
+        if self.region is None and not (self.full_screen_reason and self.full_screen_reason.strip()):
+            raise ValueError("full-image assertions require full_screen_reason")
+        return self
 
 
 class WebLocatorScope(BaseModel):
@@ -577,6 +771,8 @@ ANDROID_ACTION_DEFINITIONS: tuple[AndroidActionDefinition, ...] = (
     AndroidActionDefinition("longPressOn", "long_press_on", AndroidLongPressOnParams, "action"),
     AndroidActionDefinition("swipe", "swipe", AndroidSwipeParams, "action"),
     AndroidActionDefinition("uiTree", "ui_snapshot", AndroidUiTreeParams, "observation"),
+    AndroidActionDefinition("inspectElement", "inspect_element", AndroidInspectElementParams, "observation"),
+    AndroidActionDefinition("inspectWithAI", "inspect_with_ai", AndroidInspectWithAIParams, "observation"),
     AndroidActionDefinition("assertWithAI", "assert_with_ai", AndroidAssertWithAIParams, "assertion"),
 )
 ANDROID_ACTION_DEFINITIONS_BY_NAME: dict[str, AndroidActionDefinition] = {definition.fsq_action_name: definition for definition in ANDROID_ACTION_DEFINITIONS}

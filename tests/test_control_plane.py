@@ -364,9 +364,15 @@ def test_case_discovery_limit_and_contained_resolution(tmp_path: Path) -> None:
         resolve_case(settings, str((settings.cases.dir / "0.fsq.yaml").resolve()))
 
 
-def test_case_discovery_derives_ai_requirement_from_registry_snapshots(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    _case(settings.cases.dir / "ai.fsq.yaml", command="assertWithAI:\n    prompt: Verify the page")
+@pytest.mark.parametrize("platform", ["android", "web"])
+def test_case_discovery_retains_authored_ai_assertion_obligation(tmp_path: Path, platform: str) -> None:
+    settings = _settings(tmp_path, platform=platform)
+    command = (
+        "assertWithAI:\n    assertion: The logo is blue\n    surface: appearance\n    full_screen_reason: Logo fills the screen"
+        if platform == "android"
+        else "assertWithAI:\n    prompt: Verify the page"
+    )
+    _case(settings.cases.dir / "ai.fsq.yaml", platform=platform, command=command)
 
     entry = discover_cases(settings)["cases"][0]
 
@@ -489,10 +495,11 @@ def test_strict_preparation_builds_registry_and_resolved_steps_without_provider(
     assert calls == [False]
 
 
-def test_strict_preparation_gates_provider_from_registry_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.require_android_preflight", lambda *_args, **_kwargs: None)
+def test_android_strict_preparation_keeps_visual_assertion_without_provider_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    preflight = []
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.require_android_preflight", lambda *_args, **kwargs: preflight.append(kwargs["requires_provider"]))
     settings = _settings(tmp_path)
-    _case(settings.cases.dir / "ai.fsq.yaml", command="assertWithAI:\n    prompt: Verify the page")
+    _case(settings.cases.dir / "ai.fsq.yaml", command="assertWithAI:\n    assertion: Verify the logo\n    surface: appearance\n    full_screen_reason: Logo occupies the screen")
     calls: list[str] = []
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.validate_target", lambda _settings, _target: None)
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.validate_strict_core_settings", lambda _settings, requires_ai_assertion=False: calls.append(f"strict:{requires_ai_assertion}"))
@@ -505,7 +512,8 @@ def test_strict_preparation_gates_provider_from_registry_metadata(tmp_path: Path
     )
 
     assert prepared.requires_ai_assertion is True
-    assert calls == ["strict:True", "provider"]
+    assert calls == ["strict:True"]
+    assert preflight == [False]
 
 
 def test_strict_execution_composes_real_lifecycle_with_fake_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -560,6 +568,68 @@ def test_strict_execution_composes_real_lifecycle_with_fake_harness(tmp_path: Pa
     assert isinstance(run_id, str)
     assert (settings.output.runs_dir / run_id / "core-report.json").is_file()
     assert (settings.output.runs_dir / run_id / "run.json").is_file()
+
+
+def test_strict_execution_surfaces_harness_close_failure_as_error_instead_of_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.require_android_preflight", lambda *_args, **_kwargs: None)
+    settings = _settings(tmp_path)
+    _case(settings.cases.dir / "wait.fsq.yaml")
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.validate_target", lambda _settings, _target: None)
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.validate_strict_core_settings", lambda *_args, **_kwargs: None)
+    prepared = prepare_run(
+        request_id="request-strict-close-error",
+        settings=settings,
+        body={"mode": "strict", "workspaceName": "checkout", "platform": "android", "targetId": "device", "casePath": "wait.fsq.yaml"},
+    )
+    state = ControlPlaneState()
+    request_id = state.reserve(workspace_name="checkout", platform="android", target_id="device", mode="strict", source={"casePath": "wait.fsq.yaml"})
+    prepared.request_id = request_id
+    close_calls = 0
+
+    class FailingCloseHarness:
+        def __init__(self, store):
+            self.store = store
+
+        def get_context(self):
+            return HarnessContext(platform="android", session_id="fake")
+
+        def action_space(self):
+            return {}
+
+        def before_action(self, step, context):
+            return None
+
+        def invoke_action(self, step, context):
+            return HarnessActionResult(status="passed", action_name=step.action_name)
+
+        def after_action(self, step, context, action_result):
+            return None
+
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            ref = self.store.write_bytes(kind=kind, step_id=step_id, phase=phase, name=reason, data=b"evidence")
+            return HarnessArtifactRef(**ref.model_dump(exclude={"step_id", "step_execution_id", "phase"}))
+
+        def classify_error(self, error, phase, step):
+            return "unknown"
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+            raise RuntimeError("managed session teardown failed")
+
+    monkeypatch.setattr(
+        "fsq_agent.adapters.control_plane._execution.HarnessFactory.create_harness",
+        lambda *_args, **kwargs: FailingCloseHarness(kwargs["artifact_store"]),
+    )
+
+    _run_strict(prepared, state)
+
+    snapshot = state.snapshot(request_id)
+    assert snapshot["status"] == "error"
+    assert close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1556,3 +1626,67 @@ def test_control_plane_cancellation_reaches_eligible_teardown(tmp_path, monkeypa
     _run_strict(prepared, state)
     assert called == ["launch_app", "kill_app"]
     assert state.snapshot(request_id)["status"] == "cancelled"
+
+
+def test_android_strict_preflight_never_prepares_provider_for_unavailable_assertion(tmp_path, monkeypatch):
+    from fsq_agent.adapters.control_plane._readiness import require_android_preflight
+    from fsq_agent.application import doctor
+
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(doctor, "_safe_prerequisites", lambda *_args: ())
+    monkeypatch.setattr(doctor, "_runtime", lambda *_args: (True, "Runtime ready", ""))
+    monkeypatch.setattr(doctor, "_strict", lambda *_args: (True, "Strict ready", ""))
+    monkeypatch.setattr(doctor.PlatformRuntimeService, "check_target_configuration", lambda *_args: (True, "Target configured", ""))
+    monkeypatch.setattr(doctor.PlatformRuntimeService, "check_target_availability", lambda *_args: (True, "Target ready", ""))
+    monkeypatch.setattr(doctor, "check_provider_readiness", lambda *_args: pytest.fail("Strict startup must not prepare/refresh a provider"))
+    monkeypatch.setattr(doctor, "check_case_suggestion_readiness", lambda *_args: pytest.fail("Strict startup must not build a suggestion session"))
+    monkeypatch.setattr(doctor, "check_dynamic_agent_readiness", lambda *_args: pytest.fail("Strict startup must not build a dynamic runtime"))
+    require_android_preflight(settings, "strict", requires_provider=False)
+
+
+def test_provider_free_android_strict_dispatches_unverified_assertion_and_freezes_it(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    source = settings.cases.dir / "visual.fsq.yaml"
+    _case(source, command="assertWithAI:\n    assertion: The logo is blue\n    surface: appearance\n    full_screen_reason: Logo fills the screen")
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.require_android_preflight", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.build_ai_assertion_evaluator", lambda *_args: pytest.fail("Absent provider must not be constructed"))
+    dispatched = []
+
+    class Harness:
+        def get_context(self):
+            return HarnessContext(platform="android")
+
+        def before_action(self, step, context):
+            pass
+
+        def after_action(self, step, context, result):
+            pass
+
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            return HarnessArtifactRef(artifact_id=f"{step_id}-{kind}", kind=kind, availability="not_applicable", unavailable_reason="provider_unavailable")
+
+        def invoke_action(self, step, context):
+            dispatched.append(step.action_name)
+            return HarnessActionResult(status="incomplete", action_name=step.action_name, metadata={"ai_assertion": {"outcome": "inconclusive", "passed": False, "error_code": "provider_unavailable"}})
+
+        def classify_error(self, *_args):
+            return "harness_error"
+
+    def create_harness(*_args, **kwargs):
+        assert kwargs["ai_assertion_evaluator"] is None
+        assert kwargs["harness_settings"].android.visual_assertion_policy.provider_available is False
+        return Harness()
+
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.HarnessFactory.create_harness", create_harness)
+    state = ControlPlaneState()
+    request_id = state.reserve(workspace_name="checkout", platform="android", target_id="device", mode="strict", source={"casePath": "visual.fsq.yaml"})
+    prepared = prepare_run(request_id=request_id, settings=settings, body={"mode": "strict", "workspaceName": "checkout", "platform": "android", "targetId": "device", "casePath": "visual.fsq.yaml"})
+    _run_strict(prepared, state)
+    snapshot = state.snapshot(request_id)
+    assert dispatched == ["assert_with_ai"]
+    assert snapshot["status"] == "inconclusive"
+    frozen = json.loads((settings.output.runs_dir / snapshot["runId"] / "execution-result.json").read_text())
+    assert frozen["outcome"] == frozen["verification"]["status"] == "inconclusive"
+    assert frozen["counts"]["incomplete"] == 1
+    assert frozen["counts"]["failed"] == 0
+    assert frozen["steps"][0]["failure_category"] is None

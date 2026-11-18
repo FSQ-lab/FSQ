@@ -17,6 +17,10 @@ from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[1]
 EXACT_REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?==[^;\s]+(?:\s*;.*)?$")
+EXACT_OR_PINNED_GIT_REQUIREMENT = re.compile(
+    r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?==[^;\s]+(?:\s*;.*)?|"
+    r"appium-connect-agent @ git\+https://github\.com/FSQ-lab/appium-connect-agent\.git@[0-9a-f]{40})$"
+)
 
 
 def _load_workflow(name: str) -> tuple[str, dict[str, Any]]:
@@ -57,7 +61,7 @@ def test_python_dependencies_are_lock_free_public_and_exactly_versioned() -> Non
     assert "tool" not in project or "uv" not in project["tool"]
     assert "packagefeedproxy.microsoft.io" not in pyproject_text
     assert all(EXACT_REQUIREMENT.fullmatch(requirement) for requirement in project["build-system"]["requires"])
-    assert all(EXACT_REQUIREMENT.fullmatch(requirement) for requirement in project["project"]["dependencies"])
+    assert all(EXACT_OR_PINNED_GIT_REQUIREMENT.fullmatch(requirement) for requirement in project["project"]["dependencies"])
     assert all(EXACT_REQUIREMENT.fullmatch(requirement) for requirements in project["project"]["optional-dependencies"].values() for requirement in requirements)
 
 
@@ -83,8 +87,10 @@ def test_default_distribution_contract() -> None:
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
-    for name in ("uiautomator2", "playwright", "pywinauto", "pillow", "Appium-Python-Client"):
+    for name in ("playwright", "pywinauto", "pillow", "Appium-Python-Client", "selenium"):
         assert any(dependency.startswith(f"{name}==") for dependency in dependencies)
+    assert any(dependency.startswith("appium-connect-agent @ git+https://github.com/FSQ-lab/appium-connect-agent.git@") for dependency in dependencies)
+    assert not any(dependency.startswith("uiautomator2") for dependency in dependencies)
     assert set(metadata["optional-dependencies"]) == {"dev"}
     assert metadata["scripts"] == {
         "fsq": "fsq_agent.adapters.cli:main",
@@ -145,6 +151,12 @@ def test_release_workflow_is_manual_safe_and_uses_oidc_trusted_publishing() -> N
     assert publish["environment"] == "pypi"
     assert publish["permissions"] == {"contents": "read", "id-token": "write"}
     assert any(step.get("uses", "").startswith("actions/download-artifact@") for step in publish["steps"])
+    guard_step = _workflow_step(workflow, "publish", "Verify PyPI-compatible dependency metadata")
+    assert guard_step["shell"] == "python"
+    assert "Requires-Dist" in guard_step["run"]
+    assert "PyPI publication blocked: wheel metadata contains a direct URL dependency" in guard_step["run"]
+    step_names = [step.get("name") for step in publish["steps"]]
+    assert step_names.index("Download verified distributions") < step_names.index("Verify PyPI-compatible dependency metadata") < step_names.index("Publish with PyPI Trusted Publishing")
     assert publish["steps"][-1]["run"] == "uv publish --trusted-publishing always dist/*"
     install_smoke = workflow["jobs"]["install-smoke"]
     assert install_smoke["needs"] == "verify"
@@ -203,6 +215,9 @@ def test_workflow_embedded_python_is_syntactically_valid() -> None:
     compile(_delimited_python(verify_script, "<<'PY'", "PY"), "release.yml:verify:installed-wheel", "exec")
     matrix_script = _workflow_step(release, "install-smoke", "Install wheel and verify console scripts")["run"]
     compile(_delimited_python(matrix_script, "$resourceSmoke = @'", "'@"), "release.yml:install-smoke:resources", "exec")
+    publish_guard = _workflow_step(release, "publish", "Verify PyPI-compatible dependency metadata")
+    assert publish_guard["shell"] == "python"
+    compile(publish_guard["run"], "release.yml:publish:Verify PyPI-compatible dependency metadata", "exec")
 
 
 def test_release_install_smoke_checks_every_native_command_exit() -> None:

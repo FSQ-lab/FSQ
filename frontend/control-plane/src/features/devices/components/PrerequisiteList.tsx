@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, Copy, TriangleAlert, Minus, Ellipsis } from 'lucide-react';
 import type { PrerequisiteRecord } from '../../../api/types';
 
-const labels: Record<string,string> = {adb_cli:'ADB CLI',uiautomator2_runtime:'uiautomator2 dependency',adb_server:'Existing ADB server',device_connection:'Device connection and authorization',device_selection:'Device selection',application_identifier:'Application ID',application_installation:'Application installation',xcode_installation:'Full Xcode',xcode_developer_directory:'Xcode developer directory',appium_cli:'Appium CLI',appium_mac2_driver:'Appium Mac2 driver',appium_endpoint:'Appium endpoint',application_path:'Application path',bundle_identifier:'Bundle identifier'};
+const labels: Record<string,string> = {adb_cli:'ADB CLI',appium_connect_runtime:'Managed Appium runtime',adb_server:'Existing ADB server',device_connection:'Device connection and authorization',device_selection:'Device selection',application_identifier:'Application ID',application_installation:'Application installation',xcode_installation:'Full Xcode',xcode_developer_directory:'Xcode developer directory',appium_cli:'Appium CLI',appium_mac2_driver:'Appium Mac2 driver',appium_endpoint:'Appium endpoint',application_path:'Application path',bundle_identifier:'Bundle identifier'};
 
 function CommandCopyButton({ command }: { command: string }) {
   const [state, setState] = useState<'idle' | 'copying' | 'copied' | 'failed'>('idle');

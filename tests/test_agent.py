@@ -15,7 +15,21 @@ from fsq_agent.agent import Verifier
 from fsq_agent.agent_engine import ToolCall, ToolOutputEntry
 from fsq_agent.config import Settings
 from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService
-from fsq_agent.models import GoalPrePlan, KnowledgeBundle, ReportArtifact, RunEvent, RunExecutionContext, SkillBundle, StepResult, ToolExecutionError
+from fsq_agent.models import (
+    ConfigurationError,
+    FsqAgentError,
+    GoalPrePlan,
+    KnowledgeBundle,
+    PlanningError,
+    ReportArtifact,
+    ReportGenerationError,
+    RunEvent,
+    RunExecutionContext,
+    SkillBundle,
+    StepResult,
+    ToolExecutionError,
+    VerificationError,
+)
 from fsq_agent.observation import ExecutionLogger
 
 
@@ -203,7 +217,18 @@ class _GoalRunRuntime(_Runtime):
                 step_id=1,
                 status="success",
                 actual_outcome=(
-                    f'{{"status":"success","summary":"Goal done","pre_plan":[],"plan_updates":[],"satisfied_criteria":["{satisfied}"],"unmet_criteria":[],"evidence":["Goal observed"],"errors":[]}}'
+                    json.dumps(
+                        {
+                            "status": "success",
+                            "summary": "Goal done",
+                            "pre_plan": [],
+                            "plan_updates": [],
+                            "satisfied_criteria": [satisfied],
+                            "unmet_criteria": [],
+                            "evidence": ["Goal observed"],
+                            "errors": [],
+                        }
+                    )
                 ),
                 tool_name="agent_runtime.runner",
             )
@@ -419,13 +444,193 @@ async def test_agent_events_redact_configured_values_before_persistence_and_disp
     assert events[0].message == "Check [REDACTED]"
 
 
-@pytest.mark.parametrize("notification", ["logger", "sink"])
+async def _capture_failed_agent_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary: BaseException) -> tuple[RunEvent, dict[str, Any], str]:
+    def failed_refresh(settings):
+        raise primary
+
+    monkeypatch.setattr("fsq_agent.agent._core.refresh_model_provider_session", failed_refresh)
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    events: list[RunEvent] = []
+    runtime = _Runtime()
+    agent = FsqAgent(settings, Verifier(), _Reporter(), _KnowledgeLoader(), _SkillLoader(), runtime, ExecutionLogger(settings.output.runs_dir))
+    task = Task(description="Task", key_actions=["Inspect"], verification_goal="Inspection complete.")
+    original_cause = primary.__cause__
+
+    with pytest.raises(type(primary)) as failure:
+        await _run_in_context(agent, task, "safe-failure", events.append)
+
+    assert failure.value is primary
+    assert primary.__cause__ is original_cause
+    assert runtime.last_task is None
+    assert [event.type for event in events] == ["run_started", "agent_started", "run_failed"]
+    assert [event.sequence for event in events] == [1, 2, 3]
+    raw_events = (settings.output.runs_dir / "safe-failure" / "events.jsonl").read_text(encoding="utf-8")
+    persisted = [json.loads(line) for line in raw_events.splitlines()]
+    assert persisted[-1] == events[-1].model_dump(mode="json")
+    return events[-1], persisted[-1], raw_events
+
+
+@pytest.mark.parametrize(
+    ("exception_class", "error_code"),
+    [
+        (FsqAgentError, "fsq_agent_error"),
+        (ConfigurationError, "configuration_error"),
+        (PlanningError, "planning_error"),
+        (ToolExecutionError, "tool_execution_error"),
+        (VerificationError, "verification_error"),
+        (ReportGenerationError, "report_generation_error"),
+    ],
+)
+async def test_agent_run_failed_projects_known_domain_codes_without_context_leaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exception_class: type[FsqAgentError], error_code: str) -> None:
+    context = {
+        "reason": "network",
+        "status_code": 503,
+        "errno": 61,
+        "error_code": "CANARY_ARBITRARY_CODE",
+        "token": "CANARY_TOKEN",
+        "headers": {"Authorization": "Bearer CANARY_HEADER"},
+        "cookies": {"session": "CANARY_COOKIE"},
+        "raw_response": "CANARY_RESPONSE",
+        "path": "/private/CANARY_PATH",
+        "traceback": "CANARY_TRACEBACK",
+        "task": "CANARY_TASK",
+        "model": "CANARY_MODEL",
+        "extra": {"reason": "CANARY_NESTED_CONTEXT"},
+    }
+    primary = exception_class("CANARY_EXCEPTION_TEXT", context=context)
+    primary.error_code = "CANARY_ATTRIBUTE_CODE"
+    primary.__cause__ = OSError(13, "CANARY_CAUSE_TEXT", "/private/CANARY_CAUSE_PATH")
+
+    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+
+    assert event.message == exception_class.__name__
+    assert persisted["payload"] == {"exception_type": exception_class.__name__, "error_code": error_code, "reason": "network", "status_code": 503, "errno": 61}
+    assert "CANARY" not in raw_events
+    assert "CANARY" not in event.model_dump_json()
+    assert primary.context == context
+
+
+@pytest.mark.parametrize("reason", ["invalid_candidate", "authentication", "access_denied", "rate_limited", "timeout", "network", "malformed_response", "storage", "internal"])
+@pytest.mark.parametrize(("status_code", "errno"), [(100, 1), (599, 61)])
+async def test_agent_run_failed_preserves_allowlisted_reasons_and_exact_numeric_bounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str, status_code: int, errno: int) -> None:
+    primary = ConfigurationError("safe message", context={"reason": reason, "status_code": status_code, "errno": errno})
+
+    event, persisted, _ = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+
+    assert event.payload == persisted["payload"] == {"exception_type": "ConfigurationError", "error_code": "configuration_error", "reason": reason, "status_code": status_code, "errno": errno}
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {},
+        {"reason": "CANARY_UNKNOWN_REASON", "status_code": "CANARY_STATUS", "errno": "CANARY_ERRNO"},
+        {"reason": {"secret": "CANARY_REASON"}, "status_code": [], "errno": {}},
+        {"reason": ["network"], "status_code": None, "errno": None},
+        {"reason": True, "status_code": True, "errno": True},
+        {"reason": False, "status_code": False, "errno": False},
+        {"reason": 1, "status_code": 503.0, "errno": 61.0},
+        {"reason": "Network", "status_code": 99, "errno": 0},
+        {"reason": "network ", "status_code": 600, "errno": -1},
+    ],
+)
+async def test_agent_run_failed_omits_unknown_and_invalid_diagnostic_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: dict[str, object]) -> None:
+    primary = ConfigurationError("CANARY_EXCEPTION_TEXT", context=context)
+
+    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+
+    assert event.payload == persisted["payload"] == {"exception_type": "ConfigurationError", "error_code": "configuration_error"}
+    assert "CANARY" not in raw_events
+
+
+@pytest.mark.parametrize(
+    ("intermediate_count", "errno_value", "cycle", "expected_errno"),
+    [
+        (0, 13, False, 13),
+        (6, 13, False, 13),
+        (7, 13, False, None),
+        (0, 13, True, 13),
+        (6, 13, True, 13),
+        (0, True, True, None),
+        (0, 0, True, None),
+        (0, -1, True, None),
+        (0, "CANARY_ERRNO", True, None),
+        (0, 13.0, True, None),
+    ],
+)
+async def test_agent_run_failed_bounds_cycle_safe_oserror_cause_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, intermediate_count: int, errno_value: object, cycle: bool, expected_errno: int | None
+) -> None:
+    primary = ConfigurationError("CANARY_EXCEPTION_TEXT", context={"errno": False})
+    current: BaseException = primary
+    for _ in range(intermediate_count):
+        cause = RuntimeError("CANARY_INTERMEDIATE_TEXT")
+        current.__cause__ = cause
+        current = cause
+    os_error = OSError(13, "CANARY_CAUSE_TEXT", "/private/CANARY_PATH")
+    os_error.errno = errno_value
+    current.__cause__ = os_error
+    if cycle:
+        os_error.__cause__ = primary
+
+    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+
+    expected: dict[str, object] = {"exception_type": "ConfigurationError", "error_code": "configuration_error"}
+    if expected_errno is not None:
+        expected["errno"] = expected_errno
+    assert event.payload == persisted["payload"] == expected
+    assert "CANARY" not in raw_events
+
+
+async def test_agent_run_failed_stops_cyclic_causes_without_oserror_and_ignores_implicit_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    primary = ConfigurationError("CANARY_EXCEPTION_TEXT")
+    cause = RuntimeError("CANARY_CAUSE_TEXT")
+    primary.__cause__ = cause
+    cause.__cause__ = primary
+    primary.__context__ = OSError(13, "CANARY_IMPLICIT_CONTEXT")
+
+    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+
+    assert event.payload == persisted["payload"] == {"exception_type": "ConfigurationError", "error_code": "configuration_error"}
+    assert "CANARY" not in raw_events
+
+
+async def test_agent_run_failed_does_not_derive_codes_from_unknown_domain_classes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class UnknownDomainError(FsqAgentError):
+        pass
+
+    primary = UnknownDomainError("CANARY_EXCEPTION_TEXT", context={"error_code": "CANARY_CODE", "reason": "storage", "errno": 13})
+    primary.error_code = "CANARY_ATTRIBUTE_CODE"
+
+    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+
+    assert event.payload == persisted["payload"] == {"exception_type": "UnknownDomainError", "reason": "storage", "errno": 13}
+    assert "CANARY" not in raw_events
+
+
+@pytest.mark.parametrize("exception_class", [RuntimeError, OSError, asyncio.CancelledError])
+async def test_agent_run_failed_keeps_non_domain_exceptions_class_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exception_class: type[BaseException]) -> None:
+    primary = exception_class("CANARY_EXCEPTION_TEXT")
+    primary.context = {"reason": "network", "status_code": 503, "errno": 13, "token": "CANARY_TOKEN"}
+    primary.error_code = "CANARY_ATTRIBUTE_CODE"
+    primary.status_code = 503
+    primary.errno = 13
+    primary.__cause__ = OSError(13, "CANARY_CAUSE_TEXT", "/private/CANARY_PATH")
+
+    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+
+    assert event.payload == persisted["payload"] == {"exception_type": exception_class.__name__}
+    assert "CANARY" not in raw_events
+
+
+@pytest.mark.parametrize("notification", ["logger", "sink", "projection"])
 @pytest.mark.parametrize("cancelled", [False, True])
 async def test_failure_notification_cannot_replace_primary_exception_or_run_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, notification: str, cancelled: bool) -> None:
     from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService, load_run_metadata
 
     _stub_provider_refresh(monkeypatch)
-    primary = asyncio.CancelledError("primary cancellation") if cancelled else RuntimeError("primary execution failure")
+    primary = asyncio.CancelledError("primary cancellation") if cancelled else ConfigurationError("primary execution failure", context={"reason": "network", "errno": 61})
     run_ids = []
 
     class FailedRuntime(_Runtime):
@@ -441,6 +646,13 @@ async def test_failure_notification_cannot_replace_primary_exception_or_run_stat
     def event_sink(event: RunEvent) -> None:
         if notification == "sink" and event.type == "run_failed":
             raise OSError("secondary sink failure")
+
+    if notification == "projection":
+
+        def failed_projection(exc):
+            raise asyncio.CancelledError("secondary diagnostic projection failure")
+
+        monkeypatch.setattr("fsq_agent.agent._core._failure_event_payload", failed_projection)
 
     settings = Settings()
     settings.workspace.root_dir = tmp_path
@@ -581,6 +793,162 @@ async def test_agent_run_preplans_goal_only_task_before_execution(tmp_path: Path
     ]
     assert runtime.last_task.verification_goal == "Verify planned outcome for unknown: Access Downloads"
     assert any(event.title == "Goal pre-plan injected" for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actions", [[], [{"step_id": 1, "action": "Inspect the requested Downloads list."}]])
+@pytest.mark.parametrize("goal", ["", "   ", "The requested Downloads list was inspected and its visible entries reported."])
+@pytest.mark.parametrize("caller_actions", [[], ["  Inspect only the visible entries; keep this wording.  "]])
+async def test_open_inspection_plan_reaches_main_and_verifier_without_invented_actions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, actions, goal, caller_actions) -> None:
+    from fsq_agent.agent import CodingAgentPolicy
+
+    _stub_provider_refresh(monkeypatch)
+    request = "Browse Downloads and report the visible filenames as a title list. Do not delete, save, or rename anything."
+    runtime = _GoalRunRuntime()
+    verification_inputs = []
+
+    async def plan(*args, **kwargs):
+        return GoalPrePlan(goal=request, key_actions=actions, verification_goal=goal)
+
+    async def verify(task, results, *args, **kwargs):
+        verification_inputs.append(json.loads(CodingAgentPolicy().build_verification_input(task, results)))
+        return []
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    monkeypatch.setattr(runtime, "run_verification", verify)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+    task = Task(id="open-inspection", name="Inspect Downloads", description=request, planning_reference_kind="goal", planning_reference_text=request, key_actions=caller_actions)
+
+    outcome = await _run_in_context(agent, task, "open-inspection")
+
+    assert runtime.last_task is outcome.task
+    assert outcome.verification.status == "success"
+    assert outcome.task.key_actions == (caller_actions or (["Key action 1: Inspect the requested Downloads list."] if actions else []))
+    assert len(verification_inputs) == 1
+    assert verification_inputs[0]["verification_goal"] == outcome.task.verification_goal
+    assert verification_inputs[0]["task"]["planning_reference_text"] == request
+    assert verification_inputs[0]["agent_claims"]["satisfied_criteria"] == [outcome.task.verification_goal]
+    if goal.strip():
+        assert outcome.task.verification_goal == goal
+    else:
+        assert request in outcome.task.verification_goal
+    assert task.verification_goal is None
+    assert task.key_actions == caller_actions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [None, "{broken JSON", {}, {"goal": "Inspect Downloads", "verification_goal": "", "key_actions": "broken"}])
+async def test_invalid_planning_contract_does_not_activate_open_flow_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+
+    async def plan(*args, **kwargs):
+        return invalid
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+
+    with pytest.raises(PlanningError):
+        await _run_in_context(agent, Task(id="invalid-plan", name="Browse Downloads", description="Inspect the visible files."), "invalid-plan")
+    assert runtime.last_task is None
+
+
+@pytest.mark.asyncio
+async def test_planning_failure_is_not_replaced_by_delivery_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+    failure = PlanningError("Goal pre-plan output did not match the expected schema.")
+
+    async def plan(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+
+    with pytest.raises(PlanningError) as raised:
+        await _run_in_context(agent, Task(id="broken-plan", name="Browse Downloads", description="Inspect the visible files."), "broken-plan")
+    assert raised.value is failure
+    assert runtime.last_task is None
+
+
+@pytest.mark.asyncio
+async def test_blank_plan_keeps_explicit_objective_goal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+    goal = 'Save exact text "8 servings by" in file "Recipe" with no extension and no extra entries.'
+
+    async def plan(*args, **kwargs):
+        return GoalPrePlan(goal=goal, verification_goal=" ", key_actions=[])
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+    task = Task(id="exact-objective", name="Save recipe", description=goal, verification_goal=goal)
+
+    outcome = await _run_in_context(agent, task, "exact-objective")
+
+    assert outcome.task.verification_goal == goal
+    assert outcome.task.key_actions == []
+
+
+@pytest.mark.asyncio
+async def test_blank_plan_cannot_create_authorized_scope_from_empty_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+
+    async def plan(*args, **kwargs):
+        return GoalPrePlan(goal="", verification_goal="", key_actions=[])
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+
+    with pytest.raises(PlanningError):
+        await _run_in_context(agent, Task(id="empty-scope", name="Task", description=" "), "empty-scope")
+    assert runtime.last_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller_actions", [[], ["  Caller action\nKeep spacing.  ", "Caller action", "Caller action"]])
+async def test_agent_preserves_complete_planning_notes_and_caller_actions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caller_actions: list[str]) -> None:
+    _stub_provider_refresh(monkeypatch)
+    notes = "Keep every observed identity and field.\n" + "Repeated observations retain multiplicity. " * 400
+    pre_plan = GoalPrePlan(
+        goal="Collect entries",
+        verification_goal="Requested entries are collected.",
+        key_actions=[
+            {"step_id": 1, "action": "  Collect entries.  ", "notes": f"  {notes}  "},
+            {"step_id": 2, "action": "   ", "notes": "Do not turn this into an action."},
+            {"step_id": 3, "action": "Finish collection.", "notes": " \n "},
+            {"step_id": 4, "action": "Verify collection.", "notes": "  Preserve the destination.  "},
+        ],
+    )
+    runtime = _GoalRunRuntime()
+
+    async def run_pre_plan(*args, **kwargs):
+        return pre_plan
+
+    monkeypatch.setattr(runtime, "run_pre_plan", run_pre_plan)
+    agent = FsqAgent(
+        _settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"),
+        Verifier(),
+        _Reporter(),
+        _KnowledgeLoader(),
+        _SkillLoader(),
+        runtime,
+    )
+    task = Task(name="Collect entries", description="Collect entries", key_actions=caller_actions)
+
+    outcome = await _run_in_context(agent, task, "planning-notes")
+
+    expected_actions = caller_actions or [
+        f"Key action 1: Collect entries.\nNotes: {notes.strip()}",
+        "Key action 3: Finish collection.",
+        "Key action 4: Verify collection.\nNotes: Preserve the destination.",
+    ]
+    assert runtime.last_task is not None
+    assert runtime.last_task.key_actions == expected_actions
+    assert outcome.task.key_actions == expected_actions
+    assert runtime.last_task.verification_goal == pre_plan.verification_goal
+    assert task.key_actions == caller_actions
 
 
 @pytest.mark.asyncio

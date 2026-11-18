@@ -115,7 +115,7 @@ def _diagnose_platform(platform: str, root: Path, workspace_platform, user_confi
     return diagnose_platform_settings(settings)
 
 
-def diagnose_platform_settings(settings, *, context: PlatformDiagnosticContext | None = None) -> DoctorPlatformResult:
+def diagnose_platform_settings(settings, *, context: PlatformDiagnosticContext | None = None, provider_checks: bool = True) -> DoctorPlatformResult:
     if settings is None:
         if context is None:
             raise ValueError("A platform diagnostic context is required when settings are unavailable.")
@@ -151,9 +151,14 @@ def diagnose_platform_settings(settings, *, context: PlatformDiagnosticContext |
         target_availability = _safe_check("target_availability", lambda: environment.check_target_availability(settings, prerequisite_facts))
     foundation = (runtime_check, target_configuration, target_availability)
     strict_core = _dependent_check("strict_core", (configuration, *foundation), lambda: _strict(settings))
-    provider = _safe_check("provider", lambda: _provider_readiness(settings))
-    suggestion = _safe_check("suggestion_analyzer", lambda: check_case_suggestion_readiness(settings))
-    dynamic = _dependent_check("dynamic_agent", (*foundation, strict_core, provider), lambda: check_dynamic_agent_readiness(settings))
+    if provider_checks or platform != "android":
+        provider = _safe_check("provider", lambda: _provider_readiness(settings))
+        suggestion = _safe_check("suggestion_analyzer", lambda: check_case_suggestion_readiness(settings))
+        dynamic = _dependent_check("dynamic_agent", (*foundation, strict_core, provider), lambda: check_dynamic_agent_readiness(settings))
+    else:
+        provider = DoctorStatusDetail(status="not_applicable", code="doctor.provider_not_requested", message="Provider readiness is not requested for Android Strict startup.")
+        suggestion = provider
+        dynamic = provider
     checks = DoctorChecks(
         configuration=configuration,
         runtime=runtime_check,

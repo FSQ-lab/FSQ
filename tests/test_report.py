@@ -353,3 +353,21 @@ def test_resolve_report_path_requires_direct_child_run_id(tmp_path: Path) -> Non
         return
     with pytest.raises(ReportGenerationError, match="direct child"):
         resolve_report_path(tmp_path, linked.name)
+
+
+@pytest.mark.parametrize("answer", ["6510", "Title A\nTitle B", "   ", None])
+def test_report_keeps_primary_answer_separate_from_verification_rationale(tmp_path, answer):
+    from fsq_agent.models import AgentFinalOutput
+
+    raw = AgentFinalOutput(status="inconclusive", summary=answer).model_dump_json() if answer is not None else "unvalidated answer"
+    steps = [StepResult(step_id=1, status="success", tool_name="agent_runtime.runner", actual_outcome=raw)]
+    verification = VerificationResult(status="inconclusive", summary="Coverage remains unproven.", diagnostics=["Partial coverage"])
+    artifact = ReportGenerator(tmp_path).generate("answer", _task(), steps, verification)
+    markdown = artifact.path.read_text(encoding="utf-8")
+    summary = markdown.split("## Summary\n\n", 1)[1].split("\n\n## ", 1)[0]
+    assert summary == (answer if answer and answer.strip() else verification.summary)
+    assert "Coverage remains unproven." in markdown
+    assert "Status: `inconclusive`" in markdown
+    payload = json.loads((artifact.path.parent / "report.json").read_text(encoding="utf-8"))
+    assert payload["verification"]["status"] == "inconclusive"
+    assert payload["verification"]["summary"] == verification.summary

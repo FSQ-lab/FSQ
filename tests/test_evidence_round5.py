@@ -54,7 +54,7 @@ def test_assertion_invoke_screenshot_acknowledged_before_evaluator_failure(tmp_p
     class Evaluator:
         seen = None
 
-        def evaluate(self, request):
+        def evaluate(self, request, *, cancellation_check=None):
             bundle = EvidenceRecorder.recover_bundle(tmp_path)
             self.seen = [ref for ref in bundle.artifacts if ref.phase == "invoke"]
             raise RuntimeError("evaluator failed")

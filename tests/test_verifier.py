@@ -336,3 +336,59 @@ async def test_verifier_marks_invalid_verification_agent_output_inconclusive() -
     assert result.satisfied_criteria == []
     assert result.unmet_criteria == []
     assert "boom" in result.diagnostics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim", ["success", "failed"])
+async def test_verifier_does_not_turn_incomplete_assertion_into_model_verdict(claim):
+    import json
+
+    result = await Verifier().verify(
+        _task(),
+        [
+            StepResult(
+                step_id=1,
+                status="success",
+                actual_outcome="Tool callback completed",
+                tool_output={
+                    "runner_result": {
+                        "step_id": "visual",
+                        "status": "incomplete",
+                        "kind": "assertion",
+                        "metadata": {"optional": True},
+                        "phase_reports": [{"phase": "invoke", "metadata": {"harness_metadata": {"ai_assertion": {"outcome": "inconclusive", "passed": False, "error_code": "capture_failed"}}}}],
+                    }
+                },
+            ),
+            StepResult(step_id=2, status="success", tool_name="agent_runtime.verifier", actual_outcome=json.dumps({"status": claim, "summary": "Model claim", "satisfied_criteria": ["Criterion A"]})),
+        ],
+    )
+    assert result.status == "inconclusive"
+    assert result.satisfied_criteria == []
+    assert "capture_failed" in " ".join(result.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_verifier_uses_durable_incomplete_assertion_not_summary_envelope(tmp_path):
+    from fsq_agent.core import EvidenceRecorder
+    from fsq_agent.models import RunnerStepResult, StepPhaseReport
+
+    recorder = EvidenceRecorder(run_id="visual", output_dir=tmp_path)
+    recorder.record_step_result(
+        RunnerStepResult(
+            step_id="visual",
+            kind="assertion",
+            status="incomplete",
+            phase_reports=[
+                StepPhaseReport(
+                    step_id="visual", phase="invoke", status="incomplete", metadata={"harness_metadata": {"ai_assertion": {"outcome": "inconclusive", "error_code": "provider_unavailable"}}}
+                )
+            ],
+        )
+    )
+    recorder.write_manifest()
+    result = await Verifier().verify(
+        _task(), [StepResult(step_id=1, status="success", tool_name="agent_runtime.verifier", actual_outcome='{"status":"success","summary":"Claimed goal"}')], events_path=tmp_path / "events.jsonl"
+    )
+    assert result.status == "inconclusive"
+    assert "provider_unavailable" in " ".join(result.diagnostics)

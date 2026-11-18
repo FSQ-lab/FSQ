@@ -9,15 +9,76 @@ from pathlib import Path
 from typing import Any
 
 from fsq_agent.agent._events import RunEventEmitter
+from fsq_agent.agent._pre_plan import verification_goal_for_task
 from fsq_agent.agent._runtime import CodingAgentRuntime, CodingAgentRuntimeFactory
 from fsq_agent.agent._verifier import Verifier
 from fsq_agent.config import Settings
 from fsq_agent.core.interfaces import EvidenceJournalSink
 from fsq_agent.knowledge import PrivateKnowledgeLoader
-from fsq_agent.models import DynamicAgentOutcome, KnowledgeBundle, PlanningError, RunEvent, RunEventSink, RunExecutionContext, Task
+from fsq_agent.models import (
+    ConfigurationError,
+    DynamicAgentOutcome,
+    FsqAgentError,
+    GoalPrePlan,
+    KnowledgeBundle,
+    PlanningError,
+    ReportGenerationError,
+    RunEvent,
+    RunEventSink,
+    RunExecutionContext,
+    Task,
+    ToolExecutionError,
+    VerificationError,
+)
 from fsq_agent.observation import ExecutionLogger
 from fsq_agent.providers import refresh_model_provider_session
 from fsq_agent.skills import SkillLoader
+
+_FAILURE_ERROR_CODES = {
+    FsqAgentError: "fsq_agent_error",
+    ConfigurationError: "configuration_error",
+    PlanningError: "planning_error",
+    ToolExecutionError: "tool_execution_error",
+    VerificationError: "verification_error",
+    ReportGenerationError: "report_generation_error",
+}
+_FAILURE_REASONS = frozenset({"invalid_candidate", "authentication", "access_denied", "rate_limited", "timeout", "network", "malformed_response", "storage", "internal"})
+
+
+def _failure_event_payload(exc: BaseException) -> dict[str, str | int]:
+    payload: dict[str, str | int] = {"exception_type": type(exc).__name__}
+    if not isinstance(exc, FsqAgentError):
+        return payload
+
+    error_code = _FAILURE_ERROR_CODES.get(type(exc))
+    if error_code is not None:
+        payload["error_code"] = error_code
+    context = exc.context
+    if isinstance(context, dict):
+        reason = context.get("reason")
+        if type(reason) is str and reason in _FAILURE_REASONS:
+            payload["reason"] = reason
+        status_code = context.get("status_code")
+        if type(status_code) is int and 100 <= status_code <= 599:
+            payload["status_code"] = status_code
+        errno = context.get("errno")
+        if type(errno) is int and errno > 0:
+            payload["errno"] = errno
+            return payload
+
+    seen: set[int] = set()
+    cause: BaseException | None = exc
+    for _ in range(8):
+        if cause is None or id(cause) in seen:
+            break
+        seen.add(id(cause))
+        if isinstance(cause, OSError):
+            errno = cause.errno
+            if type(errno) is int and errno > 0:
+                payload["errno"] = errno
+                break
+        cause = cause.__cause__
+    return payload
 
 
 class FsqAgent:
@@ -122,9 +183,7 @@ class FsqAgent:
             )
         except BaseException as exc:
             with suppress(BaseException):
-                await emitter.emit(
-                    RunEvent(run_id=run_id, task_id=task.id, type="run_failed", title="Execution interrupted", message=type(exc).__name__, payload={"exception_type": type(exc).__name__})
-                )
+                await emitter.emit(RunEvent(run_id=run_id, task_id=task.id, type="run_failed", title="Execution interrupted", message=type(exc).__name__, payload=_failure_event_payload(exc)))
             raise
 
     def _load_pre_plan_knowledge(self) -> KnowledgeBundle:
@@ -153,10 +212,18 @@ class FsqAgent:
             return task
 
         reference_type, reference_text = self._planning_reference_for_task(task)
+        if not reference_text.strip():
+            raise PlanningError("Goal pre-plan requires a nonempty request scope.")
         pre_plan = await self._run_pre_plan(reference_type, reference_text, skills, run_id, emitter)
-        generated_key_actions = [f"Key action {index}: {action.action.strip()}" for index, action in enumerate(pre_plan.key_actions, start=1) if action.action.strip()]
+        if not isinstance(pre_plan, GoalPrePlan):
+            raise PlanningError("Goal pre-plan output did not match the expected schema.")
+        generated_key_actions = [
+            f"Key action {index}: {action.action.strip()}" + (f"\nNotes: {action.notes.strip()}" if action.notes.strip() else "")
+            for index, action in enumerate(pre_plan.key_actions, start=1)
+            if action.action.strip()
+        ]
         key_actions = list(task.key_actions) or generated_key_actions
-        verification_goal = pre_plan.verification_goal.strip()
+        verification_goal = pre_plan.verification_goal.strip() or verification_goal_for_task(task)
         payload = {
             "key_action_count": len(key_actions),
             "verification_goal_present": bool(verification_goal),
@@ -169,24 +236,11 @@ class FsqAgent:
                     run_id=run_id,
                     task_id=task.id,
                     type="planning_update",
-                    title="Goal pre-plan produced no key actions",
-                    message="Pre-plan did not produce a useful key-action chain.",
+                    title="Goal pre-plan uses request-grounded flow guidance",
+                    message="Derive the authorized path from fresh observations without inventing actions or acceptance conditions.",
                     payload=payload,
                 )
             )
-            raise PlanningError("Goal pre-plan did not produce useful key actions.", context=payload)
-        if not verification_goal:
-            await emitter.emit(
-                RunEvent(
-                    run_id=run_id,
-                    task_id=task.id,
-                    type="planning_update",
-                    title="Goal pre-plan produced no verification goal",
-                    message="Pre-plan did not produce a usable final verification goal.",
-                    payload=payload,
-                )
-            )
-            raise PlanningError("Goal pre-plan did not produce a usable verification goal.", context=payload)
 
         await emitter.emit(
             RunEvent(

@@ -223,9 +223,9 @@ def _discover_driver_capability_definitions(
 
 def _default_driver_capability_definitions(*, platform: HarnessPlatform) -> list[CapabilityDefinition]:
     if platform == "android":
-        from fsq_agent.drivers.android._uiautomator2 import UiAutomator2AndroidDriver
+        from fsq_agent.drivers.android._appium_connect import AppiumConnectAndroidDriver
 
-        driver_class = UiAutomator2AndroidDriver
+        driver_class = AppiumConnectAndroidDriver
     elif platform == "web":
         from fsq_agent.drivers.web._playwright import PlaywrightWebDriver
 

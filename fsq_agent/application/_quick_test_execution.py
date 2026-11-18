@@ -8,9 +8,9 @@ import inspect
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import unquote
 
 from fsq_agent.application._quick_test import prepare_quick_test
+from fsq_agent.application._result_summary import _safe_encoded_values, _safe_text, primary_summary
 from fsq_agent.application.contracts.shared import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode
 from fsq_agent.application.contracts.workspace import QuickTestPrepareRequest, QuickTestPrepareResult, QuickTestRunResult
 from fsq_agent.application.doctor import diagnose_platform_settings
@@ -154,7 +154,7 @@ async def execute_prepared_quick_test(prepared: QuickTestPrepareResult, goal: st
         **base,
         run_id=result.report.run_id,
         status=result.status,
-        summary=verification.summary,
+        summary=safe(primary_summary(result)),
         verification=verification,
         duration_ms=result.duration_ms,
         **paths,
@@ -169,27 +169,6 @@ async def _emit(sink, value) -> None:
         result = sink(value)
         if inspect.isawaitable(result):
             await result
-
-
-def _safe_text(text: str, secrets: tuple[str, ...]) -> str:
-    def url(match):
-        value = match.group()
-        decoded = unquote(value)
-        if any(secret and secret in decoded for secret in secrets):
-            return "[redacted URL]"
-        return value
-
-    return RunLifecycleService.safe_text(re.sub(r"https?://[^\s<>\"']+", url, text, flags=re.IGNORECASE), secrets)
-
-
-def _safe_encoded_values(value, secrets):
-    if isinstance(value, str):
-        return _safe_text(value, secrets)
-    if isinstance(value, dict):
-        return {key: _safe_encoded_values(item, secrets) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_safe_encoded_values(item, secrets) for item in value]
-    return value
 
 
 def _paths(runs_dir: Path, run_id: str, *, report: Path | None = None, candidate: Path | None = None) -> dict:

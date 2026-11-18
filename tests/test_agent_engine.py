@@ -50,10 +50,10 @@ def _response(text: str = "done", *, usage: bool = True) -> dict:
     }
 
 
-def _provider(monkeypatch: pytest.MonkeyPatch, handler: "Callable[[httpx.Request], httpx.Response]", **options):
+def _provider(monkeypatch: pytest.MonkeyPatch, handler: "Callable[[httpx.Request], httpx.Response]", *, sdk_retries: int = 0, **options):
     backend = importlib.import_module("fsq_agent.agent_engine._openai_backend")
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    monkeypatch.setattr(backend, "AsyncOpenAI", partial(AsyncOpenAI, http_client=client, max_retries=0))
+    monkeypatch.setattr(backend, "AsyncOpenAI", partial(AsyncOpenAI, http_client=client, max_retries=sdk_retries))
     return create_model_provider(base_url="https://model.example.test/v1/", api_key="test-credential", headers={"x-test-provider": "configured"}, **options), client
 
 
@@ -304,6 +304,255 @@ async def test_kimi_executes_tools_before_tool_free_structured_finalization(monk
     assert client.is_closed
 
 
+@pytest.mark.parametrize("max_turns", [1, 2])
+async def test_closing_retains_one_turn_answer_and_can_follow_empty_execution(monkeypatch, max_turns):
+    payloads, parsed = [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        return _http_response(_response('{"value":"6510"}' if len(payloads) == max_turns else ""), stream=False)
+
+    async def invoke(call):
+        raise AssertionError("No tools were requested")
+
+    def parse(text):
+        parsed.append(text)
+        return _FinalOutput.model_validate_json(text)
+
+    provider, _client = _provider(monkeypatch, respond)
+    try:
+        result = await create_agent_engine().run(
+            provider.get_model("gpt-5.2"),
+            AgentRequest(
+                "answer",
+                "Original constraints.",
+                "Answer from supplied context.",
+                tools=(ToolBinding("probe", "Read", {}, invoke),),
+                output=OutputContract("Final", _FinalOutput.model_json_schema(), parse),
+                max_turns=max_turns,
+                final_turn_instructions="Deliver the answer now.",
+            ),
+        )
+        assert result.final_output.value == "6510"
+        assert parsed == ['{"value":"6510"}']
+        assert len(payloads) == max_turns
+        assert payloads[0]["tools"][0]["name"] == "probe"
+        assert payloads[0]["instructions"] == "Original constraints."
+        assert bool(payloads[-1].get("tools")) is (max_turns == 1)
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("profile", ["openai", "kimi"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("execution_turns", [1, 2])
+async def test_last_turn_closes_from_filtered_tool_history(monkeypatch, profile, stream, execution_turns):
+    payloads, calls, parsed, events = [], [], [], []
+    closing = "Deliver the evidence-supported answer in the original structured contract."
+    schema = _FinalOutput.model_json_schema()
+    original_schema = deepcopy(schema)
+    thought = {"type": "reasoning", "id": "reasoning_close", "summary": [], "encrypted_content": "opaque-history"}
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) <= execution_turns:
+            response = _response("Retain this execution context.")
+            response["output"].insert(0, thought)
+            response["output"].append({"id": f"fc_{len(payloads)}", "type": "function_call", "name": "probe", "call_id": f"call_{len(payloads)}", "arguments": "{}", "status": "completed"})
+        else:
+            response = _response('{"value":"6510"}')
+        return _http_response(response, stream=stream)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "raw-observation"
+
+    def parse(text):
+        parsed.append(text)
+        return _FinalOutput.model_validate_json(text)
+
+    async def observe(event):
+        events.append(event)
+
+    provider, client = _provider(monkeypatch, respond, responses_profile=profile)
+    request = AgentRequest(
+        "answer",
+        "Original constraints.",
+        "What is the distance?",
+        tools=(ToolBinding("probe", "Read", {"type": "object", "properties": {}}, invoke),),
+        output=OutputContract("Final", schema, parse, strict=False),
+        max_turns=execution_turns + 1,
+        stream=stream,
+        reasoning_effort="high",
+        tool_output_filter=lambda entries: {entry.entry_id: "6510" for entry in entries},
+        final_turn_instructions=closing,
+    )
+    try:
+        result = await create_agent_engine().run(provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"), request, on_event=observe)
+        assert result.final_output == _FinalOutput(value="6510")
+        assert parsed == ['{"value":"6510"}']
+        assert calls == [f"call_{index}" for index in range(1, execution_turns + 1)]
+        assert len(payloads) == request.max_turns
+        assert all(payload["tools"][0]["name"] == "probe" and closing not in payload["instructions"] for payload in payloads[:-1])
+        final = payloads[-1]
+        assert not final.get("tools")
+        assert final["instructions"].startswith("Original constraints.")
+        assert closing in final["instructions"]
+        assert final["text"]["format"]["schema"] == original_schema
+        assert final["text"]["format"]["strict"] is False
+        assert final["input"][0] == {"role": "user", "content": "What is the distance?"}
+        assert thought in final["input"]
+        outputs = [item for item in final["input"] if item.get("type") == "function_call_output"]
+        assert [item["call_id"] for item in outputs] == calls
+        assert all(item["output"] == "6510" for item in outputs)
+        assert "raw-observation" not in json.dumps(final["input"])
+        assert all(payload["reasoning"] == {"effort": "max" if profile == "kimi" else "high"} for payload in payloads)
+        assert all(payload.get("stream", False) is stream for payload in payloads)
+        assert result.usage.requests == request.max_turns
+        assert result.usage.total_tokens == request.max_turns * 5
+        assert schema == original_schema
+        assert [event.output for event in events if event.kind == "tool_output"] == (["raw-observation"] * execution_turns if stream else [])
+        assert [event.text for event in events if event.kind == "message"][-1:] == (['{"value":"6510"}'] if stream else [])
+    finally:
+        await provider.aclose()
+    assert client.is_closed
+
+
+@pytest.mark.parametrize("profile", ["openai", "kimi"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("outcome", ["empty", "absent", "whitespace", "malformed", "schema", "tool"])
+async def test_last_turn_rejects_bad_close_without_dispatch_or_repair(monkeypatch, profile, stream, outcome):
+    payloads, calls, parsed, events = [], [], [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        response = _response({"empty": "", "absent": "", "whitespace": "  ", "malformed": "not-json", "schema": "{}", "tool": '{"value":"6510"}'}[outcome])
+        if len(payloads) == 1 or outcome == "tool":
+            response["output"] = [{"id": f"fc_{len(payloads)}", "type": "function_call", "name": "probe", "call_id": f"call_{len(payloads)}", "arguments": "{}", "status": "completed"}]
+        elif outcome == "absent":
+            response["output"] = []
+        return _http_response(response, stream=stream)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "6510"
+
+    def parse(text):
+        parsed.append(text)
+        return _FinalOutput.model_validate_json(text)
+
+    async def observe(event):
+        events.append(event)
+
+    provider, client = _provider(monkeypatch, respond, responses_profile=profile)
+    try:
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine().run(
+                provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"),
+                AgentRequest(
+                    "close",
+                    "Read",
+                    "Answer",
+                    tools=(ToolBinding("probe", "Read", {}, invoke),),
+                    output=OutputContract("Final", _FinalOutput.model_json_schema(), parse),
+                    max_turns=2,
+                    stream=stream,
+                    final_turn_instructions="Deliver the answer now.",
+                ),
+                on_event=observe,
+            )
+        assert failure.value.category == "invalid_output"
+        assert len(payloads) == 2
+        assert not payloads[-1].get("tools")
+        assert calls == ["call_1"]
+        assert len(parsed) == (1 if outcome in {"malformed", "schema"} else 0)
+        assert not [event for event in events if event.kind == "message" or event.call_id == "call_2"]
+    finally:
+        await provider.aclose()
+    assert client.is_closed
+
+
+@pytest.mark.parametrize("mode", ["default", "blank", "no_contract", "single_turn"])
+async def test_last_turn_opt_in_preserves_execution_compatibility(monkeypatch, mode):
+    payloads, calls = [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        response = _response()
+        response["output"] = [{"id": f"fc_{len(payloads)}", "type": "function_call", "name": "probe", "call_id": f"call_{len(payloads)}", "arguments": "{}", "status": "completed"}]
+        return _http_response(response, stream=True)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "observed"
+
+    provider, _client = _provider(monkeypatch, respond)
+    request = AgentRequest(
+        "execution",
+        "Read",
+        "Read",
+        tools=(ToolBinding("probe", "Read", {}, invoke),),
+        output=None if mode == "no_contract" else OutputContract("Final", _FinalOutput.model_json_schema(), _FinalOutput.model_validate_json),
+        max_turns=1 if mode == "single_turn" else 2,
+        stream=True,
+        final_turn_instructions=None if mode == "default" else " \n " if mode == "blank" else "Close now.",
+    )
+    try:
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine().run(provider.get_model("gpt-5.2"), request)
+        assert failure.value.category == "max_turns"
+        assert len(payloads) == len(calls) == request.max_turns
+        assert all(payload["tools"][0]["name"] == "probe" for payload in payloads)
+        assert all(payload["instructions"] == "Read" for payload in payloads)
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("profile", ["openai", "kimi"])
+async def test_last_turn_cancellation_closes_stream_without_retry(monkeypatch, profile):
+    payloads, calls = [], []
+    blocked = _RetrySseStream(body_gate=asyncio.Event())
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            response = _response()
+            response["output"] = [{"id": "fc_read", "type": "function_call", "name": "probe", "call_id": "call_read", "arguments": "{}", "status": "completed"}]
+            return _http_response(response, stream=True)
+        return _retry_http_stream(blocked)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "6510"
+
+    provider, _client = _provider(monkeypatch, respond, responses_profile=profile)
+    request = AgentRequest(
+        "close",
+        "Read",
+        "Answer",
+        tools=(ToolBinding("probe", "Read", {}, invoke),),
+        output=OutputContract("Final", _FinalOutput.model_json_schema(), _FinalOutput.model_validate_json),
+        max_turns=2,
+        stream=True,
+        final_turn_instructions="Deliver the answer now.",
+    )
+    execution = asyncio.create_task(create_agent_engine().run(provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"), request))
+    try:
+        await asyncio.wait_for(blocked.body_entered.wait(), 3)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        assert calls == ["call_read"]
+        assert len(payloads) == 2
+        assert not payloads[-1].get("tools")
+        assert blocked.closed.is_set()
+    finally:
+        if not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        await provider.aclose()
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("outcome", ["empty", "whitespace", "malformed", "schema", "tool", "refusal", "incomplete", "budget", "cancel"])
 async def test_kimi_finalization_failure_never_dispatches_or_retries(monkeypatch: pytest.MonkeyPatch, stream: bool, outcome: str) -> None:
@@ -539,6 +788,10 @@ def test_reasoning_effort_preserves_public_request_positionals():
     assert model_request.reasoning_effort == agent_request.reasoning_effort == "mid"
     assert agent_request.max_turns == 7
     assert agent_request.stream is True
+    assert agent_request.final_turn_instructions is None
+    extended = AgentRequest("name", "instructions", "input", (), contract, 7, True, False, None, "high", "Close now.")
+    assert extended.reasoning_effort == "high"
+    assert extended.final_turn_instructions == "Close now."
 
 
 @pytest.mark.parametrize("constraint", ["oneOf", "allOf", "reference"])
@@ -706,6 +959,577 @@ class _ChunkedSseStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.response_closed.set()
+
+
+class _RetrySseStream(httpx.AsyncByteStream):
+    def __init__(self, chunks=(), *, failure=None, close_failure=None, order=None, label="stream", body_gate=None, close_gate=None):
+        self.chunks = chunks
+        self.failure = failure
+        self.close_failure = close_failure
+        self.order = order if order is not None else []
+        self.label = label
+        self.body_gate = body_gate
+        self.close_gate = close_gate
+        self.body_entered = asyncio.Event()
+        self.close_entered = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def __aiter__(self):
+        self.body_entered.set()
+        if self.body_gate is not None:
+            await self.body_gate.wait()
+        for chunk in self.chunks:
+            yield chunk
+        if self.failure is not None:
+            raise self.failure
+
+    async def aclose(self):
+        self.close_entered.set()
+        if self.close_gate is not None:
+            await self.close_gate.wait()
+        if self.close_failure is not None:
+            raise self.close_failure
+        self.order.append(f"close:{self.label}")
+        self.closed.set()
+
+
+def _retry_clock(monkeypatch):
+    backend = importlib.import_module("fsq_agent.agent_engine._openai_backend")
+    waits = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        if delay:
+            waits.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(backend.asyncio, "sleep", sleep)
+    return waits
+
+
+def _retry_http_stream(stream):
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+
+def _sse_bytes(events):
+    return "".join(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events).encode()
+
+
+@pytest.mark.parametrize("profile", ["openai", "kimi"])
+async def test_stream_retry_discards_partial_tools_and_preserves_previous_history(monkeypatch, profile):
+    waits = _retry_clock(monkeypatch)
+    payloads, calls, events, order, parsed, filters = [], [], [], [], [], []
+    prior = {"type": "function_call", "id": "fc_prior", "call_id": "call_prior", "name": "observe", "arguments": "{}", "status": "completed"}
+    discarded = {**prior, "id": "fc_discarded", "call_id": "call_discarded"}
+    first = _response()
+    first["output"] = [prior]
+    partial = _RetrySseStream(
+        [_sse_bytes([{"type": "response.output_item.done", "sequence_number": 1, "output_index": 0, "item": discarded}])],
+        failure=httpx.ReadError("credential-body-canary"),
+        order=order,
+        label="broken",
+    )
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        order.append(f"request:{len(payloads)}")
+        if len(payloads) == 1:
+            return _http_response(first, stream=True)
+        if len(payloads) == 2:
+            return _retry_http_stream(partial)
+        assert partial.closed.is_set()
+        return _http_response(_response("execution draft" if profile == "kimi" and len(payloads) == 3 else '{"value":1}'), stream=True)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "actual prior tool output"
+
+    async def observe(event):
+        events.append(event)
+
+    def parse(text):
+        parsed.append(text)
+        return json.loads(text)
+
+    def filter_outputs(entries):
+        filters.append(entries)
+        return {entry.entry_id: "filtered prior tool output" for entry in entries}
+
+    provider, _client = _provider(monkeypatch, respond, responses_profile=profile, sdk_retries=2)
+    try:
+        result = await create_agent_engine().run(
+            provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"),
+            AgentRequest(
+                "retry",
+                "Keep instructions",
+                "same input",
+                tools=(ToolBinding("observe", "Observe", {}, invoke),),
+                output=OutputContract("Final", {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"], "additionalProperties": False}, parse),
+                stream=True,
+                max_turns=3 if profile == "kimi" else 2,
+                reasoning_effort="high",
+                tool_output_filter=filter_outputs,
+            ),
+            on_event=observe,
+        )
+        assert result.final_output == {"value": 1}
+        assert calls == ["call_prior"]
+        assert parsed == ['{"value":1}']
+        assert waits == [1]
+        assert payloads[1] == payloads[2]
+        assert [item["output"] for item in payloads[2]["input"] if item.get("type") == "function_call_output"] == ["filtered prior tool output"]
+        assert all(item.get("call_id") != "call_discarded" for payload in payloads for item in payload["input"])
+        assert order.index("close:broken") < order.index("request:3")
+        assert [(event.kind, event.call_id) for event in events if event.kind in {"tool_called", "tool_output"}] == [("tool_called", "call_prior"), ("tool_output", "call_prior")]
+        assert len(filters) == (3 if profile == "kimi" else 2)
+        assert result.usage.requests == (3 if profile == "kimi" else 2)
+        if profile == "kimi":
+            assert not payloads[-1].get("tools")
+            assert payloads[-1]["text"]["format"]["type"] == "json_schema"
+        assert [event.text for event in events if event.kind == "message"] == ['{"value":1}']
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize(
+    "fault,category,reason,identifier",
+    [
+        ("connect", "unavailable", "connection_error", "ConnectError"),
+        ("reset", "unavailable", "connection_error", "ConnectionResetError"),
+        ("read", "unavailable", "read_error", "ReadError"),
+        ("protocol", "unavailable", "remote_protocol_error", "RemoteProtocolError"),
+        ("incomplete", "unavailable", "incomplete_read", "IncompleteRead"),
+        ("timeout", "timeout", "timeout", "ReadTimeout"),
+        ("connect_timeout", "timeout", "timeout", "ConnectTimeout"),
+        ("429", "rate_limit", "rate_limit", "APIStatusError"),
+        ("503", "unavailable", "service_unavailable", "APIStatusError"),
+    ],
+)
+async def test_stream_retry_exhaustion_is_bounded_and_sanitizes_causal_graph(monkeypatch, caplog, fault, category, reason, identifier):
+    import traceback
+    from http.client import IncompleteRead
+
+    waits = _retry_clock(monkeypatch)
+    requests, streams = [], []
+    canary = "secret-token-header-cookie-body-url-canary"
+
+    def respond(request):
+        requests.append(request)
+        if fault.isdigit():
+            return httpx.Response(int(fault), headers={"x-private": canary}, json={"error": {"message": canary}})
+        errors = {
+            "connect": httpx.ConnectError,
+            "reset": ConnectionResetError,
+            "read": httpx.ReadError,
+            "protocol": httpx.RemoteProtocolError,
+            "timeout": httpx.ReadTimeout,
+            "connect_timeout": httpx.ConnectTimeout,
+        }
+        error = IncompleteRead(canary.encode(), 100) if fault == "incomplete" else errors[fault](canary)
+        if fault in {"connect", "connect_timeout"}:
+            raise error
+        stream = _RetrySseStream(failure=error)
+        streams.append(stream)
+        return _retry_http_stream(stream)
+
+    provider, _client = _provider(monkeypatch, respond, sdk_retries=2)
+    try:
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine().run(provider.get_model("gpt-5.2"), AgentRequest("retry", "test", canary, stream=True, max_turns=1))
+        error = failure.value
+        assert (error.category, error.reason) == (category, reason)
+        expected_status = int(fault) if fault.isdigit() else None if fault in {"connect", "connect_timeout"} else 200
+        assert error.status_code == expected_status
+        assert len(requests) == 4
+        assert waits == [1, 2, 4]
+        assert all(stream.closed.is_set() for stream in streams)
+        assert error.__cause__ is not None
+        assert identifier in str(error.__cause__)
+        pending, seen = [error], set()
+        while pending:
+            current = pending.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            assert canary not in str(current) + repr(current) + repr(getattr(current, "__dict__", {}))
+            assert not isinstance(current, (httpx.HTTPError,))
+            pending.extend(link for link in (current.__cause__, current.__context__) if link is not None)
+        assert canary not in "".join(traceback.format_exception(error))
+        assert canary not in caplog.text
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize(
+    "header,expected",
+    [
+        ("3", 3),
+        ("99", 4),
+        ("0", 1),
+        ("-1", 1),
+        ("not a date", 1),
+        ("Wed, 01 Jan 2025 00:00:03 GMT", 3),
+        ("Wed, 01 Jan 2025 00:00:59 GMT", 4),
+        ("Tue, 31 Dec 2024 23:59:59 GMT", 1),
+        ("Wed Jan  1 00:00:03 2025", 3),
+    ],
+)
+async def test_stream_retry_after_is_capped_and_supports_http_dates(monkeypatch, header, expected):
+    waits = _retry_clock(monkeypatch)
+    backend = importlib.import_module("fsq_agent.agent_engine._openai_backend")
+    monkeypatch.setattr(backend, "time", lambda: 1735689600)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(429, headers={"retry-after": header}, json={"error": {"message": "busy"}}) if len(requests) == 1 else _http_response(_response(), stream=True)
+
+    provider, _client = _provider(monkeypatch, respond, sdk_retries=2)
+    try:
+        result = await create_agent_engine().run(provider.get_model("gpt-5.2"), AgentRequest("retry", "test", "test", stream=True, max_turns=1))
+        assert result.final_output == "done"
+        assert waits == [expected]
+        assert len(requests) == 2
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize(
+    "fault,category",
+    [
+        ("401", "authentication"),
+        ("403", "authentication"),
+        ("400", "runtime"),
+        ("404", "unavailable"),
+        ("authentication", "authentication"),
+        ("failed_authentication", "authentication"),
+        ("schema", "invalid_output"),
+        ("refusal", "refusal"),
+        ("filter", "incomplete"),
+        ("malformed", "invalid_output"),
+        ("invalid_completed", "invalid_output"),
+        ("partial_refusal", "refusal"),
+        ("refusal_with_error", "refusal"),
+        ("parser", "invalid_output"),
+        ("programmer", "runtime"),
+        ("programmer_context", "runtime"),
+    ],
+)
+async def test_stream_deterministic_rejections_do_not_retry(monkeypatch, fault, category):
+    waits = _retry_clock(monkeypatch)
+    requests, events, parsed = [], [], []
+
+    def respond(request):
+        requests.append(request)
+        if fault.isdigit():
+            return httpx.Response(int(fault), json={"error": {"message": "private rejection"}})
+        if fault == "programmer":
+            raise RuntimeError("private programmer detail")
+        if fault == "programmer_context":
+            error = RuntimeError("private programming failure")
+            error.__context__ = httpx.ReadError("private transport context")
+            raise error from None
+        if fault == "partial_refusal":
+            return _sse_response([{"type": "response.refusal.done", "sequence_number": 0, "item_id": "msg_refusal", "output_index": 0, "content_index": 0, "refusal": "private refusal"}])
+        if fault == "refusal_with_error":
+            response = _response()
+            response["output"][0]["content"] = [{"type": "refusal", "refusal": "private refusal"}]
+            return _sse_response(
+                [{"type": "error", "sequence_number": 0, "code": "unknown", "message": "private error", "param": None}, {"type": "response.completed", "sequence_number": 1, "response": response}]
+            )
+        if fault == "failed_authentication":
+            response = _response()
+            response.update(status="failed", error={"code": "invalid_api_key", "message": "private authentication"})
+            return _sse_response([{"type": "response.failed", "sequence_number": 0, "response": response}])
+        if fault == "malformed":
+            return _retry_http_stream(_RetrySseStream([b"event: response.completed\ndata: {\n\n"]))
+        if fault in {"authentication", "schema", "refusal", "filter"}:
+            codes = {"authentication": "invalid_api_key", "schema": "invalid_json_schema", "refusal": "refusal", "filter": "content_filter"}
+            return _sse_response([{"type": "error", "sequence_number": 0, "code": codes[fault], "message": "private rejection", "param": None}])
+        response = _response("not valid JSON")
+        if fault == "invalid_completed":
+            response["output"] = "invalid protocol data"
+        return _http_response(response, stream=True)
+
+    async def observe(event):
+        events.append(event)
+
+    def parse(text):
+        parsed.append(text)
+        return json.loads(text)
+
+    provider, _client = _provider(monkeypatch, respond, sdk_retries=2)
+    try:
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine().run(
+                provider.get_model("gpt-5.2"), AgentRequest("retry", "test", "test", stream=True, output=OutputContract("Final", {"type": "object", "properties": {}}, parse)), on_event=observe
+            )
+        assert failure.value.category == category
+        assert len(requests) == 1
+        assert waits == []
+        assert parsed == (["not valid JSON"] if fault == "parser" else [])
+        if fault != "parser":
+            assert [event.kind for event in events] == ["agent_started"]
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("phase", ["body", "backoff", "closure", "completed_closure"])
+async def test_stream_retry_cancellation_settles_owned_stream(monkeypatch, phase):
+    requests, waits = [], []
+    gate = asyncio.Event()
+    backoff_entered = asyncio.Event()
+    stream = _RetrySseStream(
+        [_sse_bytes([{"type": "response.completed", "sequence_number": 0, "response": _response()}])] if phase == "completed_closure" else (),
+        failure=None if phase == "completed_closure" else httpx.ReadError("private body error"),
+        body_gate=gate if phase == "body" else None,
+        close_gate=gate if phase in {"closure", "completed_closure"} else None,
+    )
+    backend = importlib.import_module("fsq_agent.agent_engine._openai_backend")
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay):
+        waits.append(delay)
+        backoff_entered.set()
+        await gate.wait()
+
+    if phase == "backoff":
+        monkeypatch.setattr(backend.asyncio, "sleep", sleep)
+
+    def respond(request):
+        requests.append(request)
+        return _retry_http_stream(stream)
+
+    provider, client = _provider(monkeypatch, respond)
+    execution = asyncio.create_task(create_agent_engine().run(provider.get_model("gpt-5.2"), AgentRequest("retry", "test", "test", stream=True)))
+    try:
+        await (stream.body_entered if phase == "body" else stream.close_entered if phase in {"closure", "completed_closure"} else backoff_entered).wait()
+        execution.cancel("primary cancellation")
+        await real_sleep(0)
+        if phase in {"closure", "completed_closure"}:
+            assert not execution.done()
+            assert not client.is_closed
+            gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        assert len(requests) == 1
+        assert stream.closed.is_set()
+        assert waits == ([1] if phase == "backoff" else [])
+    finally:
+        gate.set()
+        if not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        await provider.aclose()
+
+
+async def test_stream_implicit_close_failure_never_retries_or_delivers_output(monkeypatch):
+    waits = _retry_clock(monkeypatch)
+    requests, events = [], []
+    stream = _RetrySseStream([_sse_bytes([{"type": "response.completed", "sequence_number": 0, "response": _response()}])], close_failure=RuntimeError("private cleanup canary"))
+
+    def respond(request):
+        requests.append(request)
+        return _retry_http_stream(stream)
+
+    async def observe(event):
+        events.append(event)
+
+    provider, _client = _provider(monkeypatch, respond)
+    try:
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine().run(provider.get_model("gpt-5.2"), AgentRequest("retry", "test", "test", stream=True), on_event=observe)
+        assert failure.value.category == "cleanup"
+        assert failure.value.__context__ is None
+        assert len(requests) == 1
+        assert waits == []
+        assert [event.kind for event in events] == ["agent_started"]
+    finally:
+        stream.close_failure = None
+        await stream.aclose()
+        await provider.aclose()
+
+
+def test_stream_body_interruption_settles_before_propagating(monkeypatch):
+    loop = asyncio.new_event_loop()
+    requests = []
+    interruption = KeyboardInterrupt("synthetic interruption")
+    stream = _RetrySseStream(failure=interruption)
+
+    def respond(request):
+        requests.append(request)
+        return _retry_http_stream(stream)
+
+    provider, _client = _provider(monkeypatch, respond)
+
+    async def exercise():
+        try:
+            try:
+                await create_agent_engine().run(provider.get_model("gpt-5.2"), AgentRequest("retry", "test", "test", stream=True))
+            except KeyboardInterrupt as error:
+                assert stream.closed.is_set()
+                return error
+            raise AssertionError("Interruption was not propagated")
+        finally:
+            await provider.aclose()
+
+    try:
+        assert loop.run_until_complete(exercise()) is interruption
+        assert len(requests) == 1
+        assert not asyncio.all_tasks(loop)
+    finally:
+        loop.close()
+
+
+async def test_stream_retry_cleanup_failure_preserves_primary_and_prevents_new_attempt(monkeypatch):
+    waits = _retry_clock(monkeypatch)
+    requests = []
+    stream = _RetrySseStream(failure=httpx.ReadTimeout("private primary"), close_failure=RuntimeError("private cleanup"))
+
+    def respond(request):
+        requests.append(request)
+        return _retry_http_stream(stream)
+
+    provider, _client = _provider(monkeypatch, respond)
+    try:
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine().run(provider.get_model("gpt-5.2"), AgentRequest("retry", "test", "test", stream=True))
+        assert (failure.value.category, failure.value.reason) == ("timeout", "timeout")
+        assert "cleanup" in " ".join(failure.value.__notes__)
+        assert "private" not in str(failure.value) + str(failure.value.__cause__) + " ".join(failure.value.__notes__)
+        assert len(requests) == 1
+        assert waits == []
+    finally:
+        stream.close_failure = None
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("fault", ["timeout", "429", "503", "error", "nested_error", "missing"])
+async def test_stream_retry_recovers_only_a_complete_response(monkeypatch, fault):
+    waits = _retry_clock(monkeypatch)
+    payloads, events, parsed = [], [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            if fault.isdigit():
+                return httpx.Response(int(fault), json={"error": {"message": "temporary"}})
+            if fault == "timeout":
+                return _retry_http_stream(_RetrySseStream(failure=httpx.ReadTimeout("private timeout")))
+            if fault in {"error", "nested_error"}:
+                error = {"code": "unrecognized_provider_error", "message": "private server error"}
+                return _sse_response([{"type": "error", "sequence_number": 0, **({"error": error} if fault == "nested_error" else error)}])
+            return _sse_response([{"type": "response.created", "sequence_number": 0, "response": _response("discarded output")}])
+        return _http_response(_response('{"value":1}'), stream=True)
+
+    async def observe(event):
+        events.append(event)
+
+    def parse(text):
+        parsed.append(text)
+        return json.loads(text)
+
+    provider, _client = _provider(monkeypatch, respond, sdk_retries=2)
+    try:
+        result = await create_agent_engine().run(
+            provider.get_model("gpt-5.2"),
+            AgentRequest(
+                "retry",
+                "test",
+                "test",
+                stream=True,
+                max_turns=1,
+                output=OutputContract("Final", {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"], "additionalProperties": False}, parse),
+            ),
+            on_event=observe,
+        )
+        assert result.final_output == {"value": 1}
+        assert payloads[0] == payloads[1]
+        assert waits == [1]
+        assert parsed == ['{"value":1}']
+        assert [event.text for event in events if event.kind == "message"] == ['{"value":1}']
+    finally:
+        await provider.aclose()
+
+
+async def test_kimi_streamed_finalization_retry_never_replays_tool_execution(monkeypatch):
+    waits = _retry_clock(monkeypatch)
+    payloads, calls, parsed, events = [], [], [], []
+    first = _response()
+    first["output"] = [{"type": "function_call", "id": "fc_actual", "call_id": "call_actual", "name": "observe", "arguments": "{}", "status": "completed"}]
+    broken = _RetrySseStream(failure=httpx.RemoteProtocolError("private finalization error"))
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            return _http_response(first, stream=True)
+        if len(payloads) == 2:
+            return _http_response(_response("Actual observation retained."), stream=True)
+        if len(payloads) == 3:
+            return _retry_http_stream(broken)
+        assert broken.closed.is_set()
+        return _http_response(_response('{"value":1}'), stream=True)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "Actual observation"
+
+    def parse(text):
+        parsed.append(text)
+        return json.loads(text)
+
+    async def observe(event):
+        events.append(event)
+
+    provider, _client = _provider(monkeypatch, respond, responses_profile="kimi", sdk_retries=2)
+    try:
+        result = await create_agent_engine().run(
+            provider.get_model("kimi-k3"),
+            AgentRequest(
+                "retry",
+                "test",
+                "test",
+                stream=True,
+                max_turns=3,
+                tools=(ToolBinding("observe", "Observe", {}, invoke),),
+                output=OutputContract("Final", {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"], "additionalProperties": False}, parse),
+            ),
+            on_event=observe,
+        )
+        assert result.final_output == {"value": 1}
+        assert waits == [1]
+        assert calls == ["call_actual"]
+        assert len(payloads) == 4
+        assert payloads[2] == payloads[3]
+        assert all(not payload.get("tools") and payload["text"]["format"]["type"] == "json_schema" for payload in payloads[2:])
+        assert any(item.get("output") == "Actual observation" for item in payloads[3]["input"])
+        assert parsed == ['{"value":1}']
+        assert [event.text for event in events if event.kind == "message"] == ['{"value":1}']
+        assert result.usage.requests == 3
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("entry", ["direct", "nonstream"])
+async def test_stream_retry_policy_does_not_change_other_responses_sdk_attempts(monkeypatch, entry):
+    _retry_clock(monkeypatch)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(503, json={"error": {"message": "temporary"}})
+
+    provider, _client = _provider(monkeypatch, respond, sdk_retries=2)
+    try:
+        model = provider.get_model("gpt-5.2")
+        operation = model.complete(ModelRequest("test")) if entry == "direct" else create_agent_engine().run(model, AgentRequest("test", "test", "test", max_turns=1))
+        with pytest.raises(EngineError) as failure:
+            await operation
+        assert failure.value.category == "unavailable"
+        assert len(requests) == 3
+        assert all(not json.loads(request.content).get("stream") for request in requests)
+    finally:
+        await provider.aclose()
 
 
 def test_stream_consumes_terminal_event_before_event_loop_closes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -943,6 +1767,7 @@ async def test_stream_terminal_failures_do_not_complete(monkeypatch: pytest.Monk
             response["error"] = {"code": "server_error", "message": "private terminal detail"}
         events.append({"type": terminal, "sequence_number": 1, "response": response})
     requests = []
+    waits = _retry_clock(monkeypatch)
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -952,11 +1777,14 @@ async def test_stream_terminal_failures_do_not_complete(monkeypatch: pytest.Monk
     try:
         with pytest.raises(EngineError) as failure:
             await create_agent_engine().run(provider.get_model("test-model"), AgentRequest(name="stream", instructions="test", input="test", stream=True))
-        assert failure.value.category == ("incomplete" if terminal == "response.incomplete" else "invalid_output")
+        assert failure.value.category == ("incomplete" if terminal == "response.incomplete" else "unavailable" if terminal in {"error", "missing"} else "invalid_output")
         if terminal == "response.incomplete":
             assert failure.value.reason == "content_filter"
         assert "private terminal" not in str(failure.value)
-        assert len(requests) == 1
+        assert len(requests) == (4 if terminal in {"error", "missing"} else 1)
+        assert waits == ([1, 2, 4] if terminal in {"error", "missing"} else [])
+        if terminal in {"error", "missing"}:
+            assert failure.value.reason == ("stream_error" if terminal == "error" else "stream_incomplete")
     finally:
         await provider.aclose()
     assert client.is_closed

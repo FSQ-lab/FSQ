@@ -8,7 +8,7 @@ Provide an installed Chromium-family browser. Supported channels are `chromium`,
 
 ## Android
 
-ADB must be on `PATH`, an online authorized device must be visible, and the target application must already be installed. Device connection and authorization remain operator responsibilities; FSQ does not connect, authorize, or install devices or applications during readiness checks.
+ADB and Node.js (`^20.19.0 || ^22.12.0 || >=24.0.0`) must be on `PATH`, `JAVA_HOME` and `ANDROID_HOME`/`ANDROID_SDK_ROOT` must point to valid JDK and Android SDK installations, the managed Appium 3.7.0 + UiAutomator2 8.7.0 runtime root (`~/.appium-connect-agent/`) must be initialized via `Runtime().install(InstallRequest())`, an online authorized device must be visible to an existing local ADB server, and the target application must already be installed. Device connection, managed runtime preparation, and authorization remain operator responsibilities; FSQ does not connect, authorize, or install devices, runtimes, or applications during readiness checks.
 
 ## Windows
 

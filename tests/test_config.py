@@ -19,7 +19,7 @@ from fsq_agent.config import (
     validate_strict_core_settings,
 )
 from fsq_agent.config._loader import load_platform_settings
-from fsq_agent.models import ConfigurationError
+from fsq_agent.models import AndroidHarnessSettings, ConfigurationError
 
 
 def _base_config(tmp_path: Path, body: str = "") -> str:
@@ -129,6 +129,22 @@ env:
     assert not (workspace / "cases").exists()
     assert not (workspace / "knowledge").exists()
 
+    settings.harness.android.serial = "isolated-protocol-device"
+    before = settings.model_dump()
+    policy = AndroidHarnessSettings(uiautomator2_wait_for_idle_timeout_ms=1000)
+    run_settings = settings.model_copy(deep=True)
+    run_settings.harness.android.uiautomator2_wait_for_idle_timeout_ms = policy.uiautomator2_wait_for_idle_timeout_ms
+
+    assert settings.harness.android.uiautomator2_wait_for_idle_timeout_ms is None
+    assert run_settings.harness.android.uiautomator2_wait_for_idle_timeout_ms == 1000
+    expected = settings.model_dump()
+    expected["harness"]["android"]["uiautomator2_wait_for_idle_timeout_ms"] = 1000
+    assert run_settings.model_dump() == expected
+    assert settings.model_dump() == before
+    assert run_settings.harness.android.app_id == settings.harness.android.app_id == "com.example.checkout"
+    assert run_settings.harness.android.serial == settings.harness.android.serial == "isolated-protocol-device"
+    assert run_settings.runtime_secrets.resolve("TEST_ACCOUNT_PASSWORD") == "local-secret"
+
 
 def test_load_workspace_platform_settings_uses_committed_preset_outside_repository_cwd(tmp_path: Path) -> None:
     workspace = tmp_path / "registered-android"
@@ -150,7 +166,7 @@ env: {{}}
     settings = load_workspace_platform_settings(workspace, "android")
 
     assert settings.harness.platform == "android"
-    assert settings.harness.android.backend == "uiautomator2"
+    assert settings.harness.android.backend == "appium_connect_agent"
     assert settings.harness.android.app_id == "com.example.registered"
     assert settings.agent_runtime.max_turns == 100
     assert settings.agent_context.knowledge.skills.dir == Path(_loader.__file__).resolve().parents[1] / "resources" / "skills"
@@ -523,7 +539,7 @@ def test_load_settings_ignores_fsq_process_environment(tmp_path: Path, monkeypat
 harness:
   platform: android
   android:
-    backend: uiautomator2
+    backend: appium_connect_agent
 """,
         ),
         encoding="utf-8",
@@ -532,7 +548,7 @@ harness:
     settings = load_settings(config_path)
 
     assert settings.harness.platform == "android"
-    assert settings.harness.android.backend == "uiautomator2"
+    assert settings.harness.android.backend == "appium_connect_agent"
     assert settings.harness.android.app_id is None
     assert settings.harness.android.serial is None
     assert settings.harness.web.browser_executable_path is None
@@ -965,7 +981,7 @@ def test_load_settings_rejects_android_app_and_serial_in_yaml(tmp_path: Path) ->
             """
 harness:
   android:
-    backend: uiautomator2
+    backend: appium_connect_agent
     app_id: com.example.app
     serial: emulator-5554
 """,
@@ -1338,7 +1354,7 @@ def test_load_settings_uses_default_harness_without_android_env(tmp_path: Path) 
     settings = load_settings(config_path)
 
     assert settings.harness.platform == "android"
-    assert settings.harness.android.backend == "uiautomator2"
+    assert settings.harness.android.backend == "appium_connect_agent"
     assert settings.harness.android.app_id is None
     assert settings.harness.android.serial is None
 

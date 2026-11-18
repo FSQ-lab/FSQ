@@ -53,6 +53,12 @@ class ArtifactStore:
         self._lock = threading.Lock()
         self._secret_values = tuple(value for value in secret_values if value)
         self._capture_callback = None
+        self._capture_sequence = 0
+
+    def allocate_capture_sequence(self) -> int:
+        with self._lock:
+            self._capture_sequence += 1
+            return self._capture_sequence
 
     @contextmanager
     def capture_scope(self, callback):

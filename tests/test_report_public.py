@@ -416,3 +416,83 @@ def test_wrapped_web_snapshot_normalization_preserves_metadata_and_lines(tmp_pat
     assert "http://127.0.0.1:8848/" in normalized
     assert "aria" in normalized
     assert "- button Save\n- status Saved" in normalized
+
+
+@pytest.mark.parametrize("answer", ["6510", "<script>alert(1)</script>", None])
+def test_portable_report_delivers_validated_answer_without_rewriting_frozen_conclusion(tmp_path, answer):
+    from fsq_agent.models import AgentFinalOutput
+
+    run, facts = _run(tmp_path, status="inconclusive", mode="explore")
+    facts["result"]["summary"] = "Coverage remains unproven."
+    (run / "run.json").write_text(json.dumps(facts))
+    document = {"verification": {"status": "inconclusive", "summary": "Coverage remains unproven."}}
+    document["agent_output"] = AgentFinalOutput(status="inconclusive", summary=answer).model_dump() if answer else {"summary": "Unvalidated answer"}
+    (run / "report.json").write_text(json.dumps(document))
+    service = RunReportService()
+    report = service.project(run, facts, _bundle(run.name))
+    assert report.execution["summary"] == "Coverage remains unproven."
+    assert report.run["gate"]["status"] == "incomplete"
+    artifact = service.export(report, RunReportExportOptions(format="html", destination=tmp_path / "answer.html"))
+    markup = artifact.path.read_text()
+    if answer:
+        interpretation = next(item for item in report.execution["interpretations"] if item.get("label") == "Main answer")
+        assert interpretation["kind"] == "ai_suggestion"
+        for reference in interpretation["references"]:
+            source = next(item for item in report.artifacts if (item["run_id"], item["artifact_id"]) == (reference["run_id"], reference["artifact_id"]))
+            assert source["availability"] == "available"
+            assert source["path"] == "report.json"
+        import html
+
+        assert "Main answer" in markup
+        assert html.escape(answer, quote=True) in markup
+    else:
+        assert "Main answer" not in markup
+    assert "Coverage remains unproven." in markup
+    assert "<script>alert(1)</script>" not in markup
+
+
+@pytest.mark.parametrize("export_format", ["json", "html", "bundle"])
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"replacements": [{"text": "PRIVATE_ANSWER", "replacement": "PUBLIC_ANSWER"}]},
+        {"remove_fields": ["artifacts.content"]},
+        {"remove_fields": ["execution.summary", "artifacts.content"]},
+    ],
+)
+def test_main_answer_sharing_sanitizes_all_exported_copies_without_changing_source(tmp_path, export_format, profile):
+    from fsq_agent.models import AgentFinalOutput
+
+    run, facts = _run(tmp_path, status="inconclusive", mode="explore")
+    document = {"agent_output": AgentFinalOutput(status="inconclusive", summary="PRIVATE_ANSWER").model_dump()}
+    (run / "report.json").write_text(json.dumps(document))
+    original = (run / "report.json").read_bytes()
+    service = RunReportService()
+    report = service.project(run, facts, _bundle(run.name))
+    frozen = report.model_dump(mode="json")
+    output = service.export(report, RunReportExportOptions(format=export_format, destination=tmp_path / f"shared.{export_format}", share_profile=profile))
+    if export_format == "bundle":
+        with zipfile.ZipFile(output.path) as archive:
+            contents = [archive.read(name) for name in archive.namelist()]
+    else:
+        contents = [output.path.read_bytes()]
+    assert all(b"PRIVATE_ANSWER" not in content for content in contents)
+    if "replacements" in profile:
+        assert any(b"PUBLIC_ANSWER" in content for content in contents)
+    assert report.model_dump(mode="json") == frozen
+    assert (run / "report.json").read_bytes() == original
+
+
+def test_summary_omission_clears_derived_main_answer_without_rewriting_gate(tmp_path):
+    from fsq_agent.models import AgentFinalOutput
+
+    run, facts = _run(tmp_path, status="inconclusive", mode="explore")
+    (run / "report.json").write_text(json.dumps({"agent_output": AgentFinalOutput(status="inconclusive", summary="PRIVATE_ANSWER").model_dump()}))
+    service = RunReportService()
+    report = service.project(run, facts, _bundle(run.name))
+    output = service.export(report, RunReportExportOptions(format="json", destination=tmp_path / "shared.json", share_profile={"remove_fields": ["execution.summary"]}))
+    shared = json.loads(output.path.read_text())
+    main = next(item for item in shared["execution"]["interpretations"] if item.get("label") == "Main answer")
+    assert main["text"] == "[OMITTED]"
+    assert shared["run"]["gate"] == report.run["gate"]
+    assert shared["verification"] == report.verification

@@ -342,21 +342,24 @@ jobs:
                       raise SystemExit(f"Sdist has no {suffix} file under {prefix}")
 
           expected_dependencies = (
-              "uiautomator2==",
+              "appium-connect-agent",
               "playwright==",
               "pywinauto==",
               "Appium-Python-Client==",
+              "selenium==",
               "pillow==",
           )
           dependencies = metadata.get_all("Requires-Dist", [])
           for expected in expected_dependencies:
               expected_name = canonicalize_name(expected.removesuffix("=="))
               if not any(
-                  canonicalize_name(item.split(" ", 1)[0].split("==", 1)[0]) == expected_name
+                  canonicalize_name(item.split(" ", 1)[0].split("==", 1)[0].split("@", 1)[0]) == expected_name
                   and "extra ==" not in item
                   for item in dependencies
               ):
                   raise SystemExit(f"Missing default dependency {expected}")
+          if any(canonicalize_name(item.split(" ", 1)[0].split("==", 1)[0]) == "uiautomator2" for item in dependencies):
+              raise SystemExit("Retired uiautomator2 dependency must not remain in Requires-Dist")
           if metadata.get_all("Provides-Extra", []) != ["dev"]:
               raise SystemExit(f"Unexpected extras: {metadata.get_all('Provides-Extra', [])}")
           for script in ("fsq = fsq_agent.adapters.cli:main", "fsq-agent = fsq_agent.adapters.cli:main"):

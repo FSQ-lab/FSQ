@@ -403,6 +403,11 @@ def _report_graphs(value):
 def _remove_graph_fields(graph, fields, omissions):
     for report in _report_graphs(graph):
         for field in fields:
+            if field in {"execution.summary", "artifacts.content"}:
+                for interpretation in report["execution"].get("interpretations", []):
+                    if interpretation.get("kind") == "ai_suggestion" and interpretation.get("label") == "Main answer":
+                        interpretation["text"] = "[OMITTED]"
+                        omissions.append({"run_id": report["run"]["run_id"], "kind": "display_field", "field": "execution.interpretations.text"})
             if field == "artifacts.content":
                 continue
             section, name = field.split(".")

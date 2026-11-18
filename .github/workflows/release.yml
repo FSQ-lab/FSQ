@@ -207,6 +207,30 @@ jobs:
           name: python-distributions
           path: dist/
 
+      - name: Verify PyPI-compatible dependency metadata
+        shell: python
+        run: |
+          from email import message_from_bytes
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected exactly one wheel in dist/, found {len(wheels)}.")
+
+          with ZipFile(wheels[0]) as archive:
+              metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+              if len(metadata_names) != 1:
+                  raise SystemExit(f"Expected exactly one .dist-info/METADATA in {wheels[0].name}, found {len(metadata_names)}.")
+              message = message_from_bytes(archive.read(metadata_names[0]))
+
+          requires_dist = message.get_all("Requires-Dist") or []
+          if any(" @ " in entry or "git+" in entry for entry in requires_dist):
+              raise SystemExit(
+                  "PyPI publication blocked: wheel metadata contains a direct URL dependency; "
+                  "switch appium-connect-agent to a published PyPI == version before publishing."
+              )
+
       - name: Set up uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
 

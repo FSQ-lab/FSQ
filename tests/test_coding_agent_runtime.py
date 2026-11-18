@@ -21,6 +21,8 @@ from fsq_agent.config import Settings
 from fsq_agent.models import (
     AgentFinalOutput,
     AgentRuntimeSettings,
+    AndroidSwipeParams,
+    AndroidTapAtParams,
     GoalPrePlan,
     HarnessActionResult,
     HarnessArtifactRef,
@@ -33,9 +35,9 @@ from fsq_agent.models import (
     RuntimeSecretSettings,
     SkillBundle,
     StepPhase,
-    StepPhaseReport,
     StepResult,
     Task,
+    WebClickOnParams,
 )
 from fsq_agent.providers import build_model_provider_session
 
@@ -74,11 +76,13 @@ class _FakeHarness:
         self.calls: list[str] = []
 
     def action_space(self) -> list[HarnessFunctionSchema]:
+        params_models = {"tap_at": AndroidTapAtParams, "swipe": AndroidSwipeParams, "click_on": WebClickOnParams}
+        params_model = params_models.get(self.driver_method)
         return [
             HarnessFunctionSchema(
                 name=self.tool_name,
                 description=f"Run {self.fsq_action_name}.",
-                params_json_schema={"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"]},
+                params_json_schema=params_model.model_json_schema() if params_model is not None else {"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"]},
                 platform="android",
                 driver_method=self.driver_method,
                 fsq_action_name=self.fsq_action_name,
@@ -194,11 +198,11 @@ class _FakeEngine:
 
 
 @pytest.mark.parametrize("outcome", ["success", "startup", "model", "cancelled"])
-@pytest.mark.parametrize("close_fails", [False, True])
-async def test_owned_harness_and_provider_are_disposed_for_every_exit(tmp_path, monkeypatch, outcome, close_fails):
+@pytest.mark.parametrize("cleanup_failures", [(), ("harness",), ("provider",), ("harness", "provider")])
+async def test_owned_harness_and_provider_are_disposed_for_every_exit(tmp_path, monkeypatch, outcome, cleanup_failures):
     closed = []
     primary = asyncio.CancelledError("primary") if outcome == "cancelled" else EngineError("model", "primary")
-    cleanup_error = OSError("cleanup")
+    cleanup_errors = {resource: OSError(f"{resource} cleanup") for resource in cleanup_failures}
 
     class Harness(_FakeHarness):
         def action_space(self):
@@ -208,12 +212,14 @@ async def test_owned_harness_and_provider_are_disposed_for_every_exit(tmp_path, 
 
         def close(self):
             closed.append("harness")
-            if close_fails:
-                raise cleanup_error
+            if "harness" in cleanup_errors:
+                raise cleanup_errors["harness"]
 
     class Session(_FakeProviderSession):
         async def close(self):
             closed.append("provider")
+            if "provider" in cleanup_errors:
+                raise cleanup_errors["provider"]
 
     class Engine(_FakeEngine):
         async def run(self, *args, **kwargs):
@@ -226,16 +232,125 @@ async def test_owned_harness_and_provider_are_disposed_for_every_exit(tmp_path, 
     monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: Harness(), engine=Engine())
     operation = _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "owned")
-    if outcome == "cancelled" or (outcome == "success" and close_fails):
-        with pytest.raises(asyncio.CancelledError if outcome == "cancelled" else OSError) as raised:
+    if outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError) as raised:
             await operation
-        assert raised.value is (primary if outcome == "cancelled" else cleanup_error)
+        assert raised.value is primary
+        if cleanup_errors:
+            _assert_cleanup_errors(raised.value.__cause__, list(cleanup_errors.values()))
+    elif cleanup_errors:
+        with pytest.raises(BaseExceptionGroup if outcome != "success" or len(cleanup_errors) > 1 else OSError) as raised:
+            await operation
+        cleanup_failure = raised.value
+        if outcome != "success":
+            execution_failure, cleanup_failure = raised.value.exceptions
+            if outcome == "startup":
+                assert execution_failure.__cause__ is primary
+            else:
+                assert execution_failure is primary
+        _assert_cleanup_errors(cleanup_failure, list(cleanup_errors.values()))
     else:
         result = await operation
         assert result[-1].status == ("success" if outcome == "success" else "failed")
         if outcome != "success":
             assert result[-1].error == ("Harness action-space discovery failed." if outcome == "startup" else "primary")
     assert closed == ["harness", "provider"]
+
+
+def _assert_cleanup_errors(error, expected):
+    if len(expected) == 1:
+        assert error is expected[0]
+    else:
+        assert isinstance(error, BaseExceptionGroup)
+        assert error.exceptions == tuple(expected)
+
+
+@pytest.mark.parametrize("operation", ["run_task", "run_pre_plan"])
+@pytest.mark.parametrize("failure_phase", ["provider", "model"])
+async def test_runtime_cancellation_during_failure_reporting_keeps_cleanup_visible(tmp_path, monkeypatch, operation, failure_phase):
+    primary = EngineError("model", "Primary failure")
+    cancellation = asyncio.CancelledError("Failure reporting cancelled")
+    cleanup_error = OSError("Provider cleanup failed")
+
+    class Session(_FakeProviderSession):
+        def get_model(self):
+            if failure_phase == "provider":
+                raise primary
+            return super().get_model()
+
+        async def close(self):
+            raise cleanup_error
+
+    class Engine(_FakeEngine):
+        async def run(self, *args, **kwargs):
+            raise primary
+
+    def event_sink(event):
+        if event.type == "run_failed":
+            raise cancellation
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=Engine())
+    invocation = (
+        runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "report-cancel", event_sink)
+        if operation == "run_pre_plan"
+        else _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "report-cancel", event_sink)
+    )
+    with pytest.raises(asyncio.CancelledError) as failure:
+        await invocation
+    assert failure.value is cancellation
+    assert cancellation.__cause__ is cleanup_error
+
+
+@pytest.mark.parametrize("operation", ["run_task", "run_pre_plan", "run_verification"])
+@pytest.mark.parametrize("failed_resources", [("harness",), ("provider",), ("harness", "provider")])
+async def test_runtime_retains_failed_cleanup_and_rejects_reuse(tmp_path, monkeypatch, operation, failed_resources):
+    from fsq_agent.models import ConfigurationError
+
+    constructed = []
+    cleanup_errors = {resource: OSError(f"{resource} cleanup") for resource in failed_resources}
+
+    class Harness(_FakeHarness):
+        def close(self):
+            if "harness" in cleanup_errors:
+                raise cleanup_errors["harness"]
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            if "provider" in cleanup_errors:
+                raise cleanup_errors["provider"]
+
+    harness, session = Harness(), Session()
+
+    def build_harness(run_id):
+        constructed.append("harness")
+        return harness
+
+    def build_session(settings):
+        constructed.append("provider")
+        return session
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", build_session)
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), build_harness, engine=_FakeEngine())
+    with pytest.raises(OSError if len(failed_resources) == 1 else ExceptionGroup):
+        await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "pending-cleanup")
+    resources = {"harness": harness, "provider": session}
+    assert runtime._pending_cleanup == [(resources[name], cleanup_errors[name]) for name in failed_resources]
+
+    if operation == "run_pre_plan":
+        invocation = runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "no-rebuild")
+    elif operation == "run_verification":
+        invocation = runtime.run_verification(Task(description="Test"), [], "no-rebuild")
+    else:
+        invocation = _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "no-rebuild")
+    with pytest.raises(ConfigurationError, match="unresolved owned-resource cleanup") as failure:
+        await invocation
+    _assert_cleanup_errors(failure.value.__cause__, list(cleanup_errors.values()))
+    assert constructed == ["provider", "harness"]
 
 
 @pytest.mark.parametrize("interruption", ["timeout", "cancelled"])
@@ -267,15 +382,48 @@ async def test_late_harness_construction_is_disposed_in_worker(tmp_path, interru
         assert await asyncio.to_thread(closed.wait, 2)
 
 
-async def test_cancellation_during_disposal_waits_for_owned_cleanup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider_fails", [False, True])
+async def test_runtime_preserves_grouped_harness_setup_cleanup_failure(tmp_path, monkeypatch, provider_fails):
+    startup_error = ExceptionGroup("Harness setup and cleanup failed", [TimeoutError("Setup timed out"), OSError("Harness cleanup failed")])
+    provider_error = OSError("Provider cleanup failed")
+    closed = []
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            closed.append("provider")
+            if provider_fails:
+                raise provider_error
+
+    async def fail_setup(run_id):
+        raise startup_error
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=_FakeEngine())
+    monkeypatch.setattr(runtime, "_build_harness_with_timeout", fail_setup)
+    with pytest.raises(ExceptionGroup) as failure:
+        await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "grouped-setup")
+    if provider_fails:
+        assert failure.value.exceptions == (startup_error, provider_error)
+    else:
+        assert failure.value is startup_error
+    assert closed == ["provider"]
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_cancellation_during_disposal_waits_for_owned_cleanup(tmp_path, monkeypatch, cleanup_fails):
     started, release = threading.Event(), threading.Event()
     closed = []
+    cleanup_error = OSError("Harness cleanup failed")
 
     class Harness(_FakeHarness):
         def close(self):
             started.set()
             assert release.wait(5)
             closed.append("harness")
+            if cleanup_fails:
+                raise cleanup_error
 
     class Session(_FakeProviderSession):
         async def close(self):
@@ -295,8 +443,9 @@ async def test_cancellation_during_disposal_waits_for_owned_cleanup(tmp_path, mo
         assert not operation.done()
     finally:
         release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as failure:
         await operation
+    assert failure.value.__cause__ is (cleanup_error if cleanup_fails else None)
     assert closed == ["harness", "provider"]
 
 
@@ -447,6 +596,63 @@ async def _run_in_context(runtime, task, knowledge, skills, run_id, event_sink=N
 
 
 @pytest.mark.asyncio
+async def test_main_closing_policy_preserves_answer_before_cleanup_and_read_only_verifier(tmp_path, monkeypatch):
+    from fsq_agent.agent import CodingAgentPolicy
+
+    requests, order = [], []
+    main_output = AgentFinalOutput(status="inconclusive", summary="6510", errors=["Coverage remains bounded."])
+    policy = CodingAgentPolicy()
+
+    class Harness(_FakeHarness):
+        def close(self):
+            order.append("harness.close")
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            order.append("provider.close")
+
+    class Engine:
+        async def run(self, model, request, *, on_event=None):
+            requests.append(request)
+            if request.output.name == "GoalPrePlan":
+                order.append("preplan")
+                assert request.final_turn_instructions is None
+                return AgentResult(final_output=GoalPrePlan(goal="Read the distance.", verification_goal="Observed distance is delivered."))
+            if request.name.endswith(" verifier"):
+                order.append("verifier")
+                assert order[-3:-1] == ["harness.close", "provider.close"]
+                assert request.tools == ()
+                assert request.final_turn_instructions is None
+                return AgentResult(final_output=AgentFinalOutput(status="inconclusive", summary="Independent coverage assessment."))
+            order.append("main")
+            assert "harness.close" not in order
+            assert request.final_turn_instructions == policy.final_turn_instructions
+            assert request.final_turn_instructions.strip()
+            action = next(tool for tool in request.tools if tool.name == "tap_on")
+            await action.invoke(ToolCall(name="tap_on", arguments={"target": "distance"}, call_id="read-distance"))
+            return AgentResult(final_output=main_output, usage=TokenUsage(6, 4, 10, 2))
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.agent_runtime.max_turns = 2
+    settings.execution.post_action_delay_seconds = 0
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: Harness(), policy=policy, engine=Engine())
+    task = Task(id="answer-close", description="How many meters?", verification_goal="The observed distance is delivered.")
+    await runtime.run_pre_plan(task.description, KnowledgeBundle(), [], "answer-close")
+    results = await _run_in_context(runtime, task, KnowledgeBundle(), [], "answer-close")
+    runner = next(step for step in results if step.tool_name == "agent_runtime.runner")
+    assert AgentFinalOutput.model_validate(runner.tool_output) == main_output
+    assert runner.actual_outcome == policy.serialize_agent_final_output(main_output)
+    verification = await runtime.run_verification(task, results, "answer-close")
+    assert AgentFinalOutput.model_validate(verification[-1].tool_output).summary == "Independent coverage assessment."
+    assert AgentFinalOutput.model_validate(runner.tool_output).summary == "6510"
+    assert len(requests) == 3
+    assert all(request.max_turns == 2 for request in requests)
+    assert order == ["preplan", "provider.close", "main", "harness.close", "provider.close", "verifier", "provider.close"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_failure_returns_failed_step() -> None:
     settings = Settings(agent_runtime=_azure_openai_settings())
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _run_id: _FailingHarness())
@@ -486,6 +692,302 @@ async def test_runtime_classifies_durable_evidence_failure_separately_from_model
     assert results[0].tool_output["failure_category"] == "artifact_error"
     assert results[0].tool_output["failure_reason"] == "evidence_persistence"
     assert results[0].actual_outcome == "Agent runtime stopped because durable execution evidence failed."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category,reason,status_code",
+    [
+        ("unavailable", "connection_error", None),
+        ("unavailable", "read_error", None),
+        ("unavailable", "remote_protocol_error", None),
+        ("unavailable", "incomplete_read", None),
+        ("timeout", "timeout", None),
+        ("rate_limit", "rate_limit", 429),
+        ("unavailable", "service_unavailable", 503),
+        ("unavailable", "stream_error", 100),
+        ("unavailable", "stream_incomplete", 599),
+    ],
+)
+async def test_exhausted_stream_failure_preserves_safe_fields_in_failed_runner_and_event(tmp_path, monkeypatch, category, reason, status_code):
+    canary = "private-transport-credential-and-response-fragment"
+    primary = EngineError(category, "Model streaming operation failed.", reason=reason, status_code=status_code)
+    cause = RuntimeError(canary)
+    primary.context = {"failure_category": canary, "request": canary}
+    requests, closed, events = [], [], []
+
+    class Harness(_FakeHarness):
+        def close(self):
+            closed.append("harness")
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            closed.append("provider")
+
+    class FailedEngine:
+        async def run(self, model, request, *, on_event=None):
+            requests.append(request)
+            raise primary from cause
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.agent_runtime.max_turns = 1
+    settings.output.runs_dir = tmp_path
+    harness = Harness()
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: harness, engine=FailedEngine())
+    results = await _run_in_context(runtime, Task(id="stream-failure", description="Complete the goal."), KnowledgeBundle(), [], "stream-failure-run", events.append)
+
+    assert len(results) == 1
+    runner = results[0]
+    assert runner.status == "failed"
+    assert runner.tool_name == "agent_runtime.runner"
+    assert runner.error == "Model streaming operation failed."
+    expected = {
+        "failure_category": "agent_runtime_error",
+        "failure_reason": "agent_runtime_error",
+        "failure_summary": "Agent runtime execution failed before producing structured verification output.",
+        "engine_category": category,
+        "engine_reason": reason,
+    }
+    if status_code is not None:
+        expected["status_code"] = status_code
+    assert runner.tool_output == expected
+    assert runner.actual_outcome == expected["failure_summary"]
+    failures = [json.loads(event.model_dump_json()) for event in events if event.type == "run_failed"]
+    assert len(failures) == 1
+    assert failures[0]["payload"] == expected
+    assert failures[0]["run_id"] == "stream-failure-run"
+    assert failures[0]["task_id"] == "stream-failure"
+    assert canary not in runner.model_dump_json() + json.dumps([event.model_dump(mode="json") for event in events])
+    assert not any("termination_reason" in event.payload for event in events)
+    assert len(requests) == 1
+    assert harness.steps == []
+    assert closed == ["harness", "provider"]
+    assert primary.__cause__ is cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category,reason,status_code,expected",
+    [
+        ("unknown-credential-canary", "unknown-credential-canary", "unknown-credential-canary", {}),
+        (["unknown-credential-canary"], {"secret": "unknown-credential-canary"}, {"secret": "unknown-credential-canary"}, {}),
+        (None, False, None, {}),
+        ("unavailable", "read_error", True, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", False, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", 99, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", 600, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", 503.0, {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unavailable", "read_error", "503", {"engine_category": "unavailable", "engine_reason": "read_error"}),
+        ("unknown-credential-canary", "read_error", 503, {"engine_reason": "read_error", "status_code": 503}),
+        ("timeout", "unknown-credential-canary", None, {"engine_category": "timeout"}),
+    ],
+)
+async def test_runtime_omits_unknown_or_malformed_engine_fields_without_leaking_causes(tmp_path, monkeypatch, category, reason, status_code, expected):
+    canary = "unknown-credential-canary"
+    primary = EngineError(category, "Model operation failed.", reason=reason, status_code=status_code)
+    primary.context = {"engine_category": canary, "engine_reason": canary, "status_code": canary}
+    primary.raw_response = {"body": canary}
+
+    class FailedEngine:
+        async def run(self, model, request, *, on_event=None):
+            raise primary from RuntimeError(canary)
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: _FakeProviderSession())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=FailedEngine())
+    events = []
+    results = await _run_in_context(runtime, Task(description="Fail safely."), KnowledgeBundle(), [], "malformed-engine-run", events.append)
+
+    runner = results[0]
+    assert runner.status == "failed"
+    assert runner.tool_name == "agent_runtime.runner"
+    assert runner.tool_output["failure_category"] == runner.tool_output["failure_reason"] == "agent_runtime_error"
+    assert {key: value for key, value in runner.tool_output.items() if key in {"engine_category", "engine_reason", "status_code"}} == expected
+    failure = json.loads(events[-1].model_dump_json())
+    assert failure["type"] == "run_failed"
+    assert failure["payload"] == runner.tool_output
+    assert canary not in runner.model_dump_json() + json.dumps([event.model_dump(mode="json") for event in events])
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_accept_engine_fields_from_other_exceptions(tmp_path, monkeypatch):
+    primary = RuntimeError("Runtime operation failed.")
+    primary.category, primary.reason, primary.status_code = "unavailable", "read_error", 503
+
+    class FailedEngine:
+        async def run(self, model, request, *, on_event=None):
+            raise primary
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: _FakeProviderSession())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=FailedEngine())
+    events = []
+    results = await _run_in_context(runtime, Task(description="Fail runtime."), KnowledgeBundle(), [], "non-engine-run", events.append)
+
+    assert results[0].status == "failed"
+    assert not {"engine_category", "engine_reason", "status_code"}.intersection(results[0].tool_output)
+    assert json.loads(events[-1].model_dump_json())["payload"] == results[0].tool_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "category,reason,failure_category,failure_reason,summary",
+    [
+        ("evidence", "read_error", "artifact_error", "evidence_persistence", "Agent runtime stopped because durable execution evidence failed."),
+        (
+            "incomplete",
+            "content_filter",
+            "provider_content_filter",
+            "content_filter",
+            "Agent runtime execution ended with an incomplete provider response due to content filtering.",
+        ),
+        ("incomplete", "incomplete", "provider_response_incomplete", "incomplete", "Agent runtime execution ended with an incomplete provider response."),
+    ],
+)
+async def test_safe_engine_fields_do_not_replace_existing_failure_classification(tmp_path, monkeypatch, category, reason, failure_category, failure_reason, summary):
+    canary = "private-failure-context-canary"
+    primary = EngineError(category, "Engine operation failed.", reason=reason, status_code=503)
+    primary.context = {"failure_category": canary, "failure_reason": canary, "failure_summary": canary}
+
+    class FailedEngine:
+        async def run(self, model, request, *, on_event=None):
+            raise primary from RuntimeError(canary)
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: _FakeProviderSession())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=FailedEngine())
+    events = []
+    results = await _run_in_context(runtime, Task(description="Keep failure classification."), KnowledgeBundle(), [], "classified-engine-run", events.append)
+
+    runner = results[0]
+    assert runner.status == "failed"
+    assert runner.tool_output["failure_category"] == failure_category
+    assert runner.tool_output["failure_reason"] == failure_reason
+    assert runner.tool_output["failure_summary"] == runner.actual_outcome == summary
+    assert runner.tool_output["engine_category"] == category
+    assert runner.tool_output["status_code"] == 503
+    if reason == "read_error":
+        assert runner.tool_output["engine_reason"] == reason
+    else:
+        assert "engine_reason" not in runner.tool_output
+    assert json.loads(events[-1].model_dump_json())["payload"] == runner.tool_output
+    assert canary not in runner.model_dump_json() + json.dumps([event.model_dump(mode="json") for event in events])
+
+
+@pytest.mark.asyncio
+async def test_main_turn_limit_returns_complete_inconclusive_task_result(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from fsq_agent.agent import FsqAgent
+    from fsq_agent.core import ArtifactStore
+    from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService, load_run_metadata
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.agent_runtime.max_turns = 100
+    settings.workspace.root_dir = tmp_path
+    settings.output.runs_dir = tmp_path / "runs"
+    settings.agent_runtime.user_config_root = tmp_path / "user"
+    requests, closed = [], []
+    events = []
+
+    def event_sink(event):
+        if event.payload.get("termination_reason") == "max_turns":
+            assert closed == ["harness", "provider"]
+        events.append(event)
+
+    class Harness(_FakeHarness):
+        def close(self):
+            closed.append("harness")
+
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            store = ArtifactStore(self.run_dir)
+            if kind == "ui_snapshot":
+                return store.write_json(kind=kind, step_id=step_id, phase=phase, name=reason, payload={"xml": "<hierarchy/>"})
+            return store.write_bytes(kind=kind, step_id=step_id, phase=phase, name=reason, data=b"controlled-observation")
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            closed.append("provider")
+
+    class BudgetEngine:
+        async def run(self, model, request, *, on_event=None):
+            requests.append(request)
+            action = next(tool for tool in request.tools if tool.name == "tap_on")
+            await action.invoke(ToolCall(name="tap_on", arguments={"target": "controlled-target"}, call_id="before-limit"))
+            raise EngineError("max_turns", "Main execution exhausted its turn budget.")
+
+    def harness_factory(run_id):
+        harness = Harness()
+        harness.run_dir = settings.output.runs_dir / run_id
+        return harness
+
+    monkeypatch.setattr("fsq_agent.agent._core.refresh_model_provider_session", lambda _: SimpleNamespace(close_sync=lambda: None))
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), harness_factory, engine=BudgetEngine())
+    agent = FsqAgent.from_settings(settings, runtime_factory=lambda *_args, **_kwargs: runtime)
+    task = Task(id="turn-limit", description="Complete the controlled goal.", key_actions=["Inspect the goal state"], verification_goal="The controlled goal is complete.")
+    result = await DynamicExecutionService(agent=agent).execute(DynamicExecutionRequest(task=task, settings=settings, event_sink=event_sink))
+    task_result = result.task_result
+    directory = settings.output.runs_dir / task_result.report.run_id
+    frozen = json.loads((directory / "execution-result.json").read_text())
+    runners = [step for step in task_result.steps if step.tool_name == "agent_runtime.runner"]
+    assert len(runners) == 1
+    assert runners[0].status == "success"
+    output = AgentFinalOutput.model_validate(runners[0].tool_output)
+    assert output.status == task_result.status == task_result.verification.status == frozen["outcome"] == "inconclusive"
+    assert output.summary == task_result.verification.summary
+    assert output.summary.strip()
+    assert output.satisfied_criteria == output.evidence == []
+    assert any("max_turns" in error for error in output.errors)
+    assert len(requests) == 1
+    assert requests[0].max_turns == 100
+    assert closed == ["harness", "provider"]
+    assert frozen["counts"]["total"] == frozen["counts"]["passed"] == 1
+    assert load_run_metadata(directory).status == "inconclusive"
+    assert task_result.report.path.is_file()
+    (tmp_path / "task-result.json").write_text(task_result.model_dump_json(), encoding="utf-8")
+    assert any(event.payload.get("termination_reason") == "max_turns" for event in events)
+    assert runtime._turn_limit_result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resource", ["harness", "provider"])
+async def test_main_turn_limit_does_not_hide_pending_cleanup(tmp_path, monkeypatch, resource):
+    primary = EngineError("max_turns", "Main execution exhausted its turn budget.")
+    cleanup = OSError("Owned resource remains pending.")
+    closed = []
+    events = []
+
+    class Harness(_FakeHarness):
+        def close(self):
+            closed.append("harness")
+            if resource == "harness":
+                raise cleanup
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            closed.append("provider")
+            if resource == "provider":
+                raise cleanup
+
+    class BudgetEngine:
+        async def run(self, model, request, *, on_event=None):
+            raise primary
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: Harness(), engine=BudgetEngine())
+    with pytest.raises(ExceptionGroup) as failure:
+        await _run_in_context(runtime, Task(description="Exhaust turns"), KnowledgeBundle(), [], "pending-limit", events.append)
+    assert failure.value.exceptions == (primary, cleanup)
+    assert closed == ["harness", "provider"]
+    assert not any(event.payload.get("termination_reason") == "max_turns" for event in events)
+    assert runtime._turn_limit_result is None
 
 
 @pytest.mark.asyncio
@@ -692,34 +1194,39 @@ async def test_runtime_harness_construction_failure_is_visible(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_runtime_cleanup_failure_preserves_original_failed_result(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("category,reason", [("incomplete", "content_filter"), ("unavailable", "read_error"), ("timeout", "timeout"), ("rate_limit", "rate_limit")])
+async def test_runtime_cleanup_failure_preserves_original_failed_result(monkeypatch: pytest.MonkeyPatch, category: str, reason: str) -> None:
+    primary = EngineError(category, "Primary model failure", reason=reason)
+    cleanup_error = EngineError("cleanup", "Secondary cleanup failure")
+
     class FailedCloseSession(_FakeProviderSession):
         async def close(self) -> None:
-            raise EngineError("cleanup", "Secondary cleanup failure")
+            raise cleanup_error
 
     class FailedEngine:
         async def run(self, model, request, *, on_event=None):
-            raise EngineError("incomplete", "Primary model failure", reason="content_filter")
+            raise primary
 
     _patch_runtime_engine(monkeypatch)
     monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda settings: FailedCloseSession())
     runtime = DefaultCodingAgentRuntime(Settings(agent_runtime=_azure_openai_settings()), _EmptyToolFactory(), _fake_harness_factory, engine=FailedEngine())
 
-    results = await _run_in_context(runtime, Task(id="failure", description="Fail run"), KnowledgeBundle(), [], "failed-cleanup-run")
+    with pytest.raises(ExceptionGroup) as failure:
+        await _run_in_context(runtime, Task(id="failure", description="Fail run"), KnowledgeBundle(), [], "failed-cleanup-run")
 
-    assert results[0].status == "failed"
-    assert results[0].error == "Primary model failure"
-    assert results[0].tool_output["failure_category"] == "provider_content_filter"
+    assert failure.value.exceptions == (primary, cleanup_error)
+    assert primary.category == category
+    assert primary.reason == reason
 
 
 @pytest.mark.parametrize("operation", ["run_task", "run_pre_plan", "run_verification"])
 @pytest.mark.parametrize("outcome", ["failure", "cancelled", "success"])
-@pytest.mark.parametrize("cleanup_cancelled", [False, True])
-async def test_runtime_cleanup_preserves_primary_outcome_with_real_session(monkeypatch: pytest.MonkeyPatch, operation: str, outcome: str, cleanup_cancelled: bool) -> None:
+@pytest.mark.parametrize("cleanup_outcome", ["success", "failure", "cancelled"])
+async def test_runtime_cleanup_preserves_primary_outcome_with_real_session(monkeypatch: pytest.MonkeyPatch, operation: str, outcome: str, cleanup_outcome: str) -> None:
     from fsq_agent.models import PlanningError
 
     primary = asyncio.CancelledError("Primary cancellation") if outcome == "cancelled" else EngineError("incomplete", "Primary model failure", reason="content_filter")
-    cleanup_error = asyncio.CancelledError("Secondary cleanup cancellation") if cleanup_cancelled else EngineError("cleanup", "Secondary cleanup failure")
+    cleanup_error = asyncio.CancelledError("Secondary cleanup cancellation") if cleanup_outcome == "cancelled" else EngineError("cleanup", "Secondary cleanup failure")
     closed = []
 
     class ControlledProvider:
@@ -728,7 +1235,8 @@ async def test_runtime_cleanup_preserves_primary_outcome_with_real_session(monke
 
         async def aclose(self) -> None:
             closed.append(True)
-            raise cleanup_error
+            if cleanup_outcome != "success":
+                raise cleanup_error
 
     class ControlledEngine(_FakeEngine):
         async def run(self, model, request, *, on_event=None):
@@ -754,19 +1262,108 @@ async def test_runtime_cleanup_preserves_primary_outcome_with_real_session(monke
         with pytest.raises(asyncio.CancelledError) as failure:
             await invoke_operation()
         assert failure.value is primary
-    elif outcome == "success":
-        with pytest.raises(type(cleanup_error)) as failure:
-            await invoke_operation()
-        assert failure.value is cleanup_error
-    elif operation == "run_pre_plan":
+        assert primary.__cause__ is (None if cleanup_outcome == "success" else cleanup_error)
+    elif cleanup_outcome != "success":
+        if outcome == "success":
+            with pytest.raises(type(cleanup_error)) as failure:
+                await invoke_operation()
+            assert failure.value is cleanup_error
+        else:
+            with pytest.raises(BaseExceptionGroup) as failure:
+                await invoke_operation()
+            execution_error, secondary_error = failure.value.exceptions
+            assert secondary_error is cleanup_error
+            if operation == "run_pre_plan":
+                assert isinstance(execution_error, PlanningError)
+                assert execution_error.__cause__ is primary
+            else:
+                assert execution_error is primary
+    elif outcome == "failure" and operation == "run_pre_plan":
         with pytest.raises(PlanningError) as failure:
             await invoke_operation()
         assert failure.value.__cause__ is primary
     else:
         results = await invoke_operation()
-        assert results[0].status == "failed"
-        assert results[0].error == "Primary model failure"
+        if operation == "run_pre_plan":
+            assert isinstance(results, GoalPrePlan)
+        else:
+            assert results[0].status == ("failed" if outcome == "failure" else "success")
+            if outcome == "failure":
+                assert results[0].error == "Primary model failure"
     assert closed == [True]
+
+
+@pytest.mark.parametrize("operation", ["run_task", "run_pre_plan", "run_verification"])
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_runtime_cancellation_during_provider_cleanup_preserves_all_failures(tmp_path, monkeypatch, operation, outcome, cleanup_fails):
+    from fsq_agent.models import PlanningError
+
+    started, release = asyncio.Event(), asyncio.Event()
+    closed = []
+    primary = asyncio.CancelledError("Primary cancellation") if outcome == "cancelled" else EngineError("model", "Primary failure")
+    cleanup_error = OSError("Provider cleanup failed")
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            started.set()
+            await release.wait()
+            closed.append("provider")
+            if cleanup_fails:
+                raise cleanup_error
+
+    class Engine(_FakeEngine):
+        async def run(self, *args, **kwargs):
+            if outcome != "success":
+                raise primary
+            return await super().run(*args, **kwargs)
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), _fake_harness_factory, engine=Engine())
+
+    async def invoke_operation():
+        if operation == "run_pre_plan":
+            return await runtime.run_pre_plan("Plan task", KnowledgeBundle(), [], "cancel-cleanup")
+        if operation == "run_verification":
+            return await runtime.run_verification(Task(description="Test"), [], "cancel-cleanup")
+        return await _run_in_context(runtime, Task(description="Test"), KnowledgeBundle(), [], "cancel-cleanup")
+
+    invocation = asyncio.create_task(invoke_operation())
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        invocation.cancel("During cleanup")
+        await asyncio.sleep(0)
+        invocation.cancel("Repeated cancellation")
+        await asyncio.sleep(0)
+        assert not invocation.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError) as failure:
+        await invocation
+    assert closed == ["provider"]
+    cancellation = failure.value
+    if outcome == "cancelled":
+        assert cancellation is primary
+        assert cancellation.__cause__ is (cleanup_error if cleanup_fails else None)
+    else:
+        assert cancellation.args == ("During cleanup",)
+        cause = cancellation.__cause__
+        if outcome == "failure":
+            if cleanup_fails:
+                assert isinstance(cause, BaseExceptionGroup)
+                execution_error, secondary_error = cause.exceptions
+                assert secondary_error is cleanup_error
+            else:
+                execution_error = cause
+            if operation == "run_pre_plan":
+                assert isinstance(execution_error, PlanningError)
+                assert execution_error.__cause__ is primary
+            else:
+                assert execution_error is primary
+        else:
+            assert cause is (cleanup_error if cleanup_fails else None)
 
 
 @pytest.mark.asyncio
@@ -984,19 +1581,6 @@ def test_runtime_builds_step_results_from_structured_pre_plan() -> None:
     assert "Used keyboard shortcut" in steps[1].actual_outcome
 
 
-def test_runtime_task_input_uses_goal_only_verification_contract() -> None:
-    settings = Settings(agent_runtime=AgentRuntimeSettings())
-    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
-    task = Task(id="derive", name="Derive", description="Open the page and verify it loads.")
-
-    task_input = runtime._build_task_input(task)
-
-    assert "Structured task input:" in task_input
-    assert '"schema_version": "task_input_v1"' in task_input
-    assert "Final verification goal: none provided" in task_input
-    assert "verification_goal" in task_input
-
-
 def test_runtime_task_input_includes_runtime_secret_names_and_warnings() -> None:
     runtime_secrets = RuntimeSecretSettings()
     runtime_secrets.set_values({"TEST_ACCOUNT_EMAIL": "user@example.com"})
@@ -1153,26 +1737,6 @@ def test_runtime_instructions_include_knowledge_index_content() -> None:
     assert "choose password sign-in" in instructions
 
 
-def test_prompt_model_builder_and_renderer_use_templates() -> None:
-    settings = AgentRuntimeSettings().prompt
-    builder = PromptModelBuilder(settings)
-    renderer = PromptRenderer(settings)
-
-    agent_model = builder.build_agent_prompt(KnowledgeBundle(), [])
-    task_model = builder.build_task_prompt(Task(id="task-1", description="Do it.", verification_goal="Done."))
-
-    assert "Custom operator instructions:" not in renderer.render_agent_prompt(agent_model)
-    assert "Preserve ordered key-action semantic fidelity." in renderer.render_agent_prompt(agent_model)
-    assert "launch_app harness tool" not in renderer.render_agent_prompt(agent_model)
-    assert "kill_app harness tool" not in renderer.render_agent_prompt(agent_model)
-    assert "tool usage error" in renderer.render_agent_prompt(agent_model)
-    rendered_task = renderer.render_task_prompt(task_model)
-    assert "Structured task input:" in rendered_task
-    assert '"id": "task-1"' in rendered_task
-    assert "Verification goal:" in rendered_task
-    assert "Done." in rendered_task
-
-
 def test_agent_runtime_settings_rejects_obsolete_custom_instruction_fields(tmp_path: Path) -> None:
     custom_instructions = tmp_path / "custom-instructions.md"
 
@@ -1203,57 +1767,6 @@ def test_prompt_renderer_injects_model_into_configured_jinja_templates(tmp_path:
 
     assert renderer.render_agent_prompt(agent_model) == "Base. s=Skill."
     assert renderer.render_task_prompt(task_model) == "Task task-1 Base."
-
-
-@pytest.mark.asyncio
-async def test_harness_tool_adapter_delegates_to_step_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    import fsq_agent.adapters.coding_agent._harness_tools as harness_tools_module
-
-    runner_calls: list[tuple[Any, str, Any]] = []
-
-    class _FakeStepRunner:
-        def __init__(self, harness: Any, **_: Any) -> None:
-            self.harness = harness
-
-        def run_step(self, run_id: str, step: Any) -> RunnerStepResult:
-            runner_calls.append((self.harness, run_id, step))
-            return RunnerStepResult(
-                step_id=step.step_id,
-                status="passed",
-                duration_ms=7,
-                phase_reports=[
-                    StepPhaseReport(
-                        step_id=step.step_id,
-                        phase="invoke",
-                        status="passed",
-                        metadata={
-                            "harness_output": {"params": step.params},
-                            "harness_metadata": {"runner": "fake"},
-                        },
-                    )
-                ],
-            )
-
-    monkeypatch.setattr(harness_tools_module, "StepRunner", _FakeStepRunner)
-    harness = _DirectInvokeForbiddenHarness()
-    adapter = HarnessToolAdapter(harness, run_id="run-1")
-
-    tools = adapter.build_tools()
-    output = await tools[0].invoke(ToolCall(name=tools[0].name, arguments={"target": "Downloads"}, call_id="call-1"))
-
-    payload = json.loads(output)
-    assert payload["status"] == "passed"
-    assert payload["duration_ms"] == 7
-    assert payload["runner_step_id"] == "agent-tap_on-1"
-    assert payload["runner_result"]["status"] == "passed"
-    assert payload["result"]["output"] == {"params": {"target": "Downloads"}}
-    assert runner_calls[0][0] is harness
-    assert runner_calls[0][1] == "run-1"
-    assert runner_calls[0][2].action_name == "tap_on"
-    assert runner_calls[0][2].metadata["authored_action_name"] == "tapOn"
-    assert runner_calls[0][2].evidence_policy.capture_before is False
-    assert runner_calls[0][2].evidence_policy.artifact_kinds == []
-    assert harness.steps == []
 
 
 @pytest.mark.asyncio
@@ -1344,7 +1857,7 @@ def test_harness_tool_adapter_builds_macos_bindings_with_strict_schema_requireme
     from fsq_agent.core.harness._macos import MacOSHarness
 
     class SchemaOnlyEvaluator:
-        def evaluate(self, request: Any) -> Any:
+        def evaluate(self, request: Any, *, cancellation_check=None) -> Any:
             raise AssertionError(f"Schema construction must not invoke the evaluator: {request!r}")
 
     harness = MacOSHarness(
@@ -1668,7 +2181,6 @@ def test_runtime_builds_neutral_request_with_one_tool_output_budget(monkeypatch:
 
     assert request.tracing_enabled is False
     input_filter = request.tool_output_filter
-    assert input_filter.recent_inline_outputs == 3
     assert input_filter.max_output_chars == 30000
     assert input_filter.max_total_inline_chars == 60000
     assert not hasattr(request, "trimming")
@@ -1700,26 +2212,19 @@ def test_provider_session_preserves_azure_connection_values_for_neutral_access()
     assert not hasattr(session, "create_agents_provider")
 
 
-def test_runtime_tool_count_filter_keeps_only_three_small_recent_outputs(tmp_path: Path) -> None:
+def test_runtime_tool_count_filter_keeps_twenty_small_recent_outputs(tmp_path: Path) -> None:
     output_settings = OutputSettings()
     output_settings.runs_dir = tmp_path / "runs"
     settings = Settings(agent_runtime=AgentRuntimeSettings(), output=output_settings)
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
     input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
-    entries = (
-        ToolOutputEntry(1, "1", "read_file", "old output"),
-        ToolOutputEntry(3, "2", "read_file", "recent 1"),
-        ToolOutputEntry(5, "3", "read_file", "recent 2"),
-        ToolOutputEntry(7, "4", "read_file", "recent 3"),
-    )
+    entries = tuple(ToolOutputEntry(index, str(index), "read_file", f"output {index}") for index in range(1, 22))
 
     filtered = input_filter(entries)
 
     assert filtered[1].startswith("[Historical read_file output stored as artifact.")
-    assert "old output" not in filtered[1]
-    assert 3 not in filtered
-    assert 5 not in filtered
-    assert 7 not in filtered
+    assert "output 1" not in filtered[1]
+    assert all(entry.entry_id not in filtered for entry in entries[1:])
 
 
 def test_runtime_tool_count_filter_enforces_total_inline_budget(tmp_path: Path) -> None:
@@ -1764,16 +2269,18 @@ async def test_file_helper_context_filter_preserves_complete_artifact(tmp_path: 
     from fsq_agent.agent_engine import ToolCall
 
     settings = Settings()
+    settings.workspace.root_dir = tmp_path
     settings.output.runs_dir = tmp_path / "runs"
     settings.agent_context.knowledge.root_dir = tmp_path / "knowledge"
     settings.agent_context.knowledge.root_dir.mkdir()
     content = "x" * 40000 + "TAIL"
     (settings.agent_context.knowledge.root_dir / "large.txt").write_text(content, encoding="utf-8")
     runtime = create_coding_agent_runtime(settings)
+    settings.agent_runtime.local_tool_output.recent_inline_output_count = 3
     tools = runtime.tool_factory.build_tools(run_id="run-1", task_id="task-1")
     read_tool = next(tool for tool in tools if tool.name == "read_file")
     search_tool = next(tool for tool in tools if tool.name == "search_artifact")
-    output = await read_tool.invoke(ToolCall(name="read_file", arguments={"path": "large.txt"}, call_id="large-read"))
+    output = await read_tool.invoke(ToolCall(name="read_file", arguments={"path": "knowledge/large.txt"}, call_id="large-read"))
     payload = json.loads(output)
     artifact_path = Path(payload["artifact"]["path"])
     original_artifact = await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
@@ -1999,3 +2506,385 @@ def test_neutral_argument_redaction_preserves_shape_and_removes_credentials(as_j
     assert "CANARY" not in json.dumps(parsed)
     assert parsed["key"] == "Enter"
     assert parsed["text"] == "PASSWORD_REFERENCE"
+
+
+@pytest.mark.parametrize("reference", [None, {"width": 1080, "height": 2209}])
+@pytest.mark.parametrize(
+    ("name", "alias", "arguments"),
+    [
+        ("tap_at", "tapAt", {"point": {"x": 100, "y": 200}}),
+        ("swipe", "swipe", {"start": {"x": 100, "y": 200}, "end": {"x": 200, "y": 200}}),
+    ],
+)
+async def test_online_coordinate_callbacks_reject_replay_reference_before_any_action(name, alias, arguments, reference):
+    harness = _FakeHarness(tool_name=name, driver_method=name, fsq_action_name=alias, screen_size=(1080, 2400))
+    [tool] = HarnessToolAdapter(harness, run_id="reference-rejected").build_tools()
+    arguments = {**arguments, "reference_screen_size": reference}
+    result = json.loads(await tool.invoke(ToolCall(name=name, arguments=arguments, call_id="hidden-reference")))
+    assert result["status"] == "failed"
+    assert result["capability_name"] == name
+    assert result["artifact_refs"] == []
+    assert harness.calls == []
+    assert harness.steps == []
+
+
+@pytest.mark.parametrize("shape", ["ref", "all_of", "all_of_ref"])
+async def test_harness_callback_accepts_properties_from_supported_schema_composition(shape: str) -> None:
+    harness = _FakeHarness()
+    adapter = HarnessToolAdapter(harness, run_id="composed-schema")
+    parameters = {"type": "object", "properties": {"target": {"type": "string"}}, "additionalProperties": False}
+    if shape == "ref":
+        adapter.schemas[0].params_json_schema = {"$defs": {"Arguments": parameters}, "$ref": "#/$defs/Arguments"}
+    elif shape == "all_of":
+        adapter.schemas[0].params_json_schema = {"type": "object", "additionalProperties": False, "allOf": [parameters]}
+    else:
+        adapter.schemas[0].params_json_schema = {"$defs": {"Arguments": parameters}, "allOf": [{"$ref": "#/$defs/Arguments"}]}
+    [tool] = adapter.build_tools()
+
+    result = json.loads(await tool.invoke(ToolCall(name="tap_on", arguments={"target": "Save"}, call_id="composed-save")))
+
+    assert result["status"] == "passed"
+    assert harness.steps[0].params == {"target": "Save"}
+    assert "invoke:tap_on:session-1" in harness.calls
+
+
+@pytest.mark.parametrize("additional", [None, True])
+async def test_harness_callback_preserves_permitted_additional_properties(additional: bool | None) -> None:
+    harness = _FakeHarness()
+    adapter = HarnessToolAdapter(harness, run_id="permissive-schema")
+    if additional is not None:
+        adapter.schemas[0].params_json_schema["additionalProperties"] = additional
+    [tool] = adapter.build_tools()
+    arguments = {"target": "Save", "locator": {"resourceId": "save"}}
+
+    result = json.loads(await tool.invoke(ToolCall(name="tap_on", arguments=arguments, call_id="permissive-save")))
+
+    assert result["status"] == "passed"
+    assert harness.steps[0].params == arguments
+    assert "invoke:tap_on:session-1" in harness.calls
+
+
+@pytest.mark.asyncio
+async def test_model_projection_preserves_business_result_and_raw_runner_evidence(tmp_path: Path) -> None:
+    harness = _FakeHarness()
+    adapter = HarnessToolAdapter(harness, run_id="run-1")
+    tool = adapter.build_tools()[0]
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "Downloads"}, call_id="tap"))
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
+    input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
+    entry = ToolOutputEntry(1, "tap", tool.name, raw)
+
+    projected = json.loads(input_filter((entry,))[1])
+    original = json.loads(raw)
+
+    assert projected["output"] == original["result"]["output"]
+    assert projected["status"] == "passed"
+    assert projected["runner_step_id"] == original["runner_step_id"]
+    assert projected["artifact_refs"] == original["artifact_refs"]
+    assert "runner_result" not in projected
+    assert "result" not in projected
+    assert entry.output == raw
+    assert original["runner_result"]["phase_reports"][0]["phase"] == "prepare"
+    assert not list((tmp_path / "runs" / "run-1" / "artifacts" / "tools").glob("*.json"))
+
+
+def test_model_projection_budgets_business_output_not_duplicate_metadata(tmp_path: Path) -> None:
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
+    input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
+    raw = json.dumps(
+        {
+            "tool_name": "ui_snapshot",
+            "status": "passed",
+            "tool_origin": "platform",
+            "result": {"output": {"xml": "<hierarchy/>"}, "metadata": {"schema_metadata": {"description": "x" * 40000}}},
+            "runner_result": {"status": "passed", "phase_reports": []},
+        }
+    )
+
+    replacements = input_filter((ToolOutputEntry(1, "snapshot", "ui_snapshot", raw),))
+
+    assert json.loads(replacements[1])["output"] == {"xml": "<hierarchy/>"}
+    assert not list((tmp_path / "runs" / "run-1" / "artifacts" / "tools").glob("*.json"))
+    input_filter.max_output_chars = 10
+    reference = input_filter((ToolOutputEntry(1, "snapshot", "ui_snapshot", raw),))[1]
+    assert "Artifact path:" in reference
+    artifacts = list((tmp_path / "runs" / "run-1" / "artifacts" / "tools").glob("*.json"))
+    assert json.loads(artifacts[0].read_text())["content"] == raw
+
+
+def test_model_projection_preserves_incomplete_assertion_and_evidence_failure(tmp_path: Path) -> None:
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    input_filter = _test_request(DefaultCodingAgentRuntime(settings, _EmptyToolFactory()), run_id="run-1").tool_output_filter
+    unavailable = {"kind": "screenshot", "availability": "failed", "unavailable_reason": "capture_failed", "path": None}
+    output = {"outcome": "inconclusive", "reason": "privacy_blocked", "deterministic_conflict": False, "capture": {"pointer_mapping": "unverified"}}
+    raw = json.dumps(
+        {
+            "tool_name": "assert_with_ai",
+            "tool_origin": "platform",
+            "status": "incomplete",
+            "result": {"output": output, "metadata": {"harness_metadata": {"outcome": "inconclusive", "reason": "privacy_blocked"}}},
+            "artifact_refs": [unavailable],
+            "runner_result": {
+                "action_status": "incomplete",
+                "evidence_errors": [{"message": "capture_failed"}],
+                "phase_reports": [{"phase": "prepare", "status": "failed", "failure_category": "artifact_error", "error_message": "capture_failed"}],
+            },
+        }
+    )
+
+    projected = json.loads(input_filter((ToolOutputEntry(1, "assert", "assert_with_ai", raw),))[1])
+
+    assert projected["status"] == "incomplete"
+    assert projected["output"] == output
+    assert projected["artifact_refs"] == [unavailable]
+    assert projected["evidence_errors"] == [{"message": "capture_failed"}]
+    assert projected["phase_errors"][0]["failure_category"] == "artifact_error"
+    assert projected["diagnostics"]["harness_metadata"]["reason"] == "privacy_blocked"
+
+
+@pytest.mark.parametrize("raw", ["not JSON", "[1,2]", '{"tool_name":"business","status":"passed","result":{"answer":42}}'])
+def test_model_projection_leaves_unrecognized_content_unchanged(raw: str) -> None:
+    input_filter = _test_request(DefaultCodingAgentRuntime(Settings(), _EmptyToolFactory())).tool_output_filter
+    assert input_filter((ToolOutputEntry(1, "unrelated", "read_file", raw),)) == {}
+
+
+@pytest.mark.asyncio
+async def test_verifier_receives_original_observation_when_compact_history_stays_inline(tmp_path: Path) -> None:
+    marker = "VERIFIED_VALUE_BEYOND_PROGRESS_PREVIEW"
+    observed_text = "x" * 2000 + marker + "y" * 14000
+
+    class FullObservationHarness(_FakeHarness):
+        def invoke_action(self, step: Any, context: HarnessContext) -> HarnessActionResult:
+            return HarnessActionResult(status="passed", action_name=step.action_name, output={"text": observed_text})
+
+    harness = FullObservationHarness(tool_name="inspect_element", driver_method="inspect_element", fsq_action_name="inspectElement")
+    adapter = HarnessToolAdapter(harness, run_id="run-1")
+    tool = next(binding for binding in adapter.build_tools() if binding.name == "inspect_element")
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "editor"}, call_id="read-full"))
+    settings = Settings()
+    settings.output.runs_dir = tmp_path / "runs"
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
+    input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
+    projected = input_filter((ToolOutputEntry(1, "read-full", tool.name, raw),))[1]
+    assert len(raw) > input_filter.max_output_chars
+    assert json.loads(projected)["output"]["text"] == observed_text
+    assert not list((tmp_path / "runs" / "run-1" / "artifacts" / "tools").glob("*.json"))
+
+    event = runtime._map_stream_event(AgentEvent(kind="tool_output", call_id="read-full", tool_name=tool.name, output=raw), "run-1", "verify")
+    assert marker not in event.tool_output_preview
+    events_path = tmp_path / "runs" / "run-1" / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(event.model_dump_json() + "\n", encoding="utf-8")
+    task = Task(id="verify", description="Inspect the editor.", verification_goal=f"The editor contains {marker}.")
+    bundle = VerificationEvidenceBuilder().build(task, [], events_path=events_path)
+    execution = bundle.tool_calls[0]["runner_result"]
+    invoked = next(phase for phase in execution["phase_reports"] if phase["phase"] == "invoke")
+    assert invoked["metadata"]["harness_output"]["text"] == observed_text
+    assert execution["status"] == "passed"
+    assert json.loads(events_path.read_text(encoding="utf-8"))["payload"]["runner_result"] == execution
+
+
+class _BudgetStatusHarness(_FakeHarness):
+    def __init__(self, outcome="passed", *, output_chars=0):
+        super().__init__()
+        self.outcome = outcome
+        self.output_chars = output_chars
+        self.used = 2 if outcome == "denied" else 0
+        self.receipts = {}
+        self.budget_queries = []
+
+    def action_space(self):
+        from fsq_agent.harnesses._common_tools import CommonPlatformTools
+        from fsq_agent.models import AndroidInputTextParams, AndroidTapOnParams, AndroidUiTreeParams
+
+        if self.outcome == "wait":
+            return CommonPlatformTools().common_action_space()
+        schema = super().action_space()[0]
+        if self.outcome == "observation":
+            return [schema.model_copy(update={"name": "ui_snapshot", "driver_method": "ui_snapshot", "fsq_action_name": "uiTree", "params_json_schema": AndroidUiTreeParams.model_json_schema()})]
+        if self.outcome == "secret":
+            return [schema.model_copy(update={"name": "input_text", "driver_method": "input_text", "fsq_action_name": "inputText", "params_json_schema": AndroidInputTextParams.model_json_schema()})]
+        return [schema.model_copy(update={"params_json_schema": AndroidTapOnParams.model_json_schema()})]
+
+    def before_action(self, step, context):
+        super().before_action(step, context)
+        if self.outcome == "prepare":
+            raise RuntimeError("Preparation failed before dispatch.")
+
+    def invoke_action(self, step, context):
+        from fsq_agent.harnesses._common_tools import CommonPlatformTools
+
+        charged = int(self.outcome not in {"denied", "observation", "wait"})
+        self.used += charged
+        self.receipts[step.step_id] = {"max": 2, "used": self.used, "remaining": 2 - self.used, "charged": charged}
+        # Another consumer may change the shared gate before formatting this call.
+        self.used = min(2, self.used + 1)
+        if self.outcome == "wait":
+            self.steps.append(step)
+            return CommonPlatformTools().invoke_common_tool(step)
+        result = super().invoke_action(step, context)
+        if self.outcome == "raised":
+            raise RuntimeError("Native dispatch failed.")
+        if self.outcome in {"failed", "denied"}:
+            return result.model_copy(update={"status": "failed", "failure_category": "action_error", "error_message": "Write denied." if self.outcome == "denied" else "Native write failed."})
+        if self.output_chars:
+            return result.model_copy(update={"output": {"xml": "x" * self.output_chars}})
+        return result
+
+    def write_budget_status(self, step_id=None):
+        self.budget_queries.append(step_id)
+        if step_id is not None:
+            return dict(self.receipts[step_id])
+        return {"max": 2, "used": self.used, "remaining": 2 - self.used, "charged": 0}
+
+
+@pytest.mark.parametrize("outcome", ["passed", "failed", "raised", "denied", "observation", "wait", "validation", "extra_argument", "prepare", "secret"])
+async def test_write_budget_receipt_reaches_main_model_request_without_balance_differencing(tmp_path, monkeypatch, outcome):
+    from fsq_agent.core.evidence import EvidenceRecorder
+
+    class DistinctIdentityRecorder(EvidenceRecorder):
+        def allocate_step_identity(self, step):
+            return super().allocate_step_identity(step.model_copy(update={"step_execution_id": f"execution-{step.step_id}"}))
+
+    monkeypatch.setattr("fsq_agent.core.evidence.EvidenceRecorder", DistinctIdentityRecorder)
+    harness = _BudgetStatusHarness(outcome)
+    model_outputs = []
+
+    class Engine:
+        async def run(self, model, request, *, on_event=None):
+            tool = request.tools[0]
+            arguments = {} if outcome == "observation" else {"duration_ms": 1} if outcome == "wait" else {"target": "" if outcome == "validation" else "Row"}
+            if outcome == "secret":
+                arguments.update({"text": "BUDGET_MISSING_SECRET", "textType": "runtimeSecret"})
+            if outcome == "extra_argument":
+                arguments["undeclared"] = "reject before dispatch"
+            raw = await tool.invoke(ToolCall(name=tool.name, arguments=arguments, call_id="budget-call"))
+            entry = ToolOutputEntry(1, "budget-call", tool.name, raw)
+            projected = request.tool_output_filter((entry,)).get(1, raw)
+            model_outputs.append((json.loads(raw), json.loads(projected)))
+            return AgentResult(final_output=AgentFinalOutput(status="inconclusive", summary="Budget receipt inspected."))
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: _FakeProviderSession())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: harness, engine=Engine())
+    await _run_in_context(runtime, Task(description="Inspect budget receipts."), KnowledgeBundle(), [], "budget-run")
+
+    assert len(model_outputs) == 1
+    raw, projected = model_outputs[0]
+    if outcome in {"validation", "extra_argument", "prepare", "secret"}:
+        expected = {"max": 2, "used": 0, "remaining": 2, "charged": 0}
+        assert not harness.steps
+        assert harness.budget_queries == [None]
+    else:
+        expected = next(iter(harness.receipts.values()))
+        assert harness.budget_queries == [harness.steps[0].step_id]
+        assert harness.steps[0].step_id != harness.steps[0].source_step_id
+    assert raw["write_budget"] == projected["write_budget"] == expected
+    if outcome in {"failed", "raised", "denied", "validation", "extra_argument", "prepare", "secret"}:
+        assert projected["status"] == "failed"
+    if outcome in {"failed", "raised"}:
+        assert projected["write_budget"]["charged"] == 1
+        assert projected["write_budget"]["used"] == 1
+    if outcome in {"denied", "observation", "wait"}:
+        assert projected["write_budget"]["charged"] == 0
+    if outcome == "wait":
+        assert projected["status"] == "passed"
+        assert harness.steps[0].action_name == "wait_ms"
+    if outcome == "secret":
+        assert raw["runner_result"]["action_status"] == "failed"
+
+
+@pytest.mark.parametrize("artifact_available", [False, True])
+@pytest.mark.parametrize("externalization", ["oversized_latest", "total_budget", "historical"])
+async def test_write_budget_survives_actual_filter_externalization_without_ui_body(tmp_path, artifact_available, externalization):
+    harness = _BudgetStatusHarness("observation", output_chars=4000)
+    adapter = HarnessToolAdapter(harness, run_id="budget-filter")
+    tool = adapter.build_tools()[0]
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={}, call_id="large-snapshot"))
+    settings = Settings()
+    settings.output.runs_dir = tmp_path
+    output_filter = _test_request(DefaultCodingAgentRuntime(settings, _EmptyToolFactory()), run_id="budget-filter").tool_output_filter
+    if not artifact_available:
+        output_filter.artifact_store = None
+    if externalization == "oversized_latest":
+        output_filter.max_output_chars = 100
+    elif externalization == "total_budget":
+        output_filter.max_total_inline_chars = 100
+    else:
+        output_filter.recent_inline_outputs = 0
+    entry = ToolOutputEntry(1, "large-snapshot", tool.name, raw)
+
+    replacement = output_filter((entry,))[1]
+    projected = json.loads(replacement)
+
+    assert projected["write_budget"] == json.loads(raw)["write_budget"] == {"max": 2, "used": 0, "remaining": 2, "charged": 0}
+    assert "x" * 100 not in replacement
+    assert entry.output == raw
+    assert output_filter((entry,))[1] == replacement
+    if artifact_available:
+        artifacts = list(tmp_path.rglob("*.json"))
+        assert len(artifacts) == 1
+        assert Path(projected["artifact"]["path"]) == artifacts[0]
+        assert json.loads(artifacts[0].read_text())["content"] == raw
+    else:
+        assert "omitted" in replacement
+        assert not list(tmp_path.rglob("*.json"))
+
+
+@pytest.mark.parametrize(
+    "bad_receipt",
+    [
+        None,
+        {"max": True, "used": 0, "remaining": 1, "charged": 0},
+        {"max": 2, "used": -1, "remaining": 3, "charged": 0},
+        {"max": 2, "used": 1, "remaining": 0, "charged": 1},
+        {"max": 2, "used": 1, "remaining": 1, "charged": 2},
+        {"max": 2, "used": 1, "remaining": 1, "charged": 1, "private": "budget-secret-canary"},
+        "raise",
+    ],
+)
+async def test_invalid_budget_hook_never_masks_primary_failure_or_leaks_values(bad_receipt):
+    class Harness(_BudgetStatusHarness):
+        def write_budget_status(self, step_id=None):
+            if bad_receipt == "raise":
+                raise RuntimeError("budget-secret-canary")
+            return bad_receipt
+
+    adapter = HarnessToolAdapter(Harness("failed"), run_id="invalid-budget")
+    tool = adapter.build_tools()[0]
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "Row"}, call_id="bad-budget"))
+    result = json.loads(raw)
+
+    assert result["status"] == "failed"
+    assert result["error_message"] == "Native write failed."
+    assert "write_budget" not in result
+    assert result["write_budget_unavailable"] in {"invalid_receipt", "hook_failed"}
+    assert "budget-secret-canary" not in raw
+
+
+@pytest.mark.parametrize("outcome", ["validation", "prepare"])
+async def test_current_budget_query_rejects_nonzero_charge_without_native_dispatch(outcome):
+    class InvalidCurrentReceiptHarness(_BudgetStatusHarness):
+        def write_budget_status(self, step_id=None):
+            self.budget_queries.append(step_id)
+            return {"max": 2, "used": 1, "remaining": 1, "charged": 1}
+
+    harness = InvalidCurrentReceiptHarness(outcome)
+    harness.used = 1
+    adapter = HarnessToolAdapter(harness, run_id="invalid-current-receipt")
+    tool = adapter.build_tools()[0]
+    raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "" if outcome == "validation" else "Row"}, call_id="undispatched"))
+    result = json.loads(raw)
+
+    assert result["status"] == "failed"
+    assert result["error_message"]
+    assert not harness.steps
+    assert harness.budget_queries == [None]
+    assert "write_budget" not in result
+    assert result["write_budget_unavailable"] == "invalid_receipt"

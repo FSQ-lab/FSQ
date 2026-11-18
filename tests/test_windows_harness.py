@@ -425,7 +425,7 @@ def test_windows_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> Non
         def __init__(self) -> None:
             self.requests: list[AIAssertionRequest] = []
 
-        def evaluate(self, request: AIAssertionRequest) -> AIAssertionResult:
+        def evaluate(self, request: AIAssertionRequest, *, cancellation_check=None) -> AIAssertionResult:
             self.requests.append(request)
             return AIAssertionResult(
                 status="passed",

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Never, Protocol
 
-from fsq_agent._capability_bootstrap import build_capability_registry, provider_required_capability_names, steps_require_provider
+from fsq_agent._capability_bootstrap import ai_assertion_capability_names, build_capability_registry, steps_require_provider
 from fsq_agent.ai_services import CaseSuggestionAnalysis, build_ai_assertion_evaluator
 from fsq_agent.application.contracts import (
     ApplicationError,
@@ -23,6 +23,7 @@ from fsq_agent.application.workspace import require_initialized_workspace
 from fsq_agent.case_dsl import FsqCaseLoader, FsqCaseSerializer, FsqExecutableStepAdapter
 from fsq_agent.config import Settings, list_workspace_registry, load_workspace_platform_settings, validate_strict_core_settings
 from fsq_agent.core import ArtifactStore, HarnessFactory, RuntimeSecretStore
+from fsq_agent.environments import AndroidDeviceDiscovery
 from fsq_agent.execution import RunLifecycleService, RunSource, RunStepCounts, allocate_run, collect_strict_lifecycle_cases, load_run_metadata, run_strict_lifecycle_case, transition_run
 from fsq_agent.models import ConfigurationError, EvidenceBundle
 
@@ -33,6 +34,37 @@ _MAX_FACT_BYTES = 200_000
 
 class _SuggestionAnalyzer(Protocol):
     def analyze(self, *, parsed_case: dict[str, object], execution_report: dict[str, object]) -> CaseSuggestionAnalysis: ...
+
+
+def _resolve_android_run_serial(settings: Settings) -> str:
+    configured = (getattr(getattr(settings.harness, "android", None), "serial", None) or "").strip()
+    if configured:
+        return configured
+    discovery = AndroidDeviceDiscovery().discover()
+    if discovery.error_code:
+        raise ApplicationError(
+            code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+            category=ApplicationErrorCategory.UNAVAILABLE,
+            message=discovery.error_message or "Android device discovery failed.",
+            action="Start the local ADB server and connect one online authorized Android device.",
+            details={"error_code": discovery.error_code},
+        )
+    online = [device for device in discovery.devices if device.state == "device"]
+    if len(online) == 1:
+        return online[0].serial
+    if not online:
+        raise ApplicationError(
+            code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+            category=ApplicationErrorCategory.UNAVAILABLE,
+            message="No authorized online Android device is available.",
+            action="Connect an Android device, enable USB debugging, and authorize this computer.",
+        )
+    raise ApplicationError(
+        code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+        category=ApplicationErrorCategory.UNAVAILABLE,
+        message="Multiple online Android devices require explicit selection.",
+        action="Select a device in Control Plane, or leave a single online authorized Android device connected for CLI execution.",
+    )
 
 
 def execute_case_test(
@@ -76,8 +108,16 @@ def execute_case_test(
         RunLifecycleService.preflight_steps([step for steps in resolved_steps.values() for step in steps], runtime_secret_store, registry=registry)
     except ConfigurationError as exc:
         raise _invalid_case_error(exc) from exc
-    requires_ai = any(steps_require_provider(steps, snapshot, provider_required_capability_names(request.platform)) for steps in resolved_steps.values())
+    requires_ai = any(steps_require_provider(steps, snapshot, ai_assertion_capability_names(request.platform)) for steps in resolved_steps.values())
     validate_strict_core_settings(settings, requires_ai_assertion=requires_ai)
+    android_serial: str | None = None
+    if request.platform == "android":
+        android_serial = _resolve_android_run_serial(settings)
+        settings = settings.model_copy(deep=True)
+        settings.harness.android.serial = android_serial
+        settings.harness.android.visual_assertion_policy = settings.harness.android.visual_assertion_policy.model_copy(
+            update={"provider_available": bool(settings.agent_runtime.provider and settings.agent_runtime.model)}
+        )
     workspace_name = _registered_workspace_name(workspace.workspace)
     metadata = allocate_run(
         workspace=workspace.workspace,
@@ -90,9 +130,13 @@ def execute_case_test(
     )
     run_id = metadata.run_id
     run_dir = Path(settings.output.runs_dir) / run_id
+    evaluator = None
+    harness = None
+    execution_failed = False
     try:
         metadata = transition_run(run_dir, metadata, "running")
-        evaluator = build_ai_assertion_evaluator(settings) if requires_ai else None
+        if requires_ai and request.platform != "android":
+            evaluator = build_ai_assertion_evaluator(settings)
         harness = HarnessFactory().create_harness(
             platform=request.platform,
             harness_settings=settings.harness,
@@ -100,6 +144,7 @@ def execute_case_test(
             ai_assertion_evaluator=evaluator,
             runtime_secret_settings=settings.runtime_secrets,
             app_id=(settings.harness.android.app_id or case.config.app_id) if request.platform == "android" else None,
+            serial=android_serial,
         )
         artifact = run_strict_lifecycle_case(
             case_path=case_path,
@@ -117,6 +162,7 @@ def execute_case_test(
             cases_by_path={path.resolve(): item for path, item in lifecycle_cases},
         )
     except BaseException as exc:
+        execution_failed = True
         cancelled = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)) or type(exc).__name__ in {"TaskCancelledError", "RunCancelled", "ExecutionCancelled"}
         lifecycle = RunLifecycleService()
         try:
@@ -142,6 +188,24 @@ def execute_case_test(
             action="Inspect the allocated Run evidence.",
             details={"run_id": run_id, "platform": request.platform, "exception_type": type(exc).__name__},
         ) from exc
+    finally:
+        close_harness = getattr(harness, "close", None)
+        if callable(close_harness):
+            try:
+                close_harness()
+            except Exception as cleanup_exc:
+                if not execution_failed:
+                    raise ApplicationError(
+                        code=ApplicationErrorCode.RUN_EXECUTION_FAILED,
+                        category=ApplicationErrorCategory.INTERNAL,
+                        message="Run harness cleanup failed.",
+                        action="Inspect the allocated Run evidence.",
+                        details={"run_id": run_id, "platform": request.platform, "exception_type": type(cleanup_exc).__name__},
+                    ) from cleanup_exc
+        elif evaluator is not None:
+            close_evaluator = getattr(evaluator, "close", None)
+            if callable(close_evaluator):
+                close_evaluator()
     if case_path.read_bytes() != source_before:
         raise ApplicationError(
             code=ApplicationErrorCode.RUN_SOURCE_CHANGED,
@@ -157,7 +221,7 @@ def execute_case_test(
     else:
         # Explicit collaborator compatibility: injected legacy runners may return a stored report.
         legacy_status, summary = _report_status(artifact.path)
-        status = "success" if legacy_status == "passed" else "failed"
+        status = {"passed": "success", "incomplete": "inconclusive"}.get(legacy_status, legacy_status)
     suggestion_path = None
     candidate_case_path = None
     warnings = ["case.suffix_deprecated: rename this Case to *.fsq.yaml"] if case_path.name.endswith(".codex.yaml") else []
@@ -253,9 +317,19 @@ def _invalid_case_error(error: ConfigurationError) -> ApplicationError:
 def _report_status(path: Path) -> tuple[str, str]:
     payload = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     summary = payload.get("summary", {})
-    status = str(summary.get("status", "failed"))
+    status = str(summary.get("status", "inconclusive"))
+    if status not in {"passed", "success", "failed", "inconclusive", "incomplete", "cancelled", "error"}:
+        status = "inconclusive"
     failed = summary.get("failed_steps", 0)
-    return status, "Case passed." if status == "passed" else f"Case failed with {failed} failed step(s)."
+    messages = {
+        "passed": "Case passed.",
+        "success": "Case passed.",
+        "inconclusive": "Case remains unverified.",
+        "incomplete": "Case remains unverified.",
+        "cancelled": "Case cancelled.",
+        "error": "Case encountered an infrastructure error.",
+    }
+    return status, messages.get(status, f"Case failed with {failed} failed step(s).")
 
 
 def _best_effort_terminal(run_dir: Path, metadata, status: str) -> None:

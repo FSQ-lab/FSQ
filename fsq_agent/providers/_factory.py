@@ -8,7 +8,7 @@ from fsq_agent.config import Settings
 from fsq_agent.models import ConfigurationError
 from fsq_agent.providers._azure_openai import build_azure_openai_client_config
 from fsq_agent.providers._deepseek import build_deepseek_client_config
-from fsq_agent.providers._github_copilot import build_github_copilot_client_config, refresh_github_copilot_client_config
+from fsq_agent.providers._github_copilot import build_github_copilot_client_config
 from fsq_agent.providers._google_gemini import build_google_gemini_client_config
 from fsq_agent.providers._kimi import build_kimi_client_config
 from fsq_agent.providers._openai import build_openai_client_config
@@ -38,9 +38,6 @@ class ModelProviderFactory:
         raise ConfigurationError("Model Provider is not configured. Add a Provider in Control Plane Config.")
 
     def refresh_session(self) -> ModelProviderSession:
-        provider = self.settings.agent_runtime.provider
-        if provider == "github_copilot":
-            return ModelProviderSession(refresh_github_copilot_client_config(self.settings))
         return self.build_session()
 
 

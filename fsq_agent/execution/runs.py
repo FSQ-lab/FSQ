@@ -379,7 +379,7 @@ class RunLifecycleService:
                 safe_config["agent_runtime"] = safe_policy
         import platform as python_platform
 
-        packages = {"web": "playwright", "android": "uiautomator2", "windows": "pywinauto", "macos": "Appium-Python-Client"}
+        packages = {"web": "playwright", "android": "appium-connect-agent", "windows": "pywinauto", "macos": "Appium-Python-Client"}
         try:
             backend_version = version(packages[metadata.platform])
         except PackageNotFoundError:
@@ -422,7 +422,8 @@ class RunLifecycleService:
         duration_ms: int | None = None,
         preserve_evidence_error: bool = False,
     ):
-        from fsq_agent.models import RunExecutionResult
+        from fsq_agent.agent import Verifier
+        from fsq_agent.models import RunExecutionResult, VerificationResult
 
         if bundle.run_id != metadata.run_id:
             raise ValueError("Evidence Run identity does not match metadata.")
@@ -473,7 +474,25 @@ class RunLifecycleService:
                         evidence_errors.append({"step_id": step.step_id, "phase": phase, "kind": kind, "reason": "required_capture_missing"})
         evidence = {"status": "partial" if evidence_failed else "complete" if step_values else "not_applicable", "errors": evidence_errors, "warnings": bundle.warnings}
         verdict = verification.model_dump(mode="json") if hasattr(verification, "model_dump") else dict(verification or {"status": "not_requested"})
-        outcome = status or ("cancelled" if counts["cancelled"] else "inconclusive" if counts["incomplete"] or not leaves or not attempts else "failed" if counts["failed"] else "success")
+        unverified_assertion = False
+        if verdict.get("status") in {"success", "failed", "inconclusive", "not_requested"}:
+            baseline = (
+                VerificationResult(status="inconclusive", summary="Verification was not requested.")
+                if verdict["status"] == "not_requested"
+                else VerificationResult.model_validate(
+                    {
+                        "summary": summary or "Execution verification.",
+                        **{key: value for key, value in verdict.items() if key in VerificationResult.model_fields},
+                    }
+                )
+            )
+            effective = Verifier.reconcile_execution_evidence(baseline, step_values)
+            if effective is not baseline:
+                unverified_assertion = True
+                # The frozen mapping also supports safe provenance outside the typed goal-verification contract.
+                verdict.update(effective.model_dump(mode="json"))
+                summary = effective.summary
+        outcome = status or ("cancelled" if counts["cancelled"] else "failed" if counts["failed"] else "inconclusive" if counts["incomplete"] or not leaves or not attempts else "success")
         if metadata.mode == "explore" and not status and not counts["cancelled"] and not counts["incomplete"]:
             outcome = verdict.get("status", "inconclusive")
         if metadata.mode == "strict" and outcome == "success" and (first is not None or counts["skipped"] or verdict.get("status") == "failed"):
@@ -488,8 +507,9 @@ class RunLifecycleService:
             outcome = "inconclusive"
         # A search evidence gap can lower a positive verifier conclusion, but
         # must not erase an error that recorded required-capture failures would
-        # have produced. Mere partial/missing observations are still inconclusive.
-        downgraded_capture_error = preserve_evidence_error and capture_failed and outcome == "inconclusive" and not counts["incomplete"]
+        # have produced. An unverified visual assertion cannot hide independent
+        # capture failures; other incomplete actions retain their existing policy.
+        downgraded_capture_error = capture_failed and outcome == "inconclusive" and (unverified_assertion or (preserve_evidence_error and not counts["incomplete"]))
         if evidence_failed and (outcome == "success" or downgraded_capture_error):
             outcome = "error"
         if outcome not in {"success", "failed", "inconclusive", "cancelled", "error"}:

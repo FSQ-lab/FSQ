@@ -33,10 +33,15 @@ def build_capability_registry(*, platform: HarnessPlatform = "android", include_
     )
 
 
-def provider_required_capability_names(platform: HarnessPlatform) -> frozenset[str]:
+def ai_assertion_capability_names(platform: HarnessPlatform) -> frozenset[str]:
     full_snapshot = build_capability_registry(platform=platform, include_ai_assertion=True).snapshot()
     provider_free_names = build_capability_registry(platform=platform, include_ai_assertion=False).snapshot().by_name()
     return frozenset(capability.name for capability in full_snapshot.capabilities if capability.name not in provider_free_names)
+
+
+def provider_required_capability_names(platform: HarnessPlatform) -> frozenset[str]:
+    # Android Strict recognizes unavailable visual assertions as incomplete.
+    return frozenset() if platform == "android" else ai_assertion_capability_names(platform)
 
 
 def steps_require_provider(
@@ -56,6 +61,7 @@ def _platform_capability_definitions(platform: HarnessPlatform, *, include_ai_as
 
 def build_agent_tool_provider(
     *,
+    workspace_base: Path | None = None,
     read_roots: list[Path] | None = None,
     write_root: Path | None = None,
     runtime_secret_settings: Any = None,
@@ -64,7 +70,7 @@ def build_agent_tool_provider(
     run_id: str = "",
 ) -> DefaultAgentToolProvider:
     return DefaultAgentToolProvider(
-        FileOps(read_roots=read_roots, write_root=write_root),
+        FileOps(workspace_base=workspace_base, read_roots=read_roots, write_root=write_root),
         runtime_secret_settings=runtime_secret_settings,
         local_tool_output_settings=local_tool_output_settings,
         runs_dir=runs_dir,

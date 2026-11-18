@@ -38,7 +38,9 @@ tags:
 - pressKey:
     key: Enter
 - assertWithAI:
-    prompt: Analyze the screenshot to verify bing webpage displayed normally.
+    assertion: Verify the webpage appearance.
+    surface: appearance
+    full_screen_reason: The entire page appearance is under test.
     optional: false
 - killApp
 """

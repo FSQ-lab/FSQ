@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from fsq_agent.models import GoalPrePlan, KnowledgeBundle, SkillBundle
+from fsq_agent.models import GoalPrePlan, KnowledgeBundle, SkillBundle, Task
 
 PRE_PLAN_AGENT_INSTRUCTIONS = """
 You are fsq-agent's goal pre-planner.
@@ -38,13 +38,64 @@ Return only the structured GoalPrePlan output. Key actions should be actionable,
 verification_goal must be exactly one concise string describing the final user-visible outcome that evidence must prove.
 Do not turn intermediate operations into final verification requirements. Do not add unrelated product, account,
 network, performance, visual-regression, or accessibility checks unless explicitly requested by the input.
+Authorized browsing, viewing, inspection, and exploration are legitimate executable requests even without a rigid QA
+assertion. For these requests, verification_goal describes completing the requested authorized flow and truthfully
+reporting evidence-grounded observations without unauthorized effects. Do not invent a known answer, expected state,
+exhaustive exploration requirement, or state change. Preserve explicit scope, exact text/answers, requested output
+format/units/rounding, duration bounds, no-extra-item requirements, and no-save/no-send or other terminal constraints.
+Preserve an unsaved, unsubmitted, or unsent terminal state only when the goal explicitly requests that restriction or
+a draft state, for example "do not save", "without submitting", "leave as draft", or "unsent". Such restrictions win.
+Otherwise, when creating an entry, applying settings, or answering an interactive form/challenge requires a clear
+Submit, Save, Done, or OK control to make the requested result effective, include that task-required completion action
+and verify the resulting state. The goal need not literally say "click Submit". Never invent "without submitting"
+or an unsaved-draft goal merely because those words are absent. Do not authorize unrelated or destructive confirmations.
+For click-to-reveal sequences, count requested clicks separately from observed values: the initial visible item can be
+part of the sequence, and the final click can open the answer form rather than reveal another item. Use the complete
+actually observed valid sequence, compute the requested answer, and complete any required authorized submission.
+Do not invent an extra item or abandon submission solely because the UI transitioned to the form. Truly missing or
+contradictory observations remain unverified; planning cannot claim observations or success before execution.
+Preserve an explicitly requested complete filename exactly, including an explicit absence of extension. A default .md
+suffix is not equivalent. Plan complete saved-name/destination verification in the actual file-list/file-management view,
+not an editor title that may hide extensions; never add a save/rename that violates a draft or no-save restriction.
+Put execution-critical qualifications in the same key action's notes; preserve observed facts rather than inventing them.
+Only a valid tool-root write_budget receipt activates max/remaining throttling and goal-required completion reserves.
+Absent, malformed, or throwing optional budget hooks impose no restrictions, synthetic counters, or budget-based stop.
+For cross-screen collection, retain identities, relevant fields, unresolved facts, and coverage with multiplicity but no
+overlap double count. Prune only when a goal-defined predicate is disproved; unequal durations can still contribute to
+sum/subset tasks. Reanchor after paging/deletion and continue feasible requested coverage while adequate budget remains.
+For location search, use the core name with country/region constraints and expand the current general radius until a
+candidate, observed terminal/unchanged/blocked range, or supplied limit before narrow category tabs. No unchanged cycles
+or hidden coordinates. Verified input is not rewritten merely because its display clips; distinguish uncertain acceptance.
 Use result.to_page_id values from page element operations when describing navigation between pages.
 If optional project or page knowledge is incomplete or absent, still return the best concise contiguous plan and add
 warnings only when missing knowledge materially affects planning confidence. You may skip at most one consecutive
 missing key action when page or element knowledge is unavailable for goal references. For raw_case references, use raw
-steps as a reference path, not brittle truth. If you cannot form a useful action chain or cannot summarize a reliable
-verification goal, return empty key_actions or an empty verification_goal and explain why in warnings.
+steps as a reference path, not brittle truth. When an authorized request has no reliable concrete action chain, leave
+key_actions empty rather than inventing actions; execution can derive its path from fresh observations within the request.
+Still supply its evidence-grounded flow-delivery verification_goal. A bare app/topic without an authorized scope is not
+permission to invent a task. Technical output failures are not equivalent to a legitimate open-ended request.
 """.strip()
+
+
+def verification_goal_for_task(task: Task) -> str:
+    if task.verification_goal and task.verification_goal.strip():
+        return task.verification_goal
+    scope = {
+        "name": task.name,
+        "description": task.description,
+        "reference_type": task.planning_reference_kind,
+        "reference_text": task.planning_reference_text,
+        "explicit_constraints": task.acceptance_criteria,
+    }
+    return (
+        "Complete only the flow authorized by the original request and truthfully deliver evidence-grounded observations "
+        "or the supported answer. Preserve every explicit outcome, exact value/text, scope, output format, unit/rounding, "
+        "duration interval, collection/no-extra-item, and terminal-state constraint; do not authorize additional effects. "
+        "For open inspection/exploration, evidence of the requested flow and truthful observations is sufficient, without "
+        "an invented QA assertion, exhaustive exploration, or state change. Explicit objective requirements remain strict. "
+        "Raw-case steps are advisory context, not additional final requirements. "
+        "Use actual execution evidence, not the main agent's claim alone.\nOriginal request context:\n" + json.dumps(scope, ensure_ascii=False, indent=2)
+    )
 
 
 class ReadKnowledgeIndexArgs(BaseModel):

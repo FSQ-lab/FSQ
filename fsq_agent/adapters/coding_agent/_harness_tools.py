@@ -11,7 +11,42 @@ from fsq_agent._capability_bootstrap import build_capability_registry
 from fsq_agent.agent_engine import EngineError, ToolBinding, ToolCall, ToolInputFailure
 from fsq_agent.core import HarnessInterface, RuntimeSecretStore, StepRunner
 from fsq_agent.core.interfaces import EvidenceJournalSink
-from fsq_agent.models import CapabilityDefinition, ConfigurationError, ExecutableStep, HarnessFunctionSchema, HarnessPlatform, PostActionDelaySettings, RunnerStepResult
+from fsq_agent.models import (
+    CapabilityDefinition,
+    ConfigurationError,
+    ExecutableStep,
+    HarnessActionResult,
+    HarnessContext,
+    HarnessFunctionSchema,
+    HarnessPlatform,
+    PostActionDelaySettings,
+    RunnerStepResult,
+)
+
+
+def _validated_write_budget(value: object) -> dict[str, int] | None:
+    keys = {"max", "used", "remaining", "charged"}
+    if not isinstance(value, dict) or value.keys() != keys:
+        return None
+    receipt = dict(value)
+    if any(type(number) is not int or number < 0 for number in receipt.values()):
+        return None
+    if receipt["used"] > receipt["max"] or receipt["remaining"] != receipt["max"] - receipt["used"] or receipt["charged"] not in {0, 1}:
+        return None
+    return receipt
+
+
+class _DispatchTrackingHarness:
+    def __init__(self, harness: HarnessInterface) -> None:
+        self._harness = harness
+        self.step_id: str | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._harness, name)
+
+    def invoke_action(self, step: ExecutableStep, context: HarnessContext) -> HarnessActionResult:
+        self.step_id = step.step_id
+        return self._harness.invoke_action(step, context)
 
 
 class HarnessToolAdapter:
@@ -26,17 +61,21 @@ class HarnessToolAdapter:
         platform: HarnessPlatform = "android",
         evidence_sink: EvidenceJournalSink | None = None,
         cancellation_check=None,
+        capture_action_before: bool = True,
     ) -> None:
         self.cancellation_check = cancellation_check
         self.harness = harness
         self.run_id = run_id
         self._capability_registry = build_capability_registry(platform=platform)
+        self._dispatch = _DispatchTrackingHarness(harness)
         self.runner = StepRunner(
-            harness=harness,
+            harness=self._dispatch,
             capability_registry=self._capability_registry,
             post_action_delay_seconds=post_action_delay_seconds,
             runtime_secret_store=runtime_secret_store,
             evidence_sink=evidence_sink,
+            cancellation_check=cancellation_check,
+            capture_action_before=capture_action_before,
         )
         self.reserved_tool_names = reserved_tool_names or set()
         self._counter = itertools.count(1)
@@ -62,6 +101,7 @@ class HarnessToolAdapter:
         ]
 
     def run_step_with_capability_result(self, run_id: str, step: ExecutableStep):
+        self._dispatch.step_id = None
         result = self.runner.run_step(run_id=run_id, step=step)
         return result, self.runner.last_capability_execution_result
 
@@ -89,10 +129,12 @@ class HarnessToolAdapter:
     def _handler_for(self, schema: HarnessFunctionSchema):
         async def invoke(call: ToolCall) -> str:
             started = time.perf_counter()
+            self._dispatch.step_id = None
             try:
                 if self.cancellation_check is not None:
                     self.cancellation_check()
                 params = call.arguments
+                self._validate_arguments(schema, params)
                 action_name = self._capability_name(schema)
                 step = ExecutableStep(
                     step_id=f"agent-{schema.name}-{next(self._counter)}",
@@ -113,17 +155,54 @@ class HarnessToolAdapter:
                         "schema_metadata": schema.metadata,
                     },
                 )
-                result = self.runner.run_step(run_id=self.run_id, step=step)
-                return self._format_runner_result(schema, step, result, int((time.perf_counter() - started) * 1000))
+                result, _ = self.run_step_with_capability_result(self.run_id, step)
+                return self._format_runner_result(schema, step, result, int((time.perf_counter() - started) * 1000), dispatched_step_id=self._dispatch.step_id)
             # Tool transport must convert arbitrary capability failures into structured results.
             except Exception as exc:
                 if getattr(exc, "fsq_evidence_fatal", False):
                     raise EngineError("evidence", "Durable execution evidence failed.") from None
                 if type(exc).__name__ in {"TaskCancelledError", "ExecutionCancelled", "RunCancelled"}:
                     raise asyncio.CancelledError() from exc
-                return self._format_failure(schema, exc, int((time.perf_counter() - started) * 1000))
+                return self._format_failure(schema, exc, int((time.perf_counter() - started) * 1000), step_id=self._dispatch.step_id)
 
         return invoke
+
+    @staticmethod
+    def _validate_arguments(schema: HarnessFunctionSchema, params: dict[str, object]) -> None:
+        root = schema.params_json_schema
+        pending = [root]
+        seen: set[int] = set()
+        declared: set[str] = set()
+        closed = False
+        while pending:
+            current = pending.pop()
+            if not isinstance(current, dict):
+                raise TypeError("Invalid published tool parameter schema.")
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            properties = current.get("properties", {})
+            if not isinstance(properties, dict):
+                raise TypeError("Invalid published tool parameter properties.")
+            declared.update(properties)
+            closed = closed or current.get("additionalProperties") is False
+            if "$ref" in current:
+                reference = current["$ref"]
+                if not isinstance(reference, str) or not reference.startswith("#/"):
+                    raise ValueError("Invalid published tool parameter reference.")
+                resolved: object = root
+                for key in reference[2:].split("/"):
+                    if not isinstance(resolved, dict):
+                        raise TypeError("Invalid published tool parameter reference target.")
+                    resolved = resolved[key]
+                pending.append(resolved)
+            if "allOf" in current:
+                variants = current["allOf"]
+                if not isinstance(variants, list) or len(variants) != 1:
+                    raise ValueError("Unsupported published tool parameter composition.")
+                pending.extend(variants)
+        if closed and params.keys() - declared:
+            raise ValueError("Tool arguments contain fields outside the published schema.")
 
     def _capability_name(self, schema: HarnessFunctionSchema) -> str:
         value = schema.metadata.get("capability_name")
@@ -150,6 +229,8 @@ class HarnessToolAdapter:
         step: ExecutableStep,
         runner_result: RunnerStepResult,
         duration_ms: int,
+        *,
+        dispatched_step_id: str | None,
     ) -> str:
         step_kind = self._step_kind(schema)
         artifact_refs = self._artifact_refs(runner_result)
@@ -180,7 +261,7 @@ class HarnessToolAdapter:
         }
         if payload["safe_replay_params"] is None:
             del payload["safe_replay_params"]
-        return json.dumps(payload, ensure_ascii=False, default=str)
+        return json.dumps(self._with_write_budget(payload, step_id=dispatched_step_id), ensure_ascii=False, default=str)
 
     def _result_summary(
         self,
@@ -229,50 +310,64 @@ class HarnessToolAdapter:
             refs.extend(ref.model_dump(mode="json") for ref in phase_report.artifact_refs)
         return refs
 
-    def _format_failure(self, schema: HarnessFunctionSchema, error: Exception, duration_ms: int) -> str:
+    def _with_write_budget(self, payload: dict[str, Any], *, step_id: str | None) -> dict[str, Any]:
+        try:
+            query = getattr(self.harness, "write_budget_status", None)
+            if query is None:
+                return payload
+            receipt = _validated_write_budget(query(step_id=step_id))
+            if receipt is not None and step_id is None and receipt["charged"] != 0:
+                receipt = None
+        except Exception:  # noqa: BLE001 - Optional diagnostic hooks must not replace the primary result or expose their exception text.
+            payload["write_budget_unavailable"] = "hook_failed"
+        else:
+            if receipt is None:
+                payload["write_budget_unavailable"] = "invalid_receipt"
+            else:
+                payload["write_budget"] = receipt
+        return payload
+
+    def _format_failure(self, schema: HarnessFunctionSchema, error: Exception, duration_ms: int, *, step_id: str | None = None) -> str:
         error_message = str(error) or error.__class__.__name__
         action_name = self._capability_name(schema)
         step_kind = self._step_kind(schema)
-        return json.dumps(
-            {
-                "tool_name": schema.name,
-                "tool_origin": self._tool_origin(schema),
-                "capability_name": action_name,
-                "executor_kind": schema.metadata.get("executor_kind"),
-                "step_kind": step_kind,
-                "replay": schema.metadata.get("replay"),
-                "platform": schema.platform,
-                "driver_method": schema.driver_method,
-                "fsq_action_name": schema.fsq_action_name,
+        payload = {
+            "tool_name": schema.name,
+            "tool_origin": self._tool_origin(schema),
+            "capability_name": action_name,
+            "executor_kind": schema.metadata.get("executor_kind"),
+            "step_kind": step_kind,
+            "replay": schema.metadata.get("replay"),
+            "platform": schema.platform,
+            "driver_method": schema.driver_method,
+            "fsq_action_name": schema.fsq_action_name,
+            "status": "failed",
+            "failure_category": "harness_error",
+            "error_message": error_message,
+            "duration_ms": duration_ms,
+            "result": {
                 "status": "failed",
-                "failure_category": "harness_error",
-                "error_message": error_message,
-                "duration_ms": duration_ms,
-                "result": {
-                    "status": "failed",
-                    "action_name": action_name,
-                    "artifact_refs": [],
-                    "error_message": error_message,
-                    "failure_category": "harness_error",
-                    "metadata": {
-                        "tool_origin": self._tool_origin(schema),
-                        "tool_name": schema.name,
-                        "capability_name": action_name,
-                        "executor_kind": schema.metadata.get("executor_kind"),
-                        "step_kind": step_kind,
-                        "replay": schema.metadata.get("replay"),
-                        "platform": schema.platform,
-                        "driver_method": schema.driver_method,
-                        "fsq_action_name": schema.fsq_action_name,
-                        "schema_metadata": schema.metadata,
-                    },
-                },
-                "metadata": schema.metadata,
+                "action_name": action_name,
                 "artifact_refs": [],
+                "error_message": error_message,
+                "failure_category": "harness_error",
+                "metadata": {
+                    "tool_origin": self._tool_origin(schema),
+                    "tool_name": schema.name,
+                    "capability_name": action_name,
+                    "executor_kind": schema.metadata.get("executor_kind"),
+                    "step_kind": step_kind,
+                    "replay": schema.metadata.get("replay"),
+                    "platform": schema.platform,
+                    "driver_method": schema.driver_method,
+                    "fsq_action_name": schema.fsq_action_name,
+                    "schema_metadata": schema.metadata,
+                },
             },
-            ensure_ascii=False,
-            default=str,
-        )
+            "metadata": schema.metadata,
+            "artifact_refs": [],
+        }
+        return json.dumps(self._with_write_budget(payload, step_id=step_id), ensure_ascii=False, default=str)
 
     def _tool_origin(self, schema: HarnessFunctionSchema) -> str:
         return "common" if schema.metadata.get("executor_kind") == "common" else "platform"

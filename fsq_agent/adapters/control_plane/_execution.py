@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from typing import Any, Never
 
 from fsq_agent._capability_bootstrap import steps_require_provider
 from fsq_agent.adapters.coding_agent import create_coding_agent_runtime
-from fsq_agent.agent import FsqAgent
+from fsq_agent.agent import CodingAgentPolicy, FsqAgent
 from fsq_agent.ai_services import build_ai_assertion_evaluator
 from fsq_agent.application import ApplicationError, QuickTestPrepareResult, execute_prepared_quick_test
 from fsq_agent.case_dsl import FsqCaseLoader, FsqExecutableStepAdapter
@@ -137,7 +138,7 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         raise ValueError("Strict runs must not include goal.")
     case_path = resolve_case(run_settings, body.get("casePath"))
     case = FsqCaseLoader().load_case(case_path)
-    registry, snapshot, provider_required = build_strict_registry_context(run_settings.harness.platform)
+    registry, snapshot, assertion_names = build_strict_registry_context(run_settings.harness.platform)
     lifecycle_cases = collect_strict_lifecycle_cases(
         case_path=case_path,
         case=case,
@@ -154,13 +155,16 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         steps = FsqExecutableStepAdapter(registry_snapshot=snapshot).to_executable_steps(lifecycle_case)
         _preflight_steps(steps, snapshot, secret_store)
         resolved_steps[lifecycle_path.resolve()] = steps
-        requires_ai = requires_ai or steps_require_provider(steps, snapshot, provider_required)
+        requires_ai = requires_ai or steps_require_provider(steps, snapshot, assertion_names)
     require_macos_preflight(run_settings, "strict", requires_provider=requires_ai)
     if platform == "android":
         run_settings.harness.android.app_id = _android_app_id(run_settings, case)
-        require_android_preflight(run_settings, "strict", requires_provider=requires_ai)
+        run_settings.harness.android.visual_assertion_policy = run_settings.harness.android.visual_assertion_policy.model_copy(
+            update={"provider_available": bool(run_settings.agent_runtime.provider and run_settings.agent_runtime.model)}
+        )
+        require_android_preflight(run_settings, "strict", requires_provider=False)
     validate_strict_core_settings(run_settings, requires_ai_assertion=requires_ai)
-    if requires_ai:
+    if requires_ai and platform != "android":
         require_provider(run_settings)
     return PreparedRun(
         request_id=request_id,
@@ -273,6 +277,9 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
             )
         )
         result = execution.task_result
+        runner = next((step for step in reversed(result.steps) if step.tool_name == "agent_runtime.runner"), None)
+        main_output = CodingAgentPolicy().coerce_agent_final_output(runner.tool_output or runner.actual_outcome) if runner else None
+        summary = main_output.summary if main_output and main_output.summary.strip() else result.verification.summary
         projection.bind_run(result.report.run_id)
         state.transition(request_id, "finalizing", summary="Finalizing evidence, report, and recording.")
         projection.load_persisted_manifest()
@@ -280,7 +287,7 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
         state.finish(
             request_id,
             status=result.status,
-            summary=projection.safe_text(result.verification.summary),
+            summary=projection.safe_text(summary),
             result={
                 "status": result.status,
                 "durationMs": result.duration_ms,
@@ -339,6 +346,7 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
     metadata = None
     run_dir = None
     evaluator = None
+    harness = None
     try:
         workspace_root = settings.workspace.root_dir
         if workspace_root is None:
@@ -368,7 +376,9 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         state.raise_if_cancelled(request_id)
         state.transition(request_id, "running", summary="Strict replay is executing.")
         metadata = transition_run(run_dir, metadata, "running")
-        evaluator = build_ai_assertion_evaluator(settings) if prepared.requires_ai_assertion else None
+        evaluator = None
+        if prepared.requires_ai_assertion and settings.harness.platform != "android":
+            evaluator = build_ai_assertion_evaluator(settings)
         harness = HarnessFactory().create_harness(
             platform=settings.harness.platform,
             harness_settings=settings.harness,
@@ -402,6 +412,11 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
             )
             .report
         )
+        close_harness = getattr(harness, "close", None)
+        harness = None
+        evaluator = None
+        if callable(close_harness):
+            close_harness()
         state.transition(request_id, "finalizing", summary="Finalizing strict evidence and report.")
         projection.load_persisted_manifest()
         persisted = load_run_metadata(run_dir)
@@ -423,10 +438,26 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         terminal = None
         if run_dir is not None and metadata is not None:
             terminal = _best_effort_terminal_run(run_dir, metadata, "error")
-        state.finish(request_id, status=terminal.status if terminal else "error", summary=terminal.result.summary if terminal else safe_exception_message(exc, settings=settings, unexpected=True))
+        state.finish(
+            request_id,
+            status="error",
+            summary=safe_exception_message(exc, settings=settings, unexpected=True)
+            if terminal is not None and terminal.status != "error"
+            else (terminal.result.summary if terminal else safe_exception_message(exc, settings=settings, unexpected=True)),
+        )
     finally:
-        if evaluator is not None:
-            evaluator.close()
+        if harness is not None:
+            fallback_close = getattr(harness, "close", None)
+            if callable(fallback_close):
+                try:
+                    fallback_close()
+                except Exception as cleanup_exc:  # noqa: BLE001 - preserve already-published failure/cancel state.
+                    logging.getLogger(__name__).warning("Fallback strict harness cleanup failed (%s)", type(cleanup_exc).__name__)
+        elif evaluator is not None:
+            try:
+                evaluator.close()
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logging.getLogger(__name__).warning("Fallback strict evaluator cleanup failed (%s)", type(cleanup_exc).__name__)
 
 
 class _ProjectionEvidenceRecorder(EvidenceRecorder):

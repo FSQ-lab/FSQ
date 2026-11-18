@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from fsq_agent.models._core import AndroidVisualAssertionPolicy
 from fsq_agent.models._skills import SkillConfig
 
 
@@ -24,7 +25,7 @@ class LocalToolOutputSettings(BaseModel):
     artifact_enabled: bool = True
     always_write_artifact: bool = True
     artifact_subdir: str = "artifacts/tools"
-    recent_inline_output_count: int = Field(default=3, ge=0)
+    recent_inline_output_count: int = Field(default=20, ge=0)
     full_output_max_chars: int = Field(default=30000, ge=1)
     total_inline_output_max_chars: int = Field(default=60000, ge=1)
     historical_output_mode: Literal["artifact_reference"] = "artifact_reference"
@@ -91,9 +92,34 @@ class AgentContextSettings(BaseModel):
 class AndroidHarnessSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["uiautomator2"] = "uiautomator2"
+    backend: Literal["appium_connect_agent"] = "appium_connect_agent"
+    uiautomator2_wait_for_idle_timeout_ms: int | None = Field(default=None, ge=0, le=9_007_199_254_740_991)
+    new_command_timeout_seconds: float | None = Field(default=900.0, ge=0, allow_inf_nan=False)
     _app_id: str | None = PrivateAttr(default=None)
     _serial: str | None = PrivateAttr(default=None)
+    _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)
+
+    @property
+    def visual_assertion_policy(self) -> AndroidVisualAssertionPolicy:
+        return self._visual_assertion_policy
+
+    @visual_assertion_policy.setter
+    def visual_assertion_policy(self, value: AndroidVisualAssertionPolicy) -> None:
+        self._visual_assertion_policy = AndroidVisualAssertionPolicy.model_validate(value)
+
+    @field_validator("uiautomator2_wait_for_idle_timeout_ms", mode="before")
+    @classmethod
+    def validate_initial_idle_timeout(cls, value: Any) -> int | None:
+        if value is not None and type(value) is not int:
+            raise ValueError("uiautomator2_wait_for_idle_timeout_ms must be a built-in integer or None")
+        return value
+
+    @field_validator("new_command_timeout_seconds", mode="before")
+    @classmethod
+    def validate_new_command_timeout(cls, value: Any) -> float | None:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("new_command_timeout_seconds must be a finite nonnegative number or None")
+        return value
 
     @property
     def app_id(self) -> str | None:

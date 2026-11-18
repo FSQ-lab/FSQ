@@ -8,11 +8,9 @@ import pytest
 from fsq_agent.core import ArtifactStore, HarnessInterface
 from fsq_agent.core.harness._ai_assertion_tool import AIAssertionBackendToolMixin
 from fsq_agent.core.harness._android import AndroidHarness
-from fsq_agent.core.harness._uiautomator2_driver import UiAutomator2AndroidDriver
+from fsq_agent.core.harness._appium_connect_android_driver import AppiumConnectAndroidDriver
 from fsq_agent.drivers._capabilities import _android_driver_tool
 from fsq_agent.models import (
-    AIAssertionRequest,
-    AIAssertionResult,
     AndroidAssertNotVisibleParams,
     AndroidAssertStateParams,
     AndroidAssertVisibleParams,
@@ -143,7 +141,7 @@ def test_android_harness_dispatches_fsq_action_names_to_driver() -> None:
         ("swipe", {"direction": "up", "duration": 1000}, "swipe"),
         ("uiTree", {}, "ui_snapshot"),
         ("assertNotVisible", {"target": "Dialog"}, "assert_not_visible"),
-        ("assert", {"text": {"contains": "bing.com"}}, "assert_state"),
+        ("assert", {"element": {"resourceId": "url"}, "text": {"contains": "bing.com"}}, "assert_state"),
     ]
 
     for action_name, params, _method_name in cases:
@@ -198,7 +196,7 @@ def test_android_harness_rejects_legacy_value_wrapped_known_params() -> None:
 
 
 def test_android_harness_action_space_returns_decorated_driver_method_schemas() -> None:
-    driver = UiAutomator2AndroidDriver(app_id="com.example.app", device=object())
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=object())
     harness = AndroidHarness(driver=driver)
 
     schemas = {schema.name: schema for schema in harness.action_space()}
@@ -207,24 +205,25 @@ def test_android_harness_action_space_returns_decorated_driver_method_schemas() 
     assert "tap_at" in schemas
     assert "ui_snapshot" in schemas
     assert "perform_actions" not in schemas
-    assert "assert_with_ai" not in schemas
+    assert "assert_with_ai" in schemas
     assert schemas["tap_on"].driver_method == "tap_on"
     assert schemas["tap_on"].fsq_action_name == "tapOn"
     assert schemas["tap_on"].platform == "android"
-    assert schemas["tap_on"].metadata["driver_class"] == "UiAutomator2AndroidDriver"
-    assert schemas["tap_on"].metadata["backend"] == "uiautomator2"
+    assert schemas["tap_on"].metadata["driver_class"] == "AppiumConnectAndroidDriver"
+    assert schemas["tap_on"].metadata["backend"] == "appium_connect_agent"
     assert schemas["tap_on"].metadata["capability_name"] == "tap_on"
     assert schemas["tap_on"].metadata["executor_kind"] == "driver"
     assert schemas["tap_on"].metadata["replay"] == {"kind": "fsq_command", "alias": "tapOn"}
     assert "target" in schemas["tap_on"].params_json_schema["properties"]
-    assert "target or non-empty locator" in schemas["tap_on"].params_json_schema["description"]
-    assert "semantic target" in schemas["tap_on"].params_json_schema["properties"]["target"]["description"]
     assert schemas["tap_at"].driver_method == "tap_at"
     assert schemas["tap_at"].fsq_action_name == "tapAt"
     assert "point" in schemas["tap_at"].params_json_schema["properties"]
     assert schemas["ui_snapshot"].driver_method == "ui_snapshot"
     assert schemas["ui_snapshot"].fsq_action_name == "uiTree"
     assert schemas["ui_snapshot"].params_json_schema.get("properties") == {}
+    assertion_schema = schemas["assert_state"].params_json_schema
+    assert "element" in assertion_schema["required"]
+    assert assertion_schema["properties"]["element"]["$ref"].endswith("/AndroidElementState")
 
 
 def test_android_harness_validation_failure_does_not_call_driver_method() -> None:
@@ -237,6 +236,16 @@ def test_android_harness_validation_failure_does_not_call_driver_method() -> Non
     assert result.failure_category == "configuration_error"
     assert result.error_message == "Invalid Android parameters for tapOn."
     assert result.metadata["validation_errors"]
+    assert driver.calls == [("context", None)]
+
+
+@pytest.mark.parametrize("params", [{"text": {"equals": "Ready"}}, {"element": {"enabled": False}}, {"element": {"resourceId": " "}}])
+def test_android_harness_rejects_unlocated_assertions_before_driver(params: dict[str, Any]) -> None:
+    driver = FakeAndroidDriver()
+    harness = AndroidHarness(driver=driver)
+    result = harness.invoke_action(_step("assert", params), harness.get_context())
+    assert result.status == "failed"
+    assert result.failure_category == "configuration_error"
     assert driver.calls == [("context", None)]
 
 
@@ -313,59 +322,19 @@ def test_android_harness_captures_screenshot_and_ui_snapshot_with_artifact_store
     ]
 
 
-def test_android_harness_assert_with_ai_fails_in_deterministic_core(tmp_path) -> None:
+def test_android_harness_assert_with_ai_is_unverified_without_provider(tmp_path) -> None:
     driver = FakeAndroidDriver()
     harness = AndroidHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path))
     context = harness.get_context()
 
-    result = harness.invoke_action(_step("assertWithAI", {"prompt": "Verify Bing homepage"}), context)
+    result = harness.invoke_action(_step("assertWithAI", {"assertion": "Verify the canvas", "surface": "custom_canvas", "full_screen_reason": "The canvas fills the image"}), context)
 
-    assert result.status == "failed"
+    assert result.status == "incomplete"
     assert result.action_name == "assertWithAI"
-    assert result.failure_category == "configuration_error"
-    assert "AI assertion evaluator" in result.error_message
+    assert result.failure_category is None
+    assert result.metadata["ai_assertion"]["error_code"] == "provider_unavailable"
     assert result.artifact_refs == []
     assert driver.calls == [("context", None)]
-
-
-def test_android_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> None:
-    class FakeEvaluator:
-        def __init__(self) -> None:
-            self.requests: list[AIAssertionRequest] = []
-
-        def evaluate(self, request: AIAssertionRequest) -> AIAssertionResult:
-            self.requests.append(request)
-            return AIAssertionResult(
-                status="passed",
-                passed=True,
-                explanation="The expected page is visible.",
-                provider="fake",
-                model="fake-model",
-                artifact_refs=[request.screenshot_artifact_ref] if request.screenshot_artifact_ref else [],
-            )
-
-    driver = FakeAndroidDriver()
-    evaluator = FakeEvaluator()
-    harness = AndroidHarness(
-        driver=driver,
-        artifact_store=ArtifactStore(run_dir=tmp_path),
-        ai_assertion_evaluator=evaluator,
-    )
-    context = harness.get_context()
-
-    schemas = {schema.name: schema for schema in harness.action_space()}
-    result = harness.invoke_action(_step("assertWithAI", {"prompt": "Verify Bing homepage"}), context)
-
-    assert "assert_with_ai" in schemas
-    assert schemas["assert_with_ai"].metadata["owner"] == "driver"
-    assert result.status == "passed"
-    assert result.output["passed"] is True
-    assert result.metadata["ai_assertion"]["provider"] == "fake"
-    assert result.artifact_refs[0].kind == "screenshot"
-    assert (tmp_path / result.artifact_refs[0].path).read_bytes() == b"fake-png"
-    assert evaluator.requests[0].prompt == "Verify Bing homepage"
-    assert evaluator.requests[0].screenshot_artifact_ref == result.artifact_refs[0]
-    assert driver.calls == [("context", None), ("screenshot", None)]
 
 
 def test_android_harness_requires_artifact_store_for_capture() -> None:

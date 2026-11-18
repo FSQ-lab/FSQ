@@ -286,7 +286,7 @@ def validate_runtime_settings(settings: Settings) -> None:
 
 def validate_strict_core_settings(settings: Settings, requires_ai_assertion: bool = False) -> None:
     _validate_harness_settings(settings)
-    if requires_ai_assertion:
+    if requires_ai_assertion and settings.harness.platform != "android":
         validate_provider_settings(settings)
 
 
@@ -369,10 +369,10 @@ def _validate_harness_settings(settings: Settings) -> None:
 
 
 def _validate_android_harness_settings(settings: Settings) -> None:
-    if settings.harness.android.backend != "uiautomator2":
+    if settings.harness.android.backend != "appium_connect_agent":
         raise ConfigurationError(
             "Unsupported Android harness backend.",
-            context={"backend": settings.harness.android.backend, "supported": ["uiautomator2"]},
+            context={"backend": settings.harness.android.backend, "supported": ["appium_connect_agent"]},
         )
 
 

@@ -1,9 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from fsq_agent._capability_bootstrap import build_capability_registry
@@ -575,6 +577,193 @@ def test_step_runner_derives_action_evidence_from_driver_step_kind() -> None:
     assert "invoke:tap_on:session-1" in harness.calls
     assert "capture:screenshot:before-action:step-1:prepare" in harness.calls
     assert "capture:ui_snapshot:after-action:step-1:finalize" in harness.calls
+
+
+@pytest.mark.parametrize(
+    ("action_name", "canonical_name", "params"),
+    [("tapOn", "tap_on", {"target": "Login"}), ("waitMs", "wait_ms", {"duration_ms": 1})],
+)
+def test_action_before_capture_can_be_disabled_without_skipping_execution(action_name, canonical_name, params) -> None:
+    cancellation_checks = []
+
+    def check_cancellation():
+        cancellation_checks.append(True)
+
+    class ContextHarness(CapturingHarness):
+        def before_action(self, step, context):
+            super().before_action(step, context)
+            assert context.cancellation_check is check_cancellation
+            assert context.metadata["capture_invocation"]["action_name"] == canonical_name
+            assert context.metadata["capture_invocation"]["run_id"] == "run-1"
+
+        def invoke_action(self, step, context):
+            assert step.metadata["prepared_artifacts"] == []
+            return super().invoke_action(step, context)
+
+    harness = ContextHarness()
+    runner = StepRunner(harness, capability_registry=build_capability_registry(), capture_action_before=False, cancellation_check=check_cancellation)
+    result = runner.run_step("run-1", ExecutableStep(step_id="action-1", kind="action", action_name=action_name, params=params))
+
+    assert result.status == result.action_status == "passed"
+    assert [phase.phase for phase in result.phase_reports] == ["prepare", "invoke", "settle", "finalize"]
+    assert result.phase_reports[0].artifact_refs == []
+    assert [ref.kind for ref in result.phase_reports[3].artifact_refs] == ["screenshot", "ui_snapshot"]
+    assert cancellation_checks == [True, True]
+    assert harness.calls == [
+        "get_context",
+        f"before:{canonical_name}:session-1",
+        f"invoke:{canonical_name}:session-1",
+        f"after:{canonical_name}:passed",
+        "get_context",
+        "capture:screenshot:after-action:action-1:finalize",
+        "capture:ui_snapshot:after-action:action-1:finalize",
+    ]
+    start = next(event for event in runner.events if event.event_type == "step_start")
+    assert start.payload["evidence_policy"] == result.metadata["evidence_policy"]
+    assert start.payload["evidence_policy"]["capture_before"] is False
+    assert start.payload["evidence_policy"]["capture_after"] is True
+
+
+@pytest.mark.parametrize("capture_action_before", [False, True])
+@pytest.mark.parametrize(
+    ("kind", "before", "after"),
+    [("assertion", True, False), ("setup", False, True), ("teardown", True, False), ("observation", False, False), ("diagnostic", False, False)],
+)
+def test_action_before_capture_switch_preserves_other_step_kind_policies(capture_action_before, kind, before, after) -> None:
+    harness = CapturingHarness()
+    registry = CapabilityRegistry.from_definitions([CapabilityDefinition(name="neutral_capability", params_model=NoParams, executor_kind="driver", step_kind=kind)])
+    runner = StepRunner(harness, capability_registry=registry, capture_action_before=capture_action_before)
+
+    result = runner.run_step("run-1", ExecutableStep(step_id="other-kind", kind=kind, action_name="neutral_capability"))
+
+    assert result.status == "passed"
+    assert [ref.kind for ref in result.phase_reports[0].artifact_refs] == (["screenshot", "ui_snapshot"] if before else [])
+    assert [ref.kind for ref in result.phase_reports[3].artifact_refs] == (["screenshot", "ui_snapshot"] if after else [])
+
+
+@pytest.mark.parametrize("capture_fails", [False, True])
+def test_disabled_action_before_capture_preserves_finalize_and_primary_failure(capture_fails) -> None:
+    class FailedActionHarness(FailedCapturingHarness):
+        def capture_artifact(self, **kwargs):
+            if capture_fails:
+                raise RuntimeError("after capture failed")
+            return super().capture_artifact(**kwargs)
+
+    harness = FailedActionHarness()
+    runner = StepRunner(harness, capability_registry=build_capability_registry(), capture_action_before=False)
+    result = runner.run_step("run-1", ExecutableStep(step_id="failed-action", kind="action", action_name="tapOn", params={"target": "Login"}))
+
+    assert result.status == result.action_status == "failed"
+    assert result.failure_category == "target_resolution_error"
+    assert result.error_message == "target not found"
+    assert result.phase_reports[0].artifact_refs == []
+    assert len(result.phase_reports[3].artifact_refs) == 2
+    assert result.phase_reports[3].status == ("failed" if capture_fails else "passed")
+    assert len(result.evidence_errors) == (2 if capture_fails else 0)
+    assert all(error["phase"] == "finalize" for error in result.evidence_errors)
+    assert "after:tap_on:failed" in harness.calls
+
+
+def test_disabled_action_before_capture_keeps_validation_and_cancellation_before_effects() -> None:
+    harness = CapturingHarness()
+    cancellation_checks = []
+
+    def cancel():
+        cancellation_checks.append(True)
+        raise asyncio.CancelledError()
+
+    runner = StepRunner(harness, capability_registry=build_capability_registry(), capture_action_before=False, cancellation_check=cancel)
+    invalid = runner.run_step("run-1", ExecutableStep(step_id="invalid", kind="action", action_name="waitMs", params={"duration_ms": -1}))
+
+    assert invalid.status == "failed"
+    assert invalid.failure_category == "configuration_error"
+    assert [phase.phase for phase in invalid.phase_reports] == ["prepare"]
+    assert cancellation_checks == []
+    assert harness.calls == []
+    with pytest.raises(asyncio.CancelledError):
+        runner.run_step("run-1", ExecutableStep(step_id="cancelled", kind="action", action_name="waitMs", params={"duration_ms": 1}))
+    assert cancellation_checks == [True]
+    assert harness.calls == []
+    assert runner.last_step_result.status == "cancelled"
+
+
+def test_disabled_action_before_capture_keeps_explicit_invoke_artifacts() -> None:
+    runner = StepRunner(ArtifactResultHarness(), capability_registry=build_capability_registry(), capture_action_before=False)
+
+    result = runner.run_step("run-1", ExecutableStep(step_id="explicit", kind="action", action_name="tapOn", params={"target": "Login"}))
+
+    assert result.status == "passed"
+    assert result.phase_reports[0].artifact_refs == []
+    assert [ref.artifact_id for ref in result.phase_reports[1].artifact_refs] == ["ai-screenshot"]
+
+
+def test_disabled_action_before_capture_is_not_missing_durable_evidence(tmp_path) -> None:
+    from fsq_agent.core.evidence import ArtifactStore, EvidenceRecorder
+
+    store = ArtifactStore(tmp_path)
+
+    class DurableHarness(CapturingHarness):
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            return store.write_bytes(kind=kind, step_id=step_id, phase=phase, name=reason, data=b"captured evidence")
+
+    recorder = EvidenceRecorder(run_id="run-1", output_dir=tmp_path)
+    runner = StepRunner(DurableHarness(), capability_registry=build_capability_registry(), evidence_sink=recorder, capture_action_before=False)
+    result = runner.run_step("run-1", ExecutableStep(step_id="durable", kind="action", action_name="waitMs", params={"duration_ms": 1}))
+    recorder.write_manifest()
+
+    assert result.status == "passed"
+    for bundle in (recorder.build_bundle(), EvidenceRecorder.recover_bundle(tmp_path)):
+        assert bundle.completeness == "complete"
+        assert len(bundle.artifacts) == 2
+        assert {ref.phase for ref in bundle.artifacts} == {"finalize"}
+        assert bundle.steps[0].metadata["evidence_policy"]["capture_before"] is False
+        assert bundle.steps[0].metadata["evidence_policy"]["capture_after"] is True
+
+
+def test_disabled_action_before_capture_keeps_failed_before_hook_from_invoking_or_finalizing() -> None:
+    class FailedBeforeHarness(CapturingHarness):
+        def before_action(self, step, context):
+            super().before_action(step, context)
+            raise RuntimeError("before hook failed")
+
+    harness = FailedBeforeHarness()
+    runner = StepRunner(harness, capability_registry=build_capability_registry(), capture_action_before=False)
+    result = runner.run_step("run-1", ExecutableStep(step_id="before-failed", kind="action", action_name="tapOn", params={"target": "Login"}))
+
+    assert result.status == "failed"
+    assert [phase.phase for phase in result.phase_reports] == ["prepare"]
+    assert result.phase_reports[0].artifact_refs == []
+    assert not any(call.startswith(("invoke:", "after:", "capture:")) for call in harness.calls)
+
+
+def test_strict_execution_retains_default_action_before_capture(tmp_path) -> None:
+    from fsq_agent.core.evidence import ArtifactStore
+    from fsq_agent.execution import run_fsq_core_case
+
+    store = ArtifactStore(tmp_path)
+
+    class DurableHarness(CapturingHarness):
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            return store.write_bytes(kind=kind, step_id=step_id, phase=phase, name=reason, data=b"captured evidence")
+
+    bundle = run_fsq_core_case(
+        case_path=tmp_path / "strict-actions.fsq.yaml",
+        harness=DurableHarness(),
+        output_dir=tmp_path,
+        run_id="strict-action-default",
+        registry=build_capability_registry(),
+        steps=[ExecutableStep(step_id="strict-action", kind="action", action_name="waitMs", params={"duration_ms": 1})],
+    )
+
+    assert bundle.completeness == "complete"
+    assert bundle.steps[0].status == "passed"
+    assert bundle.steps[0].metadata["evidence_policy"]["capture_before"] is True
+    assert [(ref.phase, ref.kind) for ref in bundle.artifacts] == [
+        ("prepare", "screenshot"),
+        ("prepare", "ui_snapshot"),
+        ("finalize", "screenshot"),
+        ("finalize", "ui_snapshot"),
+    ]
 
 
 def test_step_runner_uses_normalized_ui_snapshot_for_web_driver_steps() -> None:

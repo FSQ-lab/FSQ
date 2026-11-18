@@ -420,10 +420,10 @@ it('locks OpenAI saving and preserves the candidate after an unknown result is r
   expect(busy).toHaveBeenLastCalledWith(true);
   fail(new Error('connection lost'));
   expect(await screen.findByText('The save result could not be confirmed.')).toBeVisible();
+  await waitFor(() => expect(busy).toHaveBeenLastCalledWith(false));
   expect(screen.getByRole('combobox', { name: 'Model' })).toHaveValue('gpt-5.4');
   expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled();
   expect(api.saveOpenAIConfig).toHaveBeenCalledTimes(1);
-  expect(busy).toHaveBeenLastCalledWith(false);
   await user.click(screen.getByRole('button', { name: 'Save changes' }));
   expect(await screen.findByText('Selected model is no longer offered.')).toBeVisible();
   expect(screen.getByRole('combobox', { name: 'Model' })).toHaveValue('gpt-5.4');

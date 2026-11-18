@@ -16,9 +16,10 @@ it('sends Android device binding in POST body, never in a URL',async()=>{
 
 it('validates macOS diagnostic records including commands and verdicts',async()=>{
   const ok={status:'ready',message:'Ready',action:''};
-  const payload={workspaceName:'mobile',platformId:'macos',workspace:ok,platform:ok,provider:ok,target:ok,strict:ok,prerequisites:[{identifier:'appium_cli',status:'unavailable',message:'Missing',action:'Install',commands:['npm install -g appium']}],commands:{caseCreate:ok,caseTest:ok},checkedAt:'2026-09-07T00:00:00Z'};
+  const cmd='python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import Runtime; Runtime(LocalSettings()).ensure_managed_driver(\'mac2\')"';
+  const payload={workspaceName:'mobile',platformId:'macos',workspace:ok,platform:ok,provider:ok,target:ok,strict:ok,prerequisites:[{identifier:'appium_connect_runtime',status:'unavailable',message:'Missing',action:'Install',commands:[cmd]}],commands:{caseCreate:ok,caseTest:ok},checkedAt:'2026-09-07T00:00:00Z'};
   const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue(new Response(JSON.stringify(payload),{status:200}));
-  expect((await controlPlaneClient.readiness('mobile','macos')).prerequisites?.[0].commands).toEqual(['npm install -g appium']);
+  expect((await controlPlaneClient.readiness('mobile','macos')).prerequisites?.[0].commands).toEqual([cmd]);
   fetch.mockResolvedValue(new Response(JSON.stringify({...payload,commands:undefined}),{status:200}));
   await expect(controlPlaneClient.readiness('mobile','macos')).rejects.toMatchObject({body:{code:'invalid_response'}});
 });

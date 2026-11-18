@@ -6,8 +6,7 @@ agent_runtime:
 harness:
   platform: macos
   macos:
-    backend: appium_mac2
-    appium_server_url: http://127.0.0.1:4723
+    backend: appium_connect_agent
     page_source_max_depth: 12
     action_timeout_seconds: 10
     new_command_timeout_seconds: 300
@@ -27,7 +26,7 @@ agent_context:
           path: automation-basics.md
           required: true
         - name: macos-harness
-          description: macOS Appium Mac2 harness action selection and recovery guidance.
+          description: macOS harness action selection and recovery guidance.
           kind: markdown
           path: macos-harness.md
           required: true

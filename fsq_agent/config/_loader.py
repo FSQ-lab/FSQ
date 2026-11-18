@@ -34,8 +34,6 @@ _PLATFORM_CONFIG_FILENAMES = {
     "macos": "config.macos.yaml",
 }
 
-_MACOS_APPIUM_SERVER_URL_ENV = "FSQ_MACOS_APPIUM_SERVER_URL"
-
 
 def _package_config_root() -> Path:
     return Path(__file__).resolve().parent
@@ -127,7 +125,7 @@ def load_platform_settings(
             "Platform configuration does not match requested platform.",
             context={"platform": platform_id, "configured_platform": settings.harness.platform},
         )
-    return _apply_operator_environment(settings, platform_id)
+    return settings
 
 
 def load_workspace_platform_settings(
@@ -166,14 +164,6 @@ def load_workspace_platform_settings(
     settings.runtime_secrets.set_values(workspace_config.env)
     settings = refresh_provider_settings(settings, user_config_root)
     resolve_workspace_runtime_paths(settings, workspace_root, preset_path.parent, platform_id)
-    return _apply_operator_environment(settings, platform_id)
-
-
-def _apply_operator_environment(settings: Settings, platform_id: str) -> Settings:
-    if platform_id == "macos":
-        operator_url = os.environ.get(_MACOS_APPIUM_SERVER_URL_ENV)
-        if operator_url and operator_url.strip():
-            settings.harness.macos.appium_server_url = operator_url.strip()
     return settings
 
 
@@ -445,15 +435,10 @@ def _validate_windows_harness_settings(settings: Settings) -> None:
 
 
 def _validate_macos_harness_settings(settings: Settings) -> None:
-    if settings.harness.macos.backend != "appium_mac2":
+    if settings.harness.macos.backend != "appium_connect_agent":
         raise ConfigurationError(
             "Unsupported macOS harness backend.",
-            context={"backend": settings.harness.macos.backend, "supported": ["appium_mac2"]},
-        )
-    if not settings.harness.macos.appium_server_url:
-        raise ConfigurationError(
-            "macOS Appium server URL is not configured in harness.macos.appium_server_url.",
-            context={"config_key": "harness.macos.appium_server_url"},
+            context={"backend": settings.harness.macos.backend, "supported": ["appium_connect_agent"]},
         )
     app_path = settings.harness.macos.app_path
     bundle_id = settings.harness.macos.bundle_id

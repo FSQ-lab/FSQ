@@ -235,9 +235,9 @@ def _default_driver_capability_definitions(*, platform: HarnessPlatform) -> list
 
         driver_class = PywinautoWindowsDriver
     elif platform == "macos":
-        from fsq_agent.drivers.macos._appium_mac2 import AppiumMac2Driver
+        from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
 
-        driver_class = AppiumMac2Driver
+        driver_class = AppiumConnectMacOSDriver
     else:
         return []
     return _discover_driver_capability_definitions(driver_class, platform=platform)

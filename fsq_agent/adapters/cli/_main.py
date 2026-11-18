@@ -795,9 +795,6 @@ def _render_doctor(result: object) -> None:
                 "application_installation": "Application installation",
                 "xcode_installation": "Full Xcode",
                 "xcode_developer_directory": "Xcode developer directory",
-                "appium_cli": "Appium CLI",
-                "appium_mac2_driver": "Appium Mac2 driver",
-                "appium_endpoint": "Appium endpoint",
                 "application_path": "Application path",
                 "bundle_identifier": "Bundle identifier",
             }

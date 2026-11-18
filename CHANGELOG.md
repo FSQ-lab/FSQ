@@ -15,6 +15,7 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 - Coding Agent tools accept an optional native `write_budget_status` hook. Validated gate receipts remain top-level model-visible JSON even when normal output limits externalize or omit the business body; unsupported harnesses retain their existing contract, and hook failures do not replace the primary result.
 - Android owned Sessions default to a 900-second command-idle timeout with explicit-value preservation. Reuse after 45 seconds idle performs an owner-thread public SDK liveness check; deterministic dead-session recovery remains SDK-owned and non-destructive, without FSQ business-action replay or quarantine bypass.
 - Neutral Agent requests may opt into `final_turn_instructions`: the shared engine reserves the last available logical turn for tool-free structured delivery from actual retained evidence, within the original turn limit. FSQ main execution enables this across Responses/Kimi and Gemini while preserving cleanup and hard-exhaustion behavior.
+- macOS desktop automation migrates to `appium-connect-agent` (`appium_connect_agent` backend) via `AppiumConnectMacOSDriver` with lazy thread-affine managed loopback Appium server and Mac2 `Session` lifecycle, deterministic `TreeObservation` compact UI snapshot synthesis, and verified `Element`/`Device` actions. Direct `Appium-Python-Client` and `selenium` runtime dependencies, `MacOSHarnessSettings.appium_server_url`, and the `FSQ_MACOS_APPIUM_SERVER_URL` override are retired; macOS Doctor and Control Plane Preflight check `appium_connect_runtime` through static zero-subprocess `Runtime.diagnose(target_driver="mac2")` inspection.
 
 ### Fixed
 
@@ -52,7 +53,7 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ### Integration status
 
-- Android integration pins `appium-connect-agent` to `1d39c337e85b3e55ccfca327dd36243c1bcf3d2d`. Development verification consumes the owner's exact 197,276-byte Wheel (SHA-256 `2bebbe5fda8f45575d930d9985d51791e47bec50fe727277d5bb2be084425a52`). The SDK commit is intentionally local/unpublished under the authorized offline workflow; remote clean-install and publication are unverified. Device-free verification does not establish real-device, live-model, or benchmark qualification.
+- Android and macOS integration pins `appium-connect-agent` to public `master` commit `9d197f14dccd096f768a3f0847dd3116d29663f4` on `https://github.com/FSQ-lab/appium-connect-agent.git`. PyPI publication remains gated in `release.yml` until `appium-connect-agent` is published to PyPI with an exact `==` version specifier.
 
 ## [0.3.2] - 2026-10-21
 

@@ -5,7 +5,7 @@ FSQ checks ADB, the `appium-connect-agent` Python dependency and managed Appium 
 1. Install Android SDK Platform-Tools, Node.js (`^20.19.0 || ^22.12.0 || >=24.0.0`), and a JDK (`JAVA_HOME`), and ensure `adb` and `node` are on `PATH` with `ANDROID_HOME` or `ANDROID_SDK_ROOT` pointing to the SDK root. Initialize the managed Appium runtime once in the FSQ Python environment when needed:
 
 ```bash
-python -c "from appium_connect_agent.runtime import InstallRequest, Runtime; Runtime().install(InstallRequest())"
+python -c "from appium_connect_agent.contracts import LocalSettings; from appium_connect_agent.runtime import InstallRequest, Runtime; Runtime(LocalSettings()).install(InstallRequest())"
 ```
 
 2. Start the default local ADB server manually in your terminal when needed:

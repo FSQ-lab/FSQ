@@ -4,17 +4,17 @@
 from typing import cast
 
 from fsq_agent.drivers.android._appium_connect import AppiumConnectAndroidDriver
-from fsq_agent.drivers.macos._appium_mac2 import AppiumMac2Driver
+from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
 from fsq_agent.drivers.web._playwright import PlaywrightWebDriver
 from fsq_agent.drivers.windows._pywinauto import PywinautoWindowsDriver
 from fsq_agent.models import ConfigurationError, HarnessPlatform
 
-_BACKENDS = {"android": "appium_connect_agent", "web": "playwright", "windows": "pywinauto", "macos": "appium_mac2"}
+_BACKENDS = {"android": "appium_connect_agent", "web": "playwright", "windows": "pywinauto", "macos": "appium_connect_agent"}
 _DRIVER_CLASSES: dict[HarnessPlatform, type[object]] = {
     "android": cast("type[object]", AppiumConnectAndroidDriver),
     "web": cast("type[object]", PlaywrightWebDriver),
     "windows": cast("type[object]", PywinautoWindowsDriver),
-    "macos": cast("type[object]", AppiumMac2Driver),
+    "macos": cast("type[object]", AppiumConnectMacOSDriver),
 }
 
 
@@ -58,8 +58,7 @@ class _DriverFactoryImplementation:
 
     def create_macos_driver(self, settings):
         _ensure_backend("macos", settings.backend)
-        return AppiumMac2Driver(
-            server_url=settings.appium_server_url or "",
+        return AppiumConnectMacOSDriver(
             bundle_id=settings.bundle_id,
             app_path=settings.app_path,
             page_source_max_depth=settings.page_source_max_depth,

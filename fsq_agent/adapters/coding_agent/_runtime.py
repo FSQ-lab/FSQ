@@ -730,7 +730,6 @@ class DefaultCodingAgentRuntime:
             payload.update(
                 {
                     "backend": macos.backend,
-                    "appium_server_configured": macos.appium_server_url is not None,
                     "bundle_id_configured": macos.bundle_id is not None,
                     "app_path_configured": macos.app_path is not None,
                     "action_timeout_seconds": macos.action_timeout_seconds,

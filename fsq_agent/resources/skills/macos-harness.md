@@ -51,7 +51,7 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 - Use `new_session=true` on the case-opening `launch_app`; this closes any stale active session and creates the case session from the provided or configured `bundle_id` or `app_path`.
 - During the case, omit `new_session` or set it to false when activating another application or switching back by `bundle_id`. Do not pass `app_path` or `arguments` when reusing the session.
 - Reserve another `new_session=true` call for an explicit session reset. It replaces the current session and should not be used for ordinary application switching.
-- Use `close_session=true` on the case-ending `kill_app`. This closes and clears the Mac2 session directly because Mac2 does not implement the separate application termination endpoint.
+- Use `close_session=true` on the case-ending `kill_app` when you want to close and clear the Mac2 session directly; omit `close_session` or set it to false to terminate `bundle_id` via `macos: terminateApp` while retaining the active session.
 
 ## Correct Key Examples
 

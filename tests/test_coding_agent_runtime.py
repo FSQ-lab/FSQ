@@ -1495,13 +1495,13 @@ def test_runtime_builds_configured_macos_harness(monkeypatch: pytest.MonkeyPatch
 
     import fsq_agent.adapters.coding_agent._runtime as runtime_module
 
-    monkeypatch.setattr("fsq_agent.drivers._factory.AppiumMac2Driver", _FakeMacOSDriver)
+    monkeypatch.setattr("fsq_agent.drivers._factory.AppiumConnectMacOSDriver", _FakeMacOSDriver)
     monkeypatch.setattr(runtime_module, "build_ai_assertion_evaluator", lambda _settings: "ai-evaluator")
     settings = Settings(
         harness={
             "platform": "macos",
             "macos": {
-                "backend": "appium_mac2",
+                "backend": "appium_connect_agent",
                 "page_source_max_depth": 7,
                 "action_timeout_seconds": 11,
                 "new_command_timeout_seconds": 420,
@@ -1510,7 +1510,6 @@ def test_runtime_builds_configured_macos_harness(monkeypatch: pytest.MonkeyPatch
         output={"root_dir": tmp_path / "output"},
         agent_runtime=AgentRuntimeSettings(),
     )
-    settings.harness.macos.appium_server_url = "http://127.0.0.1:4723"
     settings.harness.macos.bundle_id = "com.example.MacApp"
     settings.output.runs_dir = tmp_path / "runs"
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
@@ -1520,7 +1519,6 @@ def test_runtime_builds_configured_macos_harness(monkeypatch: pytest.MonkeyPatch
     completed_payload = runtime._harness_setup_payload(harness)
 
     assert calls["driver"] == {
-        "server_url": "http://127.0.0.1:4723",
         "bundle_id": "com.example.MacApp",
         "app_path": None,
         "page_source_max_depth": 7,
@@ -1530,8 +1528,7 @@ def test_runtime_builds_configured_macos_harness(monkeypatch: pytest.MonkeyPatch
     assert payload == {
         "platform": "macos",
         "timeout_seconds": 60,
-        "backend": "appium_mac2",
-        "appium_server_configured": True,
+        "backend": "appium_connect_agent",
         "bundle_id_configured": True,
         "app_path_configured": False,
         "action_timeout_seconds": 11,
@@ -1853,7 +1850,7 @@ def test_harness_tool_adapter_uses_default_strict_schema_for_capability_tools() 
 
 
 def test_harness_tool_adapter_builds_macos_bindings_with_strict_schema_requirement() -> None:
-    from fsq_agent.core.harness._appium_mac2_driver import AppiumMac2Driver
+    from fsq_agent.core.harness._appium_connect_macos_driver import AppiumConnectMacOSDriver
     from fsq_agent.core.harness._macos import MacOSHarness
 
     class SchemaOnlyEvaluator:
@@ -1861,7 +1858,7 @@ def test_harness_tool_adapter_builds_macos_bindings_with_strict_schema_requireme
             raise AssertionError(f"Schema construction must not invoke the evaluator: {request!r}")
 
     harness = MacOSHarness(
-        driver=AppiumMac2Driver(bundle_id="com.microsoft.edgemac"),
+        driver=AppiumConnectMacOSDriver(bundle_id="com.microsoft.edgemac"),
         ai_assertion_evaluator=SchemaOnlyEvaluator(),
     )
     adapter = HarnessToolAdapter(harness, run_id="macos-schema-run", platform="macos")

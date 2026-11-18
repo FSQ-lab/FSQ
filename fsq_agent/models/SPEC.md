@@ -150,7 +150,7 @@ macOS platform exports:
 - `MacOSUiSnapshotParams`: Pydantic model for the read-only `ui_snapshot` macOS observation capability. It accepts optional maximum depth and simplification flags, rejects platform-specific element-query fields, and returns a bounded compact semantic Appium Mac2 page-source/control-tree snapshot without changing the established tree response fields.
 - `MacOSAssertVisibleParams`: Pydantic model for macOS `assert_visible` parameters. It requires a semantic `target`, non-empty `locator`, or explicit `point` plus optional assertion metadata.
 - `MacOSAssertElementsOrderParams`: Pydantic model for `assert_elements_order` parameters. It requires an ordered `elements` list whose items contain a semantic target or macOS locator, accepts `direction` constrained to `vertical` or `horizontal`, optional zero-based `expected_order`, optional pixel `tolerance`, and `require_all` defaulting to true. Driver output for this assertion includes `direction`, `elements_found`, `elements_total`, `actual_order`, `expected_order`, and per-element center positions.
-- `MacOSAssertWithAIParams`: Pydantic model for authored macOS visual assertion parameters with a required prompt and optional assertion metadata. This parameter model is consumed by decorated Appium Mac2 backend driver tools such as `AppiumMac2Driver.assert_with_ai`.
+- `MacOSAssertWithAIParams`: Pydantic model for authored macOS visual assertion parameters with a required prompt and optional assertion metadata. This parameter model is consumed by decorated macOS backend driver tools such as `AppiumConnectMacOSDriver.assert_with_ai`.
 
 Provider-backed assertion exports:
 
@@ -184,7 +184,7 @@ Platform settings exports:
   - `new_command_timeout_seconds: float | None = 900.0` is separate initial-Session command-idle policy in seconds. Owned-session creation preserves explicit SDK-supported values, including None, rather than replacing them with the default. It is not an action timeout, inference timeout, UI idle Setting, write quota, Workspace target, or environment fallback.
 - `WebHarnessSettings`: preset Playwright policy, Workspace browser channel and discovered/configured executable path, and preset `attach` plus `attach_endpoint` values. Attach defaults off, and its endpoint defaults to `http://127.0.0.1:9222`.
 - `WindowsHarnessSettings`: preset backend-kind policy and Workspace application path, title constraint, and launch arguments.
-- `MacOSHarnessSettings`: preset Mac2/snapshot/timeout policy and Workspace bundle/application identity. Only `FSQ_MACOS_APPIUM_SERVER_URL` overrides the preset endpoint; command-idle timeout defaults to 300 seconds independently of action timeout.
+- `MacOSHarnessSettings`: preset `appium_connect_agent` backend/snapshot/timeout policy and Workspace bundle/application identity without external endpoint fields or environment overrides; command-idle timeout defaults to 300 seconds independently of action timeout.
 - `AgentContextSettings`: Pydantic model grouping knowledge-root resources used to build agent context.
 - `AgentKnowledgeSettings`: Pydantic model containing the configured private knowledge `root_dir`, nested skill resource configuration, and optional pre-plan page-knowledge configuration.
 - `KnowledgeSkillSettings`: Pydantic model containing the skill directory under the knowledge root and the configured `SkillConfig` items loaded from that directory.

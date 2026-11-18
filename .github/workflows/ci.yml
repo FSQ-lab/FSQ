@@ -345,8 +345,6 @@ jobs:
               "appium-connect-agent",
               "playwright==",
               "pywinauto==",
-              "Appium-Python-Client==",
-              "selenium==",
               "pillow==",
           )
           dependencies = metadata.get_all("Requires-Dist", [])
@@ -358,8 +356,9 @@ jobs:
                   for item in dependencies
               ):
                   raise SystemExit(f"Missing default dependency {expected}")
-          if any(canonicalize_name(item.split(" ", 1)[0].split("==", 1)[0]) == "uiautomator2" for item in dependencies):
-              raise SystemExit("Retired uiautomator2 dependency must not remain in Requires-Dist")
+          for retired in ("uiautomator2", "appium-python-client", "selenium"):
+              if any(canonicalize_name(item.split(" ", 1)[0].split("==", 1)[0]) == retired for item in dependencies):
+                  raise SystemExit(f"Retired {retired} dependency must not remain in Requires-Dist")
           if metadata.get_all("Provides-Extra", []) != ["dev"]:
               raise SystemExit(f"Unexpected extras: {metadata.get_all('Provides-Extra', [])}")
           for script in ("fsq = fsq_agent.adapters.cli:main", "fsq-agent = fsq_agent.adapters.cli:main"):

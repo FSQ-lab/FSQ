@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Implement macOS desktop automation through optional Appium Mac2, including explicit session/application lifecycle, actions, compact semantic observations, assertions, and safe failure normalization.
+Implement macOS desktop automation through the `appium-connect-agent` public Python library (`appium_connect_agent` backend), including lazy thread-affine managed loopback Appium server and Mac2 `Session` lifecycle, explicit application lifecycle, desktop actions, compact semantic observations, assertions, and safe failure normalization.
 
 ## Dependencies
 
 - `core.interfaces.MacOSDriverInterface`, `capabilities`, and macOS parameter/result models.
-- Optional Appium/Selenium, imported lazily at runtime.
+- Optional `appium-connect-agent` (`appium_connect_agent.contracts`, `appium_connect_agent.runtime`, `appium_connect_agent.automation`), imported lazily at runtime without direct `Appium-Python-Client`, `selenium`, or private WebDriver access.
 
 ## Public Interface
 
@@ -17,7 +17,7 @@ Instances satisfy `MacOSDriverInterface`; the concrete backend class is private 
 
 ## Internal Structure
 
-- Private Appium Mac2 backend implementation and macOS capability declarations.
+- Private `AppiumConnectMacOSDriver` backend implementation, bounded tree/candidate helpers, and macOS capability declarations.
 
 ## Python Architecture
 
@@ -27,12 +27,12 @@ Instances satisfy `MacOSDriverInterface`; the concrete backend class is private 
 
 ## Element Resolution
 
-- Structured locator fields constrain the same element conjunctively. `name` retains semantic-name compatibility across backend identity/name/label/value signals, while explicit `label` and `value` constrain their respective attributes. A successful text lookup must not bypass an accompanying type, role, or identity constraint. Failed combined lookup never degrades to type-only or another weaker target. Explicit XPath and predicate selectors do not bypass additional semantic constraints.
-- Literal values are safely encoded for each backend query language, including apostrophes, quotes, and backslashes. Backend-owned selector syntax is not assembled by interpolating unescaped user text.
-- Element-targeted actions and assertions require a unique live match. Multiple distinct matching elements produce an ambiguity failure with bounded candidate summaries, not a first-match action. Candidate descriptions include available type, text, state, geometry, and complete usable locator signals; uncertain uniqueness never permits an action.
-- Explicit coordinate-only targeting remains supported. Coordinates must not silently replace a failed semantic locator or bypass additional supplied element constraints. An element action may use the resolved element's current center; screenshot-inferred coordinates are not element evidence.
+- Structured locator fields constrain the same element conjunctively through `Session.element(...)` and `Session.observe_tree()`/`Element.inspect(...)` without raw WebDriver queries. `name` retains semantic-name compatibility across backend identity/label/value/title signals, while explicit `label`, `value`, `title`, and `accessibilityId` constrain their respective attributes; `controlType`, `className`, and `role` constrain element type/role signals. Explicit `xpath` and `predicate` selectors intersect with any accompanying semantic constraints rather than bypassing them. Failed combined lookup never degrades to type-only or another weaker target.
+- Literal values are safely encoded for XPath and `-ios predicate string` query syntax, including apostrophes, quotes, and backslashes. Backend-owned selector syntax is not assembled by interpolating unescaped user text.
+- Element-targeted actions and assertions require a unique live match. Multiple distinct matching elements produce an ambiguity `ConfigurationError` (`resolution_reason="ambiguous"`) with bounded candidate summaries, not a first-match action. Candidate descriptions include available type, text, state, geometry, and complete usable locator signals; uncertain uniqueness never permits an action.
+- Explicit coordinate-only targeting (`Device.click_at`, `Device.hover_at`, `Device.swipe_between`) remains supported. Coordinates must not silently replace a failed semantic locator or bypass additional supplied element constraints. An element action uses `Element.click` / `Element.double_click` / `Element.right_click` / `Element.hover` / `Element.drag_and_drop` or the resolved element's live `bounds` center; screenshot-inferred coordinates are not element evidence.
 - Display-clipped labels and values are never advertised as complete exact-match locators. Complete locator values remain separate from bounded display previews; values exceeding response limits are explicitly marked unavailable rather than silently shortened or converted to broad prefix matches. Returned locator candidates are revalidated against live state before actions and do not promise cross-session stability.
-- `type_text` uses the resolved or active element input API when a readable element is available, applies requested clearing before input, and reads the element value after input. A value that does not reflect the requested text triggers one system-level `macos: keys` retry followed by another value check. A still-unsatisfied readable-element postcondition returns `action_error`; untargeted input without a readable active element retains system-level key delivery without claiming a value postcondition.
+- `type_text` uses the resolved element input API (`Element.click`, optional `Element.clear`, `Element.send_keys`, and `Element.inspect(attributes=("value",))`) when targeted, and retries once through `Element.send_macos_keys` followed by another value check when the initial value does not reflect the requested text. A still-unsatisfied readable-element postcondition returns `action_error`; untargeted input without a semantic target or locator optionally clicks `point` via `Device.click_at` and delivers keys via `Device.send_keys` without claiming a value postcondition, while untargeted `clear=true` returns `action_error`.
 
 ## Structured Observation
 
@@ -50,5 +50,5 @@ Existing normalized action/result and failure-category envelopes remain intact. 
 
 ## Current Invariants
 
-- Construction and registry discovery do not import Appium/Selenium, connect to Appium, or launch an application.
-- Session creation remains explicit through application lifecycle capabilities.
+- Construction and registry discovery do not import `appium_connect_agent`, start Appium, or launch an application.
+- All `Runtime` and `Session` operations execute on one driver-owned single-worker thread to satisfy `appium-connect-agent` owner-thread affinity; `Session` creation remains explicit through `launch_app`.

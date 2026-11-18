@@ -6,7 +6,7 @@ Own private Android, Web, Windows, and macOS host/runtime providers used by `Pla
 
 ## Dependencies
 
-Providers use standard-library host, import, and filesystem facilities plus public Models contracts. They must not invoke package managers or import adapters, Application, Config persistence, concrete drivers or harnesses, Execution, or top-level LLM `providers`.
+Providers use standard-library host, import, and filesystem facilities, public Models contracts, and optional lazy imports of `appium_connect_agent.contracts.LocalSettings` and `appium_connect_agent.runtime.Runtime` for static `Runtime.diagnose(target_driver="mac2")` inspection (acquiring only the upstream account coordination lock `runtime.lock` without mutating Workspace state or `~/.appium-connect-agent/` component and record directories). They must not invoke package managers or import adapters, Application, Config persistence, concrete drivers or harnesses, Execution, or top-level LLM `providers`.
 
 ## Public Interface
 

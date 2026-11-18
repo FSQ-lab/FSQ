@@ -37,7 +37,7 @@ def _png():
 
 
 @pytest.fixture
-def sdk_inspection(tmp_path):
+def sdk_inspection(tmp_path, macos_android_sdk):
     # Only the Appium wire peer is synthetic: screenshot acquisition, display
     # binding, provider validation and pointer mapping use the real public SDK.
     from appium_connect_agent.automation import create_session

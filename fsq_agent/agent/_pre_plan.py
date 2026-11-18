@@ -94,8 +94,7 @@ def verification_goal_for_task(task: Task) -> str:
         "For open inspection/exploration, evidence of the requested flow and truthful observations is sufficient, without "
         "an invented QA assertion, exhaustive exploration, or state change. Explicit objective requirements remain strict. "
         "Raw-case steps are advisory context, not additional final requirements. "
-        "Use actual execution evidence, not the main agent's claim alone.\nOriginal request context:\n"
-        + json.dumps(scope, ensure_ascii=False, indent=2)
+        "Use actual execution evidence, not the main agent's claim alone.\nOriginal request context:\n" + json.dumps(scope, ensure_ascii=False, indent=2)
     )
 
 

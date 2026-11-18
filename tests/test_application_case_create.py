@@ -221,11 +221,13 @@ async def test_create_case_preserves_primary_answer_and_authoritative_inconclusi
     from fsq_agent.models import StepResult
 
     settings = _settings(tmp_path)
-    task_result = _task_result(tmp_path).model_copy(update={
-        "status": "inconclusive",
-        "steps": [StepResult(step_id=1, status="success", tool_name="agent_runtime.runner", actual_outcome=raw)],
-        "verification": VerificationResult(status="inconclusive", summary="Coverage remains unproven."),
-    })
+    task_result = _task_result(tmp_path).model_copy(
+        update={
+            "status": "inconclusive",
+            "steps": [StepResult(step_id=1, status="success", tool_name="agent_runtime.runner", actual_outcome=raw)],
+            "verification": VerificationResult(status="inconclusive", summary="Coverage remains unproven."),
+        }
+    )
 
     async def execute(self, request):
         return SimpleNamespace(task_result=task_result, recording=None)
@@ -254,11 +256,20 @@ async def test_create_case_redacts_provider_auth_and_encoded_runtime_secrets(tmp
     settings.runtime_secrets.set_values({"PRIVATE": runtime_secret})
     encoded = quote(runtime_secret, safe="")
     summary = f"6510\n{settings.agent_runtime.api_key}\nAuthorization: Bearer UNIT_AUTH_CREDENTIAL\nhttps://example.test/?q={encoded}"
-    task_result = _task_result(tmp_path).model_copy(update={
-        "status": "inconclusive",
-        "steps": [StepResult(step_id=1, status="success", tool_name="agent_runtime.runner", actual_outcome=AgentFinalOutput(status="inconclusive", summary=summary).model_dump_json() if use_main_answer else "not structured output")],
-        "verification": VerificationResult(status="inconclusive", summary="Coverage remains unproven." if use_main_answer else summary),
-    })
+    task_result = _task_result(tmp_path).model_copy(
+        update={
+            "status": "inconclusive",
+            "steps": [
+                StepResult(
+                    step_id=1,
+                    status="success",
+                    tool_name="agent_runtime.runner",
+                    actual_outcome=AgentFinalOutput(status="inconclusive", summary=summary).model_dump_json() if use_main_answer else "not structured output",
+                )
+            ],
+            "verification": VerificationResult(status="inconclusive", summary="Coverage remains unproven." if use_main_answer else summary),
+        }
+    )
 
     async def execute(self, request):
         return SimpleNamespace(task_result=task_result, recording=None)

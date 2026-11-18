@@ -429,6 +429,7 @@ def test_driver_context_launch_kill_screenshot_and_ui_snapshot() -> None:
     assert ("quit",) not in session.calls
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_owned_managed_lifecycle_closes_session_before_exiting_managed_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     import appium_connect_agent.automation as aca_automation
     import appium_connect_agent.runtime as aca_runtime
@@ -512,7 +513,7 @@ def android_clock(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 @pytest.fixture
-def owned_android_backend(monkeypatch: pytest.MonkeyPatch):
+def owned_android_backend(monkeypatch: pytest.MonkeyPatch, android_sdk):
     import appium_connect_agent.automation as aca_automation
     import appium_connect_agent.runtime as aca_runtime
 
@@ -1795,6 +1796,7 @@ def test_horizontal_element_swipe_uses_interior_start_and_exact_full_right_endpo
     assert [call[-1] for call in session.calls if call[0] == "inspect"] == [("bounds",)]
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("slow_stage", ["pre_inspection", "identity_binding", "post_verification"])
 def test_input_text_slow_inspection_within_operation_budget_preserves_single_verified_write(monkeypatch: pytest.MonkeyPatch, slow_stage: str) -> None:
     session = FakeSession(text="original")
@@ -2122,6 +2124,7 @@ def _assert_numeric_secret_safe(result, session):
     assert all(secret not in str(result) for secret in secrets if secret)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("baseline", ["", "placeholder-private-canary"])
 @pytest.mark.parametrize("composed", [False, True])
 @pytest.mark.parametrize("text,keycodes", [("20250", [9, 7, 9, 12, 7]), ("-12.5", [69, 8, 9, 56, 12]), ("", [])])
@@ -2145,6 +2148,7 @@ def test_numeric_recovery_clears_once_and_verifies_exact_or_placeholder_composed
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("recovered", [False, True])
 def test_idle_liveness_preserves_controlled_numeric_recovery_without_extra_writes(android_clock, recovered):
     session = NumericSession()
@@ -2163,6 +2167,7 @@ def test_idle_liveness_preserves_controlled_numeric_recovery_without_extra_write
         driver.close()
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("text", ["hello", "\uff11\uff12", "\u0661\u0662", "12 3", "+12", "12\n"])
 def test_numeric_recovery_never_handles_other_input_characters(text):
     session = NumericSession()
@@ -2174,6 +2179,7 @@ def test_numeric_recovery_never_handles_other_input_characters(text):
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("failure", ["response_unknown", "not_sent", "wrong_code", "wrong_type", "missing_state"])
 def test_numeric_recovery_requires_received_public_sdk_command_rejection(failure):
     session = NumericSession()
@@ -2202,6 +2208,7 @@ def test_numeric_recovery_requires_received_public_sdk_command_rejection(failure
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_numeric_recovery_does_not_handle_click_rejection_or_ordinary_composed_readback():
     session = NumericSession()
     session.click_error = _numeric_command_error()
@@ -2220,6 +2227,7 @@ def test_numeric_recovery_does_not_handle_click_rejection_or_ordinary_composed_r
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("read", [1, 2])
 @pytest.mark.parametrize(
     "field,observation",
@@ -2244,6 +2252,7 @@ def test_numeric_recovery_unprovable_target_stops_before_next_side_effect(read, 
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("focus", [("value", False), ("unknown", None), ("value", 1)])
 @pytest.mark.parametrize("outcome", ["success", "unfocused", "baseline_changed", "identity_changed"])
 def test_numeric_recovery_refocuses_at_most_once_and_proves_baseline_and_target(focus, outcome, numeric_focus_clock):
@@ -2267,6 +2276,7 @@ def test_numeric_recovery_refocuses_at_most_once_and_proves_baseline_and_target(
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_numeric_recovery_dispatches_contiguous_keys_without_per_character_inspection():
     session = NumericSession()
     result = _numeric_input(session)
@@ -2279,6 +2289,7 @@ def test_numeric_recovery_dispatches_contiguous_keys_without_per_character_inspe
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("read", [1, 2])
 @pytest.mark.parametrize("no_id", [False, True])
 def test_numeric_recovery_geometry_is_mandatory_only_without_real_resource_identity(read, no_id):
@@ -2298,6 +2309,7 @@ def test_numeric_recovery_geometry_is_mandatory_only_without_real_resource_ident
             assert action[1] is session.actions[0][1]
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("stage", ["preclear", "clear", "after_clear", "key"])
 @pytest.mark.parametrize("cancel", [False, True])
 def test_numeric_recovery_errors_and_cancellation_stop_without_repeats(stage, cancel):
@@ -2328,6 +2340,7 @@ def test_numeric_recovery_errors_and_cancellation_stop_without_repeats(stage, ca
         assert [action[1] for action in session.actions if action[0] == "key"] == [9, 7]
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("observed", ["20250, wrong-private-canary", "20250 ", "2025", "020250", "20,250", "20250, ", "observed-private-canary"])
 def test_numeric_recovery_rejects_all_other_readback_formats_without_secret_leaks(observed):
     session = NumericSession()
@@ -2340,6 +2353,7 @@ def test_numeric_recovery_rejects_all_other_readback_formats_without_secret_leak
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("no_id", [False, True])
 @pytest.mark.parametrize(
     "field,observation",
@@ -2368,6 +2382,7 @@ def test_numeric_recovery_final_verification_still_requires_safe_original_target
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("cancel", [False, True])
 def test_numeric_recovery_failed_refocus_click_never_enters_key_dispatch(cancel):
     session = NumericSession()
@@ -2397,6 +2412,7 @@ def test_numeric_recovery_failed_refocus_click_never_enters_key_dispatch(cancel)
     assert _numeric_action_names(session) == ["click", "replace", "clear", "click"]
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("read", [1, 2, 3])
 @pytest.mark.parametrize("code", ["target_not_found", "target_ambiguous"])
 def test_numeric_recovery_thrown_identity_proof_is_verification_unavailable(read: int, code: str) -> None:
@@ -2432,6 +2448,7 @@ def numeric_focus_clock(monkeypatch):
     return clock
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("focus", [("value", False), ("unknown", None)])
 def test_numeric_recovery_waits_for_async_focus_without_repeating_click(focus, numeric_focus_clock):
     session = NumericSession()
@@ -2446,6 +2463,7 @@ def test_numeric_recovery_waits_for_async_focus_without_repeating_click(focus, n
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_numeric_recovery_focus_window_expires_without_extra_reads_or_keys(numeric_focus_clock):
     session = NumericSession()
     session.clear_focus = ("value", False)
@@ -2461,6 +2479,7 @@ def test_numeric_recovery_focus_window_expires_without_extra_reads_or_keys(numer
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("change", [{"text": ("value", "observed-private-canary")}, {"id": ("value", "other:id/input")}, {"password": ("value", True)}, {"enabled": ("value", False)}])
 def test_numeric_recovery_aborts_changed_target_during_focus_wait(change, numeric_focus_clock):
     session = NumericSession()
@@ -2475,6 +2494,7 @@ def test_numeric_recovery_aborts_changed_target_during_focus_wait(change, numeri
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("focused", [False, True])
 def test_numeric_recovery_allows_normal_budget_for_inflight_focus_read(focused, numeric_focus_clock):
     session = NumericSession()
@@ -2497,6 +2517,7 @@ def test_numeric_recovery_allows_normal_budget_for_inflight_focus_read(focused, 
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_numeric_recovery_cancelled_focus_poll_never_dispatches_keys(numeric_focus_clock):
     session = NumericSession()
     session.clear_focus = ("value", False)
@@ -2783,7 +2804,7 @@ def _sdk_target_peer():
 
 
 @pytest.fixture
-def sdk_target_peer():
+def sdk_target_peer(macos_android_sdk):
     with _sdk_target_peer() as peer:
         yield peer
 
@@ -2895,6 +2916,7 @@ def _exercise_unknown_target_response():
         assert "canary" not in str(result)
 
 
+@pytest.mark.usefixtures("macos_android_sdk")
 def test_public_sdk_unknown_inspection_response_fences_session_without_action_or_reconnect():
     # An external connection cannot authorize terminal managed disposal. Keep
     # its intentionally quarantined Session and reservation inside one child.

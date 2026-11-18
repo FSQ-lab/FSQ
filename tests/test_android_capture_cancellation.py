@@ -10,6 +10,7 @@ import pytest
 from fsq_agent.drivers.android._appium_connect import AppiumConnectAndroidDriver
 
 
+@pytest.mark.usefixtures("android_sdk")
 async def test_capture_checks_asyncio_cancellation_on_the_calling_task(monkeypatch):
     owner_task = asyncio.current_task()
     owner_thread = threading.get_ident()
@@ -46,6 +47,7 @@ async def test_capture_checks_asyncio_cancellation_on_the_calling_task(monkeypat
         driver.close()
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_capture_cancellation_settles_the_same_sdk_operation_and_preserves_identity(monkeypatch):
     started = threading.Event()
     settled = threading.Event()
@@ -95,6 +97,7 @@ def _borrowed_capture_session(take_screenshot):
     return session
 
 
+@pytest.mark.usefixtures("android_sdk")
 async def test_borrowed_capture_checks_on_caller_and_preserves_inline_defaults():
     owner_task = asyncio.current_task()
     owner_thread = threading.get_ident()
@@ -146,6 +149,7 @@ async def test_borrowed_capture_checks_on_caller_and_preserves_inline_defaults()
     assert session.cleanup_calls == []
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("completion", ["late_bytes", "sdk_cancelled", "sdk_timeout", "sdk_error"])
 @pytest.mark.parametrize("cancellation_type", [asyncio.CancelledError, InterruptedError])
 def test_borrowed_capture_cancellation_settles_without_accepting_late_pixels(completion, cancellation_type):
@@ -204,6 +208,7 @@ def test_borrowed_capture_cancellation_settles_without_accepting_late_pixels(com
     assert session.cleanup_calls == []
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("sdk_failure", ["timeout", "command_error"])
 @pytest.mark.parametrize("cancellation_type", [asyncio.CancelledError, InterruptedError])
 def test_borrowed_capture_sdk_failure_retains_current_cancellation(sdk_failure, cancellation_type):
@@ -250,6 +255,7 @@ def test_borrowed_capture_sdk_failure_retains_current_cancellation(sdk_failure, 
     assert session.cleanup_calls == []
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_idle_liveness_probe_shares_capture_cancellation_and_never_takes_late_pixels(monkeypatch):
     from appium_connect_agent.automation import OperationCancelledError
 

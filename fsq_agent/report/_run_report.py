@@ -1024,13 +1024,15 @@ class RunReportService:
         except ValidationError:
             main_output = None
         if main_output and main_output.summary.strip():
-            interpretations.append({
-                "kind": "ai_suggestion",
-                "availability": "available",
-                "label": "Main answer",
-                "text": safe_text(main_output.summary, limit=None),
-                "references": [{"run_id": run_id, "artifact_id": "internal-report-json"}],
-            })
+            interpretations.append(
+                {
+                    "kind": "ai_suggestion",
+                    "availability": "available",
+                    "label": "Main answer",
+                    "text": safe_text(main_output.summary, limit=None),
+                    "references": [{"run_id": run_id, "artifact_id": "internal-report-json"}],
+                }
+            )
         failure = execution.get("first_failure")
         if isinstance(failure, dict):
             interpretations.append(

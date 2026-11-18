@@ -324,8 +324,12 @@ async def test_closing_retains_one_turn_answer_and_can_follow_empty_execution(mo
         result = await create_agent_engine().run(
             provider.get_model("gpt-5.2"),
             AgentRequest(
-                "answer", "Original constraints.", "Answer from supplied context.", tools=(ToolBinding("probe", "Read", {}, invoke),),
-                output=OutputContract("Final", _FinalOutput.model_json_schema(), parse), max_turns=max_turns,
+                "answer",
+                "Original constraints.",
+                "Answer from supplied context.",
+                tools=(ToolBinding("probe", "Read", {}, invoke),),
+                output=OutputContract("Final", _FinalOutput.model_json_schema(), parse),
+                max_turns=max_turns,
                 final_turn_instructions="Deliver the answer now.",
             ),
         )
@@ -372,7 +376,9 @@ async def test_last_turn_closes_from_filtered_tool_history(monkeypatch, profile,
 
     provider, client = _provider(monkeypatch, respond, responses_profile=profile)
     request = AgentRequest(
-        "answer", "Original constraints.", "What is the distance?",
+        "answer",
+        "Original constraints.",
+        "What is the distance?",
         tools=(ToolBinding("probe", "Read", {"type": "object", "properties": {}}, invoke),),
         output=OutputContract("Final", schema, parse, strict=False),
         max_turns=execution_turns + 1,
@@ -444,8 +450,13 @@ async def test_last_turn_rejects_bad_close_without_dispatch_or_repair(monkeypatc
             await create_agent_engine().run(
                 provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"),
                 AgentRequest(
-                    "close", "Read", "Answer", tools=(ToolBinding("probe", "Read", {}, invoke),),
-                    output=OutputContract("Final", _FinalOutput.model_json_schema(), parse), max_turns=2, stream=stream,
+                    "close",
+                    "Read",
+                    "Answer",
+                    tools=(ToolBinding("probe", "Read", {}, invoke),),
+                    output=OutputContract("Final", _FinalOutput.model_json_schema(), parse),
+                    max_turns=2,
+                    stream=stream,
                     final_turn_instructions="Deliver the answer now.",
                 ),
                 on_event=observe,
@@ -477,9 +488,13 @@ async def test_last_turn_opt_in_preserves_execution_compatibility(monkeypatch, m
 
     provider, _client = _provider(monkeypatch, respond)
     request = AgentRequest(
-        "execution", "Read", "Read", tools=(ToolBinding("probe", "Read", {}, invoke),),
+        "execution",
+        "Read",
+        "Read",
+        tools=(ToolBinding("probe", "Read", {}, invoke),),
         output=None if mode == "no_contract" else OutputContract("Final", _FinalOutput.model_json_schema(), _FinalOutput.model_validate_json),
-        max_turns=1 if mode == "single_turn" else 2, stream=True,
+        max_turns=1 if mode == "single_turn" else 2,
+        stream=True,
         final_turn_instructions=None if mode == "default" else " \n " if mode == "blank" else "Close now.",
     )
     try:
@@ -512,9 +527,14 @@ async def test_last_turn_cancellation_closes_stream_without_retry(monkeypatch, p
 
     provider, _client = _provider(monkeypatch, respond, responses_profile=profile)
     request = AgentRequest(
-        "close", "Read", "Answer", tools=(ToolBinding("probe", "Read", {}, invoke),),
+        "close",
+        "Read",
+        "Answer",
+        tools=(ToolBinding("probe", "Read", {}, invoke),),
         output=OutputContract("Final", _FinalOutput.model_json_schema(), _FinalOutput.model_validate_json),
-        max_turns=2, stream=True, final_turn_instructions="Deliver the answer now.",
+        max_turns=2,
+        stream=True,
+        final_turn_instructions="Deliver the answer now.",
     )
     execution = asyncio.create_task(create_agent_engine().run(provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"), request))
     try:

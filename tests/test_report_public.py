@@ -452,11 +452,14 @@ def test_portable_report_delivers_validated_answer_without_rewriting_frozen_conc
 
 
 @pytest.mark.parametrize("export_format", ["json", "html", "bundle"])
-@pytest.mark.parametrize("profile", [
-    {"replacements": [{"text": "PRIVATE_ANSWER", "replacement": "PUBLIC_ANSWER"}]},
-    {"remove_fields": ["artifacts.content"]},
-    {"remove_fields": ["execution.summary", "artifacts.content"]},
-])
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"replacements": [{"text": "PRIVATE_ANSWER", "replacement": "PUBLIC_ANSWER"}]},
+        {"remove_fields": ["artifacts.content"]},
+        {"remove_fields": ["execution.summary", "artifacts.content"]},
+    ],
+)
 def test_main_answer_sharing_sanitizes_all_exported_copies_without_changing_source(tmp_path, export_format, profile):
     from fsq_agent.models import AgentFinalOutput
 

@@ -217,7 +217,18 @@ class _GoalRunRuntime(_Runtime):
                 step_id=1,
                 status="success",
                 actual_outcome=(
-                    json.dumps({"status": "success", "summary": "Goal done", "pre_plan": [], "plan_updates": [], "satisfied_criteria": [satisfied], "unmet_criteria": [], "evidence": ["Goal observed"], "errors": []})
+                    json.dumps(
+                        {
+                            "status": "success",
+                            "summary": "Goal done",
+                            "pre_plan": [],
+                            "plan_updates": [],
+                            "satisfied_criteria": [satisfied],
+                            "unmet_criteria": [],
+                            "evidence": ["Goal observed"],
+                            "errors": [],
+                        }
+                    )
                 ),
                 tool_name="agent_runtime.runner",
             )

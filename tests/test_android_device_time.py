@@ -9,8 +9,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
-from appium_connect_agent.automation import CommandError, DeviceTime, OperationCancelledError, create_session
-from appium_connect_agent.runtime import LocalSettings, Runtime
 from test_appium_connect_android_driver import FakeSession, _tree_observation
 from test_coding_agent_runtime import _EmptyToolFactory, _test_request
 
@@ -23,15 +21,15 @@ from fsq_agent.harnesses._android import AndroidHarness
 from fsq_agent.models import ToolExecutionError
 
 
-def _clock(iso_local):
+def _clock(iso_local, device_time_type):
     parsed = datetime.fromisoformat(iso_local)
     weekdays = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-    return DeviceTime(iso_local=iso_local, date=parsed.date().isoformat(), time=parsed.strftime("%H:%M:%S"), weekday=weekdays[parsed.weekday()], utc_offset=iso_local[-6:])
+    return device_time_type(iso_local=iso_local, date=parsed.date().isoformat(), time=parsed.strftime("%H:%M:%S"), weekday=weekdays[parsed.weekday()], utc_offset=iso_local[-6:])
 
 
-def test_snapshots_read_fresh_device_date_across_midnight_without_context_clock_reads(monkeypatch):
+def test_snapshots_read_fresh_device_date_across_midnight_without_context_clock_reads(monkeypatch, android_sdk):
     session = FakeSession()
-    observed = iter([_clock("2023-10-15T23:59:59+05:45"), _clock("2023-10-16T00:00:01+05:45")])
+    observed = iter([_clock("2023-10-15T23:59:59+05:45", android_sdk.automation.DeviceTime), _clock("2023-10-16T00:00:01+05:45", android_sdk.automation.DeviceTime)])
     calls = []
 
     def read_time(*, control):
@@ -54,13 +52,13 @@ def test_snapshots_read_fresh_device_date_across_midnight_without_context_clock_
 
 
 @pytest.mark.parametrize("iso_local", ["2023-10-15T15:35:12+00:00", "2023-10-15T15:35:12-03:30", "2023-10-15T15:35:12+05:45"])
-def test_clock_metadata_survives_unfolded_xml_fallback(monkeypatch, iso_local):
+def test_clock_metadata_survives_unfolded_xml_fallback(monkeypatch, iso_local, android_sdk):
     session = FakeSession()
     calls = []
 
     def read_time(**kwargs):
         calls.append(kwargs)
-        return _clock(iso_local)
+        return _clock(iso_local, android_sdk.automation.DeviceTime)
 
     monkeypatch.setattr(session.device, "device_time", read_time, raising=False)
     driver = AppiumConnectAndroidDriver(app_id="fixture.app", session=session)
@@ -83,17 +81,19 @@ def test_clock_metadata_survives_unfolded_xml_fallback(monkeypatch, iso_local):
 
 
 @pytest.mark.parametrize("failure", ["absent", "malformed", "unknown"])
-def test_clock_unavailability_retains_tree_without_fabrication_or_retry(monkeypatch, failure):
+def test_clock_unavailability_retains_tree_without_fabrication_or_retry(monkeypatch, failure, request):
     session = FakeSession()
     state = ["active"]
     calls = []
     monkeypatch.setattr(session, "session_info", lambda: SimpleNamespace(id="local-clock", state=state[0]))
+    if failure == "unknown":
+        command_error = request.getfixturevalue("android_sdk").automation.CommandError
 
     def read_time(**kwargs):
         calls.append(kwargs)
         if failure == "unknown":
             state[0] = "uncertain"
-            raise CommandError("operation_timeout", "a" * 32, "response_unknown")
+            raise command_error("operation_timeout", "a" * 32, "response_unknown")
         return SimpleNamespace(iso_local="private-clock-canary")
 
     if failure != "absent":
@@ -119,13 +119,13 @@ def test_clock_unavailability_retains_tree_without_fabrication_or_retry(monkeypa
         driver.close()
 
 
-def test_clock_cancellation_is_not_converted_to_ordinary_unavailability(monkeypatch):
+def test_clock_cancellation_is_not_converted_to_ordinary_unavailability(monkeypatch, android_sdk):
     session = FakeSession()
     calls = []
 
     def cancel(**kwargs):
         calls.append(kwargs)
-        raise OperationCancelledError("operation_cancelled", "a" * 32, "not_sent")
+        raise android_sdk.automation.OperationCancelledError("operation_cancelled", "a" * 32, "not_sent")
 
     monkeypatch.setattr(session.device, "device_time", cancel, raising=False)
     driver = AppiumConnectAndroidDriver(app_id="fixture.app", session=session)
@@ -137,7 +137,11 @@ def test_clock_cancellation_is_not_converted_to_ordinary_unavailability(monkeypa
     assert len(calls) == 1
 
 
+@pytest.mark.usefixtures("macos_android_sdk")
 async def test_real_sdk_clock_reaches_model_snapshot_output_without_ui_actions(tmp_path):
+    from appium_connect_agent.automation import create_session
+    from appium_connect_agent.runtime import LocalSettings, Runtime
+
     events = []
 
     class Handler(BaseHTTPRequestHandler):

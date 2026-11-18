@@ -30,9 +30,11 @@ def render_html(report: PublicRunReport, contents: dict) -> str:
     body = [
         f'<header id="run-{_escape(run_id)}"><p class="muted">FSQ · Evidence report · {_escape(report.schema_version)}</p><h1>{_escape(str(report.run.get("mode") or "Run").title())} evidence report</h1><p><strong>Run:</strong> {_escape(run_id)}</p><p class="muted"><strong>Case / Goal:</strong> {_escape(report.source.get("case_id") or report.source.get("goal_summary") or "Unavailable")}</p></header>'
     ]
-    answer = next((item for item in report.execution.get("interpretations", []) if item.get("kind") == "ai_suggestion" and item.get("label") == "Main answer" and item.get("availability") == "available"), None)
+    answer = next(
+        (item for item in report.execution.get("interpretations", []) if item.get("kind") == "ai_suggestion" and item.get("label") == "Main answer" and item.get("availability") == "available"), None
+    )
     if answer:
-        body.append(f'<section><h2>Main answer</h2><pre>{_escape(answer.get("text"))}</pre></section>')
+        body.append(f"<section><h2>Main answer</h2><pre>{_escape(answer.get('text'))}</pre></section>")
     body.append(
         f'<section class="{gate["status"]}"><h2>{_escape(gate["status"]).upper()}</h2><p>{_escape(report.execution.get("summary"))}</p><p>Execution: {_escape(report.execution.get("outcome"))} · Verification: {_escape(report.verification.get("status"))} · Evidence: {_escape(report.evidence.get("status"))}</p><p>{_escape(", ".join(gate["reasons"]))}</p></section>'
     )

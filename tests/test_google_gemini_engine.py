@@ -201,7 +201,10 @@ async def test_gemini_closing_opt_in_keeps_original_execution_slots(monkeypatch,
 
     provider, clients = _provider(monkeypatch, respond)
     request = AgentRequest(
-        "execution", "Read", "Read", tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
+        "execution",
+        "Read",
+        "Read",
+        tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
         output=None if mode == "no_contract" else OutputContract("Final", AgentFinalOutput.model_json_schema(), AgentFinalOutput.model_validate_json),
         max_turns=1 if mode == "single_turn" else 2,
         final_turn_instructions=None if mode == "default" else " \n " if mode == "blank" else "Close now.",
@@ -244,9 +247,16 @@ async def test_gemini_last_turn_closes_with_filtered_actual_history(monkeypatch,
 
     provider, clients = _provider(monkeypatch, respond)
     request = AgentRequest(
-        "answer", "Original constraints.", "What is the distance?", tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
-        output=OutputContract("Final", schema, parse), max_turns=2, stream=stream, reasoning_effort="high",
-        tool_output_filter=lambda entries: {entry.entry_id: "6510" for entry in entries}, final_turn_instructions=closing,
+        "answer",
+        "Original constraints.",
+        "What is the distance?",
+        tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
+        output=OutputContract("Final", schema, parse),
+        max_turns=2,
+        stream=stream,
+        reasoning_effort="high",
+        tool_output_filter=lambda entries: {entry.entry_id: "6510" for entry in entries},
+        final_turn_instructions=closing,
     )
     try:
         model = provider.get_model("gemini-3.8-flash")
@@ -300,8 +310,13 @@ async def test_gemini_last_turn_rejects_bad_close_without_effects_or_repair(monk
 
     provider, clients = _provider(monkeypatch, respond)
     request = AgentRequest(
-        "answer", "Read", "Answer", tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
-        output=OutputContract("Final", AgentFinalOutput.model_json_schema(), parse), max_turns=2, stream=stream,
+        "answer",
+        "Read",
+        "Answer",
+        tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
+        output=OutputContract("Final", AgentFinalOutput.model_json_schema(), parse),
+        max_turns=2,
+        stream=stream,
         final_turn_instructions="Deliver the answer now.",
     )
     try:
@@ -345,9 +360,14 @@ async def test_gemini_last_turn_cancellation_closes_stream_without_retry(monkeyp
     provider, clients = _provider(monkeypatch, respond)
     model = provider.get_model("gemini-3.8-flash")
     request = AgentRequest(
-        "answer", "Read", "Answer", tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
+        "answer",
+        "Read",
+        "Answer",
+        tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
         output=OutputContract("Final", AgentFinalOutput.model_json_schema(), AgentFinalOutput.model_validate_json),
-        max_turns=2, stream=True, final_turn_instructions="Deliver the answer now.",
+        max_turns=2,
+        stream=True,
+        final_turn_instructions="Deliver the answer now.",
     )
     execution = asyncio.create_task(create_agent_engine_for_model(model).run(model, request))
     try:

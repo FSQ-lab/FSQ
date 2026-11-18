@@ -426,7 +426,9 @@ async def test_primary_answer_survives_inconclusive_verification_without_leaking
             recording=None,
         )
 
-    monkeypatch.setattr("fsq_agent.application._quick_test_execution.diagnose_platform_settings", lambda settings: SimpleNamespace(commands=SimpleNamespace(case_create=SimpleNamespace(status="ready"))))
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test_execution.diagnose_platform_settings", lambda settings: SimpleNamespace(commands=SimpleNamespace(case_create=SimpleNamespace(status="ready")))
+    )
     monkeypatch.setattr("fsq_agent.application._quick_test_execution.validate_runtime_settings", lambda settings: None)
     monkeypatch.setattr("fsq_agent.application._quick_test_execution.DynamicExecutionService.execute", execute)
     result = await application.execute_prepared_quick_test(item, "Return only the requested answer", agent_factory=lambda settings: object())

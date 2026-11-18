@@ -176,8 +176,8 @@ class SessionStub:
     def session_info(self) -> Any:
         return SimpleNamespace(id="mac2:stub", appium_session_id="mac2:stub", state="active", platform="macos")
 
-    def element(self, by: str, value: str, *, predicate: str | None = None) -> Any:
-        self.calls.append((by, value, predicate))
+    def element(self, by: str, value: str, *, parent: Any = None, predicate: str | None = None) -> Any:
+        self.calls.append((by, value, predicate) if parent is None else (f"scoped:{by}", value, predicate))
         return _OutcomeElementProxy(self.elements, self.error)
 
     def observe_tree(self, *, control: Any = None) -> Any:
@@ -297,7 +297,7 @@ def test_explicit_selector_and_semantic_constraints_intersect() -> None:
     assert session.calls[0][0] == "xpath"
     assert session.calls[0][1].startswith("(//Button)[")
     assert "@label='Submit'" in session.calls[0][1]
-    assert session.calls[1] == ("-ios predicate string", "enabled == true", None)
+    assert session.calls[1] == ("scoped:-ios predicate string", "enabled == true", None)
 
 
 def test_role_and_predicate_constraints_intersect_without_rejection() -> None:
@@ -308,8 +308,7 @@ def test_role_and_predicate_constraints_intersect_without_rejection() -> None:
     assert session.calls[0][0] == "xpath"
     assert "@role='AXButton'" in session.calls[0][1]
     assert "@label='Submit'" in session.calls[0][1]
-    assert session.calls[1] == ("-ios predicate string", "enabled == true", None)
-
+    assert session.calls[1] == ("scoped:-ios predicate string", "enabled == true", None)
     mismatch_driver = AppiumConnectMacOSDriver(session=SessionStub([ElementStub("first")]))
     calls_count = 0
 
@@ -333,6 +332,38 @@ def test_role_and_predicate_constraints_intersect_without_rejection() -> None:
     mismatch_result = mismatch_driver.assert_visible(MacOSAssertVisibleParams(locator=locator))
     assert mismatch_result["status"] == "failed"
     assert mismatch_result["failure_category"] == "target_resolution_error"
+
+
+def test_xpath_or_role_with_broad_predicate_does_not_raise_false_ambiguity() -> None:
+    target_button = ElementStub("save-btn", type="XCUIElementTypeButton", label="Save", enabled=True)
+    other_enabled = ElementStub("cancel-btn", type="XCUIElementTypeButton", label="Cancel", enabled=True)
+
+    class ScopedSession(SessionStub):
+        def element(self, by: str, value: str, *, parent: Any = None, predicate: str | None = None) -> Any:
+            self.calls.append((by if parent is None else f"scoped:{by}", value, predicate))
+            if parent is None and by == "xpath":
+                return _OutcomeElementProxy((target_button,), None)
+            if parent is None and by == "-ios predicate string":
+                return _OutcomeElementProxy((target_button, other_enabled), None)
+            if parent is not None and 'label == "Save"' in value:
+                return _OutcomeElementProxy((target_button,), None)
+            if parent is not None:
+                # Simulate container/self + descendant matching broad predicate until narrowed by signature
+                return _OutcomeElementProxy((target_button, other_enabled), None)
+            return _OutcomeElementProxy((), None)
+
+    session = ScopedSession([target_button, other_enabled])
+    locator = MacOSLocator(role="AXButton", label="Save", predicate="enabled == true")
+    result = AppiumConnectMacOSDriver(session=session).assert_visible(MacOSAssertVisibleParams(locator=locator))
+    assert result["status"] == "passed"
+    assert all(call[0] != "-ios predicate string" for call in session.calls)
+    assert any("amRect.x == 10" in call[1] for call in session.calls)
+
+    name_session = SessionStub([target_button])
+    AppiumConnectMacOSDriver(session=name_session).assert_visible(MacOSAssertVisibleParams(target="Save"))
+    assert 'name == "Save"' not in name_session.calls[0][1]
+    for attr in ("identifier", "label", "value", "title"):
+        assert f'{attr} == "Save"' in name_session.calls[0][1]
 
 
 @pytest.mark.parametrize("method,params_type", [("click_on", MacOSClickOnParams), ("right_click_on", MacOSRightClickOnParams)])

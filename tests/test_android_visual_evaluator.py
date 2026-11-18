@@ -489,11 +489,16 @@ def test_android_cancellation_propagates_and_primary_wins_cleanup(image_request)
     assert session.closed
 
 
-def test_android_late_result_is_discarded_and_cleanup_only_failure_propagates(image_request):
+def test_android_late_result_is_discarded_and_cleanup_only_failure_propagates(image_request, monkeypatch):
+    clock = 0.0
+    monkeypatch.setattr("fsq_agent.ai_services._ai_assertion.time", SimpleNamespace(monotonic=lambda: clock, monotonic_ns=time.monotonic_ns))
+
     class LateSession(_Session):
         def complete_sync(self, request, **controls):
+            nonlocal clock
+
             response = super().complete_sync(request, **controls)
-            time.sleep(0.02)
+            clock += 0.02
             return response
 
     session = LateSession()

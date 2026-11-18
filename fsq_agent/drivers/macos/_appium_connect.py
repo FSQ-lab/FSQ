@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from itertools import pairwise
 from pathlib import Path
@@ -34,6 +35,7 @@ from fsq_agent.models import (
     MacOSTakeScreenshotParams,
     MacOSTypeTextParams,
     MacOSUiSnapshotParams,
+    ToolExecutionError,
 )
 
 if TYPE_CHECKING:
@@ -212,73 +214,89 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         self._managed_scope: AbstractContextManager[Any] | None = None
         self._connection: Any | None = None
         self._executor: ThreadPoolExecutor | None = None
+        self._session_settled = False
+        self._scope_exit_attempted = False
+        self._cleanup_primary: BaseException | None = None
 
     def close(self) -> None:
         if self._borrowed_session:
-            if self._session is not None:
-                quit_fn = getattr(self._session, "quit", None)
-                if callable(quit_fn):
-                    quit_fn()
-                self._session = None
-            return
-        if self._executor is None and self._session is None and self._managed_scope is None and self._runtime is None:
-            return
-        try:
-            self._run_sync(self._close_owned_resources)
-        finally:
             self._shutdown_executor()
+            return
+        if self._session is not None or self._managed_scope is not None or self._runtime is not None or self._connection is not None:
+            self._run_sync(self._close_owned_resources)
+        try:
+            self._shutdown_executor()
+        except BaseException as shutdown_error:
+            primary_error = self._cleanup_primary
+            if primary_error is not None:
+                if isinstance(primary_error, (CancelledError, KeyboardInterrupt, SystemExit)):
+                    raise primary_error from shutdown_error
+                raise BaseExceptionGroup("macOS session and owner-thread shutdown failed.", [primary_error, shutdown_error]) from None
+            raise
+        primary_error = self._cleanup_primary
+        self._cleanup_primary = None
+        if primary_error is not None:
+            raise primary_error
 
     def _close_owned_resources(self) -> None:
-        primary_error: BaseException | None = None
-        session = self._session
-        self._session = None
-        if session is not None:
-            try:
-                control = self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS)
-                dispose_fn = getattr(session, "dispose", None)
+        primary_error = self._cleanup_primary
+        managed_settled = False
+        try:
+            session = self._session
+            if session is not None and not self._session_settled:
                 info_fn = getattr(session, "session_info", None)
                 state = getattr(info_fn(), "state", "active") if callable(info_fn) else "active"
-                if state == "uncertain" and callable(dispose_fn):
-                    dispose_fn(control=control)
-                else:
-                    session.quit(control=control)
-            except BaseException as exc:  # noqa: BLE001 - continue managed scope cleanup before re-raising.
-                if getattr(exc, "code", None) not in {"session_closed", "session_disposed"}:
-                    if callable(getattr(session, "dispose", None)):
-                        try:
-                            session.dispose(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
-                        except BaseException as dispose_exc:  # noqa: BLE001
-                            logging.getLogger(__name__).debug("Fallback Mac2 session.dispose failed (%s)", type(dispose_exc).__name__)
-                    primary_error = exc
+                if state == "active":
+                    try:
+                        session.quit(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+                    except BaseException as exc:  # Retain quit failure while explicitly disposing uncertain resources.
+                        if getattr(exc, "code", None) in {"session_closed", "session_disposed"}:
+                            self._session_settled = True
+                        else:
+                            primary_error = self._cleanup_primary = exc
+                            state = getattr(info_fn(), "state", "active") if callable(info_fn) else "active"
+                            if state not in {"uncertain", "disposing", "disposed"}:
+                                raise
+                    else:
+                        self._session_settled = True
+                if not self._session_settled:
+                    dispose_fn = getattr(session, "dispose", None)
+                    if state in {"uncertain", "disposing"} and callable(dispose_fn):
+                        dispose_fn(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+                        state = getattr(info_fn(), "state", "disposed") if callable(info_fn) else "disposed"
+                        if state != "disposed":
+                            raise ToolExecutionError("Owned Mac2 terminal disposal did not complete.", context={"state": state})  # noqa: TRY301
+                        managed_settled = True
+                    elif state == "disposed":
+                        managed_settled = True
+                    elif state != "closed":
+                        raise ToolExecutionError("Owned Mac2 session is not available for terminal cleanup.", context={"state": state})  # noqa: TRY301
+                    self._session_settled = True
 
-        scope = self._managed_scope
+            if self._scope_exit_attempted and self._runtime is not None and not managed_settled:
+                self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+            elif self._managed_scope is not None and not self._scope_exit_attempted:
+                self._scope_exit_attempted = True
+                self._managed_scope.__exit__(None, None, None)
+                if self._runtime is not None and bool(getattr(self._runtime, "managed_cleanup_pending", False)):
+                    self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+            elif self._runtime is not None and not managed_settled and bool(getattr(self._runtime, "managed_cleanup_pending", False)):
+                self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+        except BaseException as cleanup_error:
+            if primary_error is not None and cleanup_error is not primary_error:
+                if isinstance(primary_error, (CancelledError, KeyboardInterrupt, SystemExit)):
+                    raise primary_error from cleanup_error
+                raise BaseExceptionGroup("macOS session and owned-resource cleanup failed.", [primary_error, cleanup_error]) from None
+            raise
+
+        self._session = None
         self._managed_scope = None
         self._connection = None
-        runtime = self._runtime
         self._runtime = None
-        if scope is not None:
-            try:
-                if primary_error is not None:
-                    scope.__exit__(type(primary_error), primary_error, primary_error.__traceback__)
-                else:
-                    scope.__exit__(None, None, None)
-            except BaseException as cleanup_exc:  # noqa: BLE001 - preserve primary quit error if present.
-                if primary_error is None:
-                    primary_error = cleanup_exc
-                else:
-                    logging.getLogger(__name__).warning(
-                        "Managed Appium scope exit failed after Mac2 session quit error (%s)",
-                        type(cleanup_exc).__name__,
-                    )
-            if runtime is not None and bool(getattr(runtime, "managed_cleanup_pending", False)):
-                try:
-                    runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
-                except BaseException as cleanup_exc:  # noqa: BLE001 - best-effort secondary process-group sweep.
-                    logging.getLogger(__name__).warning(
-                        "Managed Appium secondary cleanup did not complete (%s)",
-                        type(cleanup_exc).__name__,
-                    )
+        self._session_settled = False
+        self._scope_exit_attempted = False
         if primary_error is not None:
+            self._cleanup_primary = None
             raise primary_error
 
     def context(self) -> dict[str, object]:
@@ -482,11 +500,11 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         if element is not None:
             return self._type_text_into_element(element, params)
 
+        if params.clear:
+            return self._failed("action_error", "Untargeted macOS text entry cannot clear and verify an active element.")
         point = self._coordinate_only_point(params)
         if point is not None:
             self._perform_pointer_click(point, button="left", double=False, modifier_flags=None)
-        if params.clear:
-            return self._failed("action_error", "Untargeted macOS text entry cannot clear and verify an active element.")
         self._send_macos_text(params.text, element=None)
         if point is not None:
             return self._passed({"point": point.model_dump(mode="json")})
@@ -821,6 +839,9 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         self._managed_scope = scope
         self._connection = connection
         self._session = session
+        self._session_settled = False
+        self._scope_exit_attempted = False
+        self._cleanup_primary = None
         return session
 
     def _require_creation_identity(self, params: MacOSLaunchAppParams) -> tuple[str | None, str | None]:
@@ -934,21 +955,66 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
     def _intersect_xpath_and_predicate(self, session: Any, xpath_element: Any, locator: MacOSLocator) -> Any | None:
         if locator.predicate is None:
             return xpath_element
+        if not self._probe_single_or_ambiguous(session, xpath_element, locator):
+            return None
         try:
-            predicate_element = session.element("-ios predicate string", locator.predicate)
+            scoped_element = session.element("-ios predicate string", locator.predicate, parent=xpath_element)
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
             self._raise_resolution_error(exc)
 
-        xpath_ok = self._probe_single_or_ambiguous(session, xpath_element, locator)
-        pred_ok = self._probe_single_or_ambiguous(session, predicate_element, locator)
-        if not xpath_ok or not pred_ok:
-            return None
-        xpath_sig = self._element_signature(xpath_element)
-        pred_sig = self._element_signature(predicate_element)
-        if xpath_sig != pred_sig:
+        try:
+            scoped_inspection = scoped_element.inspect(
+                attributes=("type", "id", "label", "title", "value", "bounds"),
+                control=self._ActionControl(self),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._propagate_if_cancelled(exc)
+            if type(exc).__name__ == "TargetError":
+                code = getattr(exc, "code", None)
+                if code == "target_not_found":
+                    return None
+                if code == "target_ambiguous":
+                    return self._confirm_self_matches_predicate_among_subtree(xpath_element, locator.predicate)
+            self._raise_resolution_error(exc)
+        if self._element_signature(xpath_element) != self._signature_from_inspection(scoped_inspection):
             return None
         return xpath_element
+
+    def _confirm_self_matches_predicate_among_subtree(self, xpath_element: Any, predicate: str) -> Any | None:
+        xpath_sig = self._element_signature(xpath_element)
+        session = self._require_session()
+        clauses = [f"({predicate})"]
+        elem_type, elem_id, elem_label, elem_title, elem_value, bounds_tuple = xpath_sig
+        if isinstance(elem_type, str) and elem_type:
+            clauses.append(f"amType == {_predicate_literal(elem_type)}")
+        if isinstance(elem_id, str) and elem_id:
+            clauses.append(f"identifier == {_predicate_literal(elem_id)}")
+        if isinstance(elem_label, str) and elem_label:
+            clauses.append(f"label == {_predicate_literal(elem_label)}")
+        if isinstance(elem_title, str) and elem_title:
+            clauses.append(f"title == {_predicate_literal(elem_title)}")
+        if isinstance(elem_value, str) and elem_value:
+            clauses.append(f"value == {_predicate_literal(elem_value)}")
+        if isinstance(bounds_tuple, tuple) and len(bounds_tuple) == 4 and all(type(coord) is int for coord in bounds_tuple):
+            bx, by, bw, bh = bounds_tuple
+            clauses.extend((f"amRect.x == {bx}", f"amRect.y == {by}", f"amRect.width == {bw}", f"amRect.height == {bh}"))
+        try:
+            narrowed = session.element("-ios predicate string", " AND ".join(clauses), parent=xpath_element)
+        except Exception as exc:  # noqa: BLE001
+            self._propagate_if_cancelled(exc)
+            self._raise_resolution_error(exc)
+        try:
+            narrowed_inspection = narrowed.inspect(
+                attributes=("type", "id", "label", "title", "value", "bounds"),
+                control=self._ActionControl(self),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._propagate_if_cancelled(exc)
+            if type(exc).__name__ == "TargetError" and getattr(exc, "code", None) in {"target_not_found", "target_ambiguous"}:
+                return None
+            self._raise_resolution_error(exc)
+        return xpath_element if xpath_sig == self._signature_from_inspection(narrowed_inspection) else None
 
     def _probe_single_or_ambiguous(self, session: Any, element: Any, locator: MacOSLocator) -> bool:
         try:
@@ -981,6 +1047,10 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
             self._raise_resolution_error(exc)
+        return self._signature_from_inspection(inspection)
+
+    @staticmethod
+    def _signature_from_inspection(inspection: Any) -> tuple[object, ...]:
         attrs = {item.name: item.value if item.state == "value" else None for item in getattr(inspection, "attributes", ())}
         bounds = attrs.get("bounds")
         bounds_tuple = (bounds.x, bounds.y, bounds.width, bounds.height) if bounds is not None and hasattr(bounds, "x") else None

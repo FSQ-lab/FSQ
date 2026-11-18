@@ -848,6 +848,18 @@ def test_appium_connect_macos_driver_type_text_clicks_point_then_delivers_device
     assert session.device_keys == [list("point text")]
 
 
+def test_appium_connect_macos_driver_type_text_untargeted_clear_rejects_before_clicking_point() -> None:
+    session = FakeMacSession({})
+    driver = AppiumConnectMacOSDriver(session=session)
+
+    result = driver.type_text(MacOSTypeTextParams(text="point text", point=MacOSPoint(x=12, y=34), clear=True))
+
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "action_error"
+    assert session.pointer_calls == []
+    assert session.device_keys == []
+
+
 def test_appium_connect_macos_driver_type_text_does_not_fall_back_when_target_is_missing() -> None:
     session = FakeMacSession({})
     driver = AppiumConnectMacOSDriver(session=session)
@@ -1089,3 +1101,57 @@ def test_appium_connect_macos_driver_requires_explicit_launch_before_session_act
         driver.ui_snapshot(MacOSUiSnapshotParams())
 
     assert called is False
+
+
+def test_appium_connect_macos_driver_close_leaves_borrowed_session_open() -> None:
+    session = FakeMacSession({})
+    driver = AppiumConnectMacOSDriver(session=session)
+
+    driver.close()
+
+    assert session.lifecycle_calls == []
+    assert session.state == "active"
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_appium_connect_macos_driver_close_retains_owned_handles_when_managed_cleanup_fails_and_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    cleanup_attempts = 0
+
+    class FakeScope:
+        def __enter__(self) -> object:
+            return "fake-connection"
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class FakeRuntime:
+        managed_cleanup_pending = True
+
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def start_managed(self, **kwargs: object) -> FakeScope:
+            return FakeScope()
+
+        def cleanup_managed(self, *, control: object = None) -> None:
+            nonlocal cleanup_attempts
+            del control
+            cleanup_attempts += 1
+            if cleanup_attempts == 1:
+                raise RuntimeError("managed cleanup locked")
+            FakeRuntime.managed_cleanup_pending = False
+
+    monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
+    monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", lambda connection, **kwargs: FakeMacSession({}))
+
+    driver = AppiumConnectMacOSDriver(bundle_id="com.example.App")
+    driver.launch_app(MacOSLaunchAppParams())
+
+    with pytest.raises(RuntimeError, match="managed cleanup locked"):
+        driver.close()
+
+    assert driver._runtime is not None
+    driver.close()
+    assert cleanup_attempts == 2
+    assert driver._runtime is None
+    assert driver._session is None

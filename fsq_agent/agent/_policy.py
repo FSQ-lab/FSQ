@@ -21,6 +21,11 @@ from fsq_agent.models import AgentFinalOutput, AgentPromptConfig, KnowledgeBundl
 class CodingAgentPolicy:
     pre_plan_instructions = PRE_PLAN_AGENT_INSTRUCTIONS
     verification_instructions = VERIFICATION_AGENT_INSTRUCTIONS
+    final_turn_instructions = """The main execution turn limit is approaching. Return the configured AgentFinalOutput now from the retained execution evidence, with no tool calls or invented actions, observations, or success.
+For questions, counts, calculations, and lists, summary must deliver the best answer supported by observed evidence first, in exactly the requested format, units, and rounding (for example only an integer or only the requested titles). Perform supported unit conversion and arithmetic before reporting.
+Do not replace an available answer with 'Unable to verify', 'inconclusive', or a disclaimer. Keep missing coverage and residual uncertainty in evidence/errors and satisfied_criteria/unmet_criteria, separately from summary; retain status=inconclusive when proof is incomplete. Never invent an answer when evidence supports none.
+Judge only verification_goal, preserving explicit exact text, objective outcomes, filename/destination, duration bounds, no-extra-item and no-save/no-send constraints. Open inspection needs evidence of the requested authorized flow and truthful observations, not an invented QA assertion or state change.
+Report readback/repair only if already observed while the Harness was open. No closing or post-close repair, new execution loop, synthetic budget, or assumed refund is authorized. The structured envelope's completion is not proof of goal success."""
     read_knowledge_index_schema = ReadKnowledgeIndexArgs
     read_knowledge_page_schema = ReadKnowledgePageArgs
 

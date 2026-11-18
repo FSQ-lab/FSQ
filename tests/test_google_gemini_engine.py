@@ -186,6 +186,187 @@ async def test_gemini_shared_loop_preserves_private_steps_and_filters_results(mo
     assert all(client.is_closed for client in transport)
 
 
+@pytest.mark.parametrize("mode", ["default", "blank", "no_contract", "single_turn"])
+async def test_gemini_closing_opt_in_keeps_original_execution_slots(monkeypatch, mode):
+    payloads, calls = [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        call = {"type": "function_call", "id": f"call_{len(payloads)}", "name": "observe", "arguments": {}}
+        return _http(_interaction([call], status="requires_action"), False)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "observed"
+
+    provider, clients = _provider(monkeypatch, respond)
+    request = AgentRequest(
+        "execution", "Read", "Read", tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
+        output=None if mode == "no_contract" else OutputContract("Final", AgentFinalOutput.model_json_schema(), AgentFinalOutput.model_validate_json),
+        max_turns=1 if mode == "single_turn" else 2,
+        final_turn_instructions=None if mode == "default" else " \n " if mode == "blank" else "Close now.",
+    )
+    try:
+        model = provider.get_model("gemini-3.8-flash")
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine_for_model(model).run(model, request)
+        assert failure.value.category == "max_turns"
+        assert len(payloads) == len(calls) == request.max_turns
+        assert all(payload["tools"][0]["name"] == "observe" and payload["system_instruction"] == "Read" for payload in payloads)
+    finally:
+        await provider.aclose()
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_gemini_last_turn_closes_with_filtered_actual_history(monkeypatch, stream):
+    payloads, calls, parsed, events = [], [], [], []
+    thought = {"type": "thought", "signature": "b3BhcXVl", "summary": []}
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+    closing = "Deliver the evidence-supported answer now."
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            return _http(_interaction([thought, {"type": "function_call", "id": "call_read", "name": "observe", "arguments": {}}], status="requires_action"), stream)
+        return _http(_interaction([_output('{"answer":"6510"}')]), stream)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "raw-observation"
+
+    def parse(text):
+        parsed.append(text)
+        return json.loads(text)
+
+    async def observe(event):
+        events.append(event)
+
+    provider, clients = _provider(monkeypatch, respond)
+    request = AgentRequest(
+        "answer", "Original constraints.", "What is the distance?", tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
+        output=OutputContract("Final", schema, parse), max_turns=2, stream=stream, reasoning_effort="high",
+        tool_output_filter=lambda entries: {entry.entry_id: "6510" for entry in entries}, final_turn_instructions=closing,
+    )
+    try:
+        model = provider.get_model("gemini-3.8-flash")
+        result = await create_agent_engine_for_model(model).run(model, request, on_event=observe)
+        assert result.final_output == {"answer": "6510"}
+        assert parsed == ['{"answer":"6510"}']
+        assert calls == ["call_read"]
+        assert len(payloads) == 2
+        execution, final = payloads
+        assert execution["tools"][0]["name"] == "observe"
+        assert execution["system_instruction"] == "Original constraints."
+        assert not final.get("tools")
+        assert final["system_instruction"].startswith("Original constraints.")
+        assert closing in final["system_instruction"]
+        assert final["response_format"] == execution["response_format"]
+        assert thought in final["input"]
+        assert final["input"][-1] == {"type": "function_result", "call_id": "call_read", "name": "observe", "result": [{"type": "text", "text": "6510"}]}
+        assert "raw-observation" not in json.dumps(final["input"])
+        assert all(payload["generation_config"] == {"thinking_level": "high"} and payload["store"] is False and "previous_interaction_id" not in payload for payload in payloads)
+        assert result.usage.requests == 2
+        assert result.usage.total_tokens == 10
+        assert [event.output for event in events if event.kind == "tool_output"] == (["raw-observation"] if stream else [])
+    finally:
+        await provider.aclose()
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("outcome", ["empty", "absent", "whitespace", "malformed", "schema", "tool"])
+async def test_gemini_last_turn_rejects_bad_close_without_effects_or_repair(monkeypatch, stream, outcome):
+    payloads, calls, parsed, events = [], [], [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1 or outcome == "tool":
+            steps = [{"type": "function_call", "id": f"call_{len(payloads)}", "name": "observe", "arguments": {}}]
+            return _http(_interaction(steps, status="requires_action"), stream)
+        text = {"empty": "", "absent": "", "whitespace": "  ", "malformed": "not-json", "schema": "{}"}[outcome]
+        return _http(_interaction([] if outcome == "absent" else [_output(text)]), stream)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "6510"
+
+    def parse(text):
+        parsed.append(text)
+        return AgentFinalOutput.model_validate_json(text)
+
+    async def observe(event):
+        events.append(event)
+
+    provider, clients = _provider(monkeypatch, respond)
+    request = AgentRequest(
+        "answer", "Read", "Answer", tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
+        output=OutputContract("Final", AgentFinalOutput.model_json_schema(), parse), max_turns=2, stream=stream,
+        final_turn_instructions="Deliver the answer now.",
+    )
+    try:
+        model = provider.get_model("gemini-3.8-flash")
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine_for_model(model).run(model, request, on_event=observe)
+        assert failure.value.category == "invalid_output"
+        assert calls == ["call_1"]
+        assert len(payloads) == 2
+        assert not payloads[-1].get("tools")
+        assert len(parsed) == (1 if outcome in {"malformed", "schema"} else 0)
+        assert not [event for event in events if event.kind == "message" or event.call_id == "call_2"]
+    finally:
+        await provider.aclose()
+    assert all(client.is_closed for client in clients)
+
+
+async def test_gemini_last_turn_cancellation_closes_stream_without_retry(monkeypatch):
+    payloads, calls = [], []
+    started, closed = asyncio.Event(), asyncio.Event()
+
+    class BlockedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            started.set()
+            await asyncio.Event().wait()
+            yield b""
+
+        async def aclose(self):
+            closed.set()
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            return _http(_interaction([{"type": "function_call", "id": "call_read", "name": "observe", "arguments": {}}], status="requires_action"), True)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=BlockedStream())
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "6510"
+
+    provider, clients = _provider(monkeypatch, respond)
+    model = provider.get_model("gemini-3.8-flash")
+    request = AgentRequest(
+        "answer", "Read", "Answer", tools=(ToolBinding("observe", "Read", {"type": "object"}, invoke),),
+        output=OutputContract("Final", AgentFinalOutput.model_json_schema(), AgentFinalOutput.model_validate_json),
+        max_turns=2, stream=True, final_turn_instructions="Deliver the answer now.",
+    )
+    execution = asyncio.create_task(create_agent_engine_for_model(model).run(model, request))
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        assert len(payloads) == 2
+        assert not payloads[-1].get("tools")
+        assert calls == ["call_read"]
+        assert closed.is_set()
+    finally:
+        if not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        await provider.aclose()
+    assert all(client.is_closed for client in clients)
+
+
 @pytest.mark.parametrize("status,category", [("incomplete", "incomplete"), ("failed", "invalid_output"), ("in_progress", "invalid_output")])
 async def test_gemini_direct_rejects_partial_result(monkeypatch, status, category):
     provider, transport = _provider(monkeypatch, lambda request: _http(_interaction([_output("private-partial")], status=status), False))

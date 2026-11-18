@@ -56,7 +56,8 @@ DEFAULT_POLL_INTERVAL_SECONDS = 0.25
 DEFAULT_MANAGED_STARTUP_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS = 15.0
-DEFAULT_NEW_COMMAND_TIMEOUT_SECONDS = 300.0
+DEFAULT_NEW_COMMAND_TIMEOUT_SECONDS = 900.0
+SESSION_IDLE_LIVENESS_SECONDS = 45.0
 DEFAULT_OPERATION_TIMEOUT_SECONDS = 25.0
 DEFAULT_LONG_PRESS_DURATION_MS = 1000
 MAX_COORDINATE_VALUE = 2_147_483_647
@@ -309,14 +310,16 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         serial: str | None = None,
         session: object | None = None,
         uiautomator2_wait_for_idle_timeout_ms: int | None = None,
+        new_command_timeout_seconds: float | None = DEFAULT_NEW_COMMAND_TIMEOUT_SECONDS,
     ) -> None:
         if session is not None and uiautomator2_wait_for_idle_timeout_ms is not None:
             raise ConfigurationError("An initial idle override cannot be applied to a borrowed Android Session.")
-        self._uiautomator2_wait_for_idle_timeout_ms = (
-            AndroidHarnessSettings(uiautomator2_wait_for_idle_timeout_ms=uiautomator2_wait_for_idle_timeout_ms).uiautomator2_wait_for_idle_timeout_ms
-            if uiautomator2_wait_for_idle_timeout_ms is not None
-            else None
+        settings = AndroidHarnessSettings(
+            uiautomator2_wait_for_idle_timeout_ms=uiautomator2_wait_for_idle_timeout_ms,
+            new_command_timeout_seconds=new_command_timeout_seconds,
         )
+        self._uiautomator2_wait_for_idle_timeout_ms = settings.uiautomator2_wait_for_idle_timeout_ms
+        self._new_command_timeout_seconds = settings.new_command_timeout_seconds
         self.app_id = app_id
         self.serial = serial
         self._borrowed_session = session is not None
@@ -331,6 +334,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         self._cleanup_primary: BaseException | None = None
         self._terminal_disposal_diagnostic: dict[str, object] | None = None
         self._closed = False
+        self._last_operation_finished_at: float | None = None
+        self._operation_cancellation: Event | None = None
 
     def close(self) -> None:
         if self._borrowed_session:
@@ -1316,6 +1321,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 if state != "active":
                     self._cleanup_pending = not self._borrowed_session
                     raise ToolExecutionError("Android session is unavailable; explicit terminal cleanup is required.", context={"reason": "session_unavailable", **self._safe_diagnostics()})
+            if self._last_operation_finished_at is not None and time.monotonic() - self._last_operation_finished_at >= SESSION_IDLE_LIVENESS_SECONDS:
+                self._session.ensure_alive(control=self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS, cancellation=self._operation_cancellation))
             return self._session
 
         serial = (self.serial or "").strip()
@@ -1389,7 +1396,7 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
                 no_reset=True,
                 full_reset=False,
                 should_terminate_app=False,
-                new_command_timeout_seconds=DEFAULT_NEW_COMMAND_TIMEOUT_SECONDS,
+                new_command_timeout_seconds=self._new_command_timeout_seconds,
                 control=OperationControl(timeout_seconds=DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS),
                 **initial_settings,
             )
@@ -1405,13 +1412,26 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         return session
 
     def _run_on_worker(self, func: Callable[[], _T], *, cancellation_check: Callable[[], None] | None = None, cancellation_event: Event | None = None) -> _T:
-        # Default borrowed calls remain inline; controlled capture needs caller-side
-        # polling and the SDK's cross-thread Event, not ownership of its Runtime scope.
-        if self._closed or self._cleanup_pending or (self._borrowed_session and cancellation_check is None):
+        if self._closed or self._cleanup_pending:
             return func()
+
+        def run_operation() -> _T:
+            previous_cancellation = self._operation_cancellation
+            self._operation_cancellation = cancellation_event
+            try:
+                return func()
+            finally:
+                self._operation_cancellation = previous_cancellation
+                if self._session is not None:
+                    self._last_operation_finished_at = time.monotonic()
+
+        # Borrowed Sessions retain their caller's ownership; controlled capture
+        # still uses the existing worker and cross-thread cancellation Event.
+        if self._borrowed_session and cancellation_check is None:
+            return run_operation()
         self._ensure_executor()
         try:
-            return self._run_sync(func, cancellation_check=cancellation_check, cancellation_event=cancellation_event)
+            return self._run_sync(run_operation, cancellation_check=cancellation_check, cancellation_event=cancellation_event)
         except BaseException:
             if not self._cleanup_pending and self._session is None and self._managed_scope is None and self._runtime is None:
                 self._shutdown_executor()
@@ -1493,12 +1513,12 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
             raise asyncio.CancelledError from exc
 
     @staticmethod
-    def _operation_control(timeout_seconds: float) -> Any:
+    def _operation_control(timeout_seconds: float, *, cancellation: Event | None = None) -> Any:
         try:
             from appium_connect_agent.runtime import OperationControl
         except ImportError:
             return None
-        return OperationControl(timeout_seconds=timeout_seconds)
+        return OperationControl(timeout_seconds=timeout_seconds, cancellation=cancellation)
 
     @staticmethod
     def _resource_id_predicate(resource_id: str) -> str:
@@ -1625,15 +1645,17 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         normalized = direction.strip().lower()
         mid_x = width // 2
         mid_y = height // 2
+        top = min(ceil(height * 0.20), height - 1)
+        bottom = min(floor(height * 0.80), height - 1)
+        left = min(ceil(width * 0.18), width - 1)
+        right = min(floor(width * 0.82), width - 1)
         if normalized == "up":
-            return mid_x, int(height * 0.75), mid_x, int(height * 0.25)
+            return mid_x, bottom, mid_x, top
         if normalized == "down":
-            return mid_x, int(height * 0.25), mid_x, int(height * 0.75)
+            return mid_x, top, mid_x, bottom
         if normalized == "left":
-            return int(width * 0.75), mid_y, int(width * 0.25), mid_y
-        if normalized == "right":
-            return int(width * 0.25), mid_y, int(width * 0.75), mid_y
-        return mid_x, int(height * 0.75), mid_x, int(height * 0.25)
+            return right, mid_y, left, mid_y
+        return left, mid_y, right, mid_y
 
     @staticmethod
     def _swipe_point_payload(params: dict[str, object]) -> tuple[int, int, int, int] | None:

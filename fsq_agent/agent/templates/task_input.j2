@@ -7,12 +7,14 @@ Key actions:
 - {{ action }}
 {% endfor %}
 {% else %}
-Key actions: none provided; derive the path from task input and knowledge.
+Key actions: none provided; derive only the path authorized by the original request from fresh observations, task input, and knowledge. Do not invent actions or acceptance conditions.
 {% endif %}
 
 {% if task.verification_goal %}
 Verification goal:
 {{ task.verification_goal }}
 {% else %}
-Final verification goal: none provided. Collect clear flow evidence and report inconclusive if success cannot be proven.
+Final verification goal: complete the authorized request and truthfully deliver evidence-grounded observations without unauthorized effects; preserve every explicit objective, format, scope, and terminal-state constraint. Report inconclusive only when required proof is genuinely insufficient.
 {% endif %}
+
+Delivery: for questions, counts, calculations, or lists, put the best observed/computed answer in summary in the exact requested format, units, and rounding. Keep uncertainty in the other structured fields; never erase an available answer with a disclaimer or invent an unsupported answer. Read back and repair goal-relevant saved state before returning while the Harness is open, respecting explicit draft/no-save/no-send restrictions.

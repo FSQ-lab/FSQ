@@ -7,6 +7,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateError
 
+from fsq_agent.agent._pre_plan import verification_goal_for_task
 from fsq_agent.models import AgentPromptConfig, AgentTaskInput, ConfigurationError, KnowledgeBundle, SkillBundle, Task
 
 _DEFAULT_TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -69,16 +70,13 @@ class PromptModelBuilder:
         runtime_secret_names: list[str] | None = None,
         runtime_secret_warnings: list[str] | None = None,
     ) -> TaskPromptModel:
-        acceptance_policy = (
-            "Use the provided key actions as execution guidance and the verification_goal as the only final success target."
-            if task.key_actions or task.verification_goal
-            else "Use successful flow completion with enough evidence as the success standard."
-        )
+        verification_goal = verification_goal_for_task(task)
+        acceptance_policy = "Use the provided key actions as execution guidance and the verification_goal as the only final success target."
         task_input = AgentTaskInput(
             task=task,
             acceptance_criteria=list(task.acceptance_criteria),
             key_actions=list(task.key_actions),
-            verification_goal=task.verification_goal,
+            verification_goal=verification_goal,
             runtime_policy=list(runtime_policy or []),
             runtime_secret_names=list(runtime_secret_names or []),
             runtime_secret_warnings=list(runtime_secret_warnings or []),
@@ -90,7 +88,7 @@ class PromptModelBuilder:
             description=task.description,
             acceptance_criteria=list(task.acceptance_criteria),
             key_actions=list(task.key_actions),
-            verification_goal=task.verification_goal,
+            verification_goal=verification_goal,
             input_json=task_input.model_dump_json(indent=2),
             variables=dict(self.settings.variables),
         )

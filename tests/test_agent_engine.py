@@ -304,6 +304,235 @@ async def test_kimi_executes_tools_before_tool_free_structured_finalization(monk
     assert client.is_closed
 
 
+@pytest.mark.parametrize("max_turns", [1, 2])
+async def test_closing_retains_one_turn_answer_and_can_follow_empty_execution(monkeypatch, max_turns):
+    payloads, parsed = [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        return _http_response(_response('{"value":"6510"}' if len(payloads) == max_turns else ""), stream=False)
+
+    async def invoke(call):
+        raise AssertionError("No tools were requested")
+
+    def parse(text):
+        parsed.append(text)
+        return _FinalOutput.model_validate_json(text)
+
+    provider, _client = _provider(monkeypatch, respond)
+    try:
+        result = await create_agent_engine().run(
+            provider.get_model("gpt-5.2"),
+            AgentRequest(
+                "answer", "Original constraints.", "Answer from supplied context.", tools=(ToolBinding("probe", "Read", {}, invoke),),
+                output=OutputContract("Final", _FinalOutput.model_json_schema(), parse), max_turns=max_turns,
+                final_turn_instructions="Deliver the answer now.",
+            ),
+        )
+        assert result.final_output.value == "6510"
+        assert parsed == ['{"value":"6510"}']
+        assert len(payloads) == max_turns
+        assert payloads[0]["tools"][0]["name"] == "probe"
+        assert payloads[0]["instructions"] == "Original constraints."
+        assert bool(payloads[-1].get("tools")) is (max_turns == 1)
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("profile", ["openai", "kimi"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("execution_turns", [1, 2])
+async def test_last_turn_closes_from_filtered_tool_history(monkeypatch, profile, stream, execution_turns):
+    payloads, calls, parsed, events = [], [], [], []
+    closing = "Deliver the evidence-supported answer in the original structured contract."
+    schema = _FinalOutput.model_json_schema()
+    original_schema = deepcopy(schema)
+    thought = {"type": "reasoning", "id": "reasoning_close", "summary": [], "encrypted_content": "opaque-history"}
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) <= execution_turns:
+            response = _response("Retain this execution context.")
+            response["output"].insert(0, thought)
+            response["output"].append({"id": f"fc_{len(payloads)}", "type": "function_call", "name": "probe", "call_id": f"call_{len(payloads)}", "arguments": "{}", "status": "completed"})
+        else:
+            response = _response('{"value":"6510"}')
+        return _http_response(response, stream=stream)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "raw-observation"
+
+    def parse(text):
+        parsed.append(text)
+        return _FinalOutput.model_validate_json(text)
+
+    async def observe(event):
+        events.append(event)
+
+    provider, client = _provider(monkeypatch, respond, responses_profile=profile)
+    request = AgentRequest(
+        "answer", "Original constraints.", "What is the distance?",
+        tools=(ToolBinding("probe", "Read", {"type": "object", "properties": {}}, invoke),),
+        output=OutputContract("Final", schema, parse, strict=False),
+        max_turns=execution_turns + 1,
+        stream=stream,
+        reasoning_effort="high",
+        tool_output_filter=lambda entries: {entry.entry_id: "6510" for entry in entries},
+        final_turn_instructions=closing,
+    )
+    try:
+        result = await create_agent_engine().run(provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"), request, on_event=observe)
+        assert result.final_output == _FinalOutput(value="6510")
+        assert parsed == ['{"value":"6510"}']
+        assert calls == [f"call_{index}" for index in range(1, execution_turns + 1)]
+        assert len(payloads) == request.max_turns
+        assert all(payload["tools"][0]["name"] == "probe" and closing not in payload["instructions"] for payload in payloads[:-1])
+        final = payloads[-1]
+        assert not final.get("tools")
+        assert final["instructions"].startswith("Original constraints.")
+        assert closing in final["instructions"]
+        assert final["text"]["format"]["schema"] == original_schema
+        assert final["text"]["format"]["strict"] is False
+        assert final["input"][0] == {"role": "user", "content": "What is the distance?"}
+        assert thought in final["input"]
+        outputs = [item for item in final["input"] if item.get("type") == "function_call_output"]
+        assert [item["call_id"] for item in outputs] == calls
+        assert all(item["output"] == "6510" for item in outputs)
+        assert "raw-observation" not in json.dumps(final["input"])
+        assert all(payload["reasoning"] == {"effort": "max" if profile == "kimi" else "high"} for payload in payloads)
+        assert all(payload.get("stream", False) is stream for payload in payloads)
+        assert result.usage.requests == request.max_turns
+        assert result.usage.total_tokens == request.max_turns * 5
+        assert schema == original_schema
+        assert [event.output for event in events if event.kind == "tool_output"] == (["raw-observation"] * execution_turns if stream else [])
+        assert [event.text for event in events if event.kind == "message"][-1:] == (['{"value":"6510"}'] if stream else [])
+    finally:
+        await provider.aclose()
+    assert client.is_closed
+
+
+@pytest.mark.parametrize("profile", ["openai", "kimi"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("outcome", ["empty", "absent", "whitespace", "malformed", "schema", "tool"])
+async def test_last_turn_rejects_bad_close_without_dispatch_or_repair(monkeypatch, profile, stream, outcome):
+    payloads, calls, parsed, events = [], [], [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        response = _response({"empty": "", "absent": "", "whitespace": "  ", "malformed": "not-json", "schema": "{}", "tool": '{"value":"6510"}'}[outcome])
+        if len(payloads) == 1 or outcome == "tool":
+            response["output"] = [{"id": f"fc_{len(payloads)}", "type": "function_call", "name": "probe", "call_id": f"call_{len(payloads)}", "arguments": "{}", "status": "completed"}]
+        elif outcome == "absent":
+            response["output"] = []
+        return _http_response(response, stream=stream)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "6510"
+
+    def parse(text):
+        parsed.append(text)
+        return _FinalOutput.model_validate_json(text)
+
+    async def observe(event):
+        events.append(event)
+
+    provider, client = _provider(monkeypatch, respond, responses_profile=profile)
+    try:
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine().run(
+                provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"),
+                AgentRequest(
+                    "close", "Read", "Answer", tools=(ToolBinding("probe", "Read", {}, invoke),),
+                    output=OutputContract("Final", _FinalOutput.model_json_schema(), parse), max_turns=2, stream=stream,
+                    final_turn_instructions="Deliver the answer now.",
+                ),
+                on_event=observe,
+            )
+        assert failure.value.category == "invalid_output"
+        assert len(payloads) == 2
+        assert not payloads[-1].get("tools")
+        assert calls == ["call_1"]
+        assert len(parsed) == (1 if outcome in {"malformed", "schema"} else 0)
+        assert not [event for event in events if event.kind == "message" or event.call_id == "call_2"]
+    finally:
+        await provider.aclose()
+    assert client.is_closed
+
+
+@pytest.mark.parametrize("mode", ["default", "blank", "no_contract", "single_turn"])
+async def test_last_turn_opt_in_preserves_execution_compatibility(monkeypatch, mode):
+    payloads, calls = [], []
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        response = _response()
+        response["output"] = [{"id": f"fc_{len(payloads)}", "type": "function_call", "name": "probe", "call_id": f"call_{len(payloads)}", "arguments": "{}", "status": "completed"}]
+        return _http_response(response, stream=True)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "observed"
+
+    provider, _client = _provider(monkeypatch, respond)
+    request = AgentRequest(
+        "execution", "Read", "Read", tools=(ToolBinding("probe", "Read", {}, invoke),),
+        output=None if mode == "no_contract" else OutputContract("Final", _FinalOutput.model_json_schema(), _FinalOutput.model_validate_json),
+        max_turns=1 if mode == "single_turn" else 2, stream=True,
+        final_turn_instructions=None if mode == "default" else " \n " if mode == "blank" else "Close now.",
+    )
+    try:
+        with pytest.raises(EngineError) as failure:
+            await create_agent_engine().run(provider.get_model("gpt-5.2"), request)
+        assert failure.value.category == "max_turns"
+        assert len(payloads) == len(calls) == request.max_turns
+        assert all(payload["tools"][0]["name"] == "probe" for payload in payloads)
+        assert all(payload["instructions"] == "Read" for payload in payloads)
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("profile", ["openai", "kimi"])
+async def test_last_turn_cancellation_closes_stream_without_retry(monkeypatch, profile):
+    payloads, calls = [], []
+    blocked = _RetrySseStream(body_gate=asyncio.Event())
+
+    def respond(request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) == 1:
+            response = _response()
+            response["output"] = [{"id": "fc_read", "type": "function_call", "name": "probe", "call_id": "call_read", "arguments": "{}", "status": "completed"}]
+            return _http_response(response, stream=True)
+        return _retry_http_stream(blocked)
+
+    async def invoke(call):
+        calls.append(call.call_id)
+        return "6510"
+
+    provider, _client = _provider(monkeypatch, respond, responses_profile=profile)
+    request = AgentRequest(
+        "close", "Read", "Answer", tools=(ToolBinding("probe", "Read", {}, invoke),),
+        output=OutputContract("Final", _FinalOutput.model_json_schema(), _FinalOutput.model_validate_json),
+        max_turns=2, stream=True, final_turn_instructions="Deliver the answer now.",
+    )
+    execution = asyncio.create_task(create_agent_engine().run(provider.get_model("kimi-k3" if profile == "kimi" else "gpt-5.2"), request))
+    try:
+        await asyncio.wait_for(blocked.body_entered.wait(), 3)
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        assert calls == ["call_read"]
+        assert len(payloads) == 2
+        assert not payloads[-1].get("tools")
+        assert blocked.closed.is_set()
+    finally:
+        if not execution.done():
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        await provider.aclose()
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("outcome", ["empty", "whitespace", "malformed", "schema", "tool", "refusal", "incomplete", "budget", "cancel"])
 async def test_kimi_finalization_failure_never_dispatches_or_retries(monkeypatch: pytest.MonkeyPatch, stream: bool, outcome: str) -> None:
@@ -539,6 +768,10 @@ def test_reasoning_effort_preserves_public_request_positionals():
     assert model_request.reasoning_effort == agent_request.reasoning_effort == "mid"
     assert agent_request.max_turns == 7
     assert agent_request.stream is True
+    assert agent_request.final_turn_instructions is None
+    extended = AgentRequest("name", "instructions", "input", (), contract, 7, True, False, None, "high", "Close now.")
+    assert extended.reasoning_effort == "high"
+    assert extended.final_turn_instructions == "Close now."
 
 
 @pytest.mark.parametrize("constraint", ["oneOf", "allOf", "reference"])

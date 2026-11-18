@@ -455,6 +455,7 @@ class DefaultCodingAgentRuntime:
                     tools=[*agent_tools, *harness_tools],
                     output_type=AgentFinalOutput,
                     run_id=run_id,
+                    final_turn_instructions=self.policy.final_turn_instructions,
                 )
                 await self._emit(
                     event_sink,
@@ -1105,7 +1106,9 @@ class DefaultCodingAgentRuntime:
         export_api_key = os.getenv("OPENAI_API_KEY")
         return not bool(export_api_key and export_api_key.strip())
 
-    def _build_request(self, *, name: str, instructions: str, model_input: str, tools: list[ToolBinding], output_type: type[BaseModel], run_id: str = "") -> AgentRequest:
+    def _build_request(
+        self, *, name: str, instructions: str, model_input: str, tools: list[ToolBinding], output_type: type[BaseModel], run_id: str = "", final_turn_instructions: str | None = None
+    ) -> AgentRequest:
         local_output = self.settings.agent_runtime.local_tool_output
         artifact_store = ToolArtifactStore(self.settings.output.runs_dir, run_id, local_output) if run_id and local_output.artifact_enabled else None
         input_filter = _ToolOutputBudgetFilter(
@@ -1125,6 +1128,7 @@ class DefaultCodingAgentRuntime:
             stream=True,
             tool_output_filter=input_filter,
             tracing_enabled=not self._tracing_disabled(),
+            final_turn_instructions=final_turn_instructions,
         )
 
     async def _run_agent(self, model: Model, request: AgentRequest, run_id: str, task_id: str, event_sink: RunEventSink | None) -> AgentResult:

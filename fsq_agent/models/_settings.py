@@ -94,6 +94,7 @@ class AndroidHarnessSettings(BaseModel):
 
     backend: Literal["appium_connect_agent"] = "appium_connect_agent"
     uiautomator2_wait_for_idle_timeout_ms: int | None = Field(default=None, ge=0, le=9_007_199_254_740_991)
+    new_command_timeout_seconds: float | None = Field(default=900.0, ge=0, allow_inf_nan=False)
     _app_id: str | None = PrivateAttr(default=None)
     _serial: str | None = PrivateAttr(default=None)
     _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)
@@ -111,6 +112,13 @@ class AndroidHarnessSettings(BaseModel):
     def validate_initial_idle_timeout(cls, value: Any) -> int | None:
         if value is not None and type(value) is not int:
             raise ValueError("uiautomator2_wait_for_idle_timeout_ms must be a built-in integer or None")
+        return value
+
+    @field_validator("new_command_timeout_seconds", mode="before")
+    @classmethod
+    def validate_new_command_timeout(cls, value: Any) -> float | None:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("new_command_timeout_seconds must be a finite nonnegative number or None")
         return value
 
     @property

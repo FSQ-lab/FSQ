@@ -403,3 +403,71 @@ async def test_browser_processing_error_consumes_application_details_without_ear
     assert "%55%4E%49%54" not in str(snapshot)
     assert "UNIT_PRIVATE" not in str(snapshot)
     assert snapshot["result"]["durationMs"] == 123
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["6510", "Title A\nTitle B", "UNIT_PRIVATE answer", "   ", None])
+async def test_primary_answer_survives_inconclusive_verification_without_leaking_secrets(monkeypatch, tmp_path, answer):
+    from fsq_agent.models import AgentFinalOutput, StepResult
+
+    item = prepared(tmp_path)
+    raw = AgentFinalOutput(status="inconclusive", summary=answer).model_dump_json() if answer is not None else "unvalidated answer"
+    verification = VerificationResult(status="inconclusive", summary="Collection coverage remains unproven.", diagnostics=["Partial coverage"])
+
+    async def execute(self, request):
+        return SimpleNamespace(
+            task_result=TaskResult(
+                task_id=request.task.id,
+                status="inconclusive",
+                steps=[StepResult(step_id=1, status="success", tool_name="agent_runtime.runner", actual_outcome=raw)],
+                verification=verification,
+                report=ReportArtifact(run_id="answer", path=item.settings.output.runs_dir / "answer" / "report.md"),
+            ),
+            recording=None,
+        )
+
+    monkeypatch.setattr("fsq_agent.application._quick_test_execution.diagnose_platform_settings", lambda settings: SimpleNamespace(commands=SimpleNamespace(case_create=SimpleNamespace(status="ready"))))
+    monkeypatch.setattr("fsq_agent.application._quick_test_execution.validate_runtime_settings", lambda settings: None)
+    monkeypatch.setattr("fsq_agent.application._quick_test_execution.DynamicExecutionService.execute", execute)
+    result = await application.execute_prepared_quick_test(item, "Return only the requested answer", agent_factory=lambda settings: object())
+    if answer and answer.strip():
+        if "UNIT_PRIVATE" in answer:
+            assert result.summary.endswith(" answer")
+        else:
+            assert result.summary == answer
+    else:
+        assert result.summary == verification.summary
+    assert result.status == result.verification.status == "inconclusive"
+    assert result.verification.summary == verification.summary
+    assert result.verification.diagnostics == ["Partial coverage"]
+    assert "UNIT_PRIVATE" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_case_manager_live_summary_delivers_answer_without_upgrading_verdict(monkeypatch, tmp_path):
+    from fsq_agent.adapters.control_plane._execution import PreparedRun, _run_explore
+    from fsq_agent.adapters.control_plane._state import ControlPlaneState
+    from fsq_agent.models import AgentFinalOutput, StepResult
+
+    item = prepared(tmp_path)
+    state = ControlPlaneState()
+    request_id = state.reserve(workspace_name="quick-test", platform="web", target_id="chrome", mode="explore", source={"goal": "Read distance"})
+    request = PreparedRun(request_id=request_id, settings=item.settings, workspace_name="quick-test", platform_revision="exact", target_id="chrome", mode="explore", goal="Read distance")
+    raw = AgentFinalOutput(status="inconclusive", summary="6510").model_dump_json()
+    task_result = TaskResult(
+        task_id="distance",
+        status="inconclusive",
+        steps=[StepResult(step_id=1, status="success", tool_name="agent_runtime.runner", actual_outcome=raw)],
+        verification=VerificationResult(status="inconclusive", summary="Coverage remains unproven."),
+        report=ReportArtifact(run_id="answer", path=item.settings.output.runs_dir / "answer" / "report.md"),
+    )
+
+    async def execute(self, request):
+        return SimpleNamespace(task_result=task_result, recording=None)
+
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.FsqAgent.from_settings", lambda *a: object())
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.DynamicExecutionService.execute", execute)
+    await _run_explore(request, state)
+    snapshot = state.snapshot(request_id)
+    assert snapshot["summary"] == "6510"
+    assert snapshot["status"] == snapshot["result"]["status"] == "inconclusive"

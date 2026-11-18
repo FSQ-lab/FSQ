@@ -180,7 +180,8 @@ async def test_create_case_only_returns_recorded_run_local_candidate(tmp_path: P
     monkeypatch.setattr("fsq_agent.application.cases.require_initialized_workspace", lambda _request: type("Workspace", (), {"workspace": tmp_path.resolve()})())
     candidate = tmp_path / "runs" / "run-1" / "candidate.fsq.yaml"
     cases_dir = tmp_path / "cases" / "web"
-    settings = SimpleNamespace(cases=SimpleNamespace(dir=cases_dir))
+    settings = _settings(tmp_path)
+    settings.cases.dir = cases_dir
     recording = RecordingResult(
         status=recording_status,
         recording_path=tmp_path / "runs" / "run-1" / "recording.json",
@@ -212,3 +213,64 @@ async def test_create_case_only_returns_recorded_run_local_candidate(tmp_path: P
     )
 
     assert (result.candidate_case_path == candidate) is has_candidate
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ['{"status":"inconclusive","summary":"6510"}', "6510", '{"status":"inconclusive","summary":"   "}'])
+async def test_create_case_preserves_primary_answer_and_authoritative_inconclusive_status(tmp_path, monkeypatch, raw):
+    from fsq_agent.models import StepResult
+
+    settings = _settings(tmp_path)
+    task_result = _task_result(tmp_path).model_copy(update={
+        "status": "inconclusive",
+        "steps": [StepResult(step_id=1, status="success", tool_name="agent_runtime.runner", actual_outcome=raw)],
+        "verification": VerificationResult(status="inconclusive", summary="Coverage remains unproven."),
+    })
+
+    async def execute(self, request):
+        return SimpleNamespace(task_result=task_result, recording=None)
+
+    monkeypatch.setattr("fsq_agent.application.cases.require_initialized_workspace", lambda request: SimpleNamespace(workspace=tmp_path))
+    monkeypatch.setattr("fsq_agent.application.cases.DynamicExecutionService.execute", execute)
+    result = await create_case(
+        CaseCreateRequest(current_directory=tmp_path, platform="web", goal="Return the distance in meters as an integer"),
+        settings_loader=lambda path, platform: settings,
+        agent_factory=lambda value: object(),
+    )
+    assert result.summary == ("6510" if raw.startswith('{"status"') and '"6510"' in raw else "Coverage remains unproven.")
+    assert result.status == "inconclusive"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_main_answer", [True, False])
+async def test_create_case_redacts_provider_auth_and_encoded_runtime_secrets(tmp_path, monkeypatch, use_main_answer):
+    from urllib.parse import quote
+
+    from fsq_agent.models import AgentFinalOutput, StepResult
+
+    settings = _settings(tmp_path)
+    settings.agent_runtime.api_key = "UNIT_PROVIDER_CREDENTIAL"
+    runtime_secret = f"unit private {tmp_path.name}"
+    settings.runtime_secrets.set_values({"PRIVATE": runtime_secret})
+    encoded = quote(runtime_secret, safe="")
+    summary = f"6510\n{settings.agent_runtime.api_key}\nAuthorization: Bearer UNIT_AUTH_CREDENTIAL\nhttps://example.test/?q={encoded}"
+    task_result = _task_result(tmp_path).model_copy(update={
+        "status": "inconclusive",
+        "steps": [StepResult(step_id=1, status="success", tool_name="agent_runtime.runner", actual_outcome=AgentFinalOutput(status="inconclusive", summary=summary).model_dump_json() if use_main_answer else "not structured output")],
+        "verification": VerificationResult(status="inconclusive", summary="Coverage remains unproven." if use_main_answer else summary),
+    })
+
+    async def execute(self, request):
+        return SimpleNamespace(task_result=task_result, recording=None)
+
+    monkeypatch.setattr("fsq_agent.application.cases.require_initialized_workspace", lambda request: SimpleNamespace(workspace=tmp_path))
+    monkeypatch.setattr("fsq_agent.application.cases.DynamicExecutionService.execute", execute)
+    result = await create_case(
+        CaseCreateRequest(current_directory=tmp_path, platform="web", goal="Return the distance in meters as an integer"),
+        settings_loader=lambda path, platform: settings,
+        agent_factory=lambda value: object(),
+    )
+    assert result.summary.startswith("6510\n")
+    for private in (settings.agent_runtime.api_key, runtime_secret, encoded, "UNIT_AUTH_CREDENTIAL"):
+        assert private not in result.summary
+    assert result.status == "inconclusive"

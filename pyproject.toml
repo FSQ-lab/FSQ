@@ -35,7 +35,7 @@ dependencies = [
     "pyyaml==6.0.3",
     "ruamel.yaml==0.18.16",
     "jinja2==3.1.6",
-    "appium-connect-agent @ git+https://github.com/FSQ-lab/appium-connect-agent.git@b376d76187b1448580a428ac3ff11f2765b8be17",
+    "appium-connect-agent @ git+https://github.com/FSQ-lab/appium-connect-agent.git@1d39c337e85b3e55ccfca327dd36243c1bcf3d2d",
     "playwright==1.60.0",
     "pywinauto==0.6.9",
     "pillow==13.0.0",

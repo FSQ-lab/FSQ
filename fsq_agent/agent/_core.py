@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fsq_agent.agent._events import RunEventEmitter
+from fsq_agent.agent._pre_plan import verification_goal_for_task
 from fsq_agent.agent._runtime import CodingAgentRuntime, CodingAgentRuntimeFactory
 from fsq_agent.agent._verifier import Verifier
 from fsq_agent.config import Settings
@@ -18,6 +19,7 @@ from fsq_agent.models import (
     ConfigurationError,
     DynamicAgentOutcome,
     FsqAgentError,
+    GoalPrePlan,
     KnowledgeBundle,
     PlanningError,
     ReportGenerationError,
@@ -210,14 +212,18 @@ class FsqAgent:
             return task
 
         reference_type, reference_text = self._planning_reference_for_task(task)
+        if not reference_text.strip():
+            raise PlanningError("Goal pre-plan requires a nonempty request scope.")
         pre_plan = await self._run_pre_plan(reference_type, reference_text, skills, run_id, emitter)
+        if not isinstance(pre_plan, GoalPrePlan):
+            raise PlanningError("Goal pre-plan output did not match the expected schema.")
         generated_key_actions = [
             f"Key action {index}: {action.action.strip()}" + (f"\nNotes: {action.notes.strip()}" if action.notes.strip() else "")
             for index, action in enumerate(pre_plan.key_actions, start=1)
             if action.action.strip()
         ]
         key_actions = list(task.key_actions) or generated_key_actions
-        verification_goal = pre_plan.verification_goal.strip()
+        verification_goal = pre_plan.verification_goal.strip() or verification_goal_for_task(task)
         payload = {
             "key_action_count": len(key_actions),
             "verification_goal_present": bool(verification_goal),
@@ -230,24 +236,11 @@ class FsqAgent:
                     run_id=run_id,
                     task_id=task.id,
                     type="planning_update",
-                    title="Goal pre-plan produced no key actions",
-                    message="Pre-plan did not produce a useful key-action chain.",
+                    title="Goal pre-plan uses request-grounded flow guidance",
+                    message="Derive the authorized path from fresh observations without inventing actions or acceptance conditions.",
                     payload=payload,
                 )
             )
-            raise PlanningError("Goal pre-plan did not produce useful key actions.", context=payload)
-        if not verification_goal:
-            await emitter.emit(
-                RunEvent(
-                    run_id=run_id,
-                    task_id=task.id,
-                    type="planning_update",
-                    title="Goal pre-plan produced no verification goal",
-                    message="Pre-plan did not produce a usable final verification goal.",
-                    payload=payload,
-                )
-            )
-            raise PlanningError("Goal pre-plan did not produce a usable verification goal.", context=payload)
 
         await emitter.emit(
             RunEvent(

@@ -13,7 +13,7 @@ from typing import Any, Never
 
 from fsq_agent._capability_bootstrap import steps_require_provider
 from fsq_agent.adapters.coding_agent import create_coding_agent_runtime
-from fsq_agent.agent import FsqAgent
+from fsq_agent.agent import CodingAgentPolicy, FsqAgent
 from fsq_agent.ai_services import build_ai_assertion_evaluator
 from fsq_agent.application import ApplicationError, QuickTestPrepareResult, execute_prepared_quick_test
 from fsq_agent.case_dsl import FsqCaseLoader, FsqExecutableStepAdapter
@@ -277,6 +277,9 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
             )
         )
         result = execution.task_result
+        runner = next((step for step in reversed(result.steps) if step.tool_name == "agent_runtime.runner"), None)
+        main_output = CodingAgentPolicy().coerce_agent_final_output(runner.tool_output or runner.actual_outcome) if runner else None
+        summary = main_output.summary if main_output and main_output.summary.strip() else result.verification.summary
         projection.bind_run(result.report.run_id)
         state.transition(request_id, "finalizing", summary="Finalizing evidence, report, and recording.")
         projection.load_persisted_manifest()
@@ -284,7 +287,7 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
         state.finish(
             request_id,
             status=result.status,
-            summary=projection.safe_text(result.verification.summary),
+            summary=projection.safe_text(summary),
             result={
                 "status": result.status,
                 "durationMs": result.duration_ms,

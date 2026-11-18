@@ -262,10 +262,13 @@ class OpenAIConversation:
     def filtered_input(self, replacements: Mapping[int, str]) -> list[dict]:
         return [{**item, "output": replacements[index]} if index in replacements else item for index, item in enumerate(self.history)]
 
-    async def request(self, replacements: Mapping[int, str]) -> BackendTurn:
-        finalization = self._finalizing
-        phase_parameters = self._finalization_parameters if finalization else self.parameters
+    async def request(self, replacements: Mapping[int, str], *, final_turn_instructions: str | None = None) -> BackendTurn:
+        finalization = self._finalizing or final_turn_instructions is not None
+        phase_parameters = self._finalization_parameters if finalization and self._finalization_parameters is not None else self.parameters
         parameters = {**phase_parameters, "input": self.filtered_input(replacements)}
+        if final_turn_instructions is not None:
+            parameters.pop("tools", None)
+            parameters["instructions"] = f"{parameters['instructions']}\n\n{final_turn_instructions}"
         response = await _read_response(self.client, parameters, stream=self.stream)
         items = response_items(response)
         self.history.extend(items)

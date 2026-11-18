@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from fsq_agent.agent._pre_plan import verification_goal_for_task
 from fsq_agent.agent._structured_output import coerce_agent_final_output
 from fsq_agent.models import AgentFinalOutput, StepResult, Task, ToolCallRecord
 
@@ -39,7 +40,7 @@ class VerificationEvidenceBuilder:
         report_dir = events_path.parent if events_path else None
         tool_calls = self._load_tool_calls(events_path)
         return VerificationEvidenceBundle(
-            verification_goal=task.verification_goal or "",
+            verification_goal=verification_goal_for_task(task),
             task=task.model_dump(mode="json"),
             agent_claims=self._agent_claims(results),
             execution_steps=[self._step_record(step) for step in results],
@@ -51,6 +52,8 @@ class VerificationEvidenceBuilder:
                 "Check exactly the supplied verification_goal and do not infer extra final goals from key actions.",
                 "Mark the verification_goal satisfied only when supplied events, tool outputs, or artifact excerpts support it.",
                 "Mark the verification_goal unmet only when supplied evidence proves it did not happen or the required final state is false.",
+                "For open browsing, inspection, or exploration, evidence of the requested authorized flow and truthful delivery of observations is sufficient. Do not invent a rigid QA assertion, exhaustive exploration, a known answer, or an unrequested state change; unauthorized effects are not completion.",
+                "Explicit exact text, objective outcomes/answers, requested format and units/rounding, duration intervals, collection completeness, and no-extra-item requirements remain strict. Contradictory observed values prove the corresponding requirement unmet; missing required evidence is inconclusive, not success.",
                 "If evidence is missing, truncated, ambiguous, or outside the supplied bundle, use status=inconclusive.",
                 "For visual assertions such as assertWithAI, do not re-inspect screenshot pixels. Verify that execution evidence contains the backend AI assertion tool result, including verdict metadata and screenshot artifact references, and that no supplied evidence contradicts that result.",
                 "Android visual outcome=inconclusive or Runner status=incomplete is an unverified assertion, never a negative verdict inferred from passed=false. A completed tool callback or summary envelope is transport success, not business success. Optional metadata cannot waive the unresolved assertion. Preserve its safe reason; do not rejudge its pixels. Only independently proven failures justify failure when an assertion remains unverified.",
@@ -196,6 +199,8 @@ Rules:
 - Do not infer extra final goals from key actions, planning records, file names, or intermediate operations.
 - Mark the verification_goal as satisfied only when the supplied evidence supports it.
 - Mark the verification_goal as unmet only when the supplied evidence proves the required action/state did not occur or a permanent execution failure prevents it.
+- For open browsing, inspection, or exploration, accept evidence of the requested authorized flow plus truthful delivery of observations without unauthorized effects. Do not require an invented QA assertion, exhaustive exploration, a known answer, or an unrequested state change.
+- Preserve every explicit objective constraint: exact text/answers, requested output format, units/rounding, complete collection coverage, duration intervals, and absence of extras. For example, "8 servings" is not "8 servings by", and 51:03 is outside 45-50 minutes. Supplied contradictory saved state proves that requirement unmet; genuinely missing required evidence is inconclusive. An answer in summary is still a claim and uncertainty elsewhere must not be mistaken for either proof or absence of that answer.
 - If evidence is insufficient or ambiguous, explain it in evidence/errors and use status=inconclusive unless the verification_goal is proven unmet.
 - When verification_goal explicitly requests a complete filename, including an extensionless name, treat it as exact identity: a default .md suffix is not equivalent. Verify full saved name and destination from actual file-list/file-management evidence, not a hidden-extension title. Missing identity evidence is inconclusive, not proof of a match. Explicit draft/no-save restrictions win; generated notes do not authorize a save or add final goals.
 - For visual assertions such as assertWithAI, do not re-inspect screenshot pixels. The execution stage evaluates authored visual assertions through the active backend AI assertion tool. Verify that execution records contain the AI assertion result, verdict metadata, and screenshot artifact reference, that the main agent's structured output reports the corresponding result, and that no supplied evidence contradicts that result.

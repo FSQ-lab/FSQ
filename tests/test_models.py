@@ -427,6 +427,26 @@ def test_android_initial_idle_policy_rejects_coercion_and_inexact_values(value: 
     assert failed.value.errors()[0]["loc"] == ("uiautomator2_wait_for_idle_timeout_ms",)
 
 
+def test_android_command_idle_timeout_defaults_independently_of_ui_idle_policy() -> None:
+    settings = AndroidHarnessSettings()
+    assert settings.new_command_timeout_seconds == 900.0
+    assert settings.uiautomator2_wait_for_idle_timeout_ms is None
+
+
+@pytest.mark.parametrize("value", [None, 0, 0.125, 60, 1200.5, 1e100])
+def test_android_command_idle_timeout_preserves_sdk_supported_values(value: float | None) -> None:
+    settings = AndroidHarnessSettings(new_command_timeout_seconds=value)
+    assert settings.new_command_timeout_seconds == value
+    assert settings.model_dump()["new_command_timeout_seconds"] == value
+
+
+@pytest.mark.parametrize("value", [True, False, "900", "", -1, -0.5, float("nan"), float("inf"), float("-inf"), {}])
+def test_android_command_idle_timeout_rejects_invalid_sdk_values(value: object) -> None:
+    with pytest.raises(ValidationError) as failed:
+        AndroidHarnessSettings.model_validate({"new_command_timeout_seconds": value})
+    assert failed.value.errors()[0]["loc"] == ("new_command_timeout_seconds",)
+
+
 @pytest.mark.parametrize("duration", [1, 60000])
 def test_android_swipe_duration_boundaries_and_nullable_point_fraction(duration: int) -> None:
     params = AndroidSwipeParams(start={"x": 1, "y": 2}, end={"x": 3, "y": 4}, percent=None, duration=duration)

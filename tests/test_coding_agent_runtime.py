@@ -596,6 +596,63 @@ async def _run_in_context(runtime, task, knowledge, skills, run_id, event_sink=N
 
 
 @pytest.mark.asyncio
+async def test_main_closing_policy_preserves_answer_before_cleanup_and_read_only_verifier(tmp_path, monkeypatch):
+    from fsq_agent.agent import CodingAgentPolicy
+
+    requests, order = [], []
+    main_output = AgentFinalOutput(status="inconclusive", summary="6510", errors=["Coverage remains bounded."])
+    policy = CodingAgentPolicy()
+
+    class Harness(_FakeHarness):
+        def close(self):
+            order.append("harness.close")
+
+    class Session(_FakeProviderSession):
+        async def close(self):
+            order.append("provider.close")
+
+    class Engine:
+        async def run(self, model, request, *, on_event=None):
+            requests.append(request)
+            if request.output.name == "GoalPrePlan":
+                order.append("preplan")
+                assert request.final_turn_instructions is None
+                return AgentResult(final_output=GoalPrePlan(goal="Read the distance.", verification_goal="Observed distance is delivered."))
+            if request.name.endswith(" verifier"):
+                order.append("verifier")
+                assert order[-3:-1] == ["harness.close", "provider.close"]
+                assert request.tools == ()
+                assert request.final_turn_instructions is None
+                return AgentResult(final_output=AgentFinalOutput(status="inconclusive", summary="Independent coverage assessment."))
+            order.append("main")
+            assert "harness.close" not in order
+            assert request.final_turn_instructions == policy.final_turn_instructions
+            assert request.final_turn_instructions.strip()
+            action = next(tool for tool in request.tools if tool.name == "tap_on")
+            await action.invoke(ToolCall(name="tap_on", arguments={"target": "distance"}, call_id="read-distance"))
+            return AgentResult(final_output=main_output, usage=TokenUsage(6, 4, 10, 2))
+
+    settings = Settings(agent_runtime=_azure_openai_settings())
+    settings.agent_runtime.max_turns = 2
+    settings.execution.post_action_delay_seconds = 0
+    settings.output.runs_dir = tmp_path
+    monkeypatch.setattr("fsq_agent.adapters.coding_agent._runtime.build_model_provider_session", lambda _: Session())
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _: Harness(), policy=policy, engine=Engine())
+    task = Task(id="answer-close", description="How many meters?", verification_goal="The observed distance is delivered.")
+    await runtime.run_pre_plan(task.description, KnowledgeBundle(), [], "answer-close")
+    results = await _run_in_context(runtime, task, KnowledgeBundle(), [], "answer-close")
+    runner = next(step for step in results if step.tool_name == "agent_runtime.runner")
+    assert AgentFinalOutput.model_validate(runner.tool_output) == main_output
+    assert runner.actual_outcome == policy.serialize_agent_final_output(main_output)
+    verification = await runtime.run_verification(task, results, "answer-close")
+    assert AgentFinalOutput.model_validate(verification[-1].tool_output).summary == "Independent coverage assessment."
+    assert AgentFinalOutput.model_validate(runner.tool_output).summary == "6510"
+    assert len(requests) == 3
+    assert all(request.max_turns == 2 for request in requests)
+    assert order == ["preplan", "provider.close", "main", "harness.close", "provider.close", "verifier", "provider.close"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_failure_returns_failed_step() -> None:
     settings = Settings(agent_runtime=_azure_openai_settings())
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), lambda _run_id: _FailingHarness())
@@ -1522,19 +1579,6 @@ def test_runtime_builds_step_results_from_structured_pre_plan() -> None:
     assert steps[0].tool_name == "pre_plan"
     assert "Browser is open" in steps[0].actual_outcome
     assert "Used keyboard shortcut" in steps[1].actual_outcome
-
-
-def test_runtime_task_input_uses_goal_only_verification_contract() -> None:
-    settings = Settings(agent_runtime=AgentRuntimeSettings())
-    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
-    task = Task(id="derive", name="Derive", description="Open the page and verify it loads.")
-
-    task_input = runtime._build_task_input(task)
-
-    assert "Structured task input:" in task_input
-    assert '"schema_version": "task_input_v1"' in task_input
-    assert "Final verification goal: none provided" in task_input
-    assert "verification_goal" in task_input
 
 
 def test_runtime_task_input_includes_runtime_secret_names_and_warnings() -> None:

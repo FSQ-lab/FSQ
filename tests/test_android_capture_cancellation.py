@@ -248,3 +248,51 @@ def test_borrowed_capture_sdk_failure_retains_current_cancellation(sdk_failure, 
     finally:
         driver.close()
     assert session.cleanup_calls == []
+
+
+def test_idle_liveness_probe_shares_capture_cancellation_and_never_takes_late_pixels(monkeypatch):
+    from appium_connect_agent.automation import OperationCancelledError
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr("fsq_agent.drivers.android._appium_connect.time", SimpleNamespace(monotonic=lambda: clock.now))
+    started = threading.Event()
+    settled = threading.Event()
+    interrupted = asyncio.CancelledError()
+    calls = []
+    controls = []
+
+    def take_screenshot(*, control):
+        calls.append("capture")
+        return b"initial-pixels"
+
+    def ensure_alive(*, control):
+        calls.append("ensure_alive")
+        controls.append(control)
+        started.set()
+        try:
+            assert control.timeout_seconds == 25.0
+            assert control.cancellation.wait(5), "Idle probe did not receive capture cancellation."
+            raise OperationCancelledError("operation_cancelled", "a" * 32, "not_sent")
+        finally:
+            settled.set()
+
+    def check():
+        if started.is_set():
+            raise interrupted
+
+    session = _borrowed_capture_session(take_screenshot)
+    session.ensure_alive = ensure_alive
+    driver = AppiumConnectAndroidDriver(app_id="com.example.offline", session=session)
+    try:
+        assert driver.screenshot() == b"initial-pixels"
+        clock.now = 45.0
+        with pytest.raises(asyncio.CancelledError) as caught:
+            driver.screenshot({"cancellation_check": check})
+        assert caught.value is interrupted
+        assert settled.is_set()
+        assert controls[0].cancellation.is_set()
+        assert calls == ["capture", "ensure_alive"]
+        assert interrupted.fsq_capture_diagnostics["backend_code"] == "operation_cancelled"
+    finally:
+        driver.close()
+    assert session.cleanup_calls == []

@@ -111,6 +111,7 @@ class AgentRequest(Generic[OutputT]):
     tracing_enabled: bool = False
     tool_output_filter: ToolOutputFilter | None = field(default=None, repr=False)
     reasoning_effort: ReasoningEffort = "mid"
+    final_turn_instructions: str | None = None
 
 
 @dataclass(frozen=True)

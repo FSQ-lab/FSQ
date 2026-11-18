@@ -11,8 +11,9 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import yaml
 from PIL import Image
+from pydantic import ValidationError
 
-from fsq_agent.models import EvidenceBundle, PublicRunReport, ReportGenerationError, RunReportExportOptions, RunReportExportResult
+from fsq_agent.models import AgentFinalOutput, EvidenceBundle, PublicRunReport, ReportGenerationError, RunReportExportOptions, RunReportExportResult
 from fsq_agent.report._comparison import compare_reports, normalize_snapshot, step_diffs
 
 MAX_FACT_BYTES = 32 * 1024 * 1024
@@ -414,7 +415,7 @@ class RunReportService:
             if (root / filename).is_file():
                 artifacts.append({"artifact_id": artifact_id, "kind": "log", "path": filename, "mime_type": "application/json" if filename.endswith(".json") else "application/x-ndjson"})
         for filename, document in documents.items():
-            if document.get("failure_classification"):
+            if document.get("failure_classification") or document.get("agent_output"):
                 artifacts.append({"artifact_id": f"internal-{filename.replace('.', '-')}", "kind": "json", "path": filename, "mime_type": "application/json"})
         source_metadata = metadata.get("source") or {}
         source_path = source_metadata.get("snapshot_path")
@@ -1018,6 +1019,18 @@ class RunReportService:
 
     def _interpretations(self, run_id, execution, documents, suggestions, artifacts):
         interpretations = []
+        try:
+            main_output = AgentFinalOutput.model_validate(documents.get("report.json", {}).get("agent_output"))
+        except ValidationError:
+            main_output = None
+        if main_output and main_output.summary.strip():
+            interpretations.append({
+                "kind": "ai_suggestion",
+                "availability": "available",
+                "label": "Main answer",
+                "text": safe_text(main_output.summary, limit=None),
+                "references": [{"run_id": run_id, "artifact_id": "internal-report-json"}],
+            })
         failure = execution.get("first_failure")
         if isinstance(failure, dict):
             interpretations.append(

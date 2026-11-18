@@ -753,9 +753,13 @@ def test_unknown_quit_and_disposal_failure_preserve_order_and_explicit_continuat
         {"uiautomator2_wait_for_idle_timeout_ms": 0},
         {"uiautomator2_wait_for_idle_timeout_ms": 1000},
         {"uiautomator2_wait_for_idle_timeout_ms": 9_007_199_254_740_991},
+        {"new_command_timeout_seconds": None},
+        {"new_command_timeout_seconds": 0},
+        {"new_command_timeout_seconds": 0.125},
+        {"new_command_timeout_seconds": 1800.5, "uiautomator2_wait_for_idle_timeout_ms": 0},
     ],
     indirect=True,
-    ids=["omitted", "none", "zero", "explicit", "exact-upper-bound"],
+    ids=["omitted", "none", "zero", "explicit", "exact-upper-bound", "command-none", "command-zero", "command-fraction", "both-explicit"],
 )
 def test_initial_idle_policy_reaches_real_sdk_wire_and_preserves_owned_cleanup(managed_driver: _IsolatedManagedDriver, request: pytest.FixtureRequest) -> None:
     managed_driver.mode("serve")
@@ -775,6 +779,8 @@ def test_initial_idle_policy_reaches_real_sdk_wire_and_preserves_owned_cleanup(m
     assert caps["appium:appPackage"] == "com.example.isolated"
     assert caps["appium:noReset"] is True
     assert caps["appium:autoLaunch"] is False
+    timeout = request.node.callspec.params["managed_driver"].get("new_command_timeout_seconds", 900.0)
+    assert caps["appium:newCommandTimeout"] == (900.0 if timeout is None else timeout)
     expected = request.node.callspec.params["managed_driver"].get("uiautomator2_wait_for_idle_timeout_ms")
     key = "appium:settings[waitForIdleTimeout]"
     if expected is None:

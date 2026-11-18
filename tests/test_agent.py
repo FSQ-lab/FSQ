@@ -217,7 +217,7 @@ class _GoalRunRuntime(_Runtime):
                 step_id=1,
                 status="success",
                 actual_outcome=(
-                    f'{{"status":"success","summary":"Goal done","pre_plan":[],"plan_updates":[],"satisfied_criteria":["{satisfied}"],"unmet_criteria":[],"evidence":["Goal observed"],"errors":[]}}'
+                    json.dumps({"status": "success", "summary": "Goal done", "pre_plan": [], "plan_updates": [], "satisfied_criteria": [satisfied], "unmet_criteria": [], "evidence": ["Goal observed"], "errors": []})
                 ),
                 tool_name="agent_runtime.runner",
             )
@@ -782,6 +782,117 @@ async def test_agent_run_preplans_goal_only_task_before_execution(tmp_path: Path
     ]
     assert runtime.last_task.verification_goal == "Verify planned outcome for unknown: Access Downloads"
     assert any(event.title == "Goal pre-plan injected" for event in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("actions", [[], [{"step_id": 1, "action": "Inspect the requested Downloads list."}]])
+@pytest.mark.parametrize("goal", ["", "   ", "The requested Downloads list was inspected and its visible entries reported."])
+@pytest.mark.parametrize("caller_actions", [[], ["  Inspect only the visible entries; keep this wording.  "]])
+async def test_open_inspection_plan_reaches_main_and_verifier_without_invented_actions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, actions, goal, caller_actions) -> None:
+    from fsq_agent.agent import CodingAgentPolicy
+
+    _stub_provider_refresh(monkeypatch)
+    request = "Browse Downloads and report the visible filenames as a title list. Do not delete, save, or rename anything."
+    runtime = _GoalRunRuntime()
+    verification_inputs = []
+
+    async def plan(*args, **kwargs):
+        return GoalPrePlan(goal=request, key_actions=actions, verification_goal=goal)
+
+    async def verify(task, results, *args, **kwargs):
+        verification_inputs.append(json.loads(CodingAgentPolicy().build_verification_input(task, results)))
+        return []
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    monkeypatch.setattr(runtime, "run_verification", verify)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+    task = Task(id="open-inspection", name="Inspect Downloads", description=request, planning_reference_kind="goal", planning_reference_text=request, key_actions=caller_actions)
+
+    outcome = await _run_in_context(agent, task, "open-inspection")
+
+    assert runtime.last_task is outcome.task
+    assert outcome.verification.status == "success"
+    assert outcome.task.key_actions == (caller_actions or (["Key action 1: Inspect the requested Downloads list."] if actions else []))
+    assert len(verification_inputs) == 1
+    assert verification_inputs[0]["verification_goal"] == outcome.task.verification_goal
+    assert verification_inputs[0]["task"]["planning_reference_text"] == request
+    assert verification_inputs[0]["agent_claims"]["satisfied_criteria"] == [outcome.task.verification_goal]
+    if goal.strip():
+        assert outcome.task.verification_goal == goal
+    else:
+        assert request in outcome.task.verification_goal
+    assert task.verification_goal is None
+    assert task.key_actions == caller_actions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [None, "{broken JSON", {}, {"goal": "Inspect Downloads", "verification_goal": "", "key_actions": "broken"}])
+async def test_invalid_planning_contract_does_not_activate_open_flow_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+
+    async def plan(*args, **kwargs):
+        return invalid
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+
+    with pytest.raises(PlanningError):
+        await _run_in_context(agent, Task(id="invalid-plan", name="Browse Downloads", description="Inspect the visible files."), "invalid-plan")
+    assert runtime.last_task is None
+
+
+@pytest.mark.asyncio
+async def test_planning_failure_is_not_replaced_by_delivery_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+    failure = PlanningError("Goal pre-plan output did not match the expected schema.")
+
+    async def plan(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+
+    with pytest.raises(PlanningError) as raised:
+        await _run_in_context(agent, Task(id="broken-plan", name="Browse Downloads", description="Inspect the visible files."), "broken-plan")
+    assert raised.value is failure
+    assert runtime.last_task is None
+
+
+@pytest.mark.asyncio
+async def test_blank_plan_keeps_explicit_objective_goal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+    goal = 'Save exact text "8 servings by" in file "Recipe" with no extension and no extra entries.'
+
+    async def plan(*args, **kwargs):
+        return GoalPrePlan(goal=goal, verification_goal=" ", key_actions=[])
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+    task = Task(id="exact-objective", name="Save recipe", description=goal, verification_goal=goal)
+
+    outcome = await _run_in_context(agent, task, "exact-objective")
+
+    assert outcome.task.verification_goal == goal
+    assert outcome.task.key_actions == []
+
+
+@pytest.mark.asyncio
+async def test_blank_plan_cannot_create_authorized_scope_from_empty_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+
+    async def plan(*args, **kwargs):
+        return GoalPrePlan(goal="", verification_goal="", key_actions=[])
+
+    monkeypatch.setattr(runtime, "run_pre_plan", plan)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path / "knowledge", runs_dir=tmp_path / "runs"), Verifier(), None, _KnowledgeLoader(), _SkillLoader(), runtime)
+
+    with pytest.raises(PlanningError):
+        await _run_in_context(agent, Task(id="empty-scope", name="Task", description=" "), "empty-scope")
+    assert runtime.last_task is None
 
 
 @pytest.mark.asyncio

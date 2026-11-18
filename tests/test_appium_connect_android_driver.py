@@ -23,7 +23,7 @@ from fsq_agent.core.evidence import ArtifactStore
 from fsq_agent.core.harness._android import AndroidHarness
 from fsq_agent.core.harness._appium_connect_android_driver import AppiumConnectAndroidDriver
 from fsq_agent.core.harness._driver_tools import _discover_driver_capability_definitions
-from fsq_agent.models import AndroidAssertWithAIParams, ConfigurationError, ExecutableStep, HarnessContext, ReplayPolicy, ToolExecutionError
+from fsq_agent.models import AndroidAssertWithAIParams, AndroidHarnessSettings, ConfigurationError, ExecutableStep, HarnessContext, ReplayPolicy, ToolExecutionError
 
 
 class TargetError(RuntimeError):
@@ -284,6 +284,9 @@ class FakeSession:
         self.display: tuple[object, object] = (1080, 2400)
         self.display_error: BaseException | None = None
         self.quit_error: BaseException | None = None
+        self.state = "active"
+        self.alive_result = False
+        self.alive_error: BaseException | None = None
         self.calls: list[tuple[Any, ...]] = []
         self.thread_ids: set[int] = set()
         self.device = FakeDevice(self)
@@ -311,9 +314,16 @@ class FakeSession:
         return SimpleNamespace(
             appium_session_id="appium-session-123",
             id="local-session-1",
-            state="active",
+            state=self.state,
             target_app_id=self.target_app_id,
         )
+
+    def ensure_alive(self, *, control: Any = None) -> bool:
+        self._record_thread()
+        self.calls.append(("ensure_alive", control.timeout_seconds))
+        if self.alive_error is not None:
+            raise self.alive_error
+        return self.alive_result
 
     def observe_tree(self, *, max_depth: int | None = None, max_nodes: int | None = None, control: object | None = None) -> Any:
         del max_depth, max_nodes, control
@@ -492,6 +502,256 @@ def test_owned_managed_lifecycle_closes_session_before_exiting_managed_scope(mon
     assert len(worker_tids) == 1
     assert session.thread_ids == worker_tids
     assert threading.get_ident() not in worker_tids
+
+
+@pytest.fixture
+def android_clock(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr("fsq_agent.drivers.android._appium_connect.time", SimpleNamespace(monotonic=lambda: clock.now))
+    return clock
+
+
+@pytest.fixture
+def owned_android_backend(monkeypatch: pytest.MonkeyPatch):
+    import appium_connect_agent.automation as aca_automation
+    import appium_connect_agent.runtime as aca_runtime
+
+    session = FakeSession()
+    events: list[tuple[Any, ...]] = []
+
+    class FakeScope:
+        def __enter__(self):
+            events.append(("scope.enter", threading.get_ident()))
+            return SimpleNamespace()
+
+        def __exit__(self, *_args):
+            events.append(("scope.exit", threading.get_ident()))
+            return False
+
+    class FakeRuntime:
+        def __init__(self, _settings):
+            pass
+
+        def start_managed(self, **_kwargs):
+            return FakeScope()
+
+    def create_session(connection, device_id, **kwargs):
+        events.append(("create_session", kwargs, threading.get_ident()))
+        return session
+
+    monkeypatch.setattr(aca_automation, "create_session", create_session)
+    monkeypatch.setattr(aca_runtime, "Runtime", FakeRuntime)
+    monkeypatch.setattr("fsq_agent.drivers.android._appium_connect._allocate_loopback_port", lambda: 41001)
+    monkeypatch.setattr("fsq_agent.drivers.android._appium_connect._resolve_managed_local_settings", lambda _cls: SimpleNamespace())
+    return session, events
+
+
+@pytest.mark.parametrize("policy", [{}, {"new_command_timeout_seconds": None}, {"new_command_timeout_seconds": 0}, {"new_command_timeout_seconds": 0.125}, {"new_command_timeout_seconds": 1800.5}])
+@pytest.mark.parametrize("idle", [None, 0, 1000])
+def test_factory_forwards_command_and_ui_idle_policies_unchanged(owned_android_backend, policy, idle):
+    from fsq_agent.core.interfaces import DriverFactory
+
+    session, events = owned_android_backend
+    settings = AndroidHarnessSettings(**policy, uiautomator2_wait_for_idle_timeout_ms=idle)
+    driver = DriverFactory().create_android_driver(settings, app_id="com.example.app", serial="isolated-policy-device")
+    try:
+        assert driver.press_key({"key": "Home"})["status"] == "passed"
+        creates = [event for event in events if event[0] == "create_session"]
+        assert len(creates) == 1
+        kwargs = creates[0][1]
+        assert kwargs["new_command_timeout_seconds"] == policy.get("new_command_timeout_seconds", 900.0)
+        assert kwargs["no_reset"] is True
+        assert kwargs["auto_launch"] is False
+        assert kwargs["force_app_launch"] is False
+        assert kwargs["full_reset"] is False
+        assert kwargs["should_terminate_app"] is False
+        if idle is None:
+            assert "uiautomator2_wait_for_idle_timeout_ms" not in kwargs
+        else:
+            assert kwargs["uiautomator2_wait_for_idle_timeout_ms"] == idle
+        assert session.calls == [("press_keycode", 3)]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("timeout", [None, 0, 25.5])
+def test_borrowed_session_command_idle_policy_is_not_mutated(timeout):
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session, new_command_timeout_seconds=timeout)
+    driver.close()
+    assert session.calls == []
+    assert session.thread_ids == set()
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_idle_liveness_is_bounded_owner_thread_preflight_not_a_business_write(owned_android_backend, android_clock, recovered):
+    session, events = owned_android_backend
+    session.alive_result = recovered
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", serial="isolated-liveness-device")
+    try:
+        assert driver.press_key({"key": "Home"})["status"] == "passed"
+        android_clock.now = 44.0
+        assert driver.press_key({"key": "Home"})["status"] == "passed"
+        android_clock.now = 89.0
+        assert driver.press_key({"key": "Back"})["status"] == "passed"
+        assert session.calls == [("press_keycode", 3), ("press_keycode", 3), ("ensure_alive", 25.0), ("back",)]
+        assert len([event for event in events if event[0] == "create_session"]) == 1
+        assert len(session.thread_ids) == 1
+        assert threading.get_ident() not in session.thread_ids
+        assert driver._session is session
+        android_clock.now += 1.0
+        assert driver.press_key({"key": "Back"})["status"] == "passed"
+        assert sum(call[0] == "ensure_alive" for call in session.calls) == 1
+    finally:
+        driver.close()
+    assert [event[0] for event in events] == ["scope.enter", "create_session", "scope.exit"]
+    assert session.calls[-1] == ("quit",)
+
+
+def test_idle_interval_starts_after_operation_completion(android_clock, monkeypatch):
+    session = FakeSession()
+    original_back = session.device.back
+
+    def long_back(**kwargs):
+        original_back(**kwargs)
+        android_clock.now += 100.0
+
+    monkeypatch.setattr(session.device, "back", long_back)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        assert driver.press_key({"key": "Back"})["status"] == "passed"
+        android_clock.now += 44.999
+        assert driver.press_key({"key": "Home"})["status"] == "passed"
+        android_clock.now += 45.0
+        assert driver.press_key({"key": "Home"})["status"] == "passed"
+        assert session.calls == [("back",), ("press_keycode", 3), ("ensure_alive", 25.0), ("press_keycode", 3)]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("quarantined", [False, True])
+def test_probe_failure_never_dispatches_or_retries_the_requested_write(android_clock, quarantined):
+    session = FakeSession()
+    failure = CommandError("operation_timeout", "probe-private-canary")
+    failure.request_state = "response_unknown"
+
+    def probe(*, control):
+        session.calls.append(("ensure_alive", control.timeout_seconds))
+        if quarantined:
+            session.state = "uncertain"
+        raise failure
+
+    session.ensure_alive = probe
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        assert driver.press_key({"key": "Home"})["status"] == "passed"
+        android_clock.now = 45.0
+        result = driver.press_key({"key": "Back"})
+        assert result["failure_category"] == "action_error"
+        assert result["metadata"]["backend_code"] == "operation_timeout"
+        assert result["metadata"]["request_state"] == "response_unknown"
+        assert "probe-private-canary" not in str(result)
+        assert session.calls == [("press_keycode", 3), ("ensure_alive", 25.0)]
+        if quarantined:
+            android_clock.now = 100.0
+            assert driver.press_key({"key": "Back"})["metadata"]["reason"] == "session_unavailable"
+            assert len(session.calls) == 2
+    finally:
+        driver.close()
+
+
+def test_probe_cancellation_propagates_before_the_business_operation(android_clock):
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    interruption = CancelledError("probe-private-canary")
+    try:
+        assert driver.press_key({"key": "Home"})["status"] == "passed"
+        session.alive_error = interruption
+        android_clock.now = 45.0
+        with pytest.raises(CancelledError) as caught:
+            driver.press_key({"key": "Back"})
+        assert caught.value is interruption
+        assert session.calls == [("press_keycode", 3), ("ensure_alive", 25.0)]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("state", ["creating", "uncertain", "disposing", "disposed", "closing", "closed"])
+def test_idle_nonactive_session_is_not_probed_or_recovered(android_clock, state):
+    session = FakeSession()
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        assert driver.press_key({"key": "Home"})["status"] == "passed"
+        session.state = state
+        android_clock.now = 100.0
+        result = driver.press_key({"key": "Back"})
+        assert result["metadata"]["reason"] == "session_unavailable"
+        assert result["metadata"]["session_state"] == state
+        assert session.calls == [("press_keycode", 3)]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_close_after_idle_never_probes_and_owned_close_fences_later_recovery(owned_android_backend, android_clock, borrowed):
+    session, events = owned_android_backend
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", serial="isolated-close-device", session=session if borrowed else None)
+    assert driver.press_key({"key": "Home"})["status"] == "passed"
+    android_clock.now = 100.0
+    driver.close()
+    calls = list(session.calls)
+    event_snapshot = list(events)
+    if not borrowed:
+        assert driver.press_key({"key": "Back"})["metadata"]["reason"] == "closed"
+        with pytest.raises(ToolExecutionError):
+            driver.context()
+    driver.close()
+    assert session.calls == calls
+    assert events == event_snapshot
+    assert not any(call[0] == "ensure_alive" for call in calls)
+    if borrowed:
+        assert ("quit",) not in calls
+    else:
+        assert calls[-1] == ("quit",)
+
+
+def test_pending_cleanup_does_not_probe_active_session_or_create_a_generation(owned_android_backend, android_clock):
+    session, events = owned_android_backend
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", serial="isolated-cleanup-device")
+    assert driver.press_key({"key": "Home"})["status"] == "passed"
+    session.quit_error = RuntimeError("quit-private-canary")
+    try:
+        with pytest.raises(RuntimeError):
+            driver.close()
+        android_clock.now = 100.0
+        assert driver.press_key({"key": "Back"})["metadata"]["reason"] == "cleanup_pending"
+        assert session.calls == [("press_keycode", 3), ("quit",)]
+        assert [event[0] for event in events] == ["scope.enter", "create_session"]
+    finally:
+        session.quit_error = None
+        with pytest.raises(RuntimeError):
+            driver.close()
+
+
+@pytest.mark.parametrize("request_state", ["response_received", "response_unknown"])
+def test_business_failure_is_not_replayed_or_followed_by_an_fsq_reconnect(android_clock, monkeypatch, request_state):
+    session = FakeSession()
+    failure = CommandError("command_failed", "operation-private-canary")
+    failure.request_state = request_state
+
+    def fail_back(*, control):
+        session.calls.append(("back",))
+        raise failure
+
+    monkeypatch.setattr(session.device, "back", fail_back)
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        result = driver.press_key({"key": "Back"})
+        assert result["failure_category"] == "action_error"
+        assert result["metadata"]["request_state"] == request_state
+        assert session.calls == [("back",)]
+    finally:
+        driver.close()
 
 
 def test_locator_translation_handles_standard_id_short_id_raw_id_accessibility_compound_and_injection_safe_xpath() -> None:
@@ -682,8 +942,28 @@ def test_point_tap_and_swipe_support_scaling_directional_swipe_and_reject_malfor
         ("tap_at", 320, 640),
         ("tap_at", 50, 100),
         ("swipe_between", 400, 950, 100, 950, 1000),
-        ("swipe_between", 270, 900, 270, 300, 250),
+        ("swipe_between", 270, 960, 270, 240, 250),
     ]
+
+
+@pytest.mark.parametrize("display", [(1080, 2400), (541, 1201), (2, 2), (1, 1)])
+@pytest.mark.parametrize("direction", ["up", "down", "left", "right"])
+def test_untargeted_direction_swipe_uses_current_safe_physical_interior(display, direction):
+    from math import ceil, floor
+
+    session = FakeSession(observation=_tree_observation(width=99, height=101))
+    session.display = display
+    width, height = display
+    x_mid, y_mid = width // 2, height // 2
+    left, right = min(ceil(width * 0.18), width - 1), min(floor(width * 0.82), width - 1)
+    top, bottom = min(ceil(height * 0.20), height - 1), min(floor(height * 0.80), height - 1)
+    expected = {"up": (x_mid, bottom, x_mid, top), "down": (x_mid, top, x_mid, bottom), "left": (right, y_mid, left, y_mid), "right": (left, y_mid, right, y_mid)}[direction]
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        assert driver.swipe({"direction": direction})["status"] == "passed"
+    finally:
+        driver.close()
+    assert session.calls == [("display_size",), ("swipe_between", *expected, 200)]
 
 
 def test_ui_snapshot_compacts_wrapper_nodes_truncates_text_and_reports_coverage() -> None:
@@ -1100,7 +1380,7 @@ def test_context_and_all_pointer_modes_use_fresh_physical_display_not_viewport()
     assert driver.context()["screen_size"] == (540, 1200)
     assert driver.tap_at({"point": {"x": 1080, "y": 2400}, "reference_screen_size": {"width": 1080, "height": 2400}})["output"] == {"point": {"x": 539, "y": 1199}}
     assert driver.swipe({"start": {"x": 0, "y": 0}, "end": {"x": 539, "y": 1199}})["status"] == "passed"
-    assert ("swipe_between", 540, 1800, 540, 600, 200) in session.calls
+    assert ("swipe_between", 540, 1920, 540, 480, 200) in session.calls
     assert sum(call[0] == "display_size" for call in session.calls) == 5
     assert sum(call[0] == "observe_tree" for call in session.calls) == 2
 
@@ -1865,6 +2145,24 @@ def test_numeric_recovery_clears_once_and_verifies_exact_or_placeholder_composed
     _assert_numeric_secret_safe(result, session)
 
 
+@pytest.mark.parametrize("recovered", [False, True])
+def test_idle_liveness_preserves_controlled_numeric_recovery_without_extra_writes(android_clock, recovered):
+    session = NumericSession()
+    session.alive_result = recovered
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
+    try:
+        assert driver.assert_state({"element": {"resourceId": "com.example.app:id/input"}})["status"] == "passed"
+        android_clock.now = 45.0
+        result = driver.input_text({"text": "20250", "locator": {"resourceId": "com.example.app:id/input"}})
+        assert result == {"status": "passed", "output": None}
+        assert _numeric_action_names(session) == ["click", "replace", "clear"] + ["key"] * 5
+        assert [action[1] for action in session.actions if action[0] == "key"] == [9, 7, 9, 12, 7]
+        assert sum(call[0] == "ensure_alive" for call in session.calls) == 1
+        _assert_numeric_secret_safe(result, session)
+    finally:
+        driver.close()
+
+
 @pytest.mark.parametrize("text", ["hello", "\uff11\uff12", "\u0661\u0662", "12 3", "+12", "12\n"])
 def test_numeric_recovery_never_handles_other_input_characters(text):
     session = NumericSession()
@@ -2375,7 +2673,7 @@ def _sdk_target_peer():
     from appium_connect_agent.automation import create_session
     from appium_connect_agent.runtime import LocalSettings, Runtime
 
-    state = SimpleNamespace(candidate_ids=["first"], calls=[], mutations=[], disconnect=False)
+    state = SimpleNamespace(candidate_ids=["first"], calls=[], mutations=[], disconnect=False, dead_probes=0, dead_operations=0, sessions=0)
     state.nodes = {
         element_id: {
             "class": "android.widget.EditText",
@@ -2395,9 +2693,9 @@ def _sdk_target_peer():
     }
 
     class Handler(BaseHTTPRequestHandler):
-        def respond(self, value):
+        def respond(self, value, status=200):
             body = json.dumps({"value": value}).encode()
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -2407,6 +2705,13 @@ def _sdk_target_peer():
             state.calls.append(("GET", self.path, None))
             if self.path == "/status":
                 self.respond({"ready": True, "build": {"version": "3.7.0"}})
+                return
+            if self.path == "/session/target-session/appium/settings":
+                if state.dead_probes:
+                    state.dead_probes -= 1
+                    self.respond({"error": "invalid session id", "message": "isolated remote Session expired", "stacktrace": ""}, 404)
+                else:
+                    self.respond({})
                 return
             parts = self.path.split("/")
             if len(parts) >= 6 and parts[3] == "element" and parts[4] in state.nodes:
@@ -2424,11 +2729,16 @@ def _sdk_target_peer():
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             state.calls.append(("POST", self.path, payload))
             if self.path == "/session":
+                state.sessions += 1
                 self.respond({"sessionId": "target-session", "capabilities": {"platformName": "Android", "appium:automationName": "UiAutomator2"}})
             elif self.path == "/session/target-session/elements":
                 if state.disconnect:
                     self.connection.shutdown(2)
                     self.connection.close()
+                    return
+                if state.dead_operations:
+                    state.dead_operations -= 1
+                    self.respond({"error": "invalid session id", "message": "isolated remote Session expired", "stacktrace": ""}, 404)
                     return
                 candidates = state.candidate_ids if payload["using"] == "xpath" else [element_id for element_id, node in state.nodes.items() if node["resource-id"] == payload["value"]]
                 self.respond([{"element-6066-11e4-a52e-4f735466cecf": element_id} for element_id in candidates])
@@ -2455,7 +2765,7 @@ def _sdk_target_peer():
     try:
         runtime = Runtime(LocalSettings(server_url=f"http://127.0.0.1:{server.server_port}"))
         with runtime.connect() as connection:
-            session = create_session(connection, "target-test-device")
+            session = create_session(connection, "target-test-device", app_id="com.example.app", auto_launch=False, no_reset=True)
             driver = AppiumConnectAndroidDriver(app_id="com.example.app", session=session)
             state.calls.clear()
             try:
@@ -2476,6 +2786,45 @@ def _sdk_target_peer():
 def sdk_target_peer():
     with _sdk_target_peer() as peer:
         yield peer
+
+
+@pytest.mark.parametrize("dead", [False, True])
+def test_public_sdk_idle_probe_preserves_foreground_without_extra_business_dispatch(sdk_target_peer, android_clock, dead):
+    state, driver = sdk_target_peer
+    payload = {"element": {"resourceId": "com.example.app:id/first"}}
+    assert driver.assert_state(payload)["status"] == "passed"
+    state.calls.clear()
+    state.dead_probes = int(dead)
+    android_clock.now = 45.0
+    assert driver.tap_on({"locator": payload["element"]})["status"] == "passed"
+    assert state.sessions == (2 if dead else 1)
+    assert state.calls[0][:2] == ("GET", "/session/target-session/appium/settings")
+    assert sum(path.endswith("/appium/settings") for _, path, _ in state.calls) == 1
+    assert sum(path.endswith("/elements") for _, path, _ in state.calls) == 1
+    assert state.mutations == [("mobile: clickGesture", "first")]
+    reconnects = [body["capabilities"]["alwaysMatch"] for method, path, body in state.calls if method == "POST" and path == "/session"]
+    assert len(reconnects) == int(dead)
+    if dead:
+        caps = reconnects[0]
+        assert caps["appium:noReset"] is True
+        assert caps["appium:autoLaunch"] is False
+        assert caps["appium:forceAppLaunch"] is False
+        assert caps["appium:shouldTerminateApp"] is False
+        assert caps["appium:newCommandTimeout"] == 900.0
+        assert "appium:appPackage" not in caps
+        assert "appium:appActivity" not in caps
+
+
+@pytest.mark.parametrize("dead_responses", [1, 2])
+def test_public_sdk_owns_one_shot_remote_dead_operation_recovery(sdk_target_peer, dead_responses):
+    state, driver = sdk_target_peer
+    state.dead_operations = dead_responses
+    result = driver.tap_on({"locator": {"resourceId": "com.example.app:id/first"}})
+    assert result["status"] == ("passed" if dead_responses == 1 else "failed")
+    assert state.sessions == 2
+    assert sum(path.endswith("/elements") for _, path, _ in state.calls) == 2
+    assert not any(path.endswith("/appium/settings") for _, path, _ in state.calls)
+    assert state.mutations == ([("mobile: clickGesture", "first")] if dead_responses == 1 else [])
 
 
 @pytest.mark.parametrize("candidate_ids", [["first"], ["first", "second"]])

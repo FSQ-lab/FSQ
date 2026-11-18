@@ -28,6 +28,8 @@ Runtime composition binds the Models-owned Execution-allocated context, Core evi
 
 The main runtime owns the Harness returned by its default or supplied `harness_factory` for that invocation and closes it through `HarnessInterface.close` on success, startup failure after construction, inference failure, or cancellation. It also closes its Provider session even if Harness disposal fails. A caller supplying a shared borrowed Harness uses a wrapper with non-owning disposal. Test collaborators implement the same close contract without external effects.
 
+Main execution supplies Agent-owned evidence-grounded `final_turn_instructions` through the neutral request contract so the shared engine can reserve its last available turn for ordinary structured delivery. The adapter does not implement a second turn loop, infer answers from partial text, extend `max_turns`, or add a post-exhaustion inference. Successful closing returns the normal model-authored final output before owned Harness cleanup; existing hard-exhaustion fallback remains distinct. Final verification starts only after main Harness disposal and always has `tools=[]`; main-agent readback and authorized corrections happen before `run_task` returns, never in the verifier.
+
 ## Internal Structure
 
 - `__init__.py`: public factory and concrete-runtime export.

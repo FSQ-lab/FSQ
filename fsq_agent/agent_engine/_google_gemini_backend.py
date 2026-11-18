@@ -181,11 +181,14 @@ class _GoogleConversation:
         self.outputs.append(ToolOutputEntry(entry_id=len(self.history), call_id=call["call_id"], tool_name=call["name"], output=output))
         self.history.append({"type": "function_result", "call_id": call["call_id"], "name": call["name"], "result": [{"type": "text", "text": output}]})
 
-    async def request(self, replacements):
+    async def request(self, replacements, *, final_turn_instructions: str | None = None):
         history = deepcopy(self.history)
         for index, replacement in replacements.items():
             history[index]["result"] = [{"type": "text", "text": replacement}]
         parameters = {**self.parameters, "input": history}
+        if final_turn_instructions is not None:
+            parameters.pop("tools", None)
+            parameters["system_instruction"] = f"{parameters['system_instruction']}\n\n{final_turn_instructions}"
         if self.stream:
             stream = await self.resource.create(**parameters, stream=True)
             collector = GoogleStream()

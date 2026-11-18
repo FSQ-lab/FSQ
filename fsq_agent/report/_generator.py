@@ -212,6 +212,7 @@ class ReportGenerator:
     ) -> str:
         agent_output = self._parse_runner_output(steps)
         failure_classification = self.failure_analyzer.classify(steps, verification, tool_calls or [])
+        summary = agent_output.summary if agent_output and agent_output.summary.strip() else verification.summary
         lines = [
             f"# Test Report: {task.name}",
             "",
@@ -221,15 +222,12 @@ class ReportGenerator:
             "",
             "## Summary",
             "",
-            verification.summary,
-            "",
-            "## Verification Goal",
-            "",
-            task.verification_goal or "No verification goal was recorded.",
-            "",
-            "## Plan",
+            summary,
             "",
         ]
+        if summary != verification.summary:
+            lines.extend(["## Verification", "", verification.summary, ""])
+        lines.extend(["## Verification Goal", "", task.verification_goal or "No verification goal was recorded.", "", "## Plan", ""])
         if agent_output and agent_output.pre_plan:
             for item in agent_output.pre_plan:
                 lines.extend(

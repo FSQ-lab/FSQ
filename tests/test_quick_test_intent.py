@@ -85,6 +85,40 @@ def test_short_actionable_goal_is_not_length_gated():
     assert session.closed
 
 
+@pytest.mark.parametrize(
+    ("platform", "goal", "name", "reference", "url"),
+    [
+        ("android", "Browse the Downloads list in Files and tell me what is visible; do not change anything.", "Files", None, None),
+        ("macos", "Explore Calculator's available views and describe what you observe.", "Calculator", None, None),
+        ("windows", "Inspect Notepad's current document without saving or editing it.", "Notepad", None, None),
+        ("web", "Browse https://example.com/news and report the visible headlines.", None, "https://example.com/news", None),
+        ("web", "Explore the currently visible navigation and describe it without submitting anything.", None, None, "https://example.com"),
+    ],
+)
+def test_scoped_inspection_intent_needs_no_invented_qa_assertion(platform, goal, name, reference, url):
+    session = Session(output(application_name=name, explicit_reference=reference))
+
+    result = QuickTestIntentAnalyzer(session).analyze(platform=platform, goal=goal, url=url)
+
+    assert result.sufficient
+    assert result.application_name == name
+    assert result.explicit_reference == (url or reference)
+    assert len(session.requests) == 1
+    assert session.closed
+
+
+@pytest.mark.parametrize(("platform", "goal", "url"), [("android", "Files", None), ("macos", "Calculator", None), ("web", "News", "https://example.com")])
+def test_bare_application_or_topic_does_not_authorize_an_exploration_flow(platform, goal, url):
+    session = Session(output(sufficient=False, reason="insufficient", application_name=None))
+
+    result = QuickTestIntentAnalyzer(session).analyze(platform=platform, goal=goal, url=url)
+
+    assert not result.sufficient
+    assert result.reason == "insufficient"
+    assert len(session.requests) == 1
+    assert session.closed
+
+
 @pytest.mark.parametrize("reason", ["insufficient", "missing_application", "ambiguous_application"])
 def test_insufficient_intent_is_distinct_from_model_failure(reason):
     session = Session(output(sufficient=False, reason=reason, application_name=None))

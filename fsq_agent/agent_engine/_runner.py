@@ -129,6 +129,7 @@ async def _tool_results(tasks: list[asyncio.Task]) -> list[str]:
 async def run_agent(backend: BackendConversation, request: AgentRequest, on_event: AgentEventSink | None) -> AgentResult:
     bindings = {tool.name: tool for tool in request.tools}
     input_filter = ModelInputFilter(request.tool_output_filter)
+    closing_instructions = request.final_turn_instructions if request.output is not None and request.final_turn_instructions and request.final_turn_instructions.strip() else None
     usage = None
 
     async def emit(event: AgentEvent | None) -> None:
@@ -139,15 +140,16 @@ async def run_agent(backend: BackendConversation, request: AgentRequest, on_even
         with span("agent", name=request.name, handoffs=[], tools=list(bindings), output_type=request.output.name if request.output is not None else "str"):
             await emit(AgentEvent(kind="agent_started", agent_name=request.name))
             for _turn in range(request.max_turns):
+                final_turn_instructions = closing_instructions if _turn > 0 and _turn == request.max_turns - 1 else None
                 replacements = input_filter(backend.tool_outputs())
                 with span("response", response_id=None, usage=None) as response_span:
-                    response = await backend.request(replacements)
+                    response = await backend.request(replacements, final_turn_instructions=final_turn_instructions)
                     measured = response.usage
                     usage = add_usage(usage, measured)
                     if response_span is not None and measured is not None:
                         response_span["span_data"]["usage"] = {"input_tokens": measured.input_tokens, "output_tokens": measured.output_tokens}
                 calls = response.calls
-                if response.finalization:
+                if final_turn_instructions is not None or response.finalization:
                     if calls or request.output is None:
                         raise EngineError("invalid_output", "Structured finalization returned an unexpected function call or output contract.")
                     final_output = parse_output(response.text, request.output)

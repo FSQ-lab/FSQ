@@ -36,6 +36,7 @@ class _DriverFactoryImplementation:
             app_id=app_id if app_id is not None else settings.app_id or "",
             serial=serial if serial is not None else settings.serial,
             uiautomator2_wait_for_idle_timeout_ms=settings.uiautomator2_wait_for_idle_timeout_ms,
+            new_command_timeout_seconds=settings.new_command_timeout_seconds,
         )
 
     def create_web_driver(self, settings):

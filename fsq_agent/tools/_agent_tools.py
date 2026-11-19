@@ -213,10 +213,13 @@ class DefaultAgentToolProvider:
             parsed.max_matches,
             parsed.context_chars,
         )
+        result["artifact_path"] = self._recovery_reference(result["artifact_path"])
         return AgentToolResult(
             tool_name="search_artifact",
             status="success",
             output=self._redact(result),
+            artifact_path=Path(result["artifact_path"]),
+            artifact_content_chars=result["total_chars"],
             duration_ms=int((time.perf_counter() - started) * 1000),
         )
 
@@ -226,12 +229,23 @@ class DefaultAgentToolProvider:
         if not self.artifact_store:
             raise ToolExecutionError("Tool artifact storage is not enabled for this run.")
         result = self.artifact_store.read_slice(parsed.artifact_path, parsed.offset, parsed.length)
+        result["artifact_path"] = self._recovery_reference(result["artifact_path"])
         return AgentToolResult(
             tool_name="read_artifact_slice",
             status="success",
             output=self._redact(result),
+            artifact_path=Path(result["artifact_path"]),
+            artifact_content_chars=result["total_chars"],
             duration_ms=int((time.perf_counter() - started) * 1000),
         )
+
+    def _recovery_reference(self, source: str) -> str:
+        if self._redact(source) == source:
+            return source
+        relative = str(Path(source).relative_to((self.artifact_store.runs_dir / self.run_id).resolve()))
+        if self._redact(relative) != relative:
+            raise ToolExecutionError("Artifact source reference cannot be safely disclosed.")
+        return relative
 
     def _from_file_result(self, tool_name: str, result: AgentToolResult, started: float, metadata: dict[str, Any]) -> AgentToolResult:
         payload = self._redact(result.model_dump(mode="json"))
@@ -251,7 +265,9 @@ class DefaultAgentToolProvider:
         if isinstance(value, str):
             for private_value in sorted(self.runtime_secret_settings.private_values().values(), key=len, reverse=True):
                 if private_value:
-                    value = value.replace(private_value, "***")
+                    representations = {private_value, json.dumps(private_value, ensure_ascii=False)[1:-1], json.dumps(private_value, ensure_ascii=True)[1:-1]}
+                    for representation in sorted(representations, key=len, reverse=True):
+                        value = value.replace(representation, "***")
             return value
         if isinstance(value, dict):
             return {key: self._redact(item) for key, item in value.items()}

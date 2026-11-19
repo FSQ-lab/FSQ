@@ -273,3 +273,149 @@ def test_connection_test_uses_saved_provider_and_always_closes_session(tmp_path:
     assert result.duration_seconds >= 0
     session.complete_sync.assert_called_once_with(ModelRequest(input="Reply with FSQ_OK.", reasoning_effort="low"))
     session.close_sync.assert_called_once_with()
+
+
+def test_initial_copilot_application_filters_untrusted_diagnostics(monkeypatch):
+    from fsq_agent.application import providers
+
+    diagnostic = {
+        "stage": "oauth_poll",
+        "error_code": "timeout",
+        "http_status": 503,
+        "poll_attempts": 2,
+        "elapsed_seconds": 1.5,
+        "remaining_seconds": 42.0,
+        "expires_at": 1700000600.0,
+        "poll_interval_seconds": 5,
+        "last_http_status": True,
+        "last_oauth_error": "CANARY_ERROR",
+        "body": "CANARY_BODY",
+    }
+    failure = ConfigurationError("CANARY_EXCEPTION", context={"provider": "github_copilot", "diagnostic": diagnostic, "token": "CANARY_TOKEN"})
+    with patch.object(providers, "request_github_copilot_device_code", side_effect=failure), pytest.raises(ApplicationError) as caught:
+        providers.request_github_device_code()
+    result = caught.value.details["diagnostic"]
+    assert result == {key: value for key, value in diagnostic.items() if key not in {"last_http_status", "last_oauth_error", "body"}}
+    assert caught.value.details["provider"] == "github_copilot"
+    assert caught.value.__suppress_context__ is True
+    assert "CANARY" not in str(caught.value)
+
+
+@pytest.mark.parametrize("value", [True, -1, float("nan"), float("inf"), 10**400, "CANARY_NUMBER"])
+def test_initial_copilot_application_omits_invalid_diagnostic_numbers(value):
+    from fsq_agent.application import providers
+
+    failure = ConfigurationError(
+        "CANARY_EXCEPTION", context={"provider": "github_copilot", "diagnostic": {"stage": "CANARY_STAGE", "error_code": "CANARY_CODE", "elapsed_seconds": value, "poll_attempts": True}}
+    )
+    with patch.object(providers, "request_github_copilot_device_code", side_effect=failure), pytest.raises(ApplicationError) as caught:
+        providers.request_github_device_code()
+    diagnostic = caught.value.details["diagnostic"]
+    assert diagnostic["stage"] == "device_code"
+    assert diagnostic["error_code"] == "internal_error"
+    assert "poll_attempts" not in diagnostic
+    assert type(diagnostic["elapsed_seconds"]) is float
+    assert diagnostic["elapsed_seconds"] >= 0
+    assert "CANARY" not in str(caught.value)
+
+
+@pytest.mark.parametrize("stage", ["model_discovery", "model_selection", "activation"])
+def test_initial_copilot_configuration_failure_preserves_stage_and_saved_state(tmp_path, stage):
+    from fsq_agent.application import providers
+
+    save_azure_openai_provider(base_url="https://example.openai.azure.com", model="old-model", api_key="old-secret", user_config_root=tmp_path)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    failure = OSError("CANARY_STORAGE_OR_CALLBACK")
+    with (
+        patch.object(providers, "complete_github_copilot_device_flow", return_value=object()),
+        patch.object(
+            providers,
+            "list_github_copilot_models",
+            return_value=() if stage == "model_selection" else (copilot.GitHubCopilotModel("gpt-5", "GPT-5"),),
+            side_effect=failure if stage == "model_discovery" else None,
+        ),
+        patch.object(providers, "activate_github_copilot_authorization", side_effect=failure) as activate,
+    ):
+        select = MagicMock(return_value="gpt-5")
+        with pytest.raises(ApplicationError) as caught:
+            providers.complete_github_configuration(object(), model=None, select_model=select, cancel_requested=lambda: False, user_config_root=tmp_path)
+    assert caught.value.details["diagnostic"]["stage"] == stage
+    if stage == "model_selection":
+        assert caught.value.details["diagnostic"]["error_code"] == "model_not_offered"
+        select.assert_not_called()
+    if stage != "activation":
+        activate.assert_not_called()
+    assert "CANARY" not in str(caught.value)
+    assert caught.value.__suppress_context__ is True
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("lifetime", [0, -5, True, None, "3600", float("nan"), float("inf"), 10**400, "absent"])
+def test_initial_oauth_lifetime_cannot_be_promoted_to_undated_credentials(tmp_path, monkeypatch, lifetime):
+    import json
+
+    import httpx
+
+    from fsq_agent.application import providers
+
+    save_azure_openai_provider(base_url="https://example.openai.azure.com", model="old-model", api_key="old-secret", user_config_root=tmp_path)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if str(request.url) == copilot.ACCESS_TOKEN_URL:
+            data = {"access_token": "OAUTH_TEST_CREDENTIAL"}
+            if lifetime != "absent":
+                data["expires_in"] = lifetime
+            return httpx.Response(200, content=json.dumps(data).encode())
+        if str(request.url) == copilot.COPILOT_USER_URL:
+            return httpx.Response(200, json={"copilot_plan": "individual"})
+        if str(request.url) == copilot.COPILOT_TOKEN_URL:
+            return httpx.Response(200, json={"token": "PROVIDER_TEST_CREDENTIAL", "expires_at": time.time() + 3600})
+        return httpx.Response(200, json={"data": [{"id": "gpt-5", "name": "GPT-5"}]})
+
+    device = GitHubDeviceCode("device", "USER", "https://github.com/login/device", time.time() + 600, 1)
+    monkeypatch.setattr(copilot.time, "sleep", lambda _: None)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(copilot.httpx, "post", client.post)
+        monkeypatch.setattr(copilot.httpx, "get", client.get)
+        if lifetime == "absent":
+            providers.complete_github_configuration(device, model="gpt-5", select_model=lambda _: "gpt-5", cancel_requested=lambda: False, user_config_root=tmp_path)
+        else:
+            with pytest.raises(ApplicationError) as caught:
+                providers.complete_github_configuration(device, model="gpt-5", select_model=lambda _: "gpt-5", cancel_requested=lambda: False, user_config_root=tmp_path)
+            assert caught.value.details["diagnostic"]["error_code"] == "malformed_response"
+    saved = load_user_provider_config(tmp_path)
+    if lifetime == "absent":
+        assert saved.provider.type == "github_copilot"
+        assert "expires_at" not in saved.github_token
+        assert copilot._load_github_token(saved.github_token) == "OAUTH_TEST_CREDENTIAL"
+    else:
+        assert saved.provider.type == "azure_openai"
+        assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+        assert len(requests) == 1
+
+
+def test_unknown_plan_retains_safe_code_through_provider_and_application(monkeypatch):
+    import httpx
+
+    from fsq_agent.application import providers
+
+    def handle(request):
+        return httpx.Response(200, json={"access_token": "OAUTH_TEST_CREDENTIAL"} if request.method == "POST" else {"copilot_plan": "UNSUPPORTED_PRIVATE_PLAN"})
+
+    device = GitHubDeviceCode("device", "USER", "https://github.com/login/device", time.time() + 600, 1)
+    monkeypatch.setattr(copilot.time, "sleep", lambda _: None)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(copilot.httpx, "post", client.post)
+        monkeypatch.setattr(copilot.httpx, "get", client.get)
+        with pytest.raises(ConfigurationError) as provider_error:
+            complete_github_copilot_device_flow(device, cancel_requested=lambda: False)
+        with pytest.raises(ApplicationError) as application_error:
+            providers.complete_github_configuration(device, model="gpt-5", select_model=lambda _: "gpt-5", cancel_requested=lambda: False)
+    assert provider_error.value.context["reason"] == "malformed_response"
+    for error, diagnostic in ((provider_error.value, provider_error.value.context["diagnostic"]), (application_error.value, application_error.value.details["diagnostic"])):
+        assert diagnostic["stage"] == "copilot_plan"
+        assert diagnostic["error_code"] == "unknown_plan"
+        assert "UNSUPPORTED_PRIVATE_PLAN" not in str(error)

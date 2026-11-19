@@ -150,3 +150,107 @@ def test_provider_status_unavailable_is_result_with_exit_four(monkeypatch: pytes
 
     assert result.exit_code == 4
     assert json.loads(result.output)["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("expires_at,interval,shown", [(1700000600.0, 7, True), (float("nan"), True, False), (10**400, float("inf"), False)])
+def test_copilot_cli_displays_only_valid_native_timing(monkeypatch, expires_at, interval, shown):
+    from fsq_agent.providers import GitHubDeviceCode
+
+    device = GitHubDeviceCode("CANARY_DEVICE_TOKEN", "ABCD-EFGH", "https://github.com/login/device", expires_at, interval, native_expires_at=expires_at, native_poll_interval_seconds=interval)
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.request_github_device_code", lambda: device)
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.complete_github_configuration", lambda *args, **kwargs: ProviderConfigurationResult(provider="github_copilot", model="gpt-5"))
+
+    result = CliRunner().invoke(main, ["providers", "configure", "github_copilot", "--model", "gpt-5"])
+
+    assert result.exit_code == 0
+    assert "ABCD-EFGH" in result.stdout
+    if shown:
+        assert "2023-11-14T22:23:20+00:00" in result.stdout
+        assert "Polling interval: 7 seconds" in result.stdout
+    else:
+        assert "Expires at:" not in result.stdout
+        assert "Polling interval:" not in result.stdout
+    assert "CANARY" not in result.output
+
+
+def test_copilot_cli_renders_application_filtered_auth_diagnostic(monkeypatch):
+    from fsq_agent.models import ConfigurationError
+
+    def fail():
+        raise ConfigurationError(
+            "CANARY_EXCEPTION",
+            context={"provider": "github_copilot", "diagnostic": {"stage": "device_code", "error_code": "http_error", "http_status": 503, "elapsed_seconds": 1.25, "token": "CANARY_TOKEN"}},
+        )
+
+    monkeypatch.setattr("fsq_agent.application.providers.request_github_copilot_device_code", fail)
+    result = CliRunner().invoke(main, ["providers", "configure", "github_copilot"])
+
+    assert result.exit_code == 4
+    assert "stage: device_code" in result.stderr
+    assert "error_code: http_error" in result.stderr
+    assert "http_status: 503" in result.stderr
+    assert "elapsed_seconds: 1.25" in result.stderr
+    assert "CANARY" not in result.output
+
+
+@pytest.mark.parametrize("options", [["--output", "json"], ["--output", "jsonl"], ["--non-interactive"]])
+def test_copilot_machine_or_noninteractive_login_never_starts_authorization(monkeypatch, options):
+    def forbidden():
+        pytest.fail("Device flow must not start")
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.request_github_device_code", forbidden)
+    result = CliRunner().invoke(main, [*options, "providers", "configure", "github_copilot"])
+    assert result.exit_code == 2
+
+
+@pytest.mark.parametrize("timing", [{}, {"expires_in": 600}, {"interval": 2.75}, {"expires_in": 600, "interval": 7}])
+def test_copilot_cli_distinguishes_native_timing_from_effective_defaults(monkeypatch, timing):
+    import httpx
+
+    from fsq_agent.providers import _github_copilot as copilot
+
+    def handle(request):
+        if str(request.url) == copilot.DEVICE_CODE_URL:
+            return httpx.Response(200, json={"device_code": "PRIVATE_DEVICE", "user_code": "USER-CODE", "verification_uri": "https://github.com/login/device", **timing})
+        return httpx.Response(200, json={"error": "expired_token"})
+
+    waits = []
+    monkeypatch.setattr(copilot.time, "time", lambda: 1700000000.0)
+    monkeypatch.setattr(copilot.time, "sleep", waits.append)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(copilot.httpx, "post", client.post)
+        result = CliRunner().invoke(main, ["providers", "configure", "github_copilot"])
+    assert result.exit_code == 4
+    assert ("Expires at:" in result.stdout) is ("expires_in" in timing)
+    assert ("expires_at:" in result.stderr) is ("expires_in" in timing)
+    if "interval" in timing:
+        assert f"Polling interval: {timing['interval']} seconds" in result.stdout
+        assert f"poll_interval_seconds: {timing['interval']}" in result.stderr
+    else:
+        assert "Polling interval:" not in result.stdout
+        assert "poll_interval_seconds:" not in result.stderr
+    assert waits == [max(1, int(timing.get("interval", 5)))]
+    assert "PRIVATE_DEVICE" not in result.output
+
+
+def test_copilot_cli_preserves_unknown_plan_classification(monkeypatch):
+    import httpx
+
+    from fsq_agent.providers import _github_copilot as copilot
+
+    def handle(request):
+        if str(request.url) == copilot.DEVICE_CODE_URL:
+            return httpx.Response(200, json={"device_code": "PRIVATE_DEVICE", "user_code": "USER-CODE", "verification_uri": "https://github.com/login/device"})
+        if request.method == "POST":
+            return httpx.Response(200, json={"access_token": "PRIVATE_OAUTH"})
+        return httpx.Response(200, json={"copilot_plan": "PRIVATE_UNSUPPORTED_PLAN"})
+
+    monkeypatch.setattr(copilot.time, "sleep", lambda _: None)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(copilot.httpx, "post", client.post)
+        monkeypatch.setattr(copilot.httpx, "get", client.get)
+        result = CliRunner().invoke(main, ["providers", "configure", "github_copilot", "--model", "gpt-5"])
+    assert result.exit_code == 4
+    assert "stage: copilot_plan" in result.stderr
+    assert "error_code: unknown_plan" in result.stderr
+    assert "PRIVATE_" not in result.output

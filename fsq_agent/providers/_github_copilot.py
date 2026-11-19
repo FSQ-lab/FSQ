@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
@@ -54,6 +55,96 @@ COPILOT_MODEL_HEADERS: dict[str, str] = {
 }
 
 
+_OAUTH_ERRORS = frozenset(
+    {"authorization_pending", "slow_down", "expired_token", "access_denied", "unsupported_grant_type", "incorrect_client_credentials", "incorrect_device_code", "device_flow_disabled"}
+)
+_AUTH_FAILURE_REASONS = frozenset({"authentication", "access_denied", "rate_limited", "timeout", "network", "malformed_response", "storage", "internal"})
+
+
+def _positive_number(value: object) -> bool:
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
+
+
+def _oauth_error(value: object) -> str:
+    return value if isinstance(value, str) and value in _OAUTH_ERRORS else "unknown_oauth_error"
+
+
+class _UnknownCopilotPlanError(ConfigurationError):
+    """Keep the owned plan distinction without widening runtime error context."""
+
+
+class _AuthorizationDiagnostic:
+    def __init__(self, stage: str) -> None:
+        self.started = time.monotonic()
+        self.stage = stage
+        self.code = "internal_error"
+        self.message = "GitHub Copilot authentication failed."
+        self.facts: dict[str, object] = {}
+        self.device: GitHubDeviceCode | None = None
+
+    def observe(self, response: httpx.Response) -> None:
+        status = response.status_code
+        if type(status) is int and 100 <= status <= 599:
+            self.facts["http_status"] = status
+            if self.device is not None and self.stage == "oauth_poll":
+                self.facts["last_http_status"] = status
+
+    def fail(self, code: str, message: str) -> None:
+        self.code, self.message = code, message
+        raise ConfigurationError(message) from None
+
+    def context(self) -> dict[str, object]:
+        facts = dict(self.facts)
+        facts["elapsed_seconds"] = max(0.0, time.monotonic() - self.started)
+        if self.device is not None and _positive_number(self.device.native_expires_at):
+            facts["expires_at"] = self.device.native_expires_at
+            facts["remaining_seconds"] = max(0.0, self.device.native_expires_at - time.time())
+        return {"provider": "github_copilot", "diagnostic": {"stage": self.stage, "error_code": self.code, **facts}}
+
+
+@contextmanager
+def _initial_auth_diagnostic(stage: str):
+    state = _AuthorizationDiagnostic(stage)
+    try:
+        yield state
+    except Exception as exc:  # noqa: BLE001 - initial authorization exposes only bounded diagnostics.
+        original = exc.context if isinstance(exc, ConfigurationError) else {}
+        reason = original.get("reason")
+        status = original.get("status_code")
+        if isinstance(exc, httpx.HTTPStatusError):
+            state.observe(exc.response)
+            state.code = "http_error"
+        elif isinstance(exc, httpx.TimeoutException):
+            state.code = "timeout"
+        elif isinstance(exc, httpx.HTTPError):
+            state.code = "network_error"
+        elif type(status) is int and 100 <= status <= 599:
+            state.facts["http_status"] = status
+            state.code = "http_error"
+        elif isinstance(exc, _UnknownCopilotPlanError):
+            state.code = "unknown_plan"
+            state.message = "Unknown GitHub Copilot plan."
+        elif isinstance(reason, str) and reason in _AUTH_FAILURE_REASONS:
+            state.code = {"network": "network_error", "internal": "internal_error", "authentication": "access_denied", "rate_limited": "http_error"}.get(reason, reason)
+        elif isinstance(exc, (ValueError, TypeError, OverflowError)):
+            state.code = "malformed_response"
+        context = state.context()
+        # Discovery is shared with saved sessions; retain their classification facts.
+        if isinstance(reason, str) and reason in _AUTH_FAILURE_REASONS:
+            context["reason"] = reason
+        if type(status) is int and 100 <= status <= 599:
+            context["status_code"] = status
+        errno = original.get("errno")
+        if type(errno) is int and errno > 0:
+            context["errno"] = errno
+        raise ConfigurationError(state.message, context=context) from None
+
+
 @dataclass(frozen=True)
 class CopilotToken:
     token: str
@@ -74,6 +165,8 @@ class GitHubDeviceCode:
     verification_uri: str
     expires_at: float
     poll_interval_seconds: int
+    native_expires_at: float | None = None
+    native_poll_interval_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -235,21 +328,20 @@ def _copilot_retry_delay(cause: BaseException | None, retry_index: int) -> float
 
 
 def request_github_copilot_device_code() -> GitHubDeviceCode:
-    try:
+    with _initial_auth_diagnostic("device_code") as state:
         response = httpx.post(
             DEVICE_CODE_URL,
             data={"client_id": CLIENT_ID, "scope": GITHUB_OAUTH_SCOPE},
             headers={"Accept": "application/json"},
             timeout=COPILOT_AUTH_TIMEOUT_SECONDS,
         )
+        state.observe(response)
         response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise ConfigurationError("GitHub device-code request failed.", context={"error": str(exc)}) from exc
-    try:
         data = response.json()
-    except (TypeError, ValueError) as exc:
-        raise ConfigurationError("GitHub device-code response was invalid.") from exc
-    return _parse_device_code(data)
+        try:
+            return _parse_device_code(data)
+        except ConfigurationError:
+            state.fail(_oauth_error(data["error"]) if isinstance(data, dict) and "error" in data else "malformed_response", "GitHub device-code response was invalid.")
 
 
 def _parse_device_code(data: object) -> GitHubDeviceCode:
@@ -262,16 +354,19 @@ def _parse_device_code(data: object) -> GitHubDeviceCode:
     expires_in = data.get("expires_in", 900)
     if not all(isinstance(value, str) and value for value in (device_code, user_code, verification_uri)):
         raise ConfigurationError("GitHub device-code response was invalid.")
-    if not isinstance(interval, int | float) or interval <= 0:
+    if not _positive_number(interval):
         raise ConfigurationError("GitHub device-code response was invalid.")
-    if not isinstance(expires_in, int | float) or expires_in <= 0:
+    if not _positive_number(expires_in):
         raise ConfigurationError("GitHub device-code response was invalid.")
+    expires_at = time.time() + float(expires_in)
     return GitHubDeviceCode(
         device_code=device_code,
         user_code=user_code,
         verification_uri=verification_uri,
-        expires_at=time.time() + float(expires_in),
+        expires_at=expires_at,
         poll_interval_seconds=max(1, int(interval)),
+        native_expires_at=expires_at if "expires_in" in data else None,
+        native_poll_interval_seconds=interval if "interval" in data else None,
     )
 
 
@@ -280,58 +375,87 @@ def complete_github_copilot_device_flow(
     *,
     cancel_requested: Callable[[], bool],
 ) -> GitHubCopilotAuthorization:
-    wait = device_code.poll_interval_seconds
-    while time.time() < device_code.expires_at:
-        _raise_if_device_flow_cancelled(cancel_requested)
-        time.sleep(wait)
-        _raise_if_device_flow_cancelled(cancel_requested)
-        try:
+    with _initial_auth_diagnostic("oauth_poll") as state:
+        state.device = device_code
+        state.facts["poll_attempts"] = 0
+        wait = device_code.poll_interval_seconds
+        if _positive_number(device_code.native_poll_interval_seconds):
+            state.facts["poll_interval_seconds"] = device_code.native_poll_interval_seconds
+
+        def check_cancelled() -> None:
+            if cancel_requested():
+                state.fail("cancelled", "GitHub device-code authentication was cancelled.")
+
+        while time.time() < device_code.expires_at:
+            check_cancelled()
+            time.sleep(wait)
+            check_cancelled()
+            state.facts["poll_attempts"] += 1
+            state.facts.pop("http_status", None)
             response = httpx.post(
                 ACCESS_TOKEN_URL,
-                data={
-                    "client_id": CLIENT_ID,
-                    "device_code": device_code.device_code,
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                },
+                data={"client_id": CLIENT_ID, "device_code": device_code.device_code, "grant_type": "urn:ietf:params:oauth:grant-type:device_code"},
                 headers={"Accept": "application/json"},
                 timeout=COPILOT_AUTH_TIMEOUT_SECONDS,
             )
+            state.observe(response)
             response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise ConfigurationError("GitHub device-code polling failed.", context={"error": str(exc)}) from exc
-        _raise_if_device_flow_cancelled(cancel_requested)
-        data = response.json()
-        github_token = data.get("access_token")
-        if isinstance(github_token, str) and github_token:
-            expires_in = data.get("expires_in")
-            github_expires_at = time.time() + float(expires_in) if isinstance(expires_in, int | float) else None
-            plan = _get_copilot_plan(github_token)
-            _raise_if_device_flow_cancelled(cancel_requested)
-            copilot_token = _get_copilot_token(github_token)
-            _raise_if_device_flow_cancelled(cancel_requested)
-            return GitHubCopilotAuthorization(
-                github_access_token=github_token,
-                github_expires_at=github_expires_at,
-                copilot_token=copilot_token.token,
-                copilot_expires_at=copilot_token.expires_at,
-                plan=plan,
-            )
-        error = data.get("error", "")
-        if error == "authorization_pending":
-            continue
-        if error == "slow_down":
-            updated_wait = data.get("interval", wait + 5)
-            wait = int(updated_wait) if isinstance(updated_wait, int | float) and updated_wait > 0 else wait + 5
-            continue
-        if error == "expired_token":
-            raise ConfigurationError("GitHub device code expired. Please try again.")
-        if error == "access_denied":
-            raise ConfigurationError("GitHub device-code authorization was denied.")
-        raise ConfigurationError("GitHub device-code OAuth failed.", context={"error": error})
-    raise ConfigurationError("GitHub device code expired. Please try again.")
+            check_cancelled()
+            data = response.json()
+            if not isinstance(data, dict):
+                state.fail("malformed_response", "GitHub device-code response was invalid.")
+            github_token = data.get("access_token")
+            if isinstance(github_token, str) and github_token.strip():
+                github_expires_at = None
+                if "expires_in" in data:
+                    expires_in = data["expires_in"]
+                    if not _positive_number(expires_in):
+                        state.fail("malformed_response", "GitHub OAuth response had an invalid expiration.")
+                    github_expires_at = time.time() + float(expires_in)
+                    if not _positive_number(github_expires_at):
+                        state.fail("malformed_response", "GitHub OAuth response had an invalid expiration.")
+                state.stage = "copilot_plan"
+                state.facts.pop("http_status", None)
+                plan = _get_copilot_plan(github_token)
+                check_cancelled()
+                state.stage = "copilot_token"
+                copilot_token = _get_copilot_token(github_token)
+                check_cancelled()
+                return GitHubCopilotAuthorization(
+                    github_access_token=github_token,
+                    github_expires_at=github_expires_at,
+                    copilot_token=copilot_token.token,
+                    copilot_expires_at=copilot_token.expires_at,
+                    plan=plan,
+                )
+            if "error" not in data:
+                state.fail("malformed_response", "GitHub device-code response was invalid.")
+            error = _oauth_error(data.get("error"))
+            state.facts["last_oauth_error"] = error
+            if error == "authorization_pending":
+                continue
+            if error == "slow_down":
+                updated_wait = data.get("interval", wait + 5)
+                wait = max(1, int(updated_wait)) if _positive_number(updated_wait) else wait + 5
+                if "interval" in data and _positive_number(updated_wait):
+                    state.facts["poll_interval_seconds"] = updated_wait
+                else:
+                    state.facts.pop("poll_interval_seconds", None)
+                continue
+            if error == "expired_token":
+                state.fail(error, "GitHub device code expired. Please try again.")
+            if error == "access_denied":
+                state.fail(error, "GitHub device-code authorization was denied.")
+            state.fail(error, "GitHub device-code OAuth failed.")
+        state.fail("local_expiry", "GitHub device code expired. Please try again.")
 
 
 def list_github_copilot_models(authorization: GitHubCopilotAuthorization) -> tuple[GitHubCopilotModel, ...]:
+    with _initial_auth_diagnostic("model_discovery"):
+        return _discover_copilot_models(authorization)
+
+
+def _discover_copilot_models(authorization: GitHubCopilotAuthorization) -> tuple[GitHubCopilotModel, ...]:
     try:
         response = httpx.get(
             f"{COPILOT_BASE_URLS[authorization.plan]}/models",
@@ -536,11 +660,6 @@ def _parse_github_copilot_model(candidate: object) -> GitHubCopilotModel | None:
     return GitHubCopilotModel(id=model_id, name=name)
 
 
-def _raise_if_device_flow_cancelled(cancel_requested: Callable[[], bool]) -> None:
-    if cancel_requested():
-        raise ConfigurationError("GitHub device-code authentication was cancelled.")
-
-
 def _get_copilot_token(github_token: str) -> CopilotToken:
     try:
         response = httpx.get(
@@ -610,7 +729,7 @@ def _get_copilot_plan(github_token: str) -> str:
         raise _copilot_error("GitHub Copilot plan response was invalid.", "malformed_response")
     plan = data.get("copilot_plan")
     if not isinstance(plan, str) or plan not in COPILOT_BASE_URLS:
-        raise ConfigurationError(
+        raise _UnknownCopilotPlanError(
             "Unknown GitHub Copilot plan.",
             context={"provider": "github_copilot", "reason": "malformed_response"},
         )

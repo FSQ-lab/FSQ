@@ -223,7 +223,11 @@ class FsqAgent:
             if action.action.strip()
         ]
         key_actions = list(task.key_actions) or generated_key_actions
-        verification_goal = pre_plan.verification_goal.strip() or verification_goal_for_task(task)
+        explicit_goal = task.verification_goal.strip() if task.verification_goal else ""
+        if explicit_goal and not explicit_goal.startswith("Goal completed: "):
+            verification_goal = task.verification_goal
+        else:
+            verification_goal = pre_plan.verification_goal.strip() or verification_goal_for_task(task)
         payload = {
             "key_action_count": len(key_actions),
             "verification_goal_present": bool(verification_goal),
@@ -282,9 +286,13 @@ class FsqAgent:
         return "unknown", self._goal_text_for_task(task)
 
     def _goal_text_for_task(self, task: Task) -> str:
+        label = task.name.strip()
         if task.verification_goal and task.verification_goal.startswith("Goal completed: "):
-            return task.verification_goal.removeprefix("Goal completed: ").strip()
-        return task.name if task.name and task.name != "Task" else task.description
+            label = task.verification_goal.removeprefix("Goal completed: ").strip()
+        description = task.description.strip()
+        if label and label != "Task" and label != description:
+            return f"{label}\n{description}" if description else label
+        return description
 
     def _usable_text(self, value: str | None) -> bool:
         return bool(value and value.strip())

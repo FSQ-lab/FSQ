@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
@@ -44,7 +45,6 @@ from fsq_agent.tools import AgentToolAdapter, ToolArtifactStore
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from pydantic import BaseModel
 
@@ -127,11 +127,16 @@ class _ToolOutputBudgetFilter:
         max_output_chars: int,
         max_total_inline_chars: int,
         artifact_store: ToolArtifactStore | None,
+        *,
+        private_values: tuple[str, ...] = (),
     ) -> None:
         self.recent_inline_outputs = recent_inline_outputs
         self.max_output_chars = max_output_chars
         self.max_total_inline_chars = max_total_inline_chars
         self.artifact_store = artifact_store
+        self._private_values = {
+            representation for value in private_values if value for representation in (value, json.dumps(value, ensure_ascii=False)[1:-1], json.dumps(value, ensure_ascii=True)[1:-1])
+        }
         self.artifact_paths_by_call_id: dict[str, str] = {}
 
     def __call__(self, entries: tuple[ToolOutputEntry, ...]) -> dict[int, str]:
@@ -154,9 +159,12 @@ class _ToolOutputBudgetFilter:
                     replacements[entry.entry_id] = projected[entry.entry_id]
                 continue
             display_name = entry.tool_name or "tool"
-            artifact_path = self._artifact_path_for(entry)
+            stored_path = self._artifact_path_for(entry)
+            artifact_path = self._public_artifact_reference(stored_path) if stored_path else None
             if artifact_path:
                 reference = f"[Historical {display_name} output stored as artifact. Artifact path: {artifact_path}. Content chars: {len(entry.output)}.]"
+            elif stored_path:
+                reference = f"[Historical {display_name} output stored; its artifact reference cannot be safely disclosed. Content chars: {len(entry.output)}.]"
             else:
                 reference = f"[Historical {display_name} output omitted because artifact storage is unavailable. Content chars: {len(entry.output)}.]"
             replacements[entry.entry_id] = self._budget_reference(entry.output, reference, artifact_path)
@@ -243,6 +251,18 @@ class _ToolOutputBudgetFilter:
                 if errors:
                     compact["phase_errors"] = errors
         return json.dumps(compact, ensure_ascii=False, default=str, separators=(",", ":"))
+
+    def _public_artifact_reference(self, path: str) -> str | None:
+        if not any(value in path for value in self._private_values):
+            return path
+        if self.artifact_store is None:
+            return None
+        run_root = (self.artifact_store.runs_dir / self.artifact_store.run_id).resolve()
+        try:
+            relative = str(Path(path).resolve().relative_to(run_root))
+        except ValueError:
+            return None
+        return None if any(value in relative for value in self._private_values) else relative
 
     def _artifact_path_for(self, entry: ToolOutputEntry) -> str | None:
         call_id = entry.call_id or ""
@@ -1128,6 +1148,7 @@ class DefaultCodingAgentRuntime:
             local_output.full_output_max_chars,
             local_output.total_inline_output_max_chars,
             artifact_store,
+            private_values=self._runtime_secret_values(),
         )
         return AgentRequest(
             name=name,

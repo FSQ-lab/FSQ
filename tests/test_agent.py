@@ -780,7 +780,7 @@ async def test_agent_run_preplans_goal_only_task_before_execution(tmp_path: Path
     result = await _coordinate(agent).run(task, event_sink=events.append)
 
     assert result.status == "success"
-    assert runtime.pre_plan_goal == "Access Downloads"
+    assert runtime.pre_plan_goal == "Access Downloads\nAccess Downloads through the overflow menu."
     assert runtime.pre_plan_reference_type == "unknown"
     assert runtime.pre_plan_knowledge is not None
     assert runtime.pre_plan_knowledge.items == {"project.md": "# Project Knowledge"}
@@ -793,6 +793,29 @@ async def test_agent_run_preplans_goal_only_task_before_execution(tmp_path: Path
     ]
     assert runtime.last_task.verification_goal == "Verify planned outcome for unknown: Access Downloads"
     assert any(event.title == "Goal pre-plan injected" for event in events)
+
+
+@pytest.mark.parametrize(
+    ("name", "description", "legacy_goal", "expected"),
+    [
+        ("Update a note", "Save the complete filename, then leave Wi-Fi disabled.", "", "Update a note\nSave the complete filename, then leave Wi-Fi disabled."),
+        ("Other label", "Keep the app open.", "Goal completed: Update a note", "Update a note\nKeep the app open."),
+        ("Task", "  Keep every subgoal.\nDo not save.  ", "", "Keep every subgoal.\nDo not save."),
+        (" Same goal ", " Same goal ", "", "Same goal"),
+        ("   ", "Complete description", "", "Complete description"),
+    ],
+)
+async def test_direct_task_fallback_preserves_complete_planning_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, description: str, legacy_goal: str, expected: str) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+    agent = FsqAgent(_settings_with_knowledge(tmp_path, runs_dir=tmp_path / "runs"), Verifier(), _Reporter(), _KnowledgeLoader(), _SkillLoader(), runtime)
+    task = Task(name=name, description=description, verification_goal=legacy_goal)
+
+    await _run_in_context(agent, task, "complete-reference")
+
+    assert runtime.pre_plan_goal == expected
+    assert task.description == description
+    assert task.verification_goal == legacy_goal
 
 
 @pytest.mark.asyncio
@@ -1269,3 +1292,28 @@ async def test_event_credential_family_stays_redacted(value):
     events = []
     await RunEventEmitter(sink=events.append).emit(RunEvent(run_id="run", task_id="task", type="planning_update", title="progress", payload={"value": value}))
     assert "CANARY" not in events[0].model_dump_json()
+
+
+@pytest.mark.parametrize("key_actions", [[], ["Keep the caller's exact action."]])
+async def test_explicit_final_goal_survives_planner_main_and_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key_actions: list[str]) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+    verification_tasks = []
+
+    async def verify(task, *args, **kwargs):
+        verification_tasks.append(task)
+        return []
+
+    monkeypatch.setattr(runtime, "run_verification", verify)
+    agent = FsqAgent(_settings_with_knowledge(tmp_path, runs_dir=tmp_path / "runs"), Verifier(), _Reporter(), _KnowledgeLoader(), _SkillLoader(), runtime)
+    goal = "The complete filename is saved and Wi-Fi remains disabled."
+    task = Task(name="Update a note", description="Save the note without changing connectivity.", verification_goal=goal, key_actions=key_actions)
+
+    outcome = await _run_in_context(agent, task, "explicit-final-goal")
+
+    assert runtime.last_task.verification_goal == goal
+    assert verification_tasks[0].verification_goal == goal
+    assert outcome.task.verification_goal == goal
+    if key_actions:
+        assert runtime.last_task.key_actions == key_actions
+        assert verification_tasks[0].key_actions == key_actions

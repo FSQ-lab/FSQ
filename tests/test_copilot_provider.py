@@ -5,6 +5,7 @@ import json
 import time
 from datetime import UTC, datetime
 from email.utils import format_datetime
+from functools import partial
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -308,11 +309,12 @@ def test_list_copilot_models_rejects_malformed_envelope_without_exposing_token()
 
     with (
         patch.object(copilot.httpx, "get", return_value=response),
-        pytest.raises(ConfigurationError, match="model response was invalid") as captured,
+        pytest.raises(ConfigurationError) as captured,
     ):
         copilot.list_github_copilot_models(_authorization())
 
     assert _fake_copilot_token("pending") not in str(captured.value)
+    assert captured.value.context["reason"] == "malformed_response"
 
 
 def test_saved_copilot_models_refreshes_and_retries_once_after_auth_rejection(tmp_path) -> None:
@@ -897,3 +899,72 @@ def test_model_discovery_does_not_gain_runtime_retries(tmp_path, auth_transport)
     assert captured.value.context["reason"] == "network"
     assert len(requests) == 1
     assert waits == []
+
+
+@pytest.mark.parametrize("stage", ["device_code", "oauth_poll", "copilot_plan", "copilot_token", "model_discovery"])
+def test_initial_auth_http_failure_reports_safe_stage_without_retry(monkeypatch, stage):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        failures = {"device_code": copilot.DEVICE_CODE_URL, "oauth_poll": copilot.ACCESS_TOKEN_URL, "copilot_plan": copilot.COPILOT_USER_URL, "copilot_token": copilot.COPILOT_TOKEN_URL}
+        if str(request.url) == failures.get(stage) or stage == "model_discovery":
+            return httpx.Response(503, text="CANARY_RESPONSE_TOKEN")
+        if str(request.url) == copilot.ACCESS_TOKEN_URL:
+            return httpx.Response(200, json={"access_token": "CANARY_OAUTH_TOKEN"})
+        return _plan_response()
+
+    monkeypatch.setattr(copilot.time, "sleep", lambda _: None)
+    device = copilot.GitHubDeviceCode("CANARY_DEVICE_TOKEN", "USER", "https://github.com/login/device", time.time() + 600, 2)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(copilot.httpx, "post", client.post)
+        monkeypatch.setattr(copilot.httpx, "get", client.get)
+        if stage == "device_code":
+            operation = copilot.request_github_copilot_device_code
+        elif stage == "model_discovery":
+            operation = partial(copilot.list_github_copilot_models, _authorization())
+        else:
+            operation = partial(copilot.complete_github_copilot_device_flow, device, cancel_requested=lambda: False)
+        with pytest.raises(ConfigurationError) as caught:
+            operation()
+    diagnostic = caught.value.context["diagnostic"]
+    assert diagnostic["stage"] == stage
+    assert diagnostic["error_code"] == "http_error"
+    assert diagnostic["http_status"] == 503
+    assert diagnostic["elapsed_seconds"] >= 0
+    assert caught.value.__suppress_context__ is True
+    assert "CANARY" not in str(caught.value)
+    assert len(requests) == {"copilot_plan": 2, "copilot_token": 3}.get(stage, 1)
+
+
+@pytest.mark.parametrize("terminal", ["expired_token", "access_denied", "CANARY_UNRESTRICTED_ERROR"])
+def test_poll_diagnostics_preserve_slowdown_counts_and_normalize_oauth_errors(monkeypatch, terminal):
+    responses = iter(({"error": "authorization_pending"}, {"error": "slow_down", "interval": 7}, {"error": terminal}))
+    waits = []
+    monkeypatch.setattr(copilot.time, "time", lambda: 1700000000.0)
+    monkeypatch.setattr(copilot.time, "sleep", waits.append)
+    device = copilot.GitHubDeviceCode("CANARY_DEVICE_TOKEN", "USER", "https://github.com/login/device", 1700000600.0, 2, native_expires_at=1700000600.0, native_poll_interval_seconds=2)
+    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=next(responses)))) as client:
+        monkeypatch.setattr(copilot.httpx, "post", client.post)
+        with pytest.raises(ConfigurationError) as caught:
+            copilot.complete_github_copilot_device_flow(device, cancel_requested=lambda: False)
+    diagnostic = caught.value.context["diagnostic"]
+    assert diagnostic["stage"] == "oauth_poll"
+    assert diagnostic["error_code"] == diagnostic["last_oauth_error"] == ("unknown_oauth_error" if terminal.startswith("CANARY") else terminal)
+    assert diagnostic["poll_attempts"] == 3
+    assert diagnostic["poll_interval_seconds"] == 7
+    assert diagnostic["last_http_status"] == 200
+    assert diagnostic["remaining_seconds"] == 600
+    assert waits == [2, 2, 7]
+    assert "CANARY" not in str(caught.value)
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_poll_termination_without_transport_has_explicit_diagnostics(monkeypatch, cancelled):
+    monkeypatch.setattr(copilot.time, "time", lambda: 1700000000.0)
+    device = copilot.GitHubDeviceCode("device", "USER", "https://github.com/login/device", 1700000600.0 if cancelled else 1699999999.0, 2)
+    with patch.object(copilot.httpx, "post") as post, pytest.raises(ConfigurationError) as caught:
+        copilot.complete_github_copilot_device_flow(device, cancel_requested=lambda: cancelled)
+    assert caught.value.context["diagnostic"]["error_code"] == ("cancelled" if cancelled else "local_expiry")
+    assert caught.value.context["diagnostic"]["poll_attempts"] == 0
+    post.assert_not_called()

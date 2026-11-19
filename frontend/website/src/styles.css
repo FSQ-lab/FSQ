@@ -640,6 +640,45 @@ h3 {
   font-size: 0.9rem;
 }
 
+.benchmark-leaderboard {
+  margin-top: 2.5rem;
+  padding: clamp(1rem, 3vw, 2rem);
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  background: rgb(255 255 255 / 70%);
+}
+
+.benchmark-leaderboard h3 { margin: 0.5rem 0 1rem; font-size: clamp(1.35rem, 3vw, 2rem); line-height: 1.25; }
+.benchmark-leaderboard > p, .leaderboard-disclosures { color: var(--muted); font-size: 0.9rem; }
+.leaderboard-protocols { padding-left: 1rem; border-left: 3px solid var(--brand); }
+.leaderboard-rows { list-style: none; margin: 1.75rem 0; padding: 0; }
+.leaderboard-row {
+  display: grid;
+  grid-template-columns: minmax(0, 20rem) minmax(0, 1fr) 5rem;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.85rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+.leaderboard-project { min-width: 0; }
+.leaderboard-project strong { display: block; font-size: 0.95rem; line-height: 1.35; }
+.leaderboard-project small { display: block; margin-top: 0.25rem; color: var(--muted); font-size: 0.78rem; line-height: 1.5; }
+.leaderboard-track { display: block; height: 0.85rem; border-radius: 1rem; background: var(--surface-strong); overflow: hidden; }
+.leaderboard-track > span { display: block; height: 100%; background: var(--muted); border-radius: inherit; }
+.leaderboard-rate { font-size: 1.1rem; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; }
+.leaderboard-row--ours { background: var(--surface); border-radius: 0.45rem; box-shadow: inset 3px 0 var(--brand); }
+.leaderboard-row--ours strong, .leaderboard-row--ours .leaderboard-rate { color: var(--brand-dark); }
+.leaderboard-row--ours .leaderboard-track > span { background: var(--brand); }
+.leaderboard-row--reference { border-top: 1px dashed var(--muted); border-bottom-style: dashed; }
+.leaderboard-links { display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; }
+.leaderboard-links a { display: inline-flex; align-items: center; gap: 0.35rem; min-height: 44px; font-size: 0.85rem; font-weight: 650; }
+
+@media (max-width: 760px) {
+  .leaderboard-row { grid-template-columns: minmax(0, 1fr) auto; gap: 0.65rem; }
+  .leaderboard-rate { grid-column: 2; grid-row: 1; }
+  .leaderboard-track { grid-column: 1 / -1; grid-row: 2; height: 0.6rem; }
+}
+
 .benchmark-features {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

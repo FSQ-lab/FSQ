@@ -114,6 +114,16 @@ FSQ supports Web, Android, Windows, and macOS targets, subject to [platform prer
 
 ## Benchmarks
 
+### AndroidWorld Open-Source & Source-Available Leaderboard
+
+<p align="center"><a href="frontend/website/public/benchmarks/androidworld-leaderboard.png"><img src="frontend/website/public/benchmarks/androidworld-leaderboard.png" width="100%" alt="AndroidWorld Benchmark Leaderboard Comparison — selected open-source and source-available projects, with a human reference baseline"></a></p>
+
+Representative projects with publicly released code, plus a **human reference baseline**, using the Google Research leaderboard archived in November 2026 and recent public reports. **This is not the complete archived leaderboard or an official same-protocol ranking.** This selected view excludes Lusor (the evaluated Harness was not released), gbox.ai (closed-service dependencies), and Gemini 2.5 Computer Use (the reported AndroidWorld Harness is not verified as public). Model API use alone does not determine whether an Agent's code is open source.
+
+Evaluation protocols, step limits, and exact reported-score-to-code commit bindings differ. Phone Use is source-available with an unverified license; UI-Venus/UI-TARS release weights and inference code without a verified complete score-producing AndroidWorld Harness. Other license labels describe released code, not certification of the entire evaluated stack. **Minitap's 94.0% is pass³, not pass@1.** FSQ's **95.69% (111/116, pass@1)** uses 113 original tasks plus three disclosed task-contract corrections and mode B; the image rounds it to 95.7%, and `111/116*` refers to these conditions. Display order does not establish a controlled head-to-head ranking. See [comparison sources and provenance](frontend/website/public/benchmarks/leaderboard.json) and [METHOD](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md).
+
+### Frozen FSQ campaign
+
 Frozen AndroidWorld campaign `full116-33113e4`:
 
 | Metric | Result |

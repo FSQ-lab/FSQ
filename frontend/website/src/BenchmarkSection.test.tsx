@@ -55,18 +55,19 @@ describe('AndroidWorld benchmark presentation', () => {
     render(<WebsiteApp />);
     const section = benchmark();
     const content = within(section);
-    expect(content.getByText('95.69%')).toBeVisible();
+    expect(within(content.getByText('111 / 116 tasks, pass@1').parentElement!).getByText('95.69%')).toBeVisible();
     expect(content.getByText('111 / 116 tasks, pass@1')).toBeVisible();
     expect(content.getByText('0 invalid · 0 task retries')).toBeVisible();
     for (const version of ['33113e4', '9d197f1', '668267e', 'seed=30', 'gpt-6.1-sol']) {
       expect(content.getByText(version)).toBeVisible();
     }
     for (const text of [/113 unchanged upstream tasks/, /three task-contract corrections: 001, 014, 076/, /not an unmodified-upstream or stock-strict leaderboard score/i, /share the emulator and host identity/]) {
-      const disclosure = content.getByText(text);
-      expect(disclosure).toBeVisible();
-      expect(disclosure.closest('details')).toBeNull();
+      for (const disclosure of content.getAllByText(text)) {
+        expect(disclosure).toBeVisible();
+        expect(disclosure.closest('details')).toBeNull();
+      }
     }
-    expect(content.getByText(/mode B outer-single-settlement/)).toBeVisible();
+    for (const disclosure of content.getAllByText(/mode B outer-single-settlement/)) expect(disclosure).toBeVisible();
     expect(content.getByText(/one whole-task attempt; no whole-task retries/)).toBeVisible();
   });
 
@@ -171,5 +172,43 @@ describe('AndroidWorld benchmark presentation', () => {
     const observations = import.meta.glob('../public/benchmarks/*.webp', { eager: true, query: '?url', import: 'default' });
     expect(Object.keys(observations).sort()).toEqual(cases.map(item => `../public/benchmarks/${item.id}-${item.name}.webp`).sort());
     expect(caseProvenance.cases.every(item => item.reward === 1)).toBe(true);
+  });
+  it('presents the approved public-code snapshot without turning display order into official ranks', () => {
+    render(<WebsiteApp />);
+    const comparison = screen.getByRole('region', { name: 'AndroidWorld Open-Source & Source-Available Leaderboard' });
+    const rows = within(comparison).getAllByRole('listitem');
+    const expected = [
+      ['Project ARTEMIS', 'Apache-2.0', '99.1%'],
+      ['Phone Use', '113/116 · source-available, license unverified', '97.4%'],
+      ['FinalRun', 'Apache-2.0', '97.4%'],
+      ['FSQ', 'OURS · MIT · Single Model · Strict Budget · 0 App Skills', '95.69%'],
+      ['AutoDevice', 'Apache-2.0', '94.8%'],
+      ['Minitap mobile-use', 'Apache-2.0 · 109/116 pass³', '94.0%'],
+      ['Midscene.js', 'MIT', '93.1%'],
+      ['DroidRun (Mobilerun)', 'MIT', '91.4%'],
+      ['AutoGLM-Mobile', 'Apache-2.0', '80.2%'],
+      ['Human Performance', 'reference baseline', '80.0%'],
+      ['Mobile-Agent-v3', 'MIT', '73.3%'],
+      ['UI-Venus-72B', 'open weights & inference', '65.9%'],
+      ['UI-TARS', 'Apache-2.0 · open weights & inference', '46.6%'],
+    ];
+    expect(rows).toHaveLength(expected.length);
+    expected.forEach(([name, label, rate], index) => {
+      for (const text of [name, label, rate]) expect(within(rows[index]).getByText(text, { exact: true })).toBeVisible();
+    });
+    expect(within(comparison).queryByText(/rank #|official rank/i)).toBeNull();
+  });
+
+  it('keeps mixed-protocol and code-release limitations visible beside the comparison and shared artwork', () => {
+    vi.stubEnv('BASE_URL', '/FSQ/');
+    render(<WebsiteApp />);
+    const comparison = within(screen.getByRole('region', { name: 'AndroidWorld Open-Source & Source-Available Leaderboard' }));
+    for (const limit of [/not the complete archived leaderboard/, /step limits and exact score-to-code commit bindings differ/, /Phone Use.*license/, /UI-Venus.*UI-TARS.*weights and inference/, /94.0% is pass³, not pass@1/, /FSQ.*113 unchanged.*three.*mode B/]) {
+      const statement = comparison.getByText(limit);
+      expect(statement).toBeVisible();
+      expect(statement.closest('details')).toBeNull();
+    }
+    expect(comparison.getByRole('link', { name: /View high-resolution comparison/ })).toHaveAttribute('href', '/FSQ/benchmarks/androidworld-leaderboard.png');
+    expect(comparison.getByRole('link', { name: /Comparison sources and provenance/ })).toHaveAttribute('href', '/FSQ/benchmarks/leaderboard.json');
   });
 });

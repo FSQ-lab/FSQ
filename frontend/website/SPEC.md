@@ -39,6 +39,33 @@ The Website does not execute FSQ, collect credentials or visitor input, replace 
 - Six featured full-reward cases (`013`, `046`, `060`, `027`, `091`, `002`) use the reviewed handoff's WebP observations, original task goals, and admitted/max write counts. A responsive semantic card grid links each screenshot to its full-size same-origin image; captions identify representative observations rather than final-state or standalone grading proof. The playlist duration `46:29` and sports-distance answer `6,510 m` remain evidence-backed case details.
 - The evidence repository card links to `https://github.com/FSQ-lab/benchmarks`, English `androidworld/README.md`, Chinese `androidworld/README.zh-CN.md`, `androidworld/METHOD.md`, `androidworld/results.csv`, and Release tag `androidworld-2026-11-19`. It directs readers to all 116 tasks and five non-passing case analyses. Links are normal user-initiated navigation, not runtime API calls; public publication requires the evidence destinations to be available.
 
+### Public-code comparison snapshot
+
+- The benchmark section includes `AndroidWorld Open-Source & Source-Available Leaderboard` after the frozen FSQ result and scope disclosure, before the existing four explanations and six case cards. It compares selected representative projects with publicly released code and includes a separately labelled human reference baseline. It is not the complete archived AndroidWorld leaderboard, not a pure fully open evaluation-stack list, and not an official same-protocol ranking.
+- The source context is the Google Research leaderboard archived in November 2026 plus recent public project reports. The selected comparison excludes Lusor, gbox.ai, and Gemini 2.5 Computer Use; this selection is not evidence that every included project exposes its complete score-producing implementation, model, or infrastructure. Commercial model API use alone does not make otherwise open Agent code closed source.
+- Rows retain this exact display order, names, visible openness/protocol labels, and reported rates. Display positions have no official rank numbers. FSQ retains its exact `95.69% (111/116, pass@1)` result; the approved image may round its bar label to `95.7%` with `111/116*` and an explanatory footnote.
+
+| Project / reference | Visible label | Reported rate |
+| --- | --- | --- |
+| Project ARTEMIS | Apache-2.0 | 99.1% |
+| Phone Use | 113/116 · source-available, license unverified | 97.4% |
+| FinalRun | Apache-2.0 | 97.4% |
+| FSQ | OURS · MIT · Single Model · Strict Budget · 0 App Skills | 95.69% |
+| AutoDevice | Apache-2.0 | 94.8% |
+| Minitap mobile-use | Apache-2.0 · 109/116 pass³ | 94.0% |
+| Midscene.js | MIT | 93.1% |
+| DroidRun (Mobilerun) | MIT | 91.4% |
+| AutoGLM-Mobile | Apache-2.0 | 80.2% |
+| Human Performance | reference baseline | 80.0% |
+| Mobile-Agent-v3 | MIT | 73.3% |
+| UI-Venus-72B | open weights & inference | 65.9% |
+| UI-TARS | Apache-2.0 · open weights & inference | 46.6% |
+
+- Nearby, non-collapsed text explains that protocols, step budgets, and exact reported-score-to-code commit bindings differ. Phone Use has public source but an unverified licence; UI-Venus/UI-TARS release weights and inference code without a verified complete score-producing AndroidWorld Harness. Licence labels describe released code, not a certification of the complete evaluated stack. Minitap's `94.0%` is `pass³`, not `pass@1`; FSQ uses 113 unchanged upstream tasks, three disclosed task-contract corrections, and mode B outer-single-settlement. Ordering never implies an unmodified-upstream FSQ score or a controlled head-to-head comparison.
+- The Website presents static semantic comparison rows with readable project names, visible labels and numeric rates, and proportional decorative bars. FSQ is identified by text as well as emphasis; the human row is visibly a reference baseline. Labels wrap without clipping or page-level horizontal overflow, including at 390 CSS pixels; understanding the comparison does not require zooming into a desktop-sized image. No chart library, new dependency, runtime leaderboard API, or visitor state is introduced.
+- The approved non-preview PNG is tracked once at `public/benchmarks/androidworld-leaderboard.png` within this module. Both root READMEs embed that same file via a repository-relative path, centred at full available width with meaningful alternative text. The Website offers a keyboard-accessible full-resolution image link. The image and `public/benchmarks/leaderboard.json` provenance come from the approved evaluation handoff; static Website values match its 13-row snapshot and link to public source/methodology evidence. The two READMEs retain equivalent scope and protocol caveats immediately beside the image.
+
+
 ## Data And State Flow
 
 - Product copy, navigation destinations, media references, captions, alternative text, and provenance labels are static, typed Website content.
@@ -56,6 +83,7 @@ The Website does not execute FSQ, collect credentials or visitor input, replace 
 - `src/styles.css`: Light visual system, responsive layout, focus, reduced-motion, and print-safe rules.
 - `src/WebsiteApp.test.tsx`: Focused content, hierarchy, navigation, copy-feedback, and no-tracking contract tests.
 - `public/benchmarks/`: Reviewed WebP case observations and their `cases.json` provenance, copied from the approved evaluation handoff; assets resolve under the configured `/FSQ/` base path.
+- The benchmark presentation source owns the comparison's static typed rows and disclosure copy; `public/benchmarks/` also holds the single shared high-resolution leaderboard PNG and its `leaderboard.json` source/protocol provenance.
 
 ## Frontend Architecture
 
@@ -85,6 +113,7 @@ The Website does not execute FSQ, collect credentials or visitor input, replace 
 - Link verification covers the canonical repository, both setup paths, English and Chinese getting started, prerequisites, support/stability, security, contribution, Star/feedback destinations, both media destinations, and license.
 - Published media follows `docs/media/media-acceptance.md`, has reviewed provenance and privacy, and remains understandable without audio.
 - Benchmark checks cover exact campaign metrics and versions, disclosure visibility, evidence destinations, six matching case goals/write counts/images, keyboard-accessible full-size image links, narrow-screen reflow, and complete production assets below `/FSQ/`. English and Chinese README benchmark summaries retain equivalent result scope and evidence destinations.
+- Public-code comparison checks cover all 13 approved names, order, rates and labels against the handoff provenance, exact versus rounded FSQ rates, visible mixed-protocol/open-code limitations, source and full-resolution destinations, shared README image references and equivalent caveats, absence of preview artwork, and complete production assets. Browser checks additionally include 390 CSS pixels and confirm readable wrapped labels, FSQ/human text identification, keyboard-accessible links, and no page-level horizontal overflow.
 
 ## Current Invariants
 

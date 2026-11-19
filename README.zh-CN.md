@@ -114,6 +114,16 @@ FSQ 支持 Web、Android、Windows 和 macOS 目标，请查看[平台前置条�
 
 ## 基准测评
 
+### AndroidWorld Open-Source & Source-Available Leaderboard
+
+<p align="center"><a href="frontend/website/public/benchmarks/androidworld-leaderboard.png"><img src="frontend/website/public/benchmarks/androidworld-leaderboard.png" width="100%" alt="AndroidWorld Benchmark Leaderboard Comparison — 开源与源码公开代表项目对比，含人类参考基线"></a></p>
+
+本图选取公开了代码的代表性项目，并加入**人类参考基线**，来源为 Google Research 于 2026 年 11 月归档的榜单及近期公开报告。**这不是包含闭源提交的完整归档总榜，也不是官方同协议排名。** 本视图不纳入 Lusor（受测 Harness 未公开）、gbox.ai（依赖闭源服务）和 Gemini 2.5 Computer Use（未核实该 AndroidWorld 成绩对应的 Harness 已公开）。是否调用商业模型 API，本身不决定 Agent 代码是否开源。
+
+各项目的评测协议、步数限制，以及报告分数与代码 commit 的精确绑定程度不同。Phone Use 源码公开但许可证未核实；UI-Venus/UI-TARS 公开权重和推理代码，未核实其完整受测 AndroidWorld Harness 已公开。其他许可标签描述已发布代码，不代表完整评测栈认证。**Minitap 的 94.0% 是 pass³，而非 pass@1。** FSQ 的 **95.69%（111/116，pass@1）** 使用 113 项原版任务、三项公开披露的任务契约修正及 mode B；图中四舍五入为 95.7%，`111/116*` 对应这些条件。不能依据行序宣称受控同条件名次。来源见[对比数据与公开范围](frontend/website/public/benchmarks/leaderboard.json)及 [METHOD](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md)。
+
+### FSQ 冻结实验
+
 已冻结的 AndroidWorld 实验 `full116-33113e4`：
 
 | 指标 | 结果 |

@@ -4,6 +4,37 @@ const externalLinkProps = { target: '_blank', rel: 'noreferrer' } as const;
 
 function Arrow() { return <span aria-hidden="true">↗</span>; }
 
+function LeaderboardComparison() {
+  const leaderboard = content.leaderboard;
+  return (
+    <section className="benchmark-leaderboard" aria-labelledby="leaderboard-title">
+      <p className="section-label">Public-code comparison · 13 entries</p>
+      <h3 id="leaderboard-title">{leaderboard.title}</h3>
+      <p>{leaderboard.scope}</p>
+      <p className="leaderboard-protocols">{leaderboard.protocols}</p>
+      <ul className="leaderboard-rows" aria-label="Reported results, not official ranks">
+        {leaderboard.rows.map(row => (
+          <li key={row.name} className={'leaderboard-row' + (row.name === 'FSQ' ? ' leaderboard-row--ours' : row.name === 'Human Performance' ? ' leaderboard-row--reference' : '')}>
+            <div className="leaderboard-project"><strong>{row.name}</strong><small>{row.label}</small></div>
+            <span className="leaderboard-track" aria-hidden="true"><span style={{ width: row.rate + '%' }} /></span>
+            <span className="leaderboard-rate">{row.display}</span>
+          </li>
+        ))}
+      </ul>
+      <div className="leaderboard-disclosures">
+        <p>{leaderboard.releases}</p>
+        <p>{leaderboard.metrics}</p>
+        <p>{leaderboard.selection}</p>
+      </div>
+      <nav className="leaderboard-links" aria-label="Comparison evidence">
+        <a href={benchmarkAssetUrl('androidworld-leaderboard.png')} {...externalLinkProps}>{leaderboard.imageAction} <Arrow /></a>
+        <a href={benchmarkAssetUrl('leaderboard.json')} {...externalLinkProps}>{leaderboard.provenanceAction} <Arrow /></a>
+        <a href={content.links.method} {...externalLinkProps}>{leaderboard.methodAction} <Arrow /></a>
+      </nav>
+    </section>
+  );
+}
+
 export function BenchmarkSection() {
   return (
     <section className="section shell benchmarks" id="benchmarks" aria-labelledby="benchmarks-title">
@@ -26,6 +57,7 @@ export function BenchmarkSection() {
         </div>
       </div>
       <p className="benchmark-scope">{content.scope}</p>
+      <LeaderboardComparison />
       <div className="benchmark-features">
         {content.features.map(feature => (
           <article className="benchmark-feature" key={feature.title}>

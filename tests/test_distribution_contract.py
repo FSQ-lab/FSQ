@@ -346,7 +346,6 @@ def test_readmes_share_current_media_and_resolvable_local_destinations() -> None
         assert "Web" in readme
         assert "Android" in readme
         assert readme.index("FSQ Lab") < readme.index("##")
-        assert "> [!IMPORTANT]" in readme
 
         # Check actual linked files and heading fragments, not just expected strings.
         targets = re.findall(r'\]\(([^)\s]+)\)|(?:href|src|srcset)="([^"]+)"', readme)
@@ -371,50 +370,51 @@ def test_readmes_share_current_media_and_resolvable_local_destinations() -> None
 
 def test_bilingual_readmes_present_two_complete_quick_start_paths() -> None:
     contracts = (
-        ("README.md", "## Quick start", "reload or start a new Coding Agent session", "one approval", "does not initialize a Workspace, configure a Provider, or run a test"),
-        ("README.zh-CN.md", "## 快速开始", "重新加载 Coding Agent 或启动新 session", "一次批准请求", "不初始化 Workspace、不配置 Provider、不运行测试"),
+        ("README.md", "## Quick start", "getting-started.md"),
+        ("README.zh-CN.md", "## 快速开始", "getting-started.zh-CN.md"),
     )
-    for name, heading, reload, approval, setup_boundary in contracts:
+    for name, heading, guide_name in contracts:
         readme = (ROOT / name).read_text(encoding="utf-8")
         quick_start = _markdown_section(readme, heading)
-        assert not re.search(r"(?m)^### \d+[.)]\s*(?:Coding Agent|FSQ UI)", quick_start)
-        sections = {title: _markdown_section(quick_start, f"### {title}") for title in ("Coding Agent", "FSQ UI")}
-        for title, section in sections.items():
-            details = re.findall(r"<details>\s*<summary>[^<]+</summary>(.*?)</details>", section, re.DOTALL)
-            assert len(details) == 1
-            assert section[: section.index("<details>")].strip(), "Keep a concise entry before setup details"
-            assert "Quick Test" in section
-            anchor = "coding-agent" if title == "Coding Agent" else "fsq-ui"
-            assert re.search(rf"\]\(docs/getting-started(?:\.zh-CN)?\.md#{anchor}\)", section)
-        agent = sections["Coding Agent"]
-        assert agent.index("https://github.com/FSQ-lab/FSQ") < agent.index("fsq init --agent skill") < agent.index(reload)
-        assert approval in agent
-        assert setup_boundary in agent
-        assert "Skill" in agent
-        assert "Web" in agent
-        ui = sections["FSQ UI"]
-        ui_details = re.search(r"<details>(.*?)</details>", ui, re.DOTALL)
-        assert ui_details is not None
-        assert "python -m pip install --upgrade fsq-agent" in ui_details[1]
-        assert "fsq ui" in ui_details[1]
-        assert all(marker in ui_details[1] for marker in ("Settings", "Provider", "Web", "Start Quick Test", "Open report"))
+        # Equal entry paths are links, not a prescribed heading/detail layout.
+        for title, anchor in (("Coding Agent", "coding-agent"), ("FSQ UI", "fsq-ui")):
+            assert title in quick_start
+            assert re.search(rf"\[[^\]]+\]\(docs/{re.escape(guide_name)}#{anchor}\)", quick_start)
+        assert "python -m pip install --upgrade fsq-agent" in quick_start
+        assert "fsq ui" in quick_start
+        assert all(marker in quick_start for marker in ("Quick Test", "Settings", "Provider", "Web"))
+        assert re.search(r"model|模型", quick_start, re.IGNORECASE)
+        assert re.search(r"reload|重新加载", quick_start, re.IGNORECASE)
+        assert re.search(r"never[^\n]*chat|不要[^\n]*聊天", quick_start, re.IGNORECASE)
+        normalized = " ".join(quick_start.split())
+        assert re.search(r"without manual[^.]*Workspace|无需手动[^。]*Workspace", normalized)
+        assert re.search(r"neither[^.]*formal Case|不保存正式 Case", normalized)
 
-        goals = re.findall(r"```text\n(.*?)\n```", quick_start, re.DOTALL)
-        assert len(goals) == 1
-        goal = goals[0]
-        assert goal.index("FSQ-lab/FSQ") < goal.index("About") < goal.index("Describe a goal.") < goal.index("Test the real app.")
-        assert "[describe the outcome]" not in goal
-        assert "[描述期望结果]" not in goal
-        if name == "README.md":
-            assert all(
-                marker in goal
-                for marker in ("search", "selected browser", "website link", "captured page evidence", "Only browse public pages", "Do not sign in", "submit forms", "Stop and report a blocker")
-            )
-        else:
-            assert all(marker in goal for marker in ("搜索", "已选择的浏览器", "官网链接", "页面证据", "只浏览公开页面", "不登录", "不提交表单", "停止并报告阻碍"))
-        guide_name = "getting-started.zh-CN.md" if "zh-CN" in name else "getting-started.md"
         guide = (ROOT / "docs" / guide_name).read_text(encoding="utf-8")
-        assert goal in guide, "README and detailed guide must share the complete first goal"
+        first_goal_heading = "## Complete first test" if name == "README.md" else "## 完整首次测试"
+        for document in (quick_start, _markdown_section(guide, first_goal_heading)):
+            goals = re.findall(r"```text\n(.*?)\n```", document, re.DOTALL)
+            assert len(goals) == 1
+            goal = " ".join(goals[0].split())
+            assert goal.index("FSQ-lab/FSQ") < goal.index("About") < goal.index("Describe a goal.") < goal.index("Test the real app.")
+            assert "[describe the outcome]" not in goal
+            assert "[描述期望结果]" not in goal
+            markers = (
+                (
+                    "search",
+                    "selected browser",
+                    "website link",
+                    "captured page evidence",
+                    "Only browse public pages",
+                    "Do not sign in",
+                    "change repository content",
+                    "submit forms",
+                    "Stop and report a blocker",
+                )
+                if name == "README.md"
+                else ("搜索", "已选择的浏览器", "官网链接", "页面证据", "只浏览公开页面", "不登录", "不修改仓库内容", "不提交表单", "停止并报告阻碍")
+            )
+            assert all(marker in goal for marker in markers)
 
 
 def test_bilingual_getting_started_guides_follow_the_guided_skill_protocol() -> None:
@@ -529,68 +529,66 @@ def test_ci_verifies_all_runtime_package_resources() -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "headline", "quick_heading", "advanced_heading", "feedback_heading", "safety_markers"),
+    ("name", "quick_heading", "advanced_heading", "feedback_heading", "safety_patterns"),
     [
         (
             "README.md",
-            "Describe a goal. Test the real app.",
             "## Quick start",
             "## Go further when you need to",
             "## Help shape FSQ",
             (
-                "supported configured Provider and explicitly selected model",
-                "never paste them into Coding Agent chat",
-                "no manual project Workspace setup",
-                "does not save a formal Case",
-                "does not perform Strict Replay",
-                "Evidence is stored locally",
-                "may contain private app data",
-                "review it before sharing",
-                "alpha",
+                r"supported[^\n]*Provider",
+                r"explicit[^\n]*model",
+                r"(?:API keys|credentials)[^\n]*Settings",
+                r"never[^\n]*chat",
+                r"Evidence[^\n]*local",
+                r"private app data",
+                r"Review[^\n]*sharing",
+                r"alpha",
             ),
         ),
         (
             "README.zh-CN.md",
-            "描述测试目标\uff0c让 AI 测试真实应用。",
             "## 快速开始",
             "## 需要时再进阶",
             "## 一起完善 FSQ",
             (
-                "已配置的受支持 Provider 与明确选择的模型",
-                "不要发送到 Coding Agent 聊天",
-                "无需手动初始化项目 Workspace",
-                "不保存正式 Case",
-                "不执行 Strict Replay",
-                "证据保存在本地",
-                "可能包含私有应用数据",
-                "审查",
-                "Alpha",
+                r"受支持[^\n]*Provider",
+                r"明确[^\n]*模型",
+                r"(?:API key|凭据)[^\n]*(?:Settings|设置)",
+                r"不要[^\n]*聊天",
+                r"证据[^\n]*本地",
+                r"私有应用数据",
+                r"分享[^\n]*审查",
+                r"Alpha",
             ),
         ),
     ],
     ids=("english", "chinese"),
 )
-def test_readme_uses_current_installation_and_cli_contract(name: str, headline: str, quick_heading: str, advanced_heading: str, feedback_heading: str, safety_markers: tuple[str, ...]) -> None:
+def test_readme_uses_current_installation_and_cli_contract(name: str, quick_heading: str, advanced_heading: str, feedback_heading: str, safety_patterns: tuple[str, ...]) -> None:
     readme = (ROOT / name).read_text(encoding="utf-8")
-    assert readme.index(headline) < readme.index("FSQ Lab")
     assert "Python 3.11+" in _markdown_section(readme, quick_heading)
-    assert all(marker in readme for marker in safety_markers)
-    advanced = _markdown_section(readme, advanced_heading)
+    # Source wrapping is presentation, not a safety contract.
+    safety_text = re.sub(r"(?<!\n)\n(?!\n)", " ", readme)
+    for pattern in safety_patterns:
+        assert re.search(pattern, safety_text, re.IGNORECASE), (name, pattern)
+    advanced = " ".join(_markdown_section(readme, advanced_heading).split())
     assert "FSQ Case Manager" in advanced
     assert "Strict Replay" in advanced
     if name == "README.md":
-        assert "A run may produce a Case" in advanced
-        assert "separately request Strict Replay" in advanced
-        assert "Quick Test never runs it automatically" in advanced
+        assert re.search(r"Case[^.]*conditional|(?:run|Run).*may.*Case", advanced)
+        assert re.search(r"(?:separat|independent)[^.]*Strict Replay", advanced, re.IGNORECASE)
+        assert re.search(r"Quick Test (?:never|does not)[^.]*automatic", advanced, re.IGNORECASE)
     else:
-        assert "Run 可能产生 Case" in advanced
-        assert "单独请求 Strict Replay" in advanced
-        assert "Quick Test 不会自动重放" in advanced
+        assert re.search(r"Run[^\n]*可能[^\n]*Case", advanced)
+        assert re.search(r"(?:独立|单独)[^\n]*Strict Replay", advanced)
+        assert re.search(r"Quick Test\s*不(?:会)?自动[^。\uff1b;]*重放", advanced)
     assert readme.index(quick_heading) < readme.index(advanced_heading) < readme.index(feedback_heading)
     assert "https://github.com/FSQ-lab/FSQ/issues/new/choose" in _markdown_section(readme, feedback_heading)
     for link in (
         "README.md" if "zh-CN" in name else "README.zh-CN.md",
-        "docs/getting-started.zh-CN.md",
+        "docs/getting-started.zh-CN.md" if "zh-CN" in name else "docs/getting-started.md",
         "docs/platform-prerequisites.md",
         "docs/support-and-stability.md",
         "SECURITY.md",

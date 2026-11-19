@@ -832,7 +832,7 @@ def test_ios_close_preserves_borrowed_session_and_settles_owned_uncertain_sessio
 
     try:
         from appium_connect_agent.automation import ResourceStateError as _SDKResourceStateError
-    except ImportError:
+    except (ImportError, ModuleNotFoundError):
 
         class QuitUnknownError(RuntimeError):
             code = "session_quit_unknown"

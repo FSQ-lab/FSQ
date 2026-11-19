@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import signal
@@ -31,6 +30,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 if sys.platform != "darwin":
     pytest.skip("Real SDK managed XCUITest ownership proof requires macOS and /usr/sbin/lsof.", allow_module_level=True)
+
+import fcntl
 
 from appium_connect_agent import automation as aca_automation
 

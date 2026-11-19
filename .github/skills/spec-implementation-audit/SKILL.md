@@ -19,10 +19,10 @@ This skill audits only project-code or project-logic changes. Agent write author
 
 The audit covers both project paths: implementation after a confirmed SPEC update and implementation under a recorded no-SPEC-delta decision. In the latter path, the reviewer independently verifies that current SPEC remains the complete grounding truth for the changed behavior.
 
-Completion cannot be claimed until implementation is audited against:
+Standard-mode completion cannot be claimed until implementation is audited against:
 
 ```text
-root SPEC.md + relevant module SPEC.md files + actual diff
+relevant root SPEC.md sections + affected module SPEC.md files + exact git diff / base commit
 ```
 
 Tests, lint, keyword scans, and implementation summaries are auxiliary evidence only. They do not replace diff-based SPEC audit.
@@ -40,34 +40,27 @@ Do not automatically restart a full audit. Changes outside the previous findings
 
 Use a fresh reviewer or independent context whenever the platform supports it. The reviewer must not inherit the implementation agent's conversation history or rely on its self-report.
 
-Reviewer input is limited to:
+Reviewer input is converged to high-signal authority and diff context:
 
-- Root `SPEC.md`.
-- Relevant module `SPEC.md` files.
-- Complete diff artifacts for the declared audit mode plus their identity manifest, or an exact commit range.
-- For repair-only passes, the previous independent report, its finding IDs and audited snapshot, and the complete delta from that snapshot to the repaired snapshot.
-- SPEC delta mode: `confirmed-update` or `no-delta`.
-- Confirmed SPEC version and confirmation evidence, plus the authorized task scope and exclusions. These establish approval and scope, not a substitute for project SPEC.
-- Assigned `review_lane=combined|forward|reverse`, coverage boundaries, and the verification plan/status for the same snapshot.
-- Minimal navigation instructions required to locate modules and public APIs.
-- Verifiable raw verification outputs or durable evidence references, with commands, exit status, tested inputs, relevant environment, and coverage; these support but never replace independent review.
+- Affected module `SPEC.md` files and the relevant sections of root `SPEC.md` (do not force reading the entire root `SPEC.md` end-to-end when only specific architecture edges or Development Rules apply).
+- Base commit / commit range or exact scoped `git diff` (plus explicit paths for any in-scope untracked project files).
+- For repair-only passes, the previous independent report, its open finding IDs, and the repair delta from the previous reviewed state.
+- SPEC delta mode: `confirmed-update` or `no-delta`, plus confirmation evidence and the authorized task scope/exclusions.
+- Assigned `review_lane=combined|forward|reverse` and coverage boundaries.
+- Already-passed local verification evidence (pinned Ruff lint/format results and affected-scope focused test commands, exit status, and tested paths); local checks must be green before Reviewer is invoked.
 - For no-SPEC-delta work, the recorded SPEC references and neutral defect reproduction evidence as claims to verify, not accepted proof.
 
 Do not provide persuasive summaries such as "this is complete" or "tests pass, so it should be fine".
 
 ## Audit Input Integrity
 
-For a worktree audit, validate the supplied artifact path, SHA-256, byte size, `diff --git` entry count, changed-path inventory, and any separate untracked-file artifacts for the declared audit mode. Read the complete in-scope artifacts, not terminal output or overflow wrappers. Use the single evidence package and compact manifest prepared by `spec-driven`; do not request a new repository copy at each handoff. A repair-only manifest links the previous snapshot and report to the complete repair delta and verifies that code and SPEC evidence outside that scope is unchanged; identity verification does not require re-auditing unchanged content. If required evidence is missing, unreadable, truncated, wrapped, or inconsistent with its identity manifest, return `audit-blocked` without substituting a live diff or implementation summary.
+Review against the supplied base commit / commit range or exact scoped `git diff` and any declared in-scope untracked project files. Do not require temporary diff files with manual byte-size, `diff --git` entry-count, or pre/post double-SHA-256 regeneration ceremonies. If the diff is truncated, unreadable, or omits declared changed/untracked project paths, return `audit-blocked` rather than guessing from an implementation summary.
 
-Record the validated artifact identities in the audit result. The calling `spec-driven` workflow owns the post-audit comparison between these identities and a freshly regenerated worktree snapshot; the reviewer must not claim that later worktree changes are covered. For a commit-range audit, validate and report the exact immutable base and head object ids.
-
-Require the exact root and relevant module SPEC versions, even when unchanged by the diff, and independently read them for the initial scope. Compare changed SPEC inputs with their confirmed versions; matching code and unconfirmed SPEC edits do not establish approval. Necessary source context outside the diff must come from the declared frozen workspace or immutable snapshot. Immutable Git object/path references are sufficient for unchanged content; do not demand all repository files or unrelated SPECs. This reduces copying, not completeness or integrity.
+Read the affected module `SPEC.md` files and relevant root `SPEC.md` sections directly. Compare changed SPEC sections with what the user confirmed; code and unconfirmed SPEC edits changing together do not establish approval. Necessary source context outside the diff may be read directly from the frozen worktree or Git revision without copying the repository or reading unrelated module specs.
 
 ## Verification Evidence
 
-Independently read the relevant tests and necessary call paths, then default to consuming verifiable matching raw test/CI evidence instead of requesting reruns for independence. Check exact commands, exit status, tested input identity, relevant environment, and coverage against the affected requirements and review snapshot. A passing summary alone is insufficient.
-
-Retain earlier results when those factors still match. Input, relevant environment, or coverage changes invalidate affected checks and verdicts, not unrelated proof; identify the precise gap for Tech Lead to assign the necessary verification under `spec-driven`. A new snapshot identifier alone does not invalidate checks whose actual inputs and coverage are unchanged. Missing or failed required evidence blocks its dependent conclusions; static review may continue. Do not require an empty download cache as a proxy for clean-install evidence.
+Local Ruff and affected-scope focused tests are a prerequisite gate before Reviewer starts. Independently read the relevant tests and call paths, and consume the supplied verifiable local/CI results (exact commands, exit status, tested paths, and environment) rather than requesting reruns for independence. Identify any concrete coverage gap in the findings if focused tests miss a required boundary or negative path.
 
 ## Review Lanes
 
@@ -79,14 +72,14 @@ Default to one independent Reviewer with `review_lane=combined`. Under the root 
 
 A split-lane report declares only its own coverage and cannot pass the whole audit. Tech Lead joins both reports, resolves gaps or conflicting verdicts with the reviewers, and preserves all findings and source IDs. Neither inventory may be omitted because the other lane passed.
 
-Verification may run concurrently under `spec-driven`. Apply the evidence rules above while it is pending; the responsible Reviewer finalizes dependent conclusions only after consuming matching results. Verification is never inferred from another lane's success.
+Local verification completes before Reviewer dispatch under `spec-driven`; Reviewer evaluates whether the executed focused checks actually cover the changed contracts and risk boundaries.
 
 ## First-Round Complete Scope
 
 Before judging implementation in round 1, establish the complete scope:
 
-- the root and relevant module SPEC inputs;
-- the complete current worktree diff or commit range;
+- the affected module `SPEC.md` files and relevant root `SPEC.md` sections;
+- the exact scoped `git diff` (plus any in-scope untracked files) or commit range;
 - the SPEC delta mode;
 - the complete set of applicable SPEC items;
 - the complete set of in-scope added, changed, or removed behaviors and affected implementation boundaries, independently derived from code rather than filtered by known SPEC items;
@@ -96,14 +89,14 @@ Determine this initial scope independently for the assigned lane. Account for ev
 
 ## First-Round Complete Procedure
 
-1. Establish both the applicable SPEC item inventory and the actual behavior inventory for the assigned lane before assigning final verdicts, including independent validation of a no-SPEC-delta decision when applicable.
-2. Read the diff and relevant implementation paths for each item; independently trace actual behaviors back to SPEC and authorized scope.
+1. Internally establish both the applicable SPEC requirements and the actual behavior changes from the diff and affected call paths, including independent validation of a `no-SPEC-delta` classification when applicable.
+2. Perform both directions of inspection:
+   - **Forward (`SPEC -> code`)**: completeness, behavioral correctness, boundary/error handling, architecture rules, and focused test adequacy against confirmed SPEC requirements.
+   - **Reverse (`code -> SPEC`)**: trace every added, changed, or removed behavior (and test/doc promise) back to a confirmed SPEC basis and authorized task scope.
 3. Apply the correctness/risk checks below and the Python, frontend, package, browser, and visual domain checks when affected.
-4. Record a verdict and concrete diff evidence for every item.
-5. Consolidate duplicate observations of each blocking root cause and reference every affected SPEC or behavior item precisely. When grounding is absent, record `SPEC basis: absent`; do not drop the finding for lack of a SPEC reference.
-6. Record repair ownership as implementation, SPEC/human decision, or verification environment.
-7. Record non-blocking quality feedback separately from SPEC verdicts.
-8. Return the assigned coverage tables and full finding set, with blocking gaps before quality/style feedback. The aggregate full audit requires both tables.
+4. Consolidate duplicate observations of each blocking root cause with precise SPEC/file/symbol references. When grounding is absent, record `SPEC basis: absent`.
+5. Classify each finding as **Blocking** or **Non-blocking**, and record repair ownership (`implementation`, `SPEC/human decision`, or `verification environment`).
+6. Emit an **exception-only** report: output only concrete findings (Blocking / Non-blocking), unverified or out-of-scope items, and a concise coverage declaration. Do NOT emit exhaustive per-item pass tables for items that passed both forward and reverse checks.
 
 A finding alone must not cause an early return: complete the current pass before implementation repair or a finding-resolution decision begins. Missing required input, tools, or artifacts permit an early `audit-blocked` result; it is not an implementation verdict, does not consume a repair attempt, and cannot satisfy the completion gate. Root user-pause and safety/authorization stops still take precedence; interrupted coverage remains incomplete and cannot pass.
 
@@ -185,36 +178,29 @@ When packaging, dependencies, installation, or distribution behavior is affected
 
 ## Structured Result
 
-Each applicable item records:
+Keep internal bidirectional checking thorough while keeping output exception-only:
 
-- SPEC source and requirement text or a precise requirement reference;
-- represented implementation boundaries;
-- concrete diff evidence;
-- audit verdict;
-- notes needed to reproduce or repair a gap.
+- Do not output row-by-row tables of passing SPEC clauses or passing `grounded` / `implementation-detail` behaviors.
+- Every Blocking or Non-blocking finding records:
+  - stable Finding ID (retained across `repair-only` passes);
+  - severity (`Blocking` or `Non-blocking`) and verdict / reverse classification;
+  - affected SPEC reference (or `SPEC basis: absent`) and concrete file/line/symbol evidence;
+  - distinct root cause, trigger condition, impact, and repair owner (`implementation`, `SPEC/human decision`, or `verification environment`).
 
-Each finding records:
-
-- a stable finding ID retained across repair-only passes;
-- affected SPEC and behavior items or precise requirement references; explicitly absent grounding where applicable;
-- the distinct root cause;
-- blocking verdict and concrete evidence;
-- repair owner: implementation, SPEC/human decision, or verification environment;
-
-Duplicate observations of the same root cause are consolidated into one finding that may reference multiple SPEC items. Distinct root causes under one SPEC item remain distinct findings.
+Duplicate observations of the same root cause are consolidated into one finding referencing all affected items. Distinct root causes remain distinct findings.
 
 ## Repair-Only Follow-Up
 
-An audit pass must finish and return its assigned coverage tables and full finding set for the declared scope before any implementation repair begins. All review lanes and verification tasks join under `spec-driven` before a repair batch is issued. Do not interleave audit and repair.
+An audit pass must finish and return its exception-only report and coverage declaration before any implementation repair begins. Do not interleave audit and repair.
 
 After an audit result:
 
 1. Resolve any SPEC/human-decision or verification-environment blocker that can change or prevent implementation repair.
 2. Repair every implementation-fixable blocking finding from that result in one batch.
-3. Freeze the complete repaired snapshot and select all verification affected by the repair batch.
-4. Run affected verification and independent repair-only review concurrently where safe, using the previous aggregate report, its snapshot, the complete repair delta, relevant SPEC clauses, and neutral verification evidence. Join them before finalizing the pass.
-5. Judge every previous-round finding against the actual repair and its controlling path. Keep an unfixed or partially fixed finding open. A defect in the repair that prevents the same requirement from being met also keeps that finding open. Reverse-trace all behavior changes introduced by the repair delta; record repair-introduced gaps with stable IDs linked to the originating finding. They cannot inherit earlier passing evidence.
-6. Return a verdict for every previous-round finding and carry all remaining blockers forward. Repeat repair-only passes until none remain, subject to the repair limit below.
+3. Run local Ruff and affected focused tests on the repaired worktree until green, then freeze the repair delta.
+4. Run independent `audit_mode=repair-only` review using the previous report, the repair delta, relevant SPEC sections, and green local verification results.
+5. Judge every previous-round finding against the actual repair and reverse-trace any new behavior introduced by the repair delta. Record resolution status (`resolved` vs still open) for each prior Finding ID plus any newly introduced findings.
+6. Repeat repair-only passes until no Blocking findings remain, subject to the two-round repair limit below.
 
 Do not reopen unrelated passing items or expand the pass into a new full audit. Unrelated discoveries are separate feedback, not automatic additions to this repair batch. If unrelated code or SPEC changes invalidate inherited evidence, pause for a scope decision rather than claiming coverage for them.
 
@@ -253,33 +239,22 @@ For SPEC-item verdicts, any verdict except `implemented` is blocking unless the 
 
 ## Required Output
 
-For a full first pass, the forward or combined lane produces a complete item table:
+Use **Exception-Only Output** for all audit passes (do not generate full forward/reverse tables of passing items):
 
-```text
-SPEC item | Boundaries | Diff evidence | Verdict | Notes
-```
-
-The reverse or combined lane also produces a complete behavior table:
-
-```text
-Behavior ID | Actual behavior/change | Code evidence | SPEC basis or absent | Task scope basis | Classification | Rationale/gap
-```
-
-Account for every changed path in these tables or an explicit non-behavioral classification. The aggregate result includes both inventories, not just the findings.
-
-For every pass, produce the complete finding table for its scope:
-
-```text
-Finding ID | Affected SPEC/behavior items | Root cause | Evidence | Verdict | Repair owner
-```
-
-For repair-only passes, replace the full inventories with a table covering every previous-round finding and a scoped behavior table for the repair delta:
-
-```text
-Previous finding ID | Repair delta evidence | Verification evidence | Verdict | Remaining gap
-```
-
-State `audit_mode=full|repair-only`, `review_lane=combined|forward|reverse`, `coverage_complete=true|false` for that lane and mode's scope, `spec_delta_mode=confirmed-update|no-delta`, audited SPEC inputs and confirmation evidence, and validated diff artifact identities or exact commit range. State verification-dependent conclusions still pending. The aggregate result separately states forward and reverse coverage and verification status. A repair-only result also identifies the previous aggregate report and snapshot it extends. Do not describe scoped coverage as a new full audit. Each evidence entry must cite concrete files and, when possible, line numbers or changed symbols. If evidence is absent, say so directly.
+1. **Audit Header & Concise Coverage Declaration**:
+   - `audit_mode=full|repair-only`, `review_lane=combined|forward|reverse`, `spec_delta_mode=confirmed-update|no-delta`, `coverage_complete=true|false`.
+   - Audited inputs: affected module `SPEC.md` paths, relevant root `SPEC.md` sections, base commit or scoped `git diff` target (plus any untracked files), and consumed local verification commands/status.
+   - Concise bidirectional scope summary: 1–3 bullets or lines stating which modules/files/behaviors were checked forward (`SPEC -> code`) and reverse (`code -> SPEC`) and confirming all passing items satisfied grounding and correctness.
+2. **Findings (`Blocking` then `Non-blocking`)** — omit table or write `None` when zero findings exist:
+   ```text
+   Finding ID | Severity | Verdict / Classification | SPEC ref (or absent) | File / Symbol Evidence | Root cause & Impact | Repair owner
+   ```
+3. **Repair-Only Delta Status** (only when `audit_mode=repair-only`):
+   ```text
+   Previous Finding ID | Status (resolved / open) | Repair & Verification Evidence | Remaining gap (if open)
+   ```
+4. **Unverified Or Out-Of-Scope Items**:
+   - Explicitly list any unverified paths (for example CI-only platform matrix, real-device paths not run locally) or out-of-scope changes requiring human decision, or `None`.
 
 ## What Not To Accept
 
@@ -289,7 +264,7 @@ State `audit_mode=full|repair-only`, `review_lane=combined|forward|reverse`, `co
 - A design document as final authority after `SPEC.md` exists.
 - A `bugfix` or `no-spec-delta` label as proof that current SPEC needs no update.
 - Code, tests, or unconfirmed SPEC edits as authorization for new behavior.
-- A forward-only coverage table, a blanket implementation-detail exemption, or another lane's passing result as proof of reverse coverage.
+- One review direction's check, or a blanket `implementation-detail` claim without tracing actual behavior changes, as proof of bidirectional coverage.
 - Agent workflow instructions presented as proof that project behavior satisfies SPEC.
 - Public API declarations without backing behavior.
 - Mocks, stubs, hardcoded success paths, or placeholder fallbacks as production implementation.
@@ -299,14 +274,10 @@ State `audit_mode=full|repair-only`, `review_lane=combined|forward|reverse`, `co
 
 Before claiming completion, state:
 
-- Which root/module `SPEC.md` files were covered by the full first pass and any repair-only follow-ups.
-- Which validated snapshots or exact commit ranges connect the initial audit to the current implementation.
-- Which SPEC delta mode was audited and, for no-delta work, whether its classification was independently validated.
-- Whether the first full audit and every subsequent repair-only pass have complete coverage for their declared scopes.
-- Whether both forward and reverse coverage are complete, every changed path is accounted for, and no ungrounded, conflicting, out-of-scope, or unverified behavior remains unresolved.
-- Whether all review lanes and required verification have joined against the same snapshot, with pending evidence resolved by the responsible Reviewer.
-- Whether every applicable SPEC item is supported by an initial passing verdict or an independent repair verdict, with unaffected evidence unchanged.
-- Whether any unresolved blocking finding remains in the carried-forward finding set.
-- Any remaining `needs-human-decision` items accepted by the user.
+- Which module `SPEC.md` files and root `SPEC.md` sections were covered, and which base commit or scoped `git diff` was audited.
+- Which SPEC delta mode was audited and, for `no-delta` work, whether its conformance-only basis was independently validated.
+- Whether both forward (`SPEC -> code`) and reverse (`code -> SPEC`) checks completed across all changed paths with zero unresolved Blocking findings (`ungrounded`, `conflicting`, `out-of-scope`, `incomplete`, `diverged`, etc.).
+- Whether local Ruff and affected-scope focused tests passed on the reviewed state, and any residual CI-only or external verification boundaries.
+- Any remaining `needs-human-decision` items explicitly accepted by the user.
 
 Completion can be established by the full first pass plus the repair-only audit chain; it does not require another full audit. If a pass is incomplete, the evidence chain is broken, required verification is unavailable, or blocking gaps remain, do not claim completion. State the covered scope and residual limits; an audit is not a zero-bug guarantee, and a passed test suite alone is not Done.

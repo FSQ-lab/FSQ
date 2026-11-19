@@ -23,6 +23,7 @@
 <p align="center">
   <a href="https://fsq-lab.github.io/FSQ/">Website</a> ·
   <a href="#quick-start">Quick start</a> ·
+  <a href="#benchmarks">Benchmarks</a> ·
   <a href="README.zh-CN.md">中文</a> ·
   <a href="docs/getting-started.md">Guide</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
@@ -32,137 +33,87 @@
 
 https://github.com/user-attachments/assets/3acfecf4-bf48-4c76-8245-2eeef0dedb1f
 
-[Watch on YouTube](https://youtu.be/f1sobvVHNg0) · [English captions](docs/media/quick-test.en.srt) · [Media sources and review status](docs/media/quick-test-demo-provenance.md)
+[YouTube](https://youtu.be/f1sobvVHNg0) · [English captions](docs/media/quick-test.en.srt) · [Media provenance](docs/media/quick-test-demo-provenance.md)
 
-The video shows one real Android Quick Test: find the FSQ repository, follow its About website link, and verify both homepage headlines. You can start with Web; platform setup and execution differ, and search results and outcomes can vary.
+A real Android Quick Test, from goal to evidence. Try Web below; setup and execution differ across platforms,
+and search results and outcomes can vary. This recording is an observation, not a success guarantee.
 
-## From goal to evidence
+## Benchmarks
 
-**Describe the journey and the checks.** Find `FSQ-lab/FSQ`, follow its About website link, and verify `Describe a goal.` and `Test the real app.`. The card adds editorial explanation around a recorded goal; the surrounding text is separate from the product UI.
+**95.69% (111/116, pass@1)** on AndroidWorld · **Single Model · Strict Budget · 0 App Skills**.
 
-![Editorial task card with a real Quick Test goal: search for the repository, follow About to its website, and check both headlines](docs/media/quick-test-task.png)
+<p align="center"><a href="frontend/website/public/benchmarks/androidworld-leaderboard.png"><img src="frontend/website/public/benchmarks/androidworld-leaderboard.png" width="100%" alt="AndroidWorld Benchmark Leaderboard Comparison — selected open-source and source-available projects, with a human reference baseline"></a></p>
 
-**Watch AI operate the real app.** The Android browser screen sits beside the FSQ action timeline, connecting execution with captured screenshots and interface state.
+Representative open-source and public-code snapshots from the November 2026 Google Research archive and public reports,
+plus a **human reference**—not the complete leaderboard including closed-source submissions or an official same-protocol ranking.
+Protocols, step budgets, and score-to-code
+commit bindings differ. Phone Use's license is unverified; UI-Venus/UI-TARS provide weights and inference code,
+not a verified complete score-producing AndroidWorld Harness. License labels do not certify the full evaluated stack;
+using a commercial model API alone does not make an Agent closed source. **Minitap's 94.0% is pass³, not pass@1.**
 
-![Real FSQ execution capture showing the action timeline beside the Android browser device view](docs/media/quick-test-execution.png)
-
-**Check the result against the evidence.** The captured page shows both required headlines. The same Run reports execution success, verification success, and complete evidence separately. The card pairs real page and report captures with editorial explanation.
-
-![Editorial result card pairing the captured homepage headlines with the same Run report showing execution and verification success and complete evidence](docs/media/quick-test-result.png)
+FSQ uses **113 original tasks + three disclosed task-contract corrections and mode B**, not unmodified-upstream
+or stock-strict grading. The image rounds 95.69% to **95.7%**; `111/116*` refers to these conditions.
+[Full report](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.md) · [METHOD: frozen versions, budgets and audit limits](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md) · [Comparison provenance](frontend/website/public/benchmarks/leaderboard.json)
 
 ## Quick start
 
-Choose **Coding Agent** or **FSQ UI**. Both lead to one Quick Test and evidence review. You need Python 3.11+, a supported configured Provider and explicitly selected model, and [platform prerequisites](docs/platform-prerequisites.md). Enter Provider credentials privately in local FSQ Settings; never paste them into Coding Agent chat.
+Choose **Coding Agent** or **FSQ UI**—equal paths to one Quick Test and evidence review. You need **Python 3.11+**,
+a supported configured Provider, an **explicitly selected model**, and [platform prerequisites](docs/platform-prerequisites.md) for Web, Android, Windows, or macOS.
+Enter credentials privately in local FSQ **Settings**, never in Coding Agent chat.
 
-Quick Test prepares `~/.fsq/quick-test/` automatically. It requires no manual project Workspace setup, does not save a formal Case, and does not perform Strict Replay.
-
-### Coding Agent
-
-Add the FSQ Skill, reload your Coding Agent, and ask it to run the complete goal below with FSQ Quick Test.
-
-<details>
-<summary>Expand: one-time setup and first run</summary>
-
-Open your project in the Coding Agent and paste:
-
-> The official FSQ project is https://github.com/FSQ-lab/FSQ. Establish the exact opened project root. Batch and disclose read-only Python, fsq, and Skill-presence checks with their working directories, commands, purpose, and effects. Request one approval covering only installation or upgrade of fsq-agent and one fsq init --agent skill in this project; show exact commands and Python-environment and project-file effects first. Perform only approved operations, verify fsq, and report the installed Skill path. This setup does not initialize a Workspace, configure a Provider, or run a test. Ask me to reload or start a new Coding Agent session, then stop.
-
-After reloading, select Web and an available browser, then send “Use FSQ Quick Test for the following goal” with the complete goal. Follow the installed Skill: it discovers readiness, asks for unresolved decisions, and reports actual progress and evidence. After a package upgrade, rerun `fsq init --agent skill` and reload to update the copied Skill.
-
-</details>
-
-[Open Coding Agent setup guide](docs/getting-started.md#coding-agent)
-
-### FSQ UI
-
-Install FSQ, open the local UI, choose **Quick Test**, and paste the same goal.
-
-<details>
-<summary>Expand: install and start Quick Test</summary>
+- **Coding Agent:** follow the [Skill setup guide](docs/getting-started.md#coding-agent), then reload your agent.
+  Ask it to use FSQ Quick Test with Web, your selected available browser, and the complete goal below.
+- **FSQ UI:** install and launch below, configure Provider/model in **Settings**, then choose **Quick Test**,
+  select Web and an available browser, paste the goal, and select **Start Quick Test**. [UI guide](docs/getting-started.md#fsq-ui).
 
 ```bash
 python -m pip install --upgrade fsq-agent
 fsq ui
 ```
 
-1. Configure a supported Provider and explicitly select a model in **Settings**.
-2. Return to **Quick Test**, select Web and an available browser, and paste the goal below.
-3. Select **Start Quick Test**. FSQ interprets the app and validates the target and environment before testing. Unresolved intent, zero or multiple target matches, or preparation failure stop the request without follow-up dialogue.
-4. Use **Open report** to inspect the outcome and evidence. Target availability does not prove the model understood the intended app correctly.
-
-</details>
-
-[Open FSQ UI setup guide](docs/getting-started.md#fsq-ui)
-
-### Try a complete user journey
-
-Web is an accessible first-use option; the recording shows Android. After selecting a browser, copy this complete goal into either entry path:
-
 ```text
 Use the selected browser to search for the FSQ-lab/FSQ GitHub repository. Open that repository, follow the website link in its About section, and verify that the destination page displays both “Describe a goal.” and “Test the real app.” Report the outcome with the captured page evidence. Only browse public pages. Do not sign in, change repository content, or submit forms. Stop and report a blocker if the repository or About website link cannot be identified.
 ```
 
-After the run, inspect the report and captured page evidence. Treat failed, inconclusive, or preparation-error outcomes as observed; they do not mean the checks passed.
+Quick Test prepares `~/.fsq/quick-test/` without manual project Workspace setup; it neither saves a formal Case
+nor runs Strict Replay. Open the report and inspect captured evidence: failed, inconclusive, or preparation-error
+outcomes do not mean the checks passed.
+
+## From goal to evidence
+
+**Describe the journey and checks.** This editorial task card explains the recorded goal; its annotations are not product UI.
+
+![Editorial task card explaining the recorded Quick Test goal](docs/media/quick-test-task.png)
+
+**Watch the real app.** The Android browser and FSQ action timeline connect actions with screenshots and interface state.
+
+![Real FSQ execution capture with action timeline and Android browser](docs/media/quick-test-execution.png)
+
+**Inspect the result.** Real page and same-Run report captures separate execution, verification, and evidence completeness; surrounding explanations are editorial, not product UI.
+
+![Editorial result card pairing real page evidence and the same Run report](docs/media/quick-test-result.png)
 
 ## Go further when you need to
 
-- **Inspect the run:** review screenshots, interface state, events, and reports to compare actual behavior with your expectations.
-- **Manage reusable Cases:** use **FSQ Case Manager** for registered Workspaces, explicit Case creation or saving an available candidate, and run history. A run may produce a Case; generation is conditional.
-- **Choose deterministic replay:** review any returned Case unchanged, then separately request Strict Replay. Replay operates the target again and requires prerequisite and side-effect checks; Quick Test never runs it automatically.
-
-FSQ supports Web, Android, Windows, and macOS targets, subject to [platform prerequisites](docs/platform-prerequisites.md).
-
-## Benchmarks
-
-### AndroidWorld Open-Source & Source-Available Leaderboard
-
-<p align="center"><a href="frontend/website/public/benchmarks/androidworld-leaderboard.png"><img src="frontend/website/public/benchmarks/androidworld-leaderboard.png" width="100%" alt="AndroidWorld Benchmark Leaderboard Comparison — selected open-source and source-available projects, with a human reference baseline"></a></p>
-
-Representative projects with publicly released code, plus a **human reference baseline**, using the Google Research leaderboard archived in November 2026 and recent public reports. **This is not the complete archived leaderboard or an official same-protocol ranking.** This selected view excludes Lusor (the evaluated Harness was not released), gbox.ai (closed-service dependencies), and Gemini 2.5 Computer Use (the reported AndroidWorld Harness is not verified as public). Model API use alone does not determine whether an Agent's code is open source.
-
-Evaluation protocols, step limits, and exact reported-score-to-code commit bindings differ. Phone Use is source-available with an unverified license; UI-Venus/UI-TARS release weights and inference code without a verified complete score-producing AndroidWorld Harness. Other license labels describe released code, not certification of the entire evaluated stack. **Minitap's 94.0% is pass³, not pass@1.** FSQ's **95.69% (111/116, pass@1)** uses 113 original tasks plus three disclosed task-contract corrections and mode B; the image rounds it to 95.7%, and `111/116*` refers to these conditions. Display order does not establish a controlled head-to-head ranking. See [comparison sources and provenance](frontend/website/public/benchmarks/leaderboard.json) and [METHOD](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md).
-
-### Frozen FSQ campaign
-
-Frozen AndroidWorld campaign `full116-33113e4`:
-
-| Metric | Result |
-| --- | --- |
-| Task success (pass@1) | **95.69% (111/116 tasks)** |
-| Invalid results | **0** |
-| Whole-task retries | **0** |
-
-Frozen versions: FSQ `33113e4` · appium-connect-agent `9d197f1` · AndroidWorld `668267e` · seed `30` · client-selected `gpt-6.1-sol`.
-
-- **One configured model:** planning, execution, verification, and visual inspection use the same selected model across separate inference calls—not one request.
-- **Generic skills only:** two general-purpose skills; no test-app-specific skills.
-- **Strict write budget:** `int(10 × complexity)` admitted Harness write dispatches per task; failed dispatches count, rejected dispatches do not; reads and assertions are excluded.
-- **Disclosed grading contract:** 113 original tasks plus task-contract corrections for `001`, `014`, and `076`; mode B outer-single-settlement, one whole-task attempt.
-
-This is **not an unmodified-upstream or stock-strict leaderboard result**. Task Workspaces are separate, with no loaded cross-task knowledge, but share an emulator and host. Model identity is client-selected, not provider-attested; the historical service birth-anchor audit is incomplete. See [METHOD](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md) for scope and limitations.
-
-[English report](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.md) · [中文报告](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.zh-CN.md) · [Full ZIP evidence (Release)](https://github.com/FSQ-lab/benchmarks/releases/tag/androidworld-2026-11-19) · [Results CSV](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/results.csv) · [Website benchmarks](https://fsq-lab.github.io/FSQ/#benchmarks)
+- **Inspect:** compare screenshots, interface state, events, and reports with your expectations.
+- **Manage Cases:** FSQ Case Manager supports registered Workspaces, explicit Case creation or saving an available
+  candidate, and run history. Case generation is conditional; not every run produces one.
+- **Replay separately:** review any returned Case unchanged, then explicitly request Strict Replay. It operates the
+  target again and requires prerequisite and side-effect checks; Quick Test never runs it automatically.
 
 ## Help shape FSQ
 
-If FSQ is useful to you, [visit the repository and Star FSQ](https://github.com/FSQ-lab/FSQ) to help others discover it. Tried it? [Share your experience](https://github.com/FSQ-lab/FSQ/issues/new/choose): what worked, where you got stuck, and what you want to test next.
+If useful, [Star FSQ](https://github.com/FSQ-lab/FSQ) or [share your experience](https://github.com/FSQ-lab/FSQ/issues/new/choose)—neither is required to try it.
+Include version, platform, sanitized goal, expected/actual outcome, and reviewed diagnostic excerpts only.
+Remove credentials, personal data, private URLs, paths, and device identifiers from screenshots/logs; use [Security](SECURITY.md) for security issues.
 
-Include the FSQ version, platform, sanitized goal, expected and actual outcome, and only reviewed diagnostic excerpts. Remove credentials, personal data, private URLs, paths, and device identifiers before sharing screenshots or logs. Report security issues through [Security](SECURITY.md).
-
-> [!IMPORTANT]
-> FSQ is alpha software for evaluation and contribution. Evidence is stored locally and may contain private app data; review it before sharing, and do not commit evidence or credentials. AI operations send necessary provider-bound inputs to your configured Provider. Public interfaces may evolve before 1.0; see [support and stability](docs/support-and-stability.md).
+> **Alpha:** for evaluation and contribution; interfaces may evolve before 1.0. Evidence stays local and may contain
+> private app data: review before sharing, and never commit evidence or credentials. AI operations send necessary
+> provider-bound inputs to your configured Provider. See [support and stability](docs/support-and-stability.md).
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md)
-- [中文快速开始](docs/getting-started.zh-CN.md)
-- [CLI reference](docs/cli-reference.md)
-- [FSQ Case format](docs/case-format.md)
-- [Advanced Codex compatibility](docs/codex-integration.md)
-- [Platform prerequisites](docs/platform-prerequisites.md)
-- [Contribute](CONTRIBUTING.md)
-
-Built by [FSQ Lab](https://github.com/FSQ-lab) and the community, with thanks to [all contributors](https://github.com/FSQ-lab/FSQ/graphs/contributors).
+[CLI reference](docs/cli-reference.md) · [Case format](docs/case-format.md) · [Advanced Codex compatibility](docs/codex-integration.md)
 
 ## License
 

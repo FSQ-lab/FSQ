@@ -1169,7 +1169,9 @@ class DefaultCodingAgentRuntime:
             runtime_secret_settings=self.settings.runtime_secrets,
             app_id=self.settings.harness.android.app_id if self.settings.harness.platform == "android" else None,
             serial=self.settings.harness.android.serial if self.settings.harness.platform == "android" else None,
-            bundle_id=self.settings.harness.ios.bundle_id if self.settings.harness.platform == "ios" else None,
+            bundle_id=(
+                self.settings.harness.ios.bundle_id if self.settings.harness.platform == "ios" else self.settings.harness.macos.bundle_id if self.settings.harness.platform == "macos" else None
+            ),
             udid=self.settings.harness.ios.udid if self.settings.harness.platform == "ios" else None,
         )
 

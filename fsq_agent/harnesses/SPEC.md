@@ -38,7 +38,7 @@ The sole external importer of private `_factory._HarnessFactoryImplementation` i
 
 ## Error Handling
 
-Harnesses classify backend failures through normalized contracts, preserve cancellation, and keep secret values out of contexts, events, and artifacts. Missing observations are explicit safe failures.
+Harnesses classify backend failures through normalized contracts (including converting uncaught driver `ConfigurationError` and `ToolExecutionError` on `MacOSHarness` and `IOSHarness` into structured `configuration_error` / `action_error` results), preserve cancellation, and keep secret values out of contexts, events, and artifacts. Raw byte screenshot observations (`takeScreenshot`) on `MacOSHarness` and `IOSHarness` persist the PNG through the injected `ArtifactStore` when present and attach the resulting `HarnessArtifactRef` alongside `{"byte_length": ...}`. Missing observations are explicit safe failures.
 
 ## Current Invariants
 

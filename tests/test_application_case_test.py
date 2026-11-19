@@ -176,7 +176,7 @@ def test_suggest_runs_case_once_then_analyzes_and_returns_no_candidate(
     settings = SimpleNamespace(
         cases=SimpleNamespace(dir=tmp_path),
         output=SimpleNamespace(runs_dir=tmp_path / "runs"),
-        harness=SimpleNamespace(android=SimpleNamespace(app_id=None)),
+        harness=SimpleNamespace(android=SimpleNamespace(app_id=None), macos=SimpleNamespace(bundle_id=None)),
         runtime_secrets=SimpleNamespace(private_values=dict),
         execution=SimpleNamespace(post_action_delay_seconds=0),
     )
@@ -542,3 +542,37 @@ def test_unready_provider_macos_case_runs_real_assertion_path_to_inconclusive(tm
     assert frozen["outcome"] == frozen["verification"]["status"] == "inconclusive"
     assert frozen["counts"]["incomplete"] == 1
     assert frozen["counts"]["failed"] == 0
+
+
+def test_macos_case_test_falls_back_to_case_app_id_when_workspace_bundle_id_unset(tmp_path, monkeypatch):
+    from fsq_agent.config import Settings
+    from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
+
+    source = tmp_path / "case-appid-macos.fsq.yaml"
+    source.write_text("schemaVersion: fsq.ai-test/v1\nname: CaseAppIdMacOS\nplatform: macos\nappId: com.apple.Calculator\n---\n- waitMs:\n    duration_ms: 1\n")
+    settings = Settings(harness={"platform": "macos"})
+    settings.workspace.root_dir = tmp_path
+    settings.cases.dir = tmp_path
+    settings.output.runs_dir = tmp_path / ".fsq" / "runs" / "macos"
+    settings.harness.macos.bundle_id = None
+    settings.execution.post_action_delay_seconds.platform = 0.0
+    settings.execution.post_action_delay_seconds.common = 0.0
+
+    captured_bundle_ids: list[str | None] = []
+    orig_create = case_test_module.HarnessFactory.create_harness
+
+    def spy_create_harness(self, **kwargs):
+        captured_bundle_ids.append(kwargs.get("bundle_id"))
+        harness = orig_create(self, **kwargs)
+        assert isinstance(harness.driver, AppiumConnectMacOSDriver)
+        assert harness.driver.bundle_id == "com.apple.Calculator"
+        return harness
+
+    monkeypatch.setattr(case_test_module, "require_initialized_workspace", lambda _request: SimpleNamespace(workspace=tmp_path))
+    monkeypatch.setattr(case_test_module, "load_workspace_platform_settings", lambda *_args: settings)
+    monkeypatch.setattr(case_test_module, "_registered_workspace_name", lambda _root: "offline")
+    monkeypatch.setattr(case_test_module.HarnessFactory, "create_harness", spy_create_harness)
+
+    result = case_test_module.execute_case_test(CaseTestRequest(current_directory=tmp_path, platform="macos", case_path=source), suggestion_analyzer_factory=None)
+    assert result.status == "success"
+    assert captured_bundle_ids == ["com.apple.Calculator"]

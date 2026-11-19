@@ -187,22 +187,25 @@ def execute_case_test(
     requires_ai = any(steps_require_provider(steps, snapshot, ai_assertion_capability_names(request.platform)) for steps in resolved_steps.values())
     agent_runtime = getattr(settings, "agent_runtime", None)
     provider_available = bool(getattr(agent_runtime, "provider", None) and getattr(agent_runtime, "model", None))
-    validate_strict_core_settings(settings, requires_ai_assertion=requires_ai)
     android_serial: str | None = None
     ios_udid: str | None = None
     if request.platform == "android":
         android_serial = _resolve_android_run_serial(settings)
         settings = settings.model_copy(deep=True)
         settings.harness.android.serial = android_serial
+        settings.harness.android.app_id = settings.harness.android.app_id or case.config.app_id
         settings.harness.android.visual_assertion_policy = settings.harness.android.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
     elif request.platform == "ios":
         ios_udid = _resolve_ios_run_udid(settings, request.udid)
         settings = settings.model_copy(deep=True)
         settings.harness.ios.udid = ios_udid
+        settings.harness.ios.bundle_id = settings.harness.ios.bundle_id or case.config.app_id
         settings.harness.ios.visual_assertion_policy = settings.harness.ios.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
     elif request.platform == "macos":
         settings = settings.model_copy(deep=True)
+        settings.harness.macos.bundle_id = settings.harness.macos.bundle_id or case.config.app_id
         settings.harness.macos.visual_assertion_policy = settings.harness.macos.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
+    validate_strict_core_settings(settings, requires_ai_assertion=requires_ai)
     workspace_name = _registered_workspace_name(workspace.workspace)
     metadata = allocate_run(
         workspace=workspace.workspace,
@@ -230,7 +233,13 @@ def execute_case_test(
             runtime_secret_settings=settings.runtime_secrets,
             app_id=(settings.harness.android.app_id or case.config.app_id) if request.platform == "android" else None,
             serial=android_serial,
-            bundle_id=(settings.harness.ios.bundle_id or case.config.app_id) if request.platform == "ios" else None,
+            bundle_id=(
+                (settings.harness.ios.bundle_id or case.config.app_id)
+                if request.platform == "ios"
+                else (settings.harness.macos.bundle_id or case.config.app_id)
+                if request.platform == "macos"
+                else None
+            ),
             udid=ios_udid,
         )
         artifact = run_strict_lifecycle_case(

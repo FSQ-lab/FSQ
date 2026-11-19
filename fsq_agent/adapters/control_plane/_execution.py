@@ -158,6 +158,7 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         requires_ai = requires_ai or steps_require_provider(steps, snapshot, assertion_names)
     provider_available = bool(run_settings.agent_runtime.provider and run_settings.agent_runtime.model)
     if platform == "macos":
+        run_settings.harness.macos.bundle_id = _macos_bundle_id(run_settings, case)
         run_settings.harness.macos.visual_assertion_policy = run_settings.harness.macos.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
         require_macos_preflight(run_settings, "strict", requires_provider=False)
     else:
@@ -390,6 +391,7 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
             runtime_secret_settings=settings.runtime_secrets,
             app_id=_android_app_id(settings, prepared.case) if settings.harness.platform == "android" else None,
             serial=prepared.target_id if settings.harness.platform == "android" else None,
+            bundle_id=_macos_bundle_id(settings, prepared.case) if settings.harness.platform == "macos" else None,
         )
         recorder = _ProjectionEvidenceRecorder(run_id=run_id, output_dir=run_dir, projection=projection, secret_values=configured_secret_values(settings))
         artifact = (
@@ -524,6 +526,10 @@ def _validate_case_platform(settings: Settings, case: FsqCase) -> None:
 
 def _android_app_id(settings: Settings, case: FsqCase | None) -> str:
     return settings.harness.android.app_id or (case.config.app_id if case else None) or ""
+
+
+def _macos_bundle_id(settings: Settings, case: FsqCase | None) -> str | None:
+    return settings.harness.macos.bundle_id or (case.config.app_id if case else None)
 
 
 def _validate_android_app_id(settings: Settings, *, root_case: FsqCase, case: FsqCase) -> None:

@@ -486,7 +486,15 @@ def _metadata_doc(
     from .runs import RunLifecycleService
 
     secrets = tuple(settings.runtime_secrets.private_values().values())
-    app_id = settings.harness.android.app_id if settings.harness.platform == "android" else settings.harness.ios.bundle_id if settings.harness.platform == "ios" else None
+    app_id = (
+        settings.harness.android.app_id
+        if settings.harness.platform == "android"
+        else settings.harness.ios.bundle_id
+        if settings.harness.platform == "ios"
+        else settings.harness.macos.bundle_id
+        if settings.harness.platform == "macos"
+        else None
+    )
     reference = task.planning_reference_text or ""
     goal = " ".join((reference if reference.strip() else task.name).split())
     identity = [settings.harness.platform, goal] if task.planning_reference_kind == "goal" else [settings.harness.platform, task.name, task.description]

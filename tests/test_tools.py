@@ -618,10 +618,11 @@ async def test_folded_recovery_outputs_reference_original_artifact(tmp_path: Pat
     assert source.read_bytes() == original
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 @pytest.mark.parametrize("private_history_subdir", [False, True])
 @pytest.mark.parametrize("private_filename", [False, True])
 @pytest.mark.parametrize("tool_name", ["search_artifact", "read_artifact_slice"])
-async def test_recovery_references_never_disclose_private_paths(tmp_path: Path, private_filename: bool, private_history_subdir: bool, tool_name: str) -> None:
+async def test_recovery_references_never_disclose_private_paths(tmp_path: Path, private_filename: bool, private_history_subdir: bool, tool_name: str, newline: str) -> None:
     from fsq_agent.adapters.coding_agent._runtime import DefaultCodingAgentRuntime
     from fsq_agent.agent_engine import ToolOutputEntry
     from fsq_agent.config import Settings
@@ -634,7 +635,9 @@ async def test_recovery_references_never_disclose_private_paths(tmp_path: Path, 
     provider = _provider(tmp_path, runtime_secret_settings=secrets, local_tool_output_settings=settings, runs_dir=tmp_path / private_value, run_id="run-1")
     tools = {tool.name: tool for tool in AgentToolAdapter(_registry(provider), local_tool_output_settings=settings).build_tools(run_id="run-1")}
     source = provider.artifact_store.write(private_value if private_filename else "observation", "business fact")
+    source.write_bytes(source.read_text(encoding="utf-8").replace("\n", newline).encode("utf-8"))
     original = source.read_bytes()
+    original_text = source.read_text(encoding="utf-8")
     relative = str(source.relative_to(provider.artifact_store.runs_dir / "run-1"))
     arguments = {"artifact_path": relative, **({"query": "business"} if tool_name == "search_artifact" else {"length": 40})}
     encoded = await tools[tool_name].invoke(ToolCall(tool_name, arguments, "private-path"))
@@ -659,7 +662,7 @@ async def test_recovery_references_never_disclose_private_paths(tmp_path: Path, 
         reference = payload["artifact"]["path"]
         assert reference == relative
         assert payload["result"]["output"]["artifact_path"] == relative
-        assert provider.artifact_store.read_slice(reference, 0, 40)["content"] == original.decode()[:40]
+        assert provider.artifact_store.read_slice(reference, 0, 40)["content"] == original_text[:40]
         assert relative in folded
         assert list(source.parent.iterdir()) == [source]
     assert source.read_bytes() == original

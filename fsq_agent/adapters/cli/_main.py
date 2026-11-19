@@ -5,7 +5,9 @@ import asyncio
 import json
 import sys
 import webbrowser
+from datetime import UTC, datetime
 from enum import IntEnum
+from math import isfinite
 from pathlib import Path
 
 import click
@@ -534,6 +536,15 @@ def providers_configure(context: click.Context, name: str, base_url: str | None,
         device = request_github_device_code()
         click.echo(f"Open: {device.verification_uri}")
         click.echo(f"Code: {device.user_code}")
+        if _valid_native_timing(device.native_expires_at):
+            try:
+                expires_at = datetime.fromtimestamp(device.native_expires_at, UTC)
+            except (OverflowError, OSError, ValueError):
+                pass
+            else:
+                click.echo(f"Expires at: {expires_at.isoformat()} UTC")
+        if _valid_native_timing(device.native_poll_interval_seconds):
+            click.echo(f"Polling interval: {device.native_poll_interval_seconds} seconds")
 
         def select_model(models):
             if not models:
@@ -908,7 +919,23 @@ def _application_error(context: click.Context, error: ApplicationError) -> None:
     raise click.exceptions.Exit(_error_exit_code(error))
 
 
+def _valid_native_timing(value: object) -> bool:
+    if type(value) not in (int, float):
+        return False
+    try:
+        return isfinite(value) and value > 0
+    except OverflowError:
+        return False
+
+
 def _emit_safe_internal_diagnostic(error: ApplicationError) -> None:
+    if error.details.get("provider") == "github_copilot":
+        diagnostic = error.details.get("diagnostic")
+        if isinstance(diagnostic, dict):
+            for key in ("stage", "error_code", "http_status", "elapsed_seconds", "expires_at", "remaining_seconds", "poll_interval_seconds", "poll_attempts", "last_http_status", "last_oauth_error"):
+                if key in diagnostic:
+                    click.echo(f"{key}: {diagnostic[key]}", err=True)
+        return
     if error.code != ApplicationErrorCode.INTERNAL_ERROR:
         return
     exception_type = error.details.get("exception_type")

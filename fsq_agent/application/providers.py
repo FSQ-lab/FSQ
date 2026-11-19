@@ -1,8 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from math import isfinite
 from pathlib import Path
+from time import monotonic
 from typing import Literal, cast
 
 from fsq_agent.application.contracts import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode, ProviderConfigurationResult, ProviderStatusResult
@@ -249,24 +251,99 @@ def configure_kimi(*, region: str, model: str, api_key: str, user_config_root: s
     return ProviderConfigurationResult(provider="kimi", region=normalized_region, model=normalized_model)
 
 
+_GITHUB_AUTH_STAGES = {"device_code", "oauth_poll", "copilot_plan", "copilot_token", "model_discovery", "model_selection", "activation"}
+_GITHUB_AUTH_OAUTH_CODES = {
+    "authorization_pending",
+    "slow_down",
+    "expired_token",
+    "access_denied",
+    "unsupported_grant_type",
+    "incorrect_client_credentials",
+    "incorrect_device_code",
+    "device_flow_disabled",
+    "unknown_oauth_error",
+}
+_GITHUB_AUTH_CODES = _GITHUB_AUTH_OAUTH_CODES | {
+    "http_error",
+    "timeout",
+    "network_error",
+    "malformed_response",
+    "local_expiry",
+    "cancelled",
+    "unknown_plan",
+    "internal_error",
+    "storage",
+    "model_not_offered",
+    "selection_failed",
+    "activation_failed",
+}
+
+
+def _initial_github_error(message: str, action: str, exc: Exception, *, stage: str, started: float, error_code: str = "internal_error") -> ApplicationError:
+    diagnostic: dict[str, object] = {}
+    context = exc.context if isinstance(exc, ConfigurationError) else {}
+    candidate = context.get("diagnostic") if context.get("provider") == "github_copilot" else None
+    if isinstance(candidate, Mapping):
+        for key, value in candidate.items():
+            valid = False
+            if key == "stage":
+                valid = isinstance(value, str) and value in _GITHUB_AUTH_STAGES
+            elif key in {"error_code", "last_oauth_error"}:
+                valid = isinstance(value, str) and value in (_GITHUB_AUTH_CODES if key == "error_code" else _GITHUB_AUTH_OAUTH_CODES)
+            elif key in {"http_status", "last_http_status"}:
+                valid = type(value) is int and 100 <= value <= 599
+            elif key == "poll_attempts":
+                valid = type(value) is int and value >= 0
+            elif key in {"elapsed_seconds", "remaining_seconds", "expires_at", "poll_interval_seconds"} and type(value) in (int, float):
+                try:
+                    valid = isfinite(value) and (value > 0 if key in {"expires_at", "poll_interval_seconds"} else value >= 0)
+                except OverflowError:
+                    valid = False
+            if valid:
+                diagnostic[key] = value
+    if stage in {"model_selection", "activation"}:
+        diagnostic["stage"], diagnostic["error_code"] = stage, error_code
+    diagnostic.setdefault("stage", stage)
+    diagnostic.setdefault("error_code", error_code)
+    diagnostic.setdefault("elapsed_seconds", max(0.0, monotonic() - started))
+    return ApplicationError(
+        code=ApplicationErrorCode.PROVIDER_UNAVAILABLE,
+        category=ApplicationErrorCategory.UNAVAILABLE,
+        message=message,
+        action=action,
+        details={"provider": "github_copilot", "diagnostic": diagnostic},
+    )
+
+
 def request_github_device_code() -> GitHubDeviceCode:
+    started = monotonic()
     try:
         return request_github_copilot_device_code()
-    except Exception as exc:
-        raise _provider_error("GitHub Copilot sign-in could not be started.", "Check network access and retry.") from exc
+    except Exception as exc:  # noqa: BLE001 - initial authorization exposes only validated Application diagnostics.
+        raise _initial_github_error("GitHub Copilot sign-in could not be started.", "Check network access and retry.", exc, stage="device_code", started=started) from None
 
 
 def complete_github_configuration(
     device_code: GitHubDeviceCode, *, model: str | None, select_model: Callable[[tuple[GitHubCopilotModel, ...]], str], cancel_requested: Callable[[], bool], user_config_root: str | Path | None = None
 ) -> ProviderConfigurationResult:
+    started = monotonic()
+    stage = "oauth_poll"
+    error_code = "internal_error"
     try:
         authorization = complete_github_copilot_device_flow(device_code, cancel_requested=cancel_requested)
+        stage = "model_discovery"
         models = list_github_copilot_models(authorization)
+        stage, error_code = "model_selection", "model_not_offered"
+        if not models:
+            _validate_selected_model("", models)
+        error_code = "selection_failed"
         selected = model.strip() if model else select_model(models).strip()
+        error_code = "model_not_offered"
         _validate_selected_model(selected, models)
+        stage, error_code = "activation", "activation_failed"
         saved = activate_github_copilot_authorization(authorization, model=selected, user_config_root=user_config_root)
-    except Exception as exc:
-        raise _provider_error("GitHub Copilot configuration failed.", "Retry sign-in and select an available model.") from exc
+    except Exception as exc:  # noqa: BLE001 - callback and storage failures must not expose raw exceptions.
+        raise _initial_github_error("GitHub Copilot configuration failed.", "Retry sign-in and select an available model.", exc, stage=stage, started=started, error_code=error_code) from None
     return ProviderConfigurationResult(provider="github_copilot", model=saved.provider.model if saved.provider is not None else selected)
 
 

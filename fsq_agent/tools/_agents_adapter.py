@@ -228,6 +228,8 @@ class AgentToolAdapter:
     def _format_tool_response(self, result: AgentToolResult) -> str:
         payload = result.model_dump(mode="json")
         metadata = self._response_metadata(result)
+        if result.tool_name in {"search_artifact", "read_artifact_slice"} and result.status == "success" and isinstance(result.output, dict):
+            return self._format_artifact_recovery(result, payload, metadata)
         if result.sensitive:
             return json.dumps(
                 {
@@ -277,6 +279,68 @@ class AgentToolAdapter:
             preview_limit //= 2
         response["preview"] = ""
         return json.dumps(response, ensure_ascii=False, default=str)
+
+    def _format_artifact_recovery(self, result: AgentToolResult, payload: dict[str, Any], metadata: dict[str, Any]) -> str:
+        payload = {key: value for key, value in payload.items() if value is not None and key not in {"artifact_path", "artifact_content_chars"}}
+        response = {"tool_name": result.tool_name, "model_output": "full", "artifact": self._artifact_payload(result), "result": payload, **metadata}
+        output = payload["output"]
+        limit = self.local_tool_output_settings.full_output_max_chars
+
+        def encode() -> str:
+            return json.dumps(response, ensure_ascii=False, default=str)
+
+        encoded = encode()
+        if len(encoded) <= limit:
+            return encoded
+        if result.tool_name == "read_artifact_slice":
+            content = output["content"]
+            lower, upper = 1 if content else 0, len(content)
+            best = None
+            while lower <= upper:
+                length = (lower + upper) // 2
+                output["content"] = content[:length]
+                output["length"] = length
+                end = output["offset"] + length
+                output["has_more_after"] = end < output["total_chars"]
+                output["instructions"] = (
+                    f"Continue with read_artifact_slice(artifact_path, offset={end}, length=12000)." if output["has_more_after"] else "End of saved artifact; no further content after this slice."
+                )
+                candidate = encode()
+                if len(candidate) <= limit:
+                    best = candidate
+                    lower = length + 1
+                else:
+                    upper = length - 1
+            if best is not None:
+                return best
+        else:
+            matches = output["matches"]
+            while len(encoded) > limit and matches:
+                output["truncated"] = True
+                if len(matches) > 1:
+                    del matches[max(1, len(matches) // 2) :]
+                else:
+                    match = matches[0]
+                    preview = match["preview"]
+                    before = match["offset"] - match["context_start"]
+                    after = len(preview) - before
+                    if before == 0 and after <= 1:
+                        break
+                    start = before - before // 2
+                    end = before + max(1, after // 2)
+                    match["preview"] = preview[start:end]
+                    match["context_start"] += start
+                    match["context_end"] = match["context_start"] + len(match["preview"])
+                first = matches[0]
+                output["instructions"] = (
+                    f"Read the matched field with read_artifact_slice(artifact_path, offset={first['offset']}, length=12000). "
+                    f"Context ends at {first['context_end']} of {output['total_chars']} saved characters. "
+                    "Selection or context truncated: refine query or read a slice. Identical searches do not advance."
+                )
+                encoded = encode()
+            if len(encoded) <= limit:
+                return encoded
+        return json.dumps({"tool_name": result.tool_name, "status": "failed", "error_message": "Artifact recovery metadata exceeds the inline output limit; use a shorter query or path."})
 
     def _artifact_payload(self, result: AgentToolResult) -> dict[str, Any]:
         return {

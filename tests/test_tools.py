@@ -517,14 +517,16 @@ def test_artifact_slice_only_guides_continuation_before_end(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("content_length", [20, 40000])
-@pytest.mark.parametrize("private_value", ["canary-92837", 'canary-"92837"\\secret\nvalue'])
-async def test_file_helpers_redact_configured_values_before_output_artifacting(tmp_path: Path, content_length: int, private_value: str) -> None:
+@pytest.mark.parametrize("private_value", ["canary-92837", 'canary-"92837"\\secret\n值'])
+@pytest.mark.parametrize("representation", ["literal", "json", "ascii_json"])
+async def test_file_helpers_redact_configured_values_before_output_artifacting(tmp_path: Path, content_length: int, private_value: str, representation: str) -> None:
     runtime_secrets = RuntimeSecretSettings()
     runtime_secrets.set_values({"TEST_ACCOUNT_PASSWORD": private_value})
     settings = LocalToolOutputSettings(full_output_max_chars=1000)
     provider = _provider(tmp_path, runtime_secret_settings=runtime_secrets, local_tool_output_settings=settings, runs_dir=tmp_path / "runs", run_id="run-1")
     adapter = AgentToolAdapter(_registry(provider), local_tool_output_settings=settings)
-    content = f"Visible {private_value} " + "x" * content_length + " TAIL"
+    encoded_secret = private_value if representation == "literal" else json.dumps(private_value, ensure_ascii=representation == "ascii_json")[1:-1]
+    content = f"Visible {encoded_secret} " + "x" * content_length + " TAIL"
     source = tmp_path / "input.txt"
     source.write_text(content, encoding="utf-8")
     read_tool = next(tool for tool in adapter.build_tools(run_id="run-1") if tool.name == "read_file")
@@ -533,10 +535,131 @@ async def test_file_helpers_redact_configured_values_before_output_artifacting(t
 
     assert "canary-" not in output
     payload = json.loads(output)
-    expected = content.replace(private_value, "***")
+    expected = content.replace(encoded_secret, "***")
     if payload["model_output"] == "full":
         assert payload["result"]["output"]["output"] == expected
     artifact_text = await asyncio.to_thread(Path(payload["artifact"]["path"]).read_text, encoding="utf-8")
     assert "canary-" not in artifact_text
     assert json.loads(json.loads(artifact_text)["content"])["output"] == expected
     assert source.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize("limit", [1800, 30000])
+async def test_recovery_slices_preserve_source_and_reconstruct_saved_text(tmp_path: Path, limit: int) -> None:
+    settings = LocalToolOutputSettings(full_output_max_chars=limit)
+    provider = _provider(tmp_path, local_tool_output_settings=settings, runs_dir=tmp_path / "runs", run_id="run-1")
+    tools = {tool.name: tool for tool in AgentToolAdapter(_registry(provider), local_tool_output_settings=settings).build_tools(run_id="run-1")}
+    source = provider.artifact_store.write("observation", 'Quoted "value"\n值\\' * 2000)
+    original = source.read_text(encoding="utf-8")
+    recovered = []
+    offset = 0
+    while offset < len(original):
+        encoded = await tools["read_artifact_slice"].invoke(ToolCall("read_artifact_slice", {"artifact_path": str(source), "offset": offset, "length": 30000}, f"slice-{offset}"))
+        assert len(encoded) <= limit
+        payload = json.loads(encoded)
+        assert payload["artifact"]["path"] == str(source)
+        chunk = payload["result"]["output"]
+        assert chunk["offset"] == offset
+        assert chunk["length"] == len(chunk["content"]) > 0
+        assert chunk["content"] == original[offset : offset + chunk["length"]]
+        recovered.append(chunk["content"])
+        offset += chunk["length"]
+        assert chunk["has_more_after"] is (offset < len(original))
+        if chunk["has_more_after"]:
+            assert f"offset={offset}," in chunk["instructions"]
+    assert "".join(recovered) == original
+    assert source.read_text(encoding="utf-8") == original
+    assert list(source.parent.iterdir()) == [source]
+
+
+async def test_oversized_search_preserves_unicode_offsets_and_repeat_diagnostics(tmp_path: Path) -> None:
+    settings = LocalToolOutputSettings(full_output_max_chars=1800)
+    provider = _provider(tmp_path, local_tool_output_settings=settings, runs_dir=tmp_path / "runs", run_id="run-1")
+    tools = {tool.name: tool for tool in AgentToolAdapter(_registry(provider), local_tool_output_settings=settings).build_tools(run_id="run-1")}
+    source = provider.artifact_store.write("observation", ("x" * 100 + "İ business " + "y" * 100) * 100)
+    original = source.read_text(encoding="utf-8")
+    arguments = {"artifact_path": str(source), "query": "i", "context_chars": 2000, "max_matches": 100}
+    for call_id in ("first", "repeat"):
+        encoded = await tools["search_artifact"].invoke(ToolCall("search_artifact", arguments, call_id))
+        assert len(encoded) <= settings.full_output_max_chars
+        payload = json.loads(encoded)
+        assert payload["artifact"]["path"] == str(source)
+        result = payload["result"]["output"]
+        assert result["truncated"] is True
+        assert result["matches"]
+        assert result["repeated_search"] is (call_id == "repeat")
+        if call_id == "repeat":
+            assert "no new content" in result["diagnostic"]
+        for match in result["matches"]:
+            assert original[match["offset"]].lower().startswith("i")
+            assert match["preview"] == original[match["context_start"] : match["context_end"]]
+            read = json.loads(await tools["read_artifact_slice"].invoke(ToolCall("read_artifact_slice", {"artifact_path": str(source), "offset": match["offset"], "length": 1}, "read")))
+            assert read["result"]["output"]["content"] == original[match["offset"]]
+    assert source.read_text(encoding="utf-8") == original
+
+
+async def test_folded_recovery_outputs_reference_original_artifact(tmp_path: Path) -> None:
+    from fsq_agent.adapters.coding_agent._runtime import _ToolOutputBudgetFilter
+    from fsq_agent.agent_engine import ToolOutputEntry
+
+    settings = LocalToolOutputSettings()
+    provider = _provider(tmp_path, local_tool_output_settings=settings, runs_dir=tmp_path / "runs", run_id="run-1")
+    tools = {tool.name: tool for tool in AgentToolAdapter(_registry(provider), local_tool_output_settings=settings).build_tools(run_id="run-1")}
+    source = provider.artifact_store.write("observation", "business fact")
+    original = source.read_bytes()
+    outputs = []
+    for index, name in enumerate(("search_artifact", "read_artifact_slice"), start=1):
+        arguments = {"artifact_path": str(source), **({"query": "business"} if name == "search_artifact" else {"length": 40})}
+        encoded = await tools[name].invoke(ToolCall(name, arguments, f"call-{index}"))
+        outputs.append(ToolOutputEntry(index, f"call-{index}", name, encoded))
+    replacements = _ToolOutputBudgetFilter(0, 30000, 60000, provider.artifact_store)(tuple(outputs))
+    assert all(str(source) in replacements[index] for index in (1, 2))
+    assert list(source.parent.iterdir()) == [source]
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("private_history_subdir", [False, True])
+@pytest.mark.parametrize("private_filename", [False, True])
+@pytest.mark.parametrize("tool_name", ["search_artifact", "read_artifact_slice"])
+async def test_recovery_references_never_disclose_private_paths(tmp_path: Path, private_filename: bool, private_history_subdir: bool, tool_name: str) -> None:
+    from fsq_agent.adapters.coding_agent._runtime import DefaultCodingAgentRuntime
+    from fsq_agent.agent_engine import ToolOutputEntry
+    from fsq_agent.config import Settings
+    from fsq_agent.models import AgentFinalOutput
+
+    private_value = "PRIVATE_TENANT_VALUE"
+    secrets = RuntimeSecretSettings()
+    secrets.set_values({"TENANT": private_value})
+    settings = LocalToolOutputSettings(artifact_subdir=private_value if private_history_subdir else "artifacts/tools")
+    provider = _provider(tmp_path, runtime_secret_settings=secrets, local_tool_output_settings=settings, runs_dir=tmp_path / private_value, run_id="run-1")
+    tools = {tool.name: tool for tool in AgentToolAdapter(_registry(provider), local_tool_output_settings=settings).build_tools(run_id="run-1")}
+    source = provider.artifact_store.write(private_value if private_filename else "observation", "business fact")
+    original = source.read_bytes()
+    relative = str(source.relative_to(provider.artifact_store.runs_dir / "run-1"))
+    arguments = {"artifact_path": relative, **({"query": "business"} if tool_name == "search_artifact" else {"length": 40})}
+    encoded = await tools[tool_name].invoke(ToolCall(tool_name, arguments, "private-path"))
+    assert private_value not in encoded
+    payload = json.loads(encoded)
+    runtime_settings = Settings()
+    runtime_settings.output.runs_dir = provider.artifact_store.runs_dir
+    runtime_settings.runtime_secrets.set_values({"TENANT": private_value})
+    runtime_settings.agent_runtime.local_tool_output = settings.model_copy(update={"recent_inline_output_count": 0})
+    runtime = DefaultCodingAgentRuntime(runtime_settings, object())
+    request = runtime._build_request(name="privacy", instructions="Recover evidence", model_input="Recover", tools=[], output_type=AgentFinalOutput, run_id="run-1")
+    folded = request.tool_output_filter((ToolOutputEntry(1, "private-path", tool_name, encoded),))[1]
+    assert private_value not in folded
+    if private_filename or private_history_subdir:
+        assert payload["status"] == "failed"
+        wrappers = [path for path in source.parent.iterdir() if path != source]
+        assert len(wrappers) == 1
+        assert json.loads(wrappers[0].read_text(encoding="utf-8"))["content"] == encoded
+        if private_history_subdir:
+            assert "cannot be safely disclosed" in folded
+    else:
+        reference = payload["artifact"]["path"]
+        assert reference == relative
+        assert payload["result"]["output"]["artifact_path"] == relative
+        assert provider.artifact_store.read_slice(reference, 0, 40)["content"] == original.decode()[:40]
+        assert relative in folded
+        assert list(source.parent.iterdir()) == [source]
+    assert source.read_bytes() == original

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
 import time
 from asyncio import CancelledError
@@ -178,6 +179,110 @@ IOS_EDITABLE_SHORT_TYPES = frozenset(
     }
 )
 
+IOS_INPUT_PRE_ATTRIBUTES = (
+    "type",
+    "id",
+    "enabled",
+    "displayed",
+    "value",
+    "placeholder_value",
+    "bounds",
+)
+IOS_INPUT_POST_ATTRIBUTES = (
+    "type",
+    "id",
+    "enabled",
+    "value",
+    "placeholder_value",
+    "bounds",
+)
+IOS_SAFE_BACKEND_CODES = frozenset(
+    {
+        "invalid_argument",
+        "invalid_request",
+        "invalid_selector",
+        "command_failed",
+        "operation_timeout",
+        "condition_timeout",
+        "operation_cancelled",
+        "target_not_found",
+        "target_ambiguous",
+        "target_not_displayed",
+        "target_not_enabled",
+        "target_stale",
+        "precondition_not_met",
+        "element_session_mismatch",
+        "session_not_active",
+        "session_invalid",
+        "session_closed",
+        "session_uncertain",
+        "session_disposed",
+        "session_disposal_invalid",
+        "session_busy",
+        "session_create_unknown",
+        "session_quit_unknown",
+        "terminal_disposal_pending",
+        "execution_unknown",
+        "response_unknown",
+        "connection_unavailable",
+        "connection_closed",
+        "connection_closing",
+        "unsupported_connection_ownership",
+        "usage_released",
+        "cleanup_failed",
+        "managed_cleanup_pending",
+        "managed_service_exited",
+        "managed_installation_not_ready",
+        "managed_root_conflict",
+        "managed_recovery_required",
+        "service_in_use",
+        "service_ownership_unverified",
+        "environment_busy",
+        "device_busy",
+        "system_port_unavailable",
+        "coordination_unavailable",
+        "service_port_in_use",
+        "source_settings_invalid",
+        "source_invalid",
+        "structure_scope_unavailable",
+        "observation_too_large",
+        "invalid_visual_response",
+        "pointer_mapping_unavailable",
+        "frame_not_single",
+        "xcode_unavailable",
+        "unsupported_host",
+        "unsupported_operation",
+        "unsupported_platform",
+        "invalid_response",
+    }
+)
+IOS_SAFE_COMPLETED_STEPS = frozenset(
+    {
+        "target_resolved",
+        "target_displayed",
+        "target_enabled",
+        "target_focused",
+        "focus_click_completed",
+        "action_completed",
+        "settings_read",
+        "settings_changed",
+        "settings_restored",
+        "attributes_read",
+        "display_size_read",
+        "device_time_read",
+        "app_state_read",
+        "source_geometry_read",
+        "destination_geometry_read",
+        "screenshot_captured",
+        "visual_inspected",
+        "session_deleted",
+        "observation_built",
+        "source_parsed",
+    }
+)
+IOS_SESSION_STATES = frozenset({"creating", "active", "uncertain", "disposing", "disposed", "closing", "closed"})
+IOS_TEXT_INDEPENDENT_XPATH = re.compile(r"""(?:/+(?:XCUIElementType[A-Za-z0-9_]+|\*)(?:\[\d+\]|\[@name=(?:'[^']*'|"[^"]*")\])?)+""")
+IOS_MUTABLE_TEXT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(?:value|label|wdvalue|wdlabel|text)(?![A-Za-z0-9_])", re.IGNORECASE)
 IOS_STATE_ASSERTION_FIELDS = ("enabled", "selected", "focused", "accessible")
 
 IOS_ELEMENT_INSPECT_MAP = {
@@ -264,16 +369,24 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         action_timeout_seconds: int = DEFAULT_IOS_ACTION_TIMEOUT_SECONDS,
         new_command_timeout_seconds: float | None = DEFAULT_IOS_NEW_COMMAND_TIMEOUT_SECONDS,
         wda_launch_timeout_ms: int | None = None,
+        xcuitest_wait_for_idle_timeout_seconds: float | None = None,
+        xcuitest_snapshot_max_depth: int | None = None,
+        xcuitest_accessibility_deadline_seconds: float | None = None,
         xcode_org_id: str | None = None,
         xcode_signing_id: str | None = None,
         updated_wda_bundle_id: str | None = None,
         session: object | None = None,
     ) -> None:
+        if session is not None and (xcuitest_wait_for_idle_timeout_seconds is not None or xcuitest_snapshot_max_depth is not None or xcuitest_accessibility_deadline_seconds is not None):
+            raise ConfigurationError("Initial XCUITest WDA session policies cannot be applied to a borrowed iOS Session.")
         settings = IOSHarnessSettings(
             page_source_max_depth=page_source_max_depth,
             action_timeout_seconds=action_timeout_seconds,
             new_command_timeout_seconds=new_command_timeout_seconds,
             wda_launch_timeout_ms=wda_launch_timeout_ms,
+            xcuitest_wait_for_idle_timeout_seconds=xcuitest_wait_for_idle_timeout_seconds,
+            xcuitest_snapshot_max_depth=xcuitest_snapshot_max_depth,
+            xcuitest_accessibility_deadline_seconds=xcuitest_accessibility_deadline_seconds,
         )
         settings.udid = udid
         settings.bundle_id = bundle_id
@@ -289,6 +402,9 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         self.action_timeout_seconds = settings.action_timeout_seconds
         self.new_command_timeout_seconds = DEFAULT_IOS_NEW_COMMAND_TIMEOUT_SECONDS if settings.new_command_timeout_seconds is None else float(settings.new_command_timeout_seconds)
         self.wda_launch_timeout_ms = settings.wda_launch_timeout_ms
+        self.xcuitest_wait_for_idle_timeout_seconds = settings.xcuitest_wait_for_idle_timeout_seconds
+        self.xcuitest_snapshot_max_depth = settings.xcuitest_snapshot_max_depth
+        self.xcuitest_accessibility_deadline_seconds = settings.xcuitest_accessibility_deadline_seconds
         self.xcode_org_id = settings.xcode_org_id
         self.xcode_signing_id = settings.xcode_signing_id
         self.updated_wda_bundle_id = settings.updated_wda_bundle_id
@@ -299,11 +415,14 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         self._connection: Any | None = None
         self._session: Any | None = session
         self._borrowed_session: bool = session is not None
+        self._cleanup_pending: bool = False
         self._session_settled: bool = False
         self._scope_exit_attempted: bool = False
         self._cleanup_primary: BaseException | None = None
-        self._last_session_activity_monotonic: float | None = time.monotonic() if session is not None else None
+        self._terminal_disposal_diagnostic: dict[str, object] | None = None
+        self._closed: bool = False
         self._resolved_device_target: str | None = None
+        self._last_session_activity_monotonic: float | None = time.monotonic() if session is not None else None
 
     @_ios_driver_tool("launchApp", description="Start or activate an iOS application in the XCUITest session.")
     def launch_app(self, params: IOSLaunchAppParams) -> dict[str, object]:
@@ -397,58 +516,228 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._input_text_impl(params))
 
     def _input_text_impl(self, params: IOSInputTextParams) -> dict[str, object]:
+        return self._mutate_editable_text_impl(
+            params,
+            action_label="inputText",
+            clear_existing=bool(params.clear),
+            submitted_text=params.text,
+        )
+
+    @_ios_driver_tool("clearText", description="Clear text from an editable iOS element.")
+    def clear_text(self, params: IOSClearTextParams) -> dict[str, object]:
+        return self._run_tool(
+            lambda: self._mutate_editable_text_impl(
+                params,
+                action_label="clearText",
+                clear_existing=True,
+                submitted_text=None,
+            )
+        )
+
+    def _mutate_editable_text_impl(
+        self,
+        params: BaseModel,
+        *,
+        action_label: str,
+        clear_existing: bool,
+        submitted_text: str | None,
+    ) -> dict[str, object]:
+        session = self._ensure_session_impl()
         element = self._resolve_element_or_none(params)
         if element is None:
             return self._target_missing()
 
-        inspection = element.inspect(attributes=("type", "enabled", "displayed"), control=self._ActionControl(self))
+        inspection = element.inspect(attributes=IOS_INPUT_PRE_ATTRIBUTES, control=self._ActionControl(self))
         attrs = self._inspection_dict(inspection)
         type_entry = attrs.get("type")
-        type_name = str(type_entry[1]).removeprefix("XCUIElementType") if type_entry and type_entry[0] == "value" and type_entry[1] else ""
-        if type_name and type_name not in IOS_EDITABLE_SHORT_TYPES:
+        raw_type = str(type_entry[1]) if type_entry and type_entry[0] == "value" and isinstance(type_entry[1], str) and type_entry[1] else ""
+        short_type = raw_type.removeprefix("XCUIElementType") if raw_type else ""
+        if not short_type or short_type not in IOS_EDITABLE_SHORT_TYPES:
             return self._failed(
                 "target_resolution_error",
-                f"iOS inputText requires an editable text element, got {type_name}.",
-                metadata={"element_type": type_name},
+                f"iOS {action_label} requires an editable text element, got {short_type or 'unverified'}.",
+                metadata={"element_type": short_type or None},
             )
-        enabled_entry = attrs.get("enabled")
-        if enabled_entry and enabled_entry[0] == "value" and enabled_entry[1] is False:
-            return self._failed("target_resolution_error", "iOS inputText target is disabled.")
+        if attrs.get("enabled") != ("value", True):
+            return self._failed("target_resolution_error", f"iOS {action_label} requires an enabled editable element.")
+        if attrs.get("displayed") != ("value", True):
+            return self._failed("target_resolution_error", f"iOS {action_label} requires a visible editable element.")
 
-        if params.clear:
-            element.clear(wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
-        if params.text == "":
-            return self._passed()
+        is_secure = short_type == "SecureTextField"
+        bound_element, bind_failure = self._bind_editable_target(session, element, params, attrs, raw_type=raw_type)
+        if bind_failure is not None or bound_element is None:
+            return bind_failure or self._failed("action_error", f"iOS {action_label} could not anchor a stable editable target.")
 
-        try:
-            element.send_keys(params.text, wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
-        except Exception as exc:  # noqa: BLE001
-            self._propagate_if_cancelled(exc)
-            # Element.send_macos_keys is the public SDK per-keystroke input API for both Mac2 and XCUITest.
-            element.send_macos_keys(list(params.text), wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
-
-        if type_name != "SecureTextField":
+        if clear_existing:
             try:
-                after_inspection = element.inspect(attributes=("value", "text"), control=self._ActionControl(self))
-                after_attrs = self._inspection_dict(after_inspection)
-                observed_values = [str(entry[1]) for key in ("value", "text") if (entry := after_attrs.get(key)) is not None and entry[0] == "value" and isinstance(entry[1], str)]
-                if observed_values and params.clear and not any(params.text in val or val == params.text for val in observed_values):
-                    element.clear(wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
-                    element.send_macos_keys(list(params.text), wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
-            except Exception as exc:  # noqa: BLE001
+                bound_element.clear(wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
+            except Exception as exc:
                 self._propagate_if_cancelled(exc)
+                if getattr(exc, "request_state", None) == "response_unknown":
+                    return self._failed(
+                        "action_error",
+                        f"iOS {action_label} outcome is unknown; verify field content before retrying.",
+                        metadata=self.safe_diagnostics(exc, stage=action_label),
+                    )
+                raise
+        if submitted_text is not None and submitted_text != "":
+            try:
+                bound_element.send_keys(
+                    submitted_text,
+                    wait_timeout_seconds=self._wait_timeout(),
+                    control=self._ActionControl(self),
+                )
+            except Exception as exc:
+                self._propagate_if_cancelled(exc)
+                req_state = getattr(exc, "request_state", None)
+                if req_state == "response_unknown":
+                    return self._failed(
+                        "action_error",
+                        f"iOS {action_label} outcome is unknown; verify field content before retrying.",
+                        metadata=self.safe_diagnostics(exc, stage="input_text"),
+                    )
+                if req_state not in ("not_sent", "response_received") or not self._session_is_active(session):
+                    raise
+                # Element.send_macos_keys is the public SDK per-keystroke input API for both Mac2 and XCUITest.
+                bound_element.send_macos_keys(
+                    list(submitted_text),
+                    wait_timeout_seconds=self._wait_timeout(),
+                    control=self._ActionControl(self),
+                )
+
+        expected_text = "" if submitted_text is None else submitted_text
+        verify_error = self._verify_post_text_mutation(
+            bound_element,
+            pre_attrs=attrs,
+            is_secure=is_secure,
+            expected_text=expected_text,
+            action_label=action_label,
+        )
+        if verify_error is not None:
+            return verify_error
         return self._passed()
 
-    @_ios_driver_tool("clearText", description="Clear text from an editable iOS element.")
-    def clear_text(self, params: IOSClearTextParams) -> dict[str, object]:
-        def _op() -> dict[str, object]:
-            element = self._resolve_element_or_none(params)
-            if element is None:
-                return self._target_missing()
-            element.clear(wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
-            return self._passed()
+    def _bind_editable_target(
+        self,
+        session: Any,
+        element: Any,
+        params: BaseModel,
+        attrs: dict[str, tuple[str, object]],
+        *,
+        raw_type: str,
+    ) -> tuple[Any | None, dict[str, object] | None]:
+        id_entry = attrs.get("id")
+        elem_id = id_entry[1] if id_entry and id_entry[0] == "value" and isinstance(id_entry[1], str) and id_entry[1].strip() else None
+        if elem_id is not None:
+            try:
+                candidate = session.element("accessibility id", elem_id)
+                cand_attrs = self._inspection_dict(candidate.inspect(attributes=("type", "id", "bounds"), control=self._ActionControl(self)))
+                if cand_attrs.get("type") == attrs.get("type") and cand_attrs.get("id") == attrs.get("id") and self._bounds_tuple_from_attrs(cand_attrs) == self._bounds_tuple_from_attrs(attrs):
+                    return candidate, None
+            except Exception as exc:
+                self._propagate_if_cancelled(exc)
+                if type(exc).__name__ != "TargetError" or not self._target_error_is_definitive(exc):
+                    raise
 
-        return self._run_tool(_op)
+        if self._locator_is_text_independent(params):
+            return element, None
+
+        bounds_tuple = self._bounds_tuple_from_attrs(attrs)
+        full_type = raw_type if raw_type.startswith("XCUIElementType") else f"XCUIElementType{raw_type}"
+        if bounds_tuple is None or not raw_type:
+            return None, self._failed("action_error", "Editable iOS target lacks a stable name or bounds anchor independent of mutable text.")
+        bx, by, bw, bh = bounds_tuple
+        rect_predicate = f"type == {_predicate_literal(full_type)} AND rect.x == {bx} AND rect.y == {by} AND rect.width == {bw} AND rect.height == {bh}"
+        try:
+            anchored = session.element("-ios predicate string", rect_predicate)
+            anc_attrs = self._inspection_dict(anchored.inspect(attributes=("type", "id", "bounds"), control=self._ActionControl(self)))
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            if type(exc).__name__ == "TargetError" and self._target_error_is_definitive(exc):
+                return (
+                    None,
+                    self._failed(
+                        "action_error",
+                        "Editable iOS target could not be uniquely anchored by type and bounds.",
+                        metadata=self.safe_diagnostics(exc, stage="bind_editable_target"),
+                    ),
+                )
+            raise
+        if anc_attrs.get("type") != attrs.get("type") or self._bounds_tuple_from_attrs(anc_attrs) != bounds_tuple:
+            return None, self._failed("action_error", "Editable iOS target anchor did not preserve element identity.")
+        return anchored, None
+
+    @classmethod
+    def _locator_is_text_independent(cls, params: BaseModel) -> bool:
+        locator = getattr(params, "locator", None)
+        if not isinstance(locator, IOSLocator) or not locator.has_value():
+            return False
+        if locator.value is not None or locator.label is not None:
+            return False
+        if locator.predicate is not None and IOS_MUTABLE_TEXT_TOKEN_RE.search(locator.predicate) is not None:
+            return False
+        if locator.class_chain is not None and IOS_MUTABLE_TEXT_TOKEN_RE.search(locator.class_chain) is not None:
+            return False
+        if locator.xpath is not None:
+            xpath = locator.xpath.strip()
+            positional = re.fullmatch(r"\((.+)\)\[\d+\]", xpath)
+            structural = positional.group(1) if positional is not None else xpath
+            if IOS_TEXT_INDEPENDENT_XPATH.fullmatch(structural) is None:
+                return False
+        return True
+
+    @staticmethod
+    def _bounds_tuple_from_attrs(attrs: dict[str, tuple[str, object]]) -> tuple[int, int, int, int] | None:
+        entry = attrs.get("bounds")
+        bounds = entry[1] if entry and entry[0] == "value" else None
+        if bounds is None or not all(_is_strict_int(getattr(bounds, key, None)) for key in ("x", "y", "width", "height")):
+            return None
+        return int(bounds.x), int(bounds.y), int(bounds.width), int(bounds.height)
+
+    def _verify_post_text_mutation(
+        self,
+        element: Any,
+        *,
+        pre_attrs: dict[str, tuple[str, object]],
+        is_secure: bool,
+        expected_text: str | None,
+        action_label: str,
+    ) -> dict[str, object] | None:
+        post_attrs_to_read = ("type", "id", "enabled", "bounds") if is_secure else IOS_INPUT_POST_ATTRIBUTES
+        post_inspection = element.inspect(attributes=post_attrs_to_read, control=self._ActionControl(self))
+        post_attrs = self._inspection_dict(post_inspection)
+        if post_attrs.get("type") != pre_attrs.get("type"):
+            return self._failed("action_error", f"iOS {action_label} target type changed during text mutation.")
+        pre_id_entry = pre_attrs.get("id")
+        post_id_entry = post_attrs.get("id")
+        pre_id = pre_id_entry[1] if pre_id_entry and pre_id_entry[0] == "value" and isinstance(pre_id_entry[1], str) and pre_id_entry[1].strip() else None
+        post_id = post_id_entry[1] if post_id_entry and post_id_entry[0] == "value" and isinstance(post_id_entry[1], str) and post_id_entry[1].strip() else None
+        if pre_id is not None:
+            if post_id != pre_id:
+                return self._failed("action_error", f"iOS {action_label} target identity changed during text mutation.")
+        else:
+            if post_id is not None:
+                return self._failed("action_error", f"iOS {action_label} target identity changed during text mutation.")
+            pre_bounds = self._bounds_tuple_from_attrs(pre_attrs)
+            if pre_bounds is not None and self._bounds_tuple_from_attrs(post_attrs) != pre_bounds:
+                return self._failed("action_error", f"iOS {action_label} target bounds changed during text mutation.")
+        if post_attrs.get("enabled") != ("value", True):
+            return self._failed("action_error", f"iOS {action_label} target is no longer enabled after text mutation.")
+        if is_secure or expected_text is None:
+            return None
+
+        val_entry = post_attrs.get("value")
+        ph_entry = post_attrs.get("placeholder_value")
+        observed_state = val_entry[0] if val_entry is not None else "missing"
+        observed_val = val_entry[1] if val_entry and val_entry[0] == "value" and isinstance(val_entry[1], str) else None
+        placeholder_val = ph_entry[1] if ph_entry and ph_entry[0] == "value" and isinstance(ph_entry[1], str) else None
+        if expected_text == "":
+            if observed_state == "missing" or observed_val in ("", None) or (placeholder_val is not None and observed_val == placeholder_val):
+                return None
+            return self._failed("action_error", f"iOS {action_label} readback did not confirm an empty field.")
+        if observed_state == "value" and observed_val == expected_text:
+            return None
+        return self._failed("action_error", f"iOS {action_label} readback did not match expected text.")
 
     @_ios_driver_tool("pressKey", description="Press a physical iOS button (`home`, `volume_up`, `volume_down`) or send a keyboard key to the focused responder.")
     def press_key(self, params: IOSPressKeyParams) -> dict[str, object]:
@@ -468,7 +757,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 elif len(params.key) == 1:
                     mapped_key = params.key
                 else:
-                    raise ConfigurationError(f"Unsupported iOS key: {params.key!r}.")
+                    raise ConfigurationError("Unsupported iOS key name; use `home`, `volume_up`, `volume_down`, a supported responder key alias, or a single character.")
             session.device.send_keys([mapped_key], control=self._ActionControl(self))
             return self._passed({"key": mapped_key})
 
@@ -524,36 +813,60 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         if params.direction is None:
             raise ConfigurationError("iOS swipe requires direction or explicit start/end points.")
 
+        cur_w, cur_h = self._display_size(session)
         if self._has_semantic_target(params):
             element = self._resolve_element_or_none(params)
             if element is None:
                 return self._target_missing()
-            if params.percent is not None and float(params.percent) < 1.0:
-                inspection = element.inspect(attributes=("bounds",), control=self._ActionControl(self))
-                attrs = self._inspection_dict(inspection)
-                bounds_entry = attrs.get("bounds")
-                bounds = bounds_entry[1] if bounds_entry and bounds_entry[0] == "value" else None
-                if bounds is not None and all(hasattr(bounds, k) for k in ("x", "y", "width", "height")):
-                    sx, sy, ex, ey = self._compute_element_swipe_points(
-                        int(bounds.x),
-                        int(bounds.y),
-                        int(bounds.width),
-                        int(bounds.height),
-                        params.direction,
-                        float(params.percent),
-                    )
-                    session.device.swipe_between(sx, sy, ex, ey, duration_ms=duration_ms, control=control)
-                    return self._passed({"direction": params.direction, "percent": float(params.percent)})
-            # Element.macos_swipe is the public SDK element-scoped directional swipe API for both Mac2 and XCUITest.
-            element.macos_swipe(
-                direction=params.direction,
-                wait_timeout_seconds=self._wait_timeout(),
-                control=control,
+            inspection = element.inspect(attributes=("bounds",), control=self._ActionControl(self))
+            attrs = self._inspection_dict(inspection)
+            bounds_tuple = self._bounds_tuple_from_attrs(attrs)
+            if bounds_tuple is None:
+                return self._failed("action_error", "Element bounds are unavailable for iOS swipe.")
+            bx, by, bw, bh = bounds_tuple
+            if bx < 0 or by < 0 or bw <= 0 or bh <= 0 or bx + bw > cur_w or by + bh > cur_h:
+                return self._failed("action_error", "Element swipe requires positive fully on-screen logical bounds.")
+            fraction = float(params.percent if params.percent is not None else 1.0)
+            points = self._compute_element_swipe_points(
+                bx,
+                by,
+                bw,
+                bh,
+                params.direction,
+                fraction,
+                display_width=cur_w,
             )
-            return self._passed({"direction": params.direction, "percent": float(params.percent or 1.0)})
+            if points is None:
+                return self._failed("action_error", "Element swipe collapses to fewer than two logical points.")
+            sx, sy, ex, ey = points
+            session.device.swipe_between(sx, sy, ex, ey, duration_ms=duration_ms, control=control)
+            return self._passed({"direction": params.direction, "percent": fraction})
 
-        session.device.swipe(params.direction, duration_ms=duration_ms, control=control)
+        sx, sy, ex, ey = self._safe_interior_swipe_points(params.direction, cur_w, cur_h)
+        session.device.swipe_between(sx, sy, ex, ey, duration_ms=duration_ms, control=control)
         return self._passed({"direction": params.direction, "duration": duration_ms})
+
+    @staticmethod
+    def _safe_interior_swipe_points(direction: str, width: int, height: int) -> tuple[int, int, int, int]:
+        if width < 2 or height < 2:
+            raise ConfigurationError("iOS display_size must be at least 2x2 logical points for directional swipe.")
+        mid_x = width // 2
+        mid_y = height // 2
+        top_y = max(0, min(height - 1, round(height * 0.20)))
+        bottom_y = max(0, min(height - 1, round(height * 0.80)))
+        if top_y >= bottom_y:
+            top_y, bottom_y = 0, height - 1
+        left_x = max(0, min(width - 1, round(width * 0.18)))
+        right_x = max(0, min(width - 1, round(width * 0.82)))
+        if left_x >= right_x:
+            left_x, right_x = 0, width - 1
+        mapping = {
+            "up": (mid_x, bottom_y, mid_x, top_y),
+            "down": (mid_x, top_y, mid_x, bottom_y),
+            "left": (right_x, mid_y, left_x, mid_y),
+            "right": (left_x, mid_y, right_x, mid_y),
+        }
+        return mapping[direction]
 
     @staticmethod
     def _compute_element_swipe_points(
@@ -563,22 +876,32 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         height: int,
         direction: str,
         fraction: float,
-    ) -> tuple[int, int, int, int]:
+        *,
+        display_width: int,
+    ) -> tuple[int, int, int, int] | None:
         horizontal = direction in {"left", "right"}
         first = x if horizontal else y
-        span = max(2, width if horizontal else height)
-        last = first + span - 1
+        last = first + (width if horizontal else height) - 1
         midpoint = (first + last) / 2.0
-        half_span = max(1.0, (last - first) * fraction / 2.0)
+        half_span = (last - first) * fraction / 2.0
         low, high = ceil(midpoint - half_span), floor(midpoint + half_span)
         if low >= high:
-            low, high = first, last
+            return None
         start_axis, end_axis = (high, low) if direction in {"up", "left"} else (low, high)
         if horizontal:
-            mid_y = y + max(0, height // 2)
-            return start_axis, mid_y, end_axis, mid_y
-        mid_x = x + max(0, width // 2)
-        return mid_x, start_axis, mid_x, end_axis
+            inset = min(height // 2, width // 4)
+            if direction == "right":
+                if fraction == 1.0:
+                    end_axis = min(display_width - 1, x + width)
+                inset_start = max(start_axis, x + inset)
+                if inset_start < end_axis:
+                    start_axis = inset_start
+            else:
+                inset_start = min(start_axis, x + width - 1 - inset)
+                if inset_start > end_axis:
+                    start_axis = inset_start
+            return start_axis, y + height // 2, end_axis, y + height // 2
+        return x + width // 2, start_axis, x + width // 2, end_axis
 
     @_ios_driver_tool("scrollTo", description="Scroll one uniquely resolved iOS scrollable container or element in direction by a bounded distance fraction.")
     def scroll_to(self, params: IOSScrollToParams) -> dict[str, object]:
@@ -845,16 +1168,61 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         check_on_caller()
         return data
 
-    def safe_diagnostics(self, error: BaseException | None = None, *, stage: str = "driver") -> dict[str, object]:
-        diag: dict[str, object] = {"platform": "ios", "backend": self.backend, "stage": stage}
+    def safe_diagnostics(self, error: BaseException | None = None, *, stage: str | None = "driver") -> dict[str, object]:
+        diag: dict[str, object] = {"platform": "ios", "backend": self.backend}
+        if stage is not None:
+            diag["stage"] = stage
+        if self._closed:
+            diag["reason"] = "closed"
+        elif self._cleanup_pending:
+            diag["reason"] = "cleanup_pending"
         if error is not None:
-            diag["error_type"] = type(error).__name__
             code = getattr(error, "code", None)
-            if isinstance(code, str) and code:
+            if isinstance(code, str) and code in IOS_SAFE_BACKEND_CODES:
                 diag["backend_code"] = code
             req_state = getattr(error, "request_state", None)
-            if isinstance(req_state, str) and req_state:
+            if isinstance(req_state, str) and req_state in {"not_sent", "response_received", "response_unknown"}:
                 diag["request_state"] = req_state
+            operation_id = getattr(error, "operation_id", None)
+            if isinstance(operation_id, str) and re.fullmatch(r"[0-9a-f]{32}", operation_id) is not None:
+                diag["operation_id"] = operation_id
+            steps = getattr(error, "completed_steps", None)
+            if isinstance(steps, (tuple, list)):
+                diag["completed_steps"] = list(dict.fromkeys(step for step in steps[: len(IOS_SAFE_COMPLETED_STEPS)] if isinstance(step, str) and step in IOS_SAFE_COMPLETED_STEPS))
+            if isinstance(error, ToolExecutionError):
+                ctx_stage = error.context.get("stage")
+                if isinstance(ctx_stage, str) and ctx_stage and stage == "driver":
+                    diag["stage"] = ctx_stage
+                reason = error.context.get("reason")
+                if reason in {"closed", "cleanup_pending", "session_unavailable", "display_size_unavailable"}:
+                    diag["reason"] = reason
+                res_reason = error.context.get("resolution_reason")
+                if res_reason in {"not_found", "ambiguous", "invalid_locator", "session_unavailable", "backend_error"}:
+                    diag["resolution_reason"] = res_reason
+                ctx_code = error.context.get("backend_code")
+                if "backend_code" not in diag and isinstance(ctx_code, str) and ctx_code in IOS_SAFE_BACKEND_CODES:
+                    diag["backend_code"] = ctx_code
+                ctx_req = error.context.get("request_state")
+                if "request_state" not in diag and isinstance(ctx_req, str) and ctx_req in {"not_sent", "response_received", "response_unknown"}:
+                    diag["request_state"] = ctx_req
+                ctx_op = error.context.get("operation_id")
+                if "operation_id" not in diag and isinstance(ctx_op, str) and re.fullmatch(r"[0-9a-f]{32}", ctx_op) is not None:
+                    diag["operation_id"] = ctx_op
+                ctx_steps = error.context.get("completed_steps")
+                if "completed_steps" not in diag and isinstance(ctx_steps, (tuple, list)):
+                    diag["completed_steps"] = list(dict.fromkeys(step for step in ctx_steps[: len(IOS_SAFE_COMPLETED_STEPS)] if isinstance(step, str) and step in IOS_SAFE_COMPLETED_STEPS))
+                ctx_state = error.context.get("session_state")
+                if isinstance(ctx_state, str) and ctx_state in IOS_SESSION_STATES:
+                    diag["session_state"] = ctx_state
+        try:
+            if self._session is not None:
+                info_fn = getattr(self._session, "session_info", None)
+                if callable(info_fn):
+                    state = getattr(info_fn(), "state", None)
+                    if isinstance(state, str) and state in IOS_SESSION_STATES:
+                        diag["session_state"] = state
+        except BaseException:  # noqa: BLE001 - Local diagnostic read must never replace primary error.
+            return diag
         return diag
 
     def _safe_diagnostics(self, error: BaseException | None = None, *, stage: str = "driver") -> dict[str, object]:
@@ -867,7 +1235,17 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         return self._run_on_worker(self._ensure_session_impl)
 
     def context(self) -> dict[str, object]:
+        if self._closed:
+            raise ToolExecutionError("iOS driver is closed.", context={"reason": "closed"})
+        if self._cleanup_pending:
+            state = self._local_session_state(self._session)
+            ctx: dict[str, object] = {"reason": "cleanup_pending"}
+            if state is not None:
+                ctx["session_state"] = state
+            raise ToolExecutionError("iOS session cleanup is pending; explicit close() is required.", context=ctx)
         if self._session is None:
+            if self._managed_scope is not None or self._runtime is not None or self._connection is not None:
+                raise ToolExecutionError("iOS runtime cleanup is pending; explicit close() is required.", context={"reason": "cleanup_pending"})
             return {
                 "session_id": None,
                 "screen_size": None,
@@ -883,7 +1261,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     def _raw_ui_snapshot_impl(self, options: IOSUiSnapshotParams) -> dict[str, object]:
         session = self._ensure_session_impl()
-        snapshot_timeout = max(20.0, float(self.action_timeout_seconds) + 10.0)
+        snapshot_timeout = self._snapshot_timeout_seconds()
         observation = session.observe_tree(control=self._operation_control(snapshot_timeout))
         max_depth = int(options.max_depth or self.page_source_max_depth)
         compacted = self._simplify_tree_observation(observation, max_depth=max_depth)
@@ -896,6 +1274,14 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         return compacted
 
     def _context_impl(self) -> dict[str, object]:
+        if self._closed:
+            raise ToolExecutionError("iOS driver is closed.", context={"reason": "closed"})
+        if self._cleanup_pending:
+            state = self._local_session_state(self._session)
+            ctx: dict[str, object] = {"reason": "cleanup_pending"}
+            if state is not None:
+                ctx["session_state"] = state
+            raise ToolExecutionError("iOS session cleanup is pending; explicit close() is required.", context=ctx)
         session = self._session
         if session is None:
             return {
@@ -909,18 +1295,23 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                     "app_path_configured": self.app_path is not None,
                 },
             }
+        if not self._session_is_active(session):
+            if not self._borrowed_session:
+                self._cleanup_pending = True
+            state = self._local_session_state(session)
+            ctx = {"reason": "session_unavailable"}
+            if state is not None:
+                ctx["session_state"] = state
+            raise ToolExecutionError("iOS session is no longer active.", context=ctx)
         info_fn = getattr(session, "session_info", None)
         session_id: str | None = None
         if callable(info_fn):
             info = info_fn()
-            state = getattr(info, "state", "active")
-            if state not in {"closed", "disposed"}:
-                raw_id = getattr(info, "appium_session_id", None) or getattr(info, "session_id", None) or getattr(info, "id", None)
-                session_id = str(raw_id) if raw_id else None
+            raw_id = getattr(info, "appium_session_id", None) or getattr(info, "session_id", None) or getattr(info, "id", None)
+            session_id = str(raw_id) if raw_id else None
         else:
             raw_id = getattr(session, "session_id", None)
             session_id = raw_id if isinstance(raw_id, str) else None
-
         screen_size: tuple[int, int] | None = None
         if session_id is not None:
             try:
@@ -949,6 +1340,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         try:
             self._shutdown_executor()
         except BaseException as shutdown_error:
+            self._cleanup_pending = True
             primary_error = self._cleanup_primary
             if primary_error is not None:
                 if isinstance(primary_error, (CancelledError, KeyboardInterrupt, SystemExit)):
@@ -957,10 +1349,20 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             raise
         primary_error = self._cleanup_primary
         self._cleanup_primary = None
-        if primary_error is not None:
+        self._cleanup_pending = False
+        self._closed = True
+        if self._terminal_disposal_diagnostic is not None:
+            if not self._terminal_disposal_diagnostic["terminal_disposal_completed"]:
+                self._terminal_disposal_diagnostic["terminal_disposal_completed"] = True
+                logging.getLogger(__name__).info(
+                    "iOS terminal disposal settled an unconfirmed remote quit.",
+                    extra=self._terminal_disposal_diagnostic,
+                )
+        elif primary_error is not None:
             raise primary_error
 
     def _close_owned_resources(self) -> None:
+        self._cleanup_pending = True
         primary_error: BaseException | None = self._cleanup_primary
         managed_settled = False
         try:
@@ -977,6 +1379,21 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                         else:
                             primary_error = self._cleanup_primary = exc
                             state = getattr(info_fn(), "state", "uncertain") if callable(info_fn) else "uncertain"
+                            if state in {"uncertain", "disposing"} and getattr(exc, "code", None) == "session_quit_unknown":
+                                try:
+                                    from appium_connect_agent.automation import ResourceStateError
+                                except ImportError:
+                                    is_resource_state_err = type(exc).__name__ == "ResourceStateError"
+                                else:
+                                    is_resource_state_err = isinstance(exc, ResourceStateError)
+                                if is_resource_state_err:
+                                    req_state = getattr(exc, "request_state", None)
+                                    self._terminal_disposal_diagnostic = {
+                                        "backend_code": "session_quit_unknown",
+                                        "request_state": req_state if req_state in {"not_sent", "response_unknown", "response_received"} else "unknown",
+                                        "remote_quit_confirmed": False,
+                                        "terminal_disposal_completed": False,
+                                    }
                             if state not in {"uncertain", "disposing", "disposed"}:
                                 raise
                     else:
@@ -989,9 +1406,6 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                         if state != "disposed":
                             raise ToolExecutionError("Owned iOS terminal disposal did not complete.", context={"state": state})  # noqa: TRY301
                         managed_settled = True
-                        if getattr(primary_error, "code", None) == "session_quit_unknown":
-                            primary_error = None
-                            self._cleanup_primary = None
                     elif state == "disposed":
                         managed_settled = True
                     elif state != "closed":
@@ -1005,7 +1419,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 self._managed_scope.__exit__(None, None, None)
                 if self._runtime is not None and bool(getattr(self._runtime, "managed_cleanup_pending", False)):
                     self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
-            elif self._runtime is not None and not managed_settled and bool(getattr(self._runtime, "managed_cleanup_pending", False)):
+            elif self._runtime is not None and not managed_settled:
                 self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
         except BaseException as cleanup_error:
             if primary_error is not None and cleanup_error is not primary_error:
@@ -1020,13 +1434,47 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         self._runtime = None
         self._session_settled = False
         self._scope_exit_attempted = False
-        if primary_error is not None:
-            self._cleanup_primary = None
+
+    def _settle_owned_session_for_replacement(self) -> None:
+        self._terminal_disposal_diagnostic = None
+        self._close_owned_resources()
+        primary_error = self._cleanup_primary
+        self._cleanup_primary = None
+        self._cleanup_pending = False
+        if self._terminal_disposal_diagnostic is not None:
+            self._terminal_disposal_diagnostic["terminal_disposal_completed"] = True
+            logging.getLogger(__name__).info(
+                "iOS terminal disposal settled an unconfirmed remote quit.",
+                extra=self._terminal_disposal_diagnostic,
+            )
+            self._terminal_disposal_diagnostic = None
+        elif primary_error is not None:
             raise primary_error
 
     def _ensure_session_impl(self, params: IOSLaunchAppParams | None = None, *, explicit_launch: bool = False) -> Any:
+        if self._closed:
+            raise ToolExecutionError("iOS driver is closed.", context={"reason": "closed"})
+        if self._cleanup_pending:
+            state = self._local_session_state(self._session)
+            ctx: dict[str, object] = {"reason": "cleanup_pending"}
+            if state is not None:
+                ctx["session_state"] = state
+            raise ToolExecutionError("iOS session cleanup is pending; explicit close() is required.", context=ctx)
+
         launch_params = params or IOSLaunchAppParams()
-        if self._session is not None and self._session_is_active(self._session):
+        if self._session is not None:
+            if not self._session_is_active(self._session):
+                if self._borrowed_session:
+                    raise ConfigurationError("Borrowed iOS XCUITest session is no longer active.")
+                self._cleanup_pending = True
+                state = self._local_session_state(self._session)
+                ctx = {"reason": "session_unavailable"}
+                if state is not None:
+                    ctx["session_state"] = state
+                raise ToolExecutionError(
+                    "Owned iOS XCUITest session is no longer active; explicit close() is required before new work.",
+                    context=ctx,
+                )
             self._ensure_idle_session_alive(self._session)
             if not explicit_launch:
                 self._last_session_activity_monotonic = time.monotonic()
@@ -1034,7 +1482,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             if launch_params.new_session:
                 if self._borrowed_session:
                     raise ConfigurationError("Cannot recreate a borrowed iOS XCUITest session with new_session=true.")
-                self._close_owned_resources()
+                self._settle_owned_session_for_replacement()
                 return self._create_session(launch_params)
             if launch_params.app_path is not None:
                 raise ConfigurationError("app_path requires new_session=true when an iOS XCUITest session already exists.")
@@ -1054,8 +1502,9 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
         if self._borrowed_session:
             raise ConfigurationError("Borrowed iOS XCUITest session is no longer active.")
-        if self._managed_scope is not None or self._runtime is not None:
-            self._close_owned_resources()
+        if self._managed_scope is not None or self._runtime is not None or self._connection is not None:
+            self._cleanup_pending = True
+            raise ToolExecutionError("iOS runtime cleanup is pending; explicit close() is required.", context={"reason": "cleanup_pending"})
         return self._create_session(launch_params)
 
     def _ensure_idle_session_alive(self, session: Any) -> None:
@@ -1071,12 +1520,18 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         self._last_session_activity_monotonic = time.monotonic()
 
     @staticmethod
-    def _session_is_active(session: Any) -> bool:
+    def _local_session_state(session: Any) -> str | None:
+        if session is None:
+            return None
         info_fn = getattr(session, "session_info", None)
         if not callable(info_fn):
-            return True
-        state = getattr(info_fn(), "state", "active")
-        return state == "active"
+            return "active"
+        state = getattr(info_fn(), "state", None)
+        return state if isinstance(state, str) else None
+
+    @classmethod
+    def _session_is_active(cls, session: Any) -> bool:
+        return cls._local_session_state(session) == "active"
 
     def _select_target_device(self, list_ios_devices_fn: Callable[..., Sequence[Any]], operation_control_cls: type[Any]) -> tuple[str, str]:
         devices = list(list_ios_devices_fn(control=operation_control_cls(timeout_seconds=15.0)))
@@ -1087,7 +1542,10 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                     state = getattr(item, "state", "")
                     target = str(getattr(item, "kind", None) or getattr(item, "target", "simulator"))
                     if state not in {"booted", "connected"}:
-                        raise ConfigurationError(f"Configured iOS target device is not ready (state={state}).")
+                        safe_state = (
+                            state if isinstance(state, str) and state in {"shutdown", "booting", "creating", "shutting_down", "disconnected", "offline", "unauthorized", "unknown"} else "not_ready"
+                        )
+                        raise ConfigurationError("Configured iOS target device is not ready.", context={"device_state": safe_state})
                     return self.udid, target
             return self.udid, "unknown"
 
@@ -1131,6 +1589,17 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
         local_settings = _resolve_managed_local_settings(LocalSettings)
         runtime = Runtime(local_settings)
+        self._borrowed_session = False
+        self._runtime = runtime
+        self._managed_scope = None
+        self._connection = None
+        self._session = None
+        self._session_settled = False
+        self._scope_exit_attempted = False
+        self._cleanup_primary = None
+        self._terminal_disposal_diagnostic = None
+        self._cleanup_pending = True
+
         scope: AbstractContextManager[Any] | None = None
         connection: Any | None = None
         last_port_error: BaseException | None = None
@@ -1142,12 +1611,24 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 base_path="",
                 control=OperationControl(timeout_seconds=DEFAULT_MANAGED_STARTUP_TIMEOUT_SECONDS),
             )
+            self._managed_scope = candidate_scope
             try:
                 connection = candidate_scope.__enter__()
                 scope = candidate_scope
+                self._connection = connection
                 break
-            except ServiceLifecycleError as exc:
-                if exc.code == "service_port_in_use":
+            except BaseException as exc:
+                self._cleanup_pending = True
+                self._scope_exit_attempted = True
+                if isinstance(exc, ServiceLifecycleError) and exc.code == "service_port_in_use":
+                    try:
+                        runtime.cleanup_managed(control=OperationControl(timeout_seconds=DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
+                    except BaseException as cleanup_error:
+                        if isinstance(exc, (CancelledError, KeyboardInterrupt, SystemExit)):
+                            raise exc from cleanup_error
+                        raise BaseExceptionGroup("iOS managed startup and cleanup failed.", [exc, cleanup_error]) from None
+                    self._managed_scope = None
+                    self._scope_exit_attempted = False
                     last_port_error = exc
                     continue
                 raise
@@ -1175,32 +1656,19 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 xcode_signing_id=self.xcode_signing_id,
                 updated_wda_bundle_id=self.updated_wda_bundle_id,
                 wda_launch_timeout_ms=self.wda_launch_timeout_ms,
+                xcuitest_wait_for_idle_timeout_seconds=self.xcuitest_wait_for_idle_timeout_seconds,
+                xcuitest_snapshot_max_depth=self.xcuitest_snapshot_max_depth,
+                xcuitest_accessibility_deadline_seconds=self.xcuitest_accessibility_deadline_seconds,
                 new_command_timeout_seconds=float(self.new_command_timeout_seconds),
                 control=OperationControl(timeout_seconds=create_timeout_seconds),
             )
         except BaseException as exc:
-            try:
-                scope.__exit__(type(exc), exc, exc.__traceback__)
-            except BaseException as cleanup_exc:  # noqa: BLE001
-                logging.getLogger(__name__).warning(
-                    "Managed Appium scope cleanup failed after XCUITest session creation error (%s)",
-                    type(cleanup_exc).__name__,
-                )
-            if bool(getattr(runtime, "managed_cleanup_pending", False)):
-                try:
-                    runtime.cleanup_managed(control=OperationControl(timeout_seconds=DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
-                except BaseException as cleanup_exc:  # noqa: BLE001
-                    logging.getLogger(__name__).debug("Secondary managed cleanup did not complete (%s)", type(cleanup_exc).__name__)
+            self._session = getattr(exc, "session", None)
+            self._cleanup_pending = True
             raise
 
-        self._borrowed_session = False
-        self._runtime = runtime
-        self._managed_scope = scope
-        self._connection = connection
         self._session = session
-        self._session_settled = False
-        self._scope_exit_attempted = False
-        self._cleanup_primary = None
+        self._cleanup_pending = False
         self._resolved_device_target = target_kind
         self._last_session_activity_monotonic = time.monotonic()
         return session
@@ -1303,7 +1771,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
             code = getattr(exc, "code", None)
-            if type(exc).__name__ == "TargetError":
+            if type(exc).__name__ == "TargetError" and self._target_error_is_definitive(exc):
                 if code == "target_not_found":
                     return None
                 if code == "target_ambiguous":
@@ -1337,7 +1805,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             )
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
-            if type(exc).__name__ == "TargetError":
+            if type(exc).__name__ == "TargetError" and self._target_error_is_definitive(exc):
                 code = getattr(exc, "code", None)
                 if code == "target_not_found":
                     return None
@@ -1375,7 +1843,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             )
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
-            if type(exc).__name__ == "TargetError" and getattr(exc, "code", None) in {"target_not_found", "target_ambiguous"}:
+            if type(exc).__name__ == "TargetError" and self._target_error_is_definitive(exc) and getattr(exc, "code", None) in {"target_not_found", "target_ambiguous"}:
                 return None
             self._raise_resolution_error(exc)
         return base_element if base_sig == self._signature_from_inspection(narrowed_inspection) else None
@@ -1386,7 +1854,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
             code = getattr(exc, "code", None)
-            if type(exc).__name__ == "TargetError":
+            if type(exc).__name__ == "TargetError" and self._target_error_is_definitive(exc):
                 if code == "target_not_found":
                     return False
                 if code == "target_ambiguous":
@@ -1525,14 +1993,11 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             node = stack.pop()
             xml_node = self._tree_node_to_xml_element(node)
             if self._xml_node_matches_locator(xml_node, locator):
-                matches.append(
-                    {
-                        "type": xml_node.tag,
-                        "name": xml_node.attrib.get("name"),
-                        "label": xml_node.attrib.get("label"),
-                        "value": xml_node.attrib.get("value"),
-                    }
-                )
+                candidate_info: dict[str, object] = {"type": xml_node.tag}
+                for coord_key in ("x", "y", "width", "height"):
+                    if coord_key in xml_node.attrib:
+                        candidate_info[coord_key] = xml_node.attrib[coord_key]
+                matches.append(candidate_info)
             children = getattr(node, "children", ())
             if children:
                 stack.extend(reversed(children))
@@ -1805,26 +2270,46 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
     def _xml_name(value: str) -> str:
         return value.rsplit("}", 1)[-1] if "}" in value else value
 
+    def _target_error_is_definitive(self, exc: BaseException) -> bool:
+        if getattr(exc, "request_state", None) == "response_unknown":
+            return False
+        return self.safe_diagnostics(exc).get("session_state") == "active"
+
     def _raise_resolution_error(self, error: Exception) -> None:
         cls_name = type(error).__name__
         code = getattr(error, "code", None)
-        reason = "backend_error"
         if cls_name in {"ElementValidationError", "InvalidRequestError"} or code in {
             "invalid_selector",
             "invalid_argument",
             "unsupported_operation",
         }:
-            reason = "invalid_locator"
-        elif cls_name == "InvalidSessionStateError" or code in {
-            "session_closed",
-            "session_disposed",
-            "session_invalid",
-            "session_lost",
-            "connection_closed",
-            "connection_closing",
-        }:
+            raise ConfigurationError(
+                "iOS element lookup failed: invalid_locator.",
+                context={"resolution_reason": "invalid_locator", **self.safe_diagnostics(error, stage="element_resolution")},
+            ) from None
+        if cls_name == "OperationTimeoutError" or code == "operation_timeout":
+            raise error
+        reason = "backend_error"
+        if (
+            cls_name == "InvalidSessionStateError"
+            or code
+            in {
+                "session_not_active",
+                "session_uncertain",
+                "session_closed",
+                "session_disposed",
+                "session_invalid",
+                "session_lost",
+                "connection_closed",
+                "connection_closing",
+            }
+            or (isinstance(error, ToolExecutionError) and error.context.get("reason") in {"closed", "cleanup_pending", "session_unavailable"})
+        ):
             reason = "session_unavailable"
-        raise ConfigurationError(f"iOS element lookup failed: {reason}.", context={"resolution_reason": reason}) from None
+        raise ToolExecutionError(
+            f"iOS element lookup failed: {reason}.",
+            context={"resolution_reason": reason, **self.safe_diagnostics(error, stage="element_resolution")},
+        ) from error
 
     @staticmethod
     def _propagate_if_cancelled(exc: BaseException) -> None:
@@ -1836,9 +2321,21 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
     def _wait_timeout(self) -> float:
         return max(0.5, float(self.action_timeout_seconds))
 
+    def _snapshot_timeout_seconds(self) -> float:
+        base = max(20.0, float(self.action_timeout_seconds) + 10.0)
+        if self.xcuitest_accessibility_deadline_seconds is not None:
+            return max(base, float(self.xcuitest_accessibility_deadline_seconds) + 10.0)
+        return base
+
+    def _action_control_timeout_seconds(self) -> float:
+        base = max(5.0, float(self.action_timeout_seconds) + 5.0)
+        if self.xcuitest_accessibility_deadline_seconds is not None:
+            return max(base, float(self.xcuitest_accessibility_deadline_seconds) + 5.0)
+        return base
+
     @staticmethod
     def _ActionControl(driver: AppiumConnectIOSDriver) -> Any:
-        return driver._operation_control(max(5.0, float(driver.action_timeout_seconds) + 5.0))
+        return driver._operation_control(driver._action_control_timeout_seconds())
 
     @staticmethod
     def _operation_control(timeout_seconds: float) -> Any:
@@ -1861,11 +2358,13 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             return self._run_on_worker(func)
         except ConfigurationError:
             raise
+        except ToolExecutionError as exc:
+            return self._failed("action_error", str(exc), metadata=self.safe_diagnostics(exc))
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
             code = getattr(exc, "code", None)
             cls_name = type(exc).__name__
-            if cls_name == "TargetError":
+            if cls_name == "TargetError" and self._target_error_is_definitive(exc):
                 if code == "target_not_found":
                     return self._target_missing()
                 if code == "target_ambiguous":
@@ -1874,11 +2373,12 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                         "iOS target locator matched multiple elements; refine the locator.",
                         metadata={"resolution_reason": "ambiguous", **self.safe_diagnostics(exc)},
                     )
-                return self._failed(
-                    "target_resolution_error",
-                    "iOS target is not ready for interaction.",
-                    metadata={"resolution_reason": str(code or "not_ready"), **self.safe_diagnostics(exc)},
-                )
+                if code in {"target_not_displayed", "target_not_enabled", "target_stale"}:
+                    return self._failed(
+                        "target_resolution_error",
+                        "iOS target is not ready for interaction.",
+                        metadata={"resolution_reason": code, **self.safe_diagnostics(exc)},
+                    )
             if cls_name == "OperationTimeoutError" or code == "operation_timeout":
                 return self._failed("timeout_error", "iOS operation timed out.", metadata=self.safe_diagnostics(exc))
             if cls_name in {"InvalidRequestError", "ElementValidationError"}:
@@ -1892,13 +2392,13 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         cancellation_check: Callable[[], None] | None = None,
         cancellation_event: Event | None = None,
     ) -> _T:
-        if self._borrowed_session and cancellation_check is None:
+        if self._closed or (self._borrowed_session and cancellation_check is None):
             return func()
         self._ensure_executor()
         try:
             return self._run_sync(func, cancellation_check=cancellation_check, cancellation_event=cancellation_event)
         except BaseException:
-            if self._session is None and self._managed_scope is None:
+            if not self._cleanup_pending and self._session is None and self._managed_scope is None and self._runtime is None and self._connection is None:
                 self._shutdown_executor()
             raise
 
@@ -1935,9 +2435,9 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     def _shutdown_executor(self) -> None:
         executor = self._executor
-        self._executor = None
         if executor is not None:
             executor.shutdown(wait=True)
+            self._executor = None
 
     def _target_missing(self) -> dict[str, object]:
         return self._failed(

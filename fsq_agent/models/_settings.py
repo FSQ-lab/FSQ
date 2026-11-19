@@ -255,6 +255,9 @@ class IOSHarnessSettings(BaseModel):
     action_timeout_seconds: int = Field(default=15, ge=1)
     new_command_timeout_seconds: float | None = Field(default=900.0, ge=0, le=86400.0, allow_inf_nan=False)
     wda_launch_timeout_ms: int | None = Field(default=None, ge=1000, le=600000)
+    xcuitest_wait_for_idle_timeout_seconds: float | None = Field(default=None, ge=0.0, le=600.0, allow_inf_nan=False)
+    xcuitest_snapshot_max_depth: int | None = Field(default=None, ge=1, le=500)
+    xcuitest_accessibility_deadline_seconds: float | None = Field(default=None, ge=0.0, le=600.0, allow_inf_nan=False)
     _bundle_id: str | None = PrivateAttr(default=None)
     _app_path: Path | None = PrivateAttr(default=None)
     _xcode_org_id: str | None = PrivateAttr(default=None)
@@ -263,18 +266,23 @@ class IOSHarnessSettings(BaseModel):
     _udid: str | None = PrivateAttr(default=None)
     _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)
 
-    @field_validator("wda_launch_timeout_ms", mode="before")
+    @field_validator("wda_launch_timeout_ms", "xcuitest_snapshot_max_depth", mode="before")
     @classmethod
-    def validate_wda_launch_timeout(cls, value: Any) -> int | None:
+    def validate_strict_optional_int(cls, value: Any) -> int | None:
         if value is not None and type(value) is not int:
-            raise ValueError("wda_launch_timeout_ms must be a built-in integer or None")
+            raise ValueError("Setting must be a built-in integer or None")
         return value
 
-    @field_validator("new_command_timeout_seconds", mode="before")
+    @field_validator(
+        "new_command_timeout_seconds",
+        "xcuitest_wait_for_idle_timeout_seconds",
+        "xcuitest_accessibility_deadline_seconds",
+        mode="before",
+    )
     @classmethod
-    def validate_new_command_timeout(cls, value: Any) -> float | None:
+    def validate_finite_nonnegative_seconds(cls, value: Any) -> float | None:
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
-            raise ValueError("new_command_timeout_seconds must be a finite nonnegative number or None")
+            raise ValueError("Timeout policy must be a finite nonnegative number or None")
         return value
 
     @property

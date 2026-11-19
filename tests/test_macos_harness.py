@@ -1491,6 +1491,7 @@ def test_macos_harness_validation_redacts_secret_input_and_enforces_deterministi
     assert conflict.output["deterministic_conflict"] is True
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_macos_inspect_with_ai_extract_and_locate_pointer_mapping_unavailable(tmp_path) -> None:
     png_bytes = _valid_png_bytes(64, 48)
 
@@ -1557,11 +1558,12 @@ def test_macos_inspect_with_ai_extract_and_locate_pointer_mapping_unavailable(tm
     assert locate_res.output["reason"] == "pointer_mapping_unavailable"
 
 
-def test_macos_driver_worker_cancellation_ensure_alive_and_quit_unknown_settlement(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_driver_worker_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
     import threading
     import time
 
-    # 1. Cooperative worker cancellation within bounded latency
+    del monkeypatch
     started_evt = threading.Event()
     observed_cancel: list[bool] = []
 
@@ -1592,7 +1594,11 @@ def test_macos_driver_worker_cancellation_ensure_alive_and_quit_unknown_settleme
     assert observed_cancel == [True]
     driver.close()
 
-    # 2. Owned session idle >= 45s invokes ensure_alive; session_quit_unknown absorbed when dispose settles
+
+def test_macos_driver_ensure_alive_and_quit_unknown_settlement() -> None:
+    import time
+
+    # Owned session idle >= 45s invokes ensure_alive; session_quit_unknown absorbed when dispose settles
     ensure_alive_calls = 0
     dispose_calls = 0
 

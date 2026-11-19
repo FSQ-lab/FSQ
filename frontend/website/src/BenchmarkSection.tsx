@@ -12,15 +12,20 @@ function LeaderboardComparison() {
       <h3 id="leaderboard-title">{leaderboard.title}</h3>
       <p>{leaderboard.scope}</p>
       <p className="leaderboard-protocols">{leaderboard.protocols}</p>
-      <ul className="leaderboard-rows" aria-label="Reported results, not official ranks">
-        {leaderboard.rows.map(row => (
-          <li key={row.name} className={'leaderboard-row' + (row.name === 'FSQ' ? ' leaderboard-row--ours' : row.name === 'Human Performance' ? ' leaderboard-row--reference' : '')}>
-            <div className="leaderboard-project"><strong>{row.name}</strong><small>{row.label}</small></div>
-            <span className="leaderboard-track" aria-hidden="true"><span style={{ width: row.rate + '%' }} /></span>
-            <span className="leaderboard-rate">{row.display}</span>
-          </li>
-        ))}
-      </ul>
+      <div className="leaderboard-plot">
+        <div className="leaderboard-axis leaderboard-axis--top" aria-hidden="true"><span>0%</span><span className="leaderboard-axis-reference">80% Human reference</span><span>100%</span></div>
+        <ul className="leaderboard-rows" aria-label="Reported results, not official ranks">
+          {leaderboard.rows.map(row => (
+            <li key={row.name} className={'leaderboard-row' + (row.name === 'FSQ' ? ' leaderboard-row--ours' : row.name === 'Human Performance' ? ' leaderboard-row--reference' : '')}>
+              <div className="leaderboard-project"><strong>{row.name}</strong><small>{row.label}</small></div>
+              <span className="leaderboard-track" aria-hidden="true"><span style={{ width: row.rate + '%' }} /></span>
+              <span className="leaderboard-rate">{row.display}</span>
+            </li>
+          ))}
+        </ul>
+        <span className="leaderboard-reference" aria-hidden="true" />
+        <div className="leaderboard-axis leaderboard-axis--bottom" aria-hidden="true"><span>0%</span><span className="leaderboard-axis-reference">80% Human reference</span><span>100%</span></div>
+      </div>
       <div className="leaderboard-disclosures">
         <p>{leaderboard.releases}</p>
         <p>{leaderboard.metrics}</p>

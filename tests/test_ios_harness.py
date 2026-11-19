@@ -33,6 +33,7 @@ from fsq_agent.models import (
     IOSDoubleTapOnParams,
     IOSElementState,
     IOSHandleAlertParams,
+    IOSHarnessSettings,
     IOSHideKeyboardParams,
     IOSInputTextParams,
     IOSInspectElementParams,
@@ -134,6 +135,11 @@ class FakeElement:
 
     def clear(self, *, wait_timeout_seconds: float, control: object = None) -> None:
         self.calls.append(("clear", {"wait_timeout_seconds": wait_timeout_seconds}))
+        ph_state, ph_val = self.attrs.get("placeholder_value", ("missing", None))
+        if ph_state == "value" and isinstance(ph_val, str):
+            self.attrs["value"] = ("value", ph_val)
+        else:
+            self.attrs["value"] = ("value", "")
 
     def send_keys(self, text: str, *, wait_timeout_seconds: float, control: object = None) -> None:
         self.calls.append(("send_keys", {"text": text}))
@@ -535,7 +541,7 @@ def test_ios_input_text_rejects_non_editable_and_falls_back_to_mobile_keys_witho
             "enabled": ("value", True),
             "displayed": ("value", True),
         },
-        send_keys_error=RuntimeError("WDA key typing glitch"),
+        send_keys_error=type("CommandError", (RuntimeError,), {"code": "command_failed", "request_state": "response_received"})("WDA key typing glitch"),
     )
     session.elements[("accessibility id", "search_input", None)] = field_el
     ok_res = driver.input_text(IOSInputTextParams(locator=IOSLocator(accessibility_id="search_input"), text="Wi-Fi", clear=True))
@@ -824,8 +830,18 @@ def test_ios_close_preserves_borrowed_session_and_settles_owned_uncertain_sessio
     assert borrowed_driver._session is borrowed
     assert borrowed_driver.tap_at(IOSTapAtParams(point=IOSPoint(x=10, y=20)))["status"] == "passed"
 
-    class QuitUnknownError(RuntimeError):
-        code = "session_quit_unknown"
+    try:
+        from appium_connect_agent.automation import ResourceStateError as _SDKResourceStateError
+    except (ImportError, ModuleNotFoundError):
+
+        class QuitUnknownError(RuntimeError):
+            code = "session_quit_unknown"
+            request_state = "response_unknown"
+
+        QuitUnknownError.__name__ = "ResourceStateError"
+        quit_unknown_exc: BaseException = QuitUnknownError("remote quit uncertain")
+    else:
+        quit_unknown_exc = _SDKResourceStateError("session_quit_unknown", "a" * 32, "response_unknown")
 
     class OwnedSession:
         def __init__(self) -> None:
@@ -837,7 +853,7 @@ def test_ios_close_preserves_borrowed_session_and_settles_owned_uncertain_sessio
 
         def quit(self, *, control: object = None) -> None:
             self.state = "uncertain"
-            raise QuitUnknownError("remote quit uncertain")
+            raise quit_unknown_exc
 
         def dispose(self, *, control: object = None) -> None:
             self.dispose_called = True
@@ -875,3 +891,375 @@ def test_ios_close_preserves_borrowed_session_and_settles_owned_uncertain_sessio
     assert fake_rt.cleanup_calls == 1
     assert owned_driver._session is None
     assert owned_driver._executor is None
+
+
+def test_ios_input_and_clear_text_anchoring_response_unknown_and_readback_safety() -> None:
+    session = FakeSession()
+    driver = AppiumConnectIOSDriver(bundle_id="com.apple.Preferences", session=session)
+
+    # 1. Mutable bare-target / value-based locator without `id` rebinds via exact type+rect predicate before clear/send_keys
+    rect_pred = 'type == "XCUIElementTypeTextField" AND rect.x == 24 AND rect.y == 220 AND rect.width == 320 AND rect.height == 44'
+    mutable_el = FakeElement(
+        by="predicate",
+        value='name == "Draft" OR value == "Draft"',
+        attrs={
+            "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("missing", None),
+            "label": ("missing", None),
+            "value": ("value", "Draft"),
+            "placeholder_value": ("value", "Title"),
+            "enabled": ("value", True),
+            "displayed": ("value", True),
+            "bounds": ("value", _bounds(24, 220, 320, 44)),
+        },
+    )
+    session.elements[("name", "Draft", None)] = FakeElement(by="name", value="Draft", inspect_error=TargetError("target_not_found"))
+    session.elements[("-ios predicate string", 'label == "Draft"', None)] = FakeElement(
+        by="predicate",
+        value='label == "Draft"',
+        inspect_error=TargetError("target_not_found"),
+    )
+    session.elements[("-ios predicate string", 'name == "Draft" OR value == "Draft"', None)] = mutable_el
+    session.elements[("-ios predicate string", rect_pred, None)] = mutable_el
+    anchored_res = driver.input_text(IOSInputTextParams(target="Draft", text="Final Report", clear=True))
+    assert anchored_res["status"] == "passed"
+    assert ("clear", {"wait_timeout_seconds": 15.0}) in mutable_el.calls
+    assert ("send_keys", {"text": "Final Report"}) in mutable_el.calls
+
+    # 2. clearText rejects disabled/hidden/non-editable controls and verifies placeholder-aware clear readback
+    disabled_field = FakeElement(
+        by="accessibility id",
+        value="disabled_input",
+        attrs={
+            "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("value", "disabled_input"),
+            "enabled": ("value", False),
+            "displayed": ("value", True),
+        },
+    )
+    session.elements[("accessibility id", "disabled_input", None)] = disabled_field
+    dis_clear = driver.clear_text(IOSClearTextParams(locator=IOSLocator(accessibility_id="disabled_input")))
+    assert dis_clear["status"] == "failed"
+    assert dis_clear["failure_category"] == "target_resolution_error"
+    assert all(name != "clear" for name, _ in disabled_field.calls)
+
+    clearable_field = FakeElement(
+        by="accessibility id",
+        value="notes_input",
+        attrs={
+            "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("value", "notes_input"),
+            "value": ("value", "Temp Note"),
+            "placeholder_value": ("value", "Enter note"),
+            "enabled": ("value", True),
+            "displayed": ("value", True),
+            "bounds": ("value", _bounds(16, 300, 350, 44)),
+        },
+    )
+    session.elements[("accessibility id", "notes_input", None)] = clearable_field
+    assert driver.clear_text(IOSClearTextParams(locator=IOSLocator(accessibility_id="notes_input")))["status"] == "passed"
+
+    # 3. send_keys with request_state="response_unknown" MUST NOT fall back to send_macos_keys (no duplicate text)
+    class UnknownSendError(RuntimeError):
+        code = "execution_unknown"
+        request_state = "response_unknown"
+        operation_id = "a" * 32
+        completed_steps = ("target_resolved", " secret_step_ignored ")
+
+    unknown_field = FakeElement(
+        by="accessibility id",
+        value="amount_input",
+        attrs={
+            "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("value", "amount_input"),
+            "value": ("value", ""),
+            "enabled": ("value", True),
+            "displayed": ("value", True),
+            "bounds": ("value", _bounds(16, 360, 200, 44)),
+        },
+        send_keys_error=UnknownSendError("socket dropped mid-POST"),
+    )
+    session.elements[("accessibility id", "amount_input", None)] = unknown_field
+    unk_res = driver.input_text(IOSInputTextParams(locator=IOSLocator(accessibility_id="amount_input"), text="100"))
+    assert unk_res["status"] == "failed"
+    assert unk_res["failure_category"] == "action_error"
+    assert unk_res["metadata"]["request_state"] == "response_unknown"
+    assert unk_res["metadata"]["backend_code"] == "execution_unknown"
+    assert unk_res["metadata"]["operation_id"] == "a" * 32
+    assert unk_res["metadata"]["completed_steps"] == ["target_resolved"]
+    assert all(name != "send_macos_keys" for name, _ in unknown_field.calls)
+
+    # 4. Silent write failure (readback mismatch) fails explicitly on non-secure controls, while SecureTextField skips value readback
+    class SilentNoOpElement(FakeElement):
+        def send_keys(self, text: str, *, wait_timeout_seconds: float, control: object = None) -> None:
+            self.calls.append(("send_keys", {"text": text}))
+            # Intentionally leave value unchanged
+
+    silent_el = SilentNoOpElement(
+        by="accessibility id",
+        value="broken_field",
+        attrs={
+            "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("value", "broken_field"),
+            "value": ("value", ""),
+            "enabled": ("value", True),
+            "displayed": ("value", True),
+            "bounds": ("value", _bounds(16, 420, 200, 44)),
+        },
+    )
+    session.elements[("accessibility id", "broken_field", None)] = silent_el
+    mismatch_res = driver.input_text(IOSInputTextParams(locator=IOSLocator(accessibility_id="broken_field"), text="Expected"))
+    assert mismatch_res["status"] == "failed"
+    assert mismatch_res["failure_category"] == "action_error"
+
+    secure_silent = SilentNoOpElement(
+        by="accessibility id",
+        value="pin_field",
+        attrs={
+            "type": ("value", "XCUIElementTypeSecureTextField"),
+            "id": ("value", "pin_field"),
+            "value": ("value", "••••"),
+            "enabled": ("value", True),
+            "displayed": ("value", True),
+            "bounds": ("value", _bounds(16, 480, 200, 44)),
+        },
+    )
+    session.elements[("accessibility id", "pin_field", None)] = secure_silent
+    sec_res = driver.input_text(IOSInputTextParams(locator=IOSLocator(accessibility_id="pin_field"), text="SecretPin!"))
+    assert sec_res["status"] == "passed"
+    post_inspect_attrs = secure_silent.calls[-1][1]["attributes"]
+    assert "value" not in post_inspect_attrs
+
+
+def test_ios_swipe_safe_interior_ranges_and_validated_element_insets() -> None:
+    session = FakeSession()
+    driver = AppiumConnectIOSDriver(bundle_id="com.apple.Preferences", session=session)
+
+    # Untargeted swipe uses 20%-80% vertical and 18%-82% horizontal via swipe_between (never raw Device.swipe)
+    session.device.calls.clear()
+    assert driver.swipe(IOSSwipeParams(direction="up"))["status"] == "passed"
+    assert driver.swipe(IOSSwipeParams(direction="right"))["status"] == "passed"
+    swipe_calls = [payload for name, payload in session.device.calls if name == "swipe_between"]
+    assert len(swipe_calls) == 2
+    assert all(name != "swipe" for name, _ in session.device.calls)
+    # For 402x874: mid_x=201, top=round(874*0.20)=175, bottom=round(874*0.80)=699; left=round(402*0.18)=72, right=round(402*0.82)=330
+    assert swipe_calls[0] == {"start_x": 201, "start_y": 699, "end_x": 201, "end_y": 175, "duration_ms": 300}
+    assert swipe_calls[1] == {"start_x": 72, "start_y": 437, "end_x": 330, "end_y": 437, "duration_ms": 300}
+
+    # Element swipe at percent=1.0 validates bounds and applies horizontal inset instead of unvalidated macos_swipe
+    slider = FakeElement(
+        by="accessibility id",
+        value="volume_slider",
+        attrs={
+            "type": ("value", "XCUIElementTypeSlider"),
+            "id": ("value", "volume_slider"),
+            "enabled": ("value", True),
+            "bounds": ("value", _bounds(20, 400, 300, 40)),
+        },
+    )
+    session.elements[("accessibility id", "volume_slider", None)] = slider
+    session.device.calls.clear()
+    el_swipe = driver.swipe(IOSSwipeParams(locator=IOSLocator(accessibility_id="volume_slider"), direction="right", percent=1.0))
+    assert el_swipe["status"] == "passed"
+    assert all(name != "macos_swipe" for name, _ in slider.calls)
+    # inset = min(40//2, 300//4) = 20 -> start_x = 20 + 20 = 40, end_x = min(401, 20 + 300) = 320, mid_y = 420
+    assert ("swipe_between", {"start_x": 40, "start_y": 420, "end_x": 320, "end_y": 420, "duration_ms": 300}) in session.device.calls
+
+    # Off-screen element bounds rejected safely
+    offscreen = FakeElement(
+        by="accessibility id",
+        value="offscreen_slider",
+        attrs={"enabled": ("value", True), "bounds": ("value", _bounds(350, 400, 120, 40))},
+    )
+    session.elements[("accessibility id", "offscreen_slider", None)] = offscreen
+    off_res = driver.swipe(IOSSwipeParams(locator=IOSLocator(accessibility_id="offscreen_slider"), direction="left", percent=1.0))
+    assert off_res["status"] == "failed"
+    assert off_res["failure_category"] == "action_error"
+
+
+def test_ios_safe_diagnostics_and_non_definitive_target_error_redaction() -> None:
+    session = FakeSession()
+    driver = AppiumConnectIOSDriver(bundle_id="com.apple.Preferences", session=session)
+
+    class UnlistedError(RuntimeError):
+        code = "udid_00008110_secret_code"
+        request_state = "raw_http_body_leak"
+        operation_id = "NOT-HEX-SECRET"
+        completed_steps = ("target_resolved", "leaked_password_value")
+
+    diag = driver.safe_diagnostics(UnlistedError("raw message with secret"))
+    assert "backend_code" not in diag
+    assert "request_state" not in diag
+    assert "operation_id" not in diag
+    assert diag["completed_steps"] == ["target_resolved"]
+    assert diag["session_state"] == "active"
+    assert "secret" not in str(diag)
+
+    # TargetError with response_unknown is NOT classified as target_not_found
+    class UncertainTargetError(Exception):
+        code = "target_not_found"
+        request_state = "response_unknown"
+
+    UncertainTargetError.__name__ = "TargetError"
+    uncertain_btn = FakeElement(by="accessibility id", value="flaky_btn")
+    session.elements[("accessibility id", "flaky_btn", None)] = uncertain_btn
+
+    def raise_uncertain(*, wait_timeout_seconds: float, control: object = None) -> None:
+        raise UncertainTargetError("transport reset")
+
+    uncertain_btn.click = raise_uncertain  # type: ignore[method-assign]
+    res = driver.tap_on(IOSTapOnParams(locator=IOSLocator(accessibility_id="flaky_btn")))
+    assert res["status"] == "failed"
+    assert res["failure_category"] == "action_error"
+    assert res["metadata"].get("resolution_reason") != "not_found"
+
+    # Non-definitive TargetError or timeout during element lookup produces action_error/timeout_error (never ConfigurationError)
+    lookup_uncertain = FakeElement(
+        by="accessibility id",
+        value="lookup_uncertain_btn",
+        inspect_error=UncertainTargetError("transport reset during lookup"),
+    )
+    session.elements[("accessibility id", "lookup_uncertain_btn", None)] = lookup_uncertain
+    lookup_res = driver.tap_on(IOSTapOnParams(locator=IOSLocator(accessibility_id="lookup_uncertain_btn")))
+    assert lookup_res["status"] == "failed"
+    assert lookup_res["failure_category"] == "action_error"
+    assert lookup_res["metadata"]["resolution_reason"] == "backend_error"
+    assert lookup_res["metadata"]["request_state"] == "response_unknown"
+
+    class LookupTimeoutError(Exception):
+        code = "operation_timeout"
+        request_state = "not_sent"
+
+    LookupTimeoutError.__name__ = "OperationTimeoutError"
+    lookup_timeout_el = FakeElement(
+        by="accessibility id",
+        value="lookup_timeout_btn",
+        inspect_error=LookupTimeoutError("lookup deadline expired"),
+    )
+    session.elements[("accessibility id", "lookup_timeout_btn", None)] = lookup_timeout_el
+    timeout_res = driver.tap_on(IOSTapOnParams(locator=IOSLocator(accessibility_id="lookup_timeout_btn")))
+    assert timeout_res["status"] == "failed"
+    assert timeout_res["failure_category"] == "timeout_error"
+    assert timeout_res["metadata"]["backend_code"] == "operation_timeout"
+
+    # Unsupported pressKey never echoes caller-supplied key text
+    with pytest.raises(ConfigurationError) as bad_key_err:
+        driver.press_key(IOSPressKeyParams(key="SUPER_SECRET_KEY_VALUE_999"))
+    assert "SUPER_SECRET_KEY_VALUE_999" not in str(bad_key_err.value)
+
+    # inputText(text="", clear=False) still verifies post-write empty readback, and no-id bounds shift fails identity check
+    non_empty_no_id = FakeElement(
+        by="predicate",
+        value='placeholderValue == "Code"',
+        attrs={
+            "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("missing", None),
+            "value": ("value", "ResidualText"),
+            "placeholder_value": ("value", "Code"),
+            "enabled": ("value", True),
+            "displayed": ("value", True),
+            "bounds": ("value", _bounds(10, 500, 180, 40)),
+        },
+    )
+    session.elements[("-ios predicate string", 'placeholderValue == "Code"', None)] = non_empty_no_id
+    empty_check = driver.input_text(IOSInputTextParams(locator=IOSLocator(predicate='placeholderValue == "Code"'), text="", clear=False))
+    assert empty_check["status"] == "failed"
+    assert empty_check["failure_category"] == "action_error"
+
+    class BoundsShiftingElement(FakeElement):
+        def send_keys(self, text: str, *, wait_timeout_seconds: float, control: object = None) -> None:
+            super().send_keys(text, wait_timeout_seconds=wait_timeout_seconds, control=control)
+            self.attrs["bounds"] = ("value", _bounds(10, 620, 180, 40))
+
+    shifting_el = BoundsShiftingElement(
+        by="predicate",
+        value='placeholderValue == "Shifting"',
+        attrs={
+            "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("missing", None),
+            "value": ("value", ""),
+            "placeholder_value": ("value", "Shifting"),
+            "enabled": ("value", True),
+            "displayed": ("value", True),
+            "bounds": ("value", _bounds(10, 560, 180, 40)),
+        },
+    )
+    session.elements[("-ios predicate string", 'placeholderValue == "Shifting"', None)] = shifting_el
+    shift_res = driver.input_text(IOSInputTextParams(locator=IOSLocator(predicate='placeholderValue == "Shifting"'), text="abc", clear=False))
+    assert shift_res["status"] == "failed"
+    assert shift_res["failure_category"] == "action_error"
+    assert "bounds changed" in str(shift_res["error_message"])
+
+
+class _IntSubclass(int):
+    pass
+
+
+@pytest.mark.parametrize(
+    "invalid_kwargs",
+    [
+        {"xcuitest_wait_for_idle_timeout_seconds": True},
+        {"xcuitest_wait_for_idle_timeout_seconds": False},
+        {"xcuitest_wait_for_idle_timeout_seconds": "2.0"},
+        {"xcuitest_wait_for_idle_timeout_seconds": float("nan")},
+        {"xcuitest_wait_for_idle_timeout_seconds": float("inf")},
+        {"xcuitest_wait_for_idle_timeout_seconds": -0.001},
+        {"xcuitest_wait_for_idle_timeout_seconds": 600.001},
+        {"xcuitest_snapshot_max_depth": True},
+        {"xcuitest_snapshot_max_depth": _IntSubclass(25)},
+        {"xcuitest_snapshot_max_depth": 25.0},
+        {"xcuitest_snapshot_max_depth": "25"},
+        {"xcuitest_snapshot_max_depth": 0},
+        {"xcuitest_snapshot_max_depth": -1},
+        {"xcuitest_snapshot_max_depth": 501},
+        {"xcuitest_accessibility_deadline_seconds": True},
+        {"xcuitest_accessibility_deadline_seconds": "10.0"},
+        {"xcuitest_accessibility_deadline_seconds": float("nan")},
+        {"xcuitest_accessibility_deadline_seconds": float("-inf")},
+        {"xcuitest_accessibility_deadline_seconds": -0.001},
+        {"xcuitest_accessibility_deadline_seconds": 600.001},
+    ],
+)
+def test_ios_harness_settings_rejects_invalid_initial_wda_policies(invalid_kwargs: dict[str, Any]) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        IOSHarnessSettings(**invalid_kwargs)
+
+
+def test_ios_harness_settings_and_driver_policy_forwarding_and_borrowed_rejection() -> None:
+    from fsq_agent.core.interfaces import DriverFactory
+
+    defaults = IOSHarnessSettings()
+    assert defaults.xcuitest_wait_for_idle_timeout_seconds is None
+    assert defaults.xcuitest_snapshot_max_depth is None
+    assert defaults.xcuitest_accessibility_deadline_seconds is None
+
+    tuned = IOSHarnessSettings(
+        action_timeout_seconds=15,
+        xcuitest_wait_for_idle_timeout_seconds=0,
+        xcuitest_snapshot_max_depth=25,
+        xcuitest_accessibility_deadline_seconds=30,
+    )
+    assert tuned.xcuitest_wait_for_idle_timeout_seconds == 0.0
+    assert type(tuned.xcuitest_wait_for_idle_timeout_seconds) is float
+    assert tuned.xcuitest_snapshot_max_depth == 25
+    assert type(tuned.xcuitest_snapshot_max_depth) is int
+    assert tuned.xcuitest_accessibility_deadline_seconds == 30.0
+    assert type(tuned.xcuitest_accessibility_deadline_seconds) is float
+
+    driver = DriverFactory().create_ios_driver(tuned, bundle_id="com.apple.Preferences", udid="SIM-UDID")
+    assert driver.xcuitest_wait_for_idle_timeout_seconds == 0.0
+    assert driver.xcuitest_snapshot_max_depth == 25
+    assert driver.xcuitest_accessibility_deadline_seconds == 30.0
+    assert driver._snapshot_timeout_seconds() == 40.0
+    assert driver._action_control_timeout_seconds() == 35.0
+
+    session = FakeSession()
+    for policy_kwarg in (
+        {"xcuitest_wait_for_idle_timeout_seconds": 2.0},
+        {"xcuitest_snapshot_max_depth": 25},
+        {"xcuitest_accessibility_deadline_seconds": 10.0},
+    ):
+        with pytest.raises(ConfigurationError, match="borrowed iOS Session"):
+            AppiumConnectIOSDriver(bundle_id="com.apple.Preferences", session=session, **policy_kwarg)

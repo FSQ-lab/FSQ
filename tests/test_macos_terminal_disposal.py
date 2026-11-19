@@ -470,7 +470,8 @@ def test_macos_other_real_resource_state_error_is_not_settled_quit_history(manag
     assert failed.value.code == "cleanup_failed"
     assert failed.value.request_state == "response_received"
     assert failed.value.completed_steps == ("session_deleted",)
-    assert failed.value.cleanup_errors == tuple(failures)
+    assert len(failed.value.cleanup_errors) == len(failures)
+    assert all(isinstance(err, RuntimeError) and err.args == ("transport_cleanup_failed",) for err in failed.value.cleanup_errors)
     assert driver._terminal_disposal_diagnostic is None
     _assert_owner_settled(managed_driver, owner)
     assert len([event for event in managed_driver.events() if event.get("method") == "DELETE"]) == 1

@@ -4,6 +4,10 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-11-19
+
+Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.5.md) for upgrade steps and validation limits.
+
 ### Added
 
 - Android `assert_with_ai` / `assertWithAI` accepts a structured visual assertion with an explicit image-pixel rectangle or nonblank full-screen reason. It remains assertion-only: no element-region mapping, grounding, driving, or coordinate output. External upload permission and current non-sensitive-frame classification are resolved anew by a trusted, non-persistent host callback for each invocation; previous frame decisions and static settings do not grant access.
@@ -56,6 +60,12 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 - Android input failures preserve safe operation stage, SDK request/completion facts, and local lifecycle state without leaking input or backend messages. Closed and pending-cleanup failures remain distinct, with quarantine and primary-versus-evidence failure precedence preserved.
 - Android and shared guidance reserve `assert_with_ai` for pure visual assertions, not locating/driving or approximating exact accessible state. Slider, filename-extension, and collection-deletion guidance requires precise readback, complete object identity, and preservation of the authorized root container.
 - iOS `IOSHarnessSettings` and `AppiumConnectIOSDriver` forward optional typed initial-Session WDA policies (`xcuitest_wait_for_idle_timeout_seconds`, `xcuitest_snapshot_max_depth`, `xcuitest_accessibility_deadline_seconds`; defaulting to `None`) to `create_xcuitest_session(...)` while rejecting non-`None` overrides on borrowed Sessions. `input_text` and `clear_text` require an editable, enabled, visible XCUITest control, rebind mutable text-dependent locators to a stable `name` or `type`+`rect` predicate anchor, restrict `send_macos_keys` fallback to confirmed non-acceptance (`not_sent` or `response_received`), and verify post-write readback (with `SecureTextField` withholding); element-scoped `swipe` validates logical display bounds with horizontal edge insets, non-active or pending-cleanup sessions fail fast without implicit reconstruction, progressive startup retains creation-failure resources for owner-thread `Session.dispose` settlement, and `ios-harness.md` adds form-completion and observed-sequence guidance.
+
+### Changed
+
+- Published the AndroidWorld benchmark presentation (`95.69%`, `111/116`, `pass@1`), public-code leaderboard comparison, methodology/evidence links, and refined README/Website hierarchy (#53, #54, #55).
+- Updated `pillow` to `13.0.0`, `vite` to `8.3.4`, and `vitest` / `@vitest/mocker` (#44, #45, #46).
+- Python distribution metadata is prepared for version 0.3.5. The private npm package remains independently versioned at 0.1.0; this metadata preparation adds no runtime or dependency change.
 
 ### Integration status
 
@@ -146,11 +156,12 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/FSQ-lab/FSQ/compare/v0.3.2...v0.3.5
 [0.3.2]: https://github.com/FSQ-lab/FSQ/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/FSQ-lab/FSQ/compare/v0.3.0...v0.3.1
 [0.1.6]: https://github.com/FSQ-lab/FSQ/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/FSQ-lab/FSQ/compare/v0.1.0...v0.1.5
 [0.1.0]: https://github.com/FSQ-lab/FSQ/releases/tag/v0.1.0
 
-The 0.3.2 comparison references anticipate release tags; they do not establish that a tag or publication exists.
+The 0.3.5 comparison references anticipate release tags; they do not establish that a tag or publication exists.

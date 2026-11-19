@@ -17,10 +17,6 @@ from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[1]
 EXACT_REQUIREMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?==[^;\s]+(?:\s*;.*)?$")
-EXACT_OR_PINNED_GIT_REQUIREMENT = re.compile(
-    r"^(?:[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9._,-]+\])?==[^;\s]+(?:\s*;.*)?|"
-    r"appium-connect-agent @ git\+https://github\.com/FSQ-lab/appium-connect-agent\.git@[0-9a-f]{40})$"
-)
 
 
 def _load_workflow(name: str) -> tuple[str, dict[str, Any]]:
@@ -59,9 +55,10 @@ def test_python_dependencies_are_lock_free_public_and_exactly_versioned() -> Non
     ignored_paths = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert "uv.lock" in ignored_paths
     assert "tool" not in project or "uv" not in project["tool"]
+    assert "tool" not in project or "hatch" not in project["tool"] or "metadata" not in project["tool"]["hatch"]
     assert "packagefeedproxy.microsoft.io" not in pyproject_text
     assert all(EXACT_REQUIREMENT.fullmatch(requirement) for requirement in project["build-system"]["requires"])
-    assert all(EXACT_OR_PINNED_GIT_REQUIREMENT.fullmatch(requirement) for requirement in project["project"]["dependencies"])
+    assert all(EXACT_REQUIREMENT.fullmatch(requirement) for requirement in project["project"]["dependencies"])
     assert all(EXACT_REQUIREMENT.fullmatch(requirement) for requirements in project["project"]["optional-dependencies"].values() for requirement in requirements)
 
 
@@ -87,9 +84,9 @@ def test_default_distribution_contract() -> None:
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
-    for name in ("playwright", "pywinauto", "pillow"):
+    assert "appium-connect-agent==0.1.0" in dependencies
+    for name in ("appium-connect-agent", "playwright", "pywinauto", "pillow"):
         assert any(dependency.startswith(f"{name}==") for dependency in dependencies)
-    assert any(dependency.startswith("appium-connect-agent @ git+https://github.com/FSQ-lab/appium-connect-agent.git@") for dependency in dependencies)
     for retired in ("uiautomator2", "Appium-Python-Client", "selenium"):
         assert not any(dependency.startswith(retired) for dependency in dependencies)
     assert set(metadata["optional-dependencies"]) == {"dev"}

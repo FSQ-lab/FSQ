@@ -59,7 +59,7 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ### Integration status
 
-- Android, macOS, and iOS integration pins `appium-connect-agent` to public `master` commit `0a75007826a789ed7e10f7bad4a9de6bb86f2769` on `https://github.com/FSQ-lab/appium-connect-agent.git`. PyPI publication remains gated in `release.yml` until `appium-connect-agent` is published to PyPI with an exact `==` version specifier.
+- Android, macOS, and iOS integration depends on the published PyPI package `appium-connect-agent==0.1.0`, retiring the direct Git URL reference and `allow-direct-references` build metadata so `fsq-agent` wheel metadata satisfies `release.yml` PyPI publication checks.
 
 ## [0.3.2] - 2026-10-21
 

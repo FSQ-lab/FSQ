@@ -7,7 +7,7 @@ from fsq_agent.core._platform_runtime import PlatformRuntimeService
 from fsq_agent.core._platform_tools import CommonPlatformTools
 from fsq_agent.core._runtime_secrets import RuntimeSecretStore
 from fsq_agent.core.evidence import ArtifactStore, EvidenceRecorder
-from fsq_agent.core.harness import AndroidDeviceDiscovery
+from fsq_agent.core.harness import AndroidDeviceDiscovery, IOSDeviceDiscovery
 from fsq_agent.core.interfaces import (
     AIAssertionEvaluatorProtocol,
     AIVisualInspectionEvaluatorProtocol,
@@ -20,6 +20,7 @@ from fsq_agent.core.interfaces import (
     EvidenceSink,
     HarnessFactory,
     HarnessInterface,
+    IOSDriverInterface,
     MacOSDriverInterface,
     RuntimeSecretResolver,
     WebDriverInterface,
@@ -45,6 +46,8 @@ __all__ = [
     "EvidenceSink",
     "HarnessFactory",
     "HarnessInterface",
+    "IOSDeviceDiscovery",
+    "IOSDriverInterface",
     "MacOSDriverInterface",
     "PlatformRuntimeService",
     "RuntimeSecretResolver",

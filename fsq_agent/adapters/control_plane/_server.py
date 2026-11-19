@@ -68,6 +68,7 @@ from ._workspaces import (
 
 _HISTORY_PREFIX = "/api/control-plane/history"
 _HISTORY_HEADERS = {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+_CONTROL_PLANE_HISTORY_PLATFORMS = ("android", "web", "windows", "macos")
 
 
 @dataclass(frozen=True)
@@ -136,9 +137,13 @@ def _history_route(path: str) -> tuple[str, str, tuple[str, ...]]:
 def _list_history(query: dict[str, list[str]], user_root: Path | None) -> dict[str, Any]:
     if set(query) - {"workspace", "platform", "status", "mode", "case", "since", "limit"}:
         raise ValueError("Unsupported Run filter.")
+    platform_filter = _history_one(query, "platform")
+    if platform_filter is not None and platform_filter not in _CONTROL_PLANE_HISTORY_PLATFORMS:
+        raise ValueError("platform must be one of android, web, windows, or macos.")
     request = contracts.ListRunsRequest(
         **_history_scope(_history_one(query, "workspace", required=True), user_root),
-        platform=_history_one(query, "platform"),
+        platform=platform_filter,
+        allowed_platforms=_CONTROL_PLANE_HISTORY_PLATFORMS,
         statuses=tuple(query.get("status", [])),
         mode=_history_one(query, "mode"),
         case_id=_history_one(query, "case"),

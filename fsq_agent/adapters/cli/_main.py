@@ -63,7 +63,8 @@ from fsq_agent.application import (
 
 from ._composition import create_case_agent
 
-PLATFORMS = click.Choice(["android", "web", "windows", "macos"])
+PLATFORMS = click.Choice(["android", "web", "windows", "macos", "ios"])
+QUICK_TEST_PLATFORMS = click.Choice(["android", "web", "windows", "macos"])
 OUTPUTS = click.Choice(["human", "json", "jsonl"])
 RUN_STATUSES = click.Choice(["preparing", "running", "finalizing", "success", "failed", "inconclusive", "cancelled", "error", "interrupted"])
 
@@ -222,6 +223,9 @@ def main(context: click.Context, output_format: str, non_interactive: bool) -> N
 @click.option("--window-title-re", default=None)
 @click.option("--launch-args", default=None)
 @click.option("--bundle-id", default=None)
+@click.option("--xcode-org-id", default=None)
+@click.option("--xcode-signing-id", default=None)
+@click.option("--updated-wda-bundle-id", default=None)
 @click.option("--env", "env_values", multiple=True, metavar="NAME=VALUE")
 @click.option("--update-existing", is_flag=True, default=False)
 @click.pass_context
@@ -238,12 +242,27 @@ def init(
     window_title_re: str | None,
     launch_args: str | None,
     bundle_id: str | None,
+    xcode_org_id: str | None,
+    xcode_signing_id: str | None,
+    updated_wda_bundle_id: str | None,
     env_values: tuple[str, ...],
     update_existing: bool,
 ) -> None:
     if platform is None and agent is None:
         raise click.UsageError("At least one of --platform or --agent is required.")
-    platform_values = (name, app_id, browser_channel, browser_executable_path, app_path, window_title_re, launch_args, bundle_id)
+    platform_values = (
+        name,
+        app_id,
+        browser_channel,
+        browser_executable_path,
+        app_path,
+        window_title_re,
+        launch_args,
+        bundle_id,
+        xcode_org_id,
+        xcode_signing_id,
+        updated_wda_bundle_id,
+    )
     if platform is None and (any(value is not None for value in platform_values) or env_values or update_existing):
         raise click.UsageError("Workspace and platform options require --platform.")
     if agent is None and no_overwrite:
@@ -271,6 +290,9 @@ def init(
                 window_title_re=window_title_re,
                 launch_args=launch_args,
                 bundle_id=bundle_id,
+                xcode_org_id=xcode_org_id,
+                xcode_signing_id=xcode_signing_id,
+                updated_wda_bundle_id=updated_wda_bundle_id,
                 env=env,
                 update_existing=update_existing,
             )
@@ -340,7 +362,7 @@ def quick_test_group() -> None:
 
 
 @quick_test_group.command(name="context")
-@click.option("--platform", type=PLATFORMS, required=True)
+@click.option("--platform", type=QUICK_TEST_PLATFORMS, required=True)
 @click.option("--target-id", default=None)
 @click.pass_context
 def quick_test_context(context: click.Context, platform: str, target_id: str | None) -> None:
@@ -351,7 +373,7 @@ def quick_test_context(context: click.Context, platform: str, target_id: str | N
 
 
 @quick_test_group.command(name="run")
-@click.option("--platform", type=PLATFORMS, required=True)
+@click.option("--platform", type=QUICK_TEST_PLATFORMS, required=True)
 @click.option("--goal", required=True)
 @click.option("--target-id", default=None)
 @click.option("--url", default=None, help="Exact HTTP(S) starting address (Web only).")
@@ -389,8 +411,9 @@ def quick_test_run(context: click.Context, platform: str, goal: str, target_id: 
 @click.option("--platform", type=PLATFORMS, required=True)
 @click.option("--goal", required=True)
 @click.option("--name", default=None, help="Stable Case name without a suffix.")
+@click.option("--udid", default=None, help="Transient iOS Simulator or physical device UDID (--platform ios only).")
 @click.pass_context
-def case_create(context: click.Context, platform: str, goal: str, name: str | None) -> None:
+def case_create(context: click.Context, platform: str, goal: str, name: str | None, udid: str | None) -> None:
     def emit_event(event: object) -> None:
         if context.obj["output"] == "jsonl":
             click.echo(
@@ -404,7 +427,7 @@ def case_create(context: click.Context, platform: str, goal: str, name: str | No
     try:
         result = asyncio.run(
             create_case(
-                CaseCreateRequest(current_directory=Path.cwd(), platform=platform, goal=goal, case_name=name),
+                CaseCreateRequest(current_directory=Path.cwd(), platform=platform, goal=goal, case_name=name, udid=udid),
                 event_sink=emit_event,
                 agent_factory=create_case_agent,
             )
@@ -424,10 +447,11 @@ def case_create(context: click.Context, platform: str, goal: str, name: str | No
 @click.argument("case_path", type=click.Path(path_type=Path))
 @click.option("--platform", type=PLATFORMS, required=True)
 @click.option("--suggest", is_flag=True, default=False)
+@click.option("--udid", default=None, help="Transient iOS Simulator or physical device UDID (--platform ios only).")
 @click.pass_context
-def case_test(context: click.Context, case_path: Path, platform: str, suggest: bool) -> None:
+def case_test(context: click.Context, case_path: Path, platform: str, suggest: bool, udid: str | None) -> None:
     try:
-        result = test_case(CaseTestRequest(current_directory=Path.cwd(), platform=platform, case_path=case_path, suggest=suggest))
+        result = test_case(CaseTestRequest(current_directory=Path.cwd(), platform=platform, case_path=case_path, suggest=suggest, udid=udid))
         if context.obj["output"] == "human":
             click.echo(f"Case {result.status}: {result.summary}")
             click.echo(f"Report: {result.report_path}")
@@ -783,7 +807,8 @@ def _render_doctor(result: object) -> None:
         "case_create": "fsq case create",
     }
     for platform in result.platforms:
-        click.echo(f"\n{platform.platform.capitalize()}")
+        platform_heading = {"macos": "macOS", "ios": "iOS"}.get(platform.platform, platform.platform.capitalize())
+        click.echo(f"\n{platform_heading}")
         if platform.prerequisites:
             labels = {
                 "adb_cli": "ADB CLI",

@@ -23,7 +23,7 @@ from fsq_agent.application.workspace import require_initialized_workspace
 from fsq_agent.case_dsl import FsqCaseLoader, FsqCaseSerializer, FsqExecutableStepAdapter
 from fsq_agent.config import Settings, list_workspace_registry, load_workspace_platform_settings, validate_strict_core_settings
 from fsq_agent.core import ArtifactStore, HarnessFactory, RuntimeSecretStore
-from fsq_agent.environments import AndroidDeviceDiscovery
+from fsq_agent.environments import AndroidDeviceDiscovery, IOSDeviceDiscovery
 from fsq_agent.execution import RunLifecycleService, RunSource, RunStepCounts, allocate_run, collect_strict_lifecycle_cases, load_run_metadata, run_strict_lifecycle_case, transition_run
 from fsq_agent.models import ConfigurationError, EvidenceBundle
 
@@ -67,11 +67,87 @@ def _resolve_android_run_serial(settings: Settings) -> str:
     )
 
 
+def _resolve_ios_run_udid(settings: Settings, explicit_udid: str | None = None) -> str:
+    requested = (explicit_udid or "").strip()
+    if requested:
+        if any(char.isspace() for char in requested):
+            raise ApplicationError(
+                code=ApplicationErrorCode.CASE_INVALID,
+                category=ApplicationErrorCategory.REQUEST_VALIDATION,
+                message="iOS UDID must not contain whitespace.",
+                action="Pass a valid Simulator or physical device UDID.",
+            )
+        discovery = IOSDeviceDiscovery().discover()
+        if discovery.error_code:
+            raise ApplicationError(
+                code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+                category=ApplicationErrorCategory.UNAVAILABLE,
+                message=discovery.error_message or "iOS device discovery failed.",
+                action="Verify full Xcode tools and boot one iOS Simulator or connect one physical iOS device.",
+                details={"error_code": discovery.error_code},
+            )
+        matched = [device for device in discovery.devices if device.udid == requested]
+        if not matched:
+            raise ApplicationError(
+                code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+                category=ApplicationErrorCategory.UNAVAILABLE,
+                message="The requested iOS UDID was not found in current Simulator or physical device inventory.",
+                action="Boot or connect the requested iOS target, or inspect available targets.",
+            )
+        usable_match = next(
+            (device for device in matched if (device.kind == "simulator" and device.state == "booted") or (device.kind == "device" and device.state == "connected")),
+            None,
+        )
+        if usable_match is None:
+            raise ApplicationError(
+                code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+                category=ApplicationErrorCategory.UNAVAILABLE,
+                message=f"The requested iOS {matched[0].kind} target is currently {matched[0].state}.",
+                action="Boot the Simulator or unlock/connect the physical iOS device before running.",
+            )
+        return usable_match.udid
+    configured = (getattr(getattr(settings.harness, "ios", None), "udid", None) or "").strip()
+    if configured:
+        return configured
+    discovery = IOSDeviceDiscovery().discover()
+    if discovery.error_code:
+        raise ApplicationError(
+            code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+            category=ApplicationErrorCategory.UNAVAILABLE,
+            message=discovery.error_message or "iOS device discovery failed.",
+            action="Verify full Xcode tools and boot one iOS Simulator or connect one physical iOS device.",
+            details={"error_code": discovery.error_code},
+        )
+    usable = [device for device in discovery.devices if (device.kind == "simulator" and device.state == "booted") or (device.kind == "device" and device.state == "connected")]
+    if len(usable) == 1:
+        return usable[0].udid
+    if not usable:
+        raise ApplicationError(
+            code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+            category=ApplicationErrorCategory.UNAVAILABLE,
+            message="No booted iOS Simulator or connected physical iOS device is available.",
+            action="Boot an iOS Simulator (`xcrun simctl boot <UDID>`) or connect and unlock a physical iOS device.",
+        )
+    raise ApplicationError(
+        code=ApplicationErrorCode.ENVIRONMENT_UNAVAILABLE,
+        category=ApplicationErrorCategory.UNAVAILABLE,
+        message="Multiple usable iOS targets require explicit UDID selection.",
+        action="Leave a single booted Simulator / connected iOS device active for CLI execution, or configure `harness.ios.udid`.",
+    )
+
+
 def execute_case_test(
     request: CaseTestRequest,
     *,
     suggestion_analyzer_factory: Callable[[Settings], _SuggestionAnalyzer] | None,
 ) -> CaseTestResult:
+    if request.udid is not None and request.platform != "ios":
+        raise ApplicationError(
+            code=ApplicationErrorCode.CASE_INVALID,
+            category=ApplicationErrorCategory.REQUEST_VALIDATION,
+            message="--udid is supported only with --platform ios.",
+            action="Omit --udid or select --platform ios.",
+        )
     workspace = require_initialized_workspace(WorkspaceRequest(current_directory=request.current_directory))
     settings = load_workspace_platform_settings(workspace.workspace, request.platform)
     try:
@@ -111,11 +187,19 @@ def execute_case_test(
     requires_ai = any(steps_require_provider(steps, snapshot, ai_assertion_capability_names(request.platform)) for steps in resolved_steps.values())
     validate_strict_core_settings(settings, requires_ai_assertion=requires_ai)
     android_serial: str | None = None
+    ios_udid: str | None = None
     if request.platform == "android":
         android_serial = _resolve_android_run_serial(settings)
         settings = settings.model_copy(deep=True)
         settings.harness.android.serial = android_serial
         settings.harness.android.visual_assertion_policy = settings.harness.android.visual_assertion_policy.model_copy(
+            update={"provider_available": bool(settings.agent_runtime.provider and settings.agent_runtime.model)}
+        )
+    elif request.platform == "ios":
+        ios_udid = _resolve_ios_run_udid(settings, request.udid)
+        settings = settings.model_copy(deep=True)
+        settings.harness.ios.udid = ios_udid
+        settings.harness.ios.visual_assertion_policy = settings.harness.ios.visual_assertion_policy.model_copy(
             update={"provider_available": bool(settings.agent_runtime.provider and settings.agent_runtime.model)}
         )
     workspace_name = _registered_workspace_name(workspace.workspace)
@@ -135,7 +219,7 @@ def execute_case_test(
     execution_failed = False
     try:
         metadata = transition_run(run_dir, metadata, "running")
-        if requires_ai and request.platform != "android":
+        if requires_ai and request.platform not in {"android", "ios"}:
             evaluator = build_ai_assertion_evaluator(settings)
         harness = HarnessFactory().create_harness(
             platform=request.platform,
@@ -145,6 +229,8 @@ def execute_case_test(
             runtime_secret_settings=settings.runtime_secrets,
             app_id=(settings.harness.android.app_id or case.config.app_id) if request.platform == "android" else None,
             serial=android_serial,
+            bundle_id=(settings.harness.ios.bundle_id or case.config.app_id) if request.platform == "ios" else None,
+            udid=ios_udid,
         )
         artifact = run_strict_lifecycle_case(
             case_path=case_path,

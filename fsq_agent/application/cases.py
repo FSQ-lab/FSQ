@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from fsq_agent.ai_services import build_case_suggestion_analyzer
-from fsq_agent.application._case_test import _resolve_android_run_serial
+from fsq_agent.application._case_test import _resolve_android_run_serial, _resolve_ios_run_udid
 from fsq_agent.application._result_summary import _safe_text, primary_summary
 from fsq_agent.application.contracts import (
     ApplicationError,
@@ -43,6 +43,13 @@ async def create_case(
     agent_factory: AgentFactory | None = None,
 ) -> CaseCreateResult:
     normalized_goal = " ".join(request.goal.split())
+    if request.udid is not None and request.platform != "ios":
+        raise ApplicationError(
+            code=ApplicationErrorCode.CASE_INVALID,
+            category=ApplicationErrorCategory.REQUEST_VALIDATION,
+            message="--udid is supported only with --platform ios.",
+            action="Omit --udid or select --platform ios.",
+        )
     if request.case_name is not None:
         try:
             RecordingService.validate_case_name(request.case_name)
@@ -74,6 +81,10 @@ async def create_case(
         resolved_serial = _resolve_android_run_serial(settings)
         settings = settings.model_copy(deep=True)
         settings.harness.android.serial = resolved_serial
+    elif request.platform == "ios" and (request.udid is not None or not (getattr(getattr(settings.harness, "ios", None), "udid", None) or "").strip()):
+        resolved_udid = _resolve_ios_run_udid(settings, request.udid)
+        settings = settings.model_copy(deep=True)
+        settings.harness.ios.udid = resolved_udid
     task = _task_from_goal(normalized_goal)
     try:
         execution = await DynamicExecutionService(agent=agent_factory(settings)).execute(

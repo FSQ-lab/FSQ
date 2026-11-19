@@ -83,7 +83,7 @@ class RunMetadata(BaseModel):
     revision: int = Field(default=0, ge=0)
     run_id: str
     workspace: dict[Literal["name"], str]
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     mode: Literal["strict", "explore"]
     status: Literal["preparing", "running", "finalizing", "success", "failed", "inconclusive", "cancelled", "error"]
     started_at: datetime | None
@@ -170,7 +170,7 @@ class RunExecutionResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["fsq.execution-result/v1"] = "fsq.execution-result/v1"
     run_id: str
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     mode: Literal["strict", "explore"]
     outcome: Literal["success", "failed", "inconclusive", "cancelled", "error"]
     completed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

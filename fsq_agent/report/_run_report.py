@@ -1008,7 +1008,7 @@ class RunReportService:
             or not execution.get("accounting_complete", True)
             or execution.get("history_conflict")
             or evidence.get("status") == "unavailable"
-            or metadata.get("platform") not in {"web", "android", "windows", "macos"}
+            or metadata.get("platform") not in {"web", "android", "windows", "macos", "ios"}
             or metadata.get("mode") not in {"strict", "explore"}
             or (metadata.get("mode") == "strict" and (execution["counts"].get("incomplete") or execution["counts"].get("skipped") or not execution["counts"].get("attempt_count")))
             or (not execution["counts"].get("attempt_count") and not execution["counts"].get("total") and verification.get("status") not in {"success", "passed"})

@@ -50,6 +50,7 @@ WebWaitUntil: TypeAlias = Literal["commit", "domcontentloaded", "load", "network
 WebWaitForState: TypeAlias = Literal["visible", "hidden", "attached", "detached"]
 WindowsMouseButton: TypeAlias = Literal["left", "right", "middle"]
 MacOSOrderDirection: TypeAlias = Literal["vertical", "horizontal"]
+IOSSwipeDirection: TypeAlias = Literal["up", "down", "left", "right"]
 
 TEXT_TYPE_DESCRIPTION = "Use literal for plain text; use runtimeSecret when text names an allowlisted runtime secret."
 ANDROID_TARGET_SCHEMA_DESCRIPTION = (
@@ -60,6 +61,11 @@ ANDROID_TARGET_SCHEMA_DESCRIPTION = (
 WEB_LOCATOR_SCHEMA_DESCRIPTION = "Provide one semantic locator using a role and optional name, within scope, or final-result index."
 WINDOWS_TARGET_SCHEMA_DESCRIPTION = "Provide a non-empty locator. The target field is descriptive only and is not used for Windows control lookup."
 MACOS_TARGET_SCHEMA_DESCRIPTION = "Provide target, non-empty locator, or point. Prefer target or locator for UI elements and point only for coordinate-based actions."
+IOS_TARGET_SCHEMA_DESCRIPTION = (
+    "Provide target or non-empty locator. A usable explicit locator is authoritative. "
+    "A bare target matches trimmed exact label first, then exact name or value only when no label matches; duplicates are errors. "
+    "Prefer current structured locators from ui_snapshot."
+)
 
 
 class SourceRef(BaseModel):
@@ -1240,6 +1246,385 @@ MACOS_ACTION_DEFINITIONS: tuple[MacOSActionDefinition, ...] = (
     MacOSActionDefinition("assertWithAI", "assert_with_ai", MacOSAssertWithAIParams, "assertion"),
 )
 MACOS_ACTION_DEFINITIONS_BY_NAME: dict[str, MacOSActionDefinition] = {definition.fsq_action_name: definition for definition in MACOS_ACTION_DEFINITIONS}
+
+
+class IOSPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "iOS logical screen point in XCUITest coordinates."})
+
+    x: int = Field(description="Horizontal iOS screen coordinate in logical points.")
+    y: int = Field(description="Vertical iOS screen coordinate in logical points.")
+
+
+class IOSScreenSize(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "iOS logical screen size used as a coordinate reference."})
+
+    width: int = Field(ge=1, description="Reference screen width in logical points.")
+    height: int = Field(ge=1, description="Reference screen height in logical points.")
+
+
+class IOSLocator(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"description": "Structured iOS XCUITest locator. All populated fields constrain one unique element (AND). Use complete literal values, not clipped display text."},
+    )
+
+    accessibility_id: str | None = Field(default=None, description="Exact XCUITest accessibility id (name) to match.")
+    id: str | None = Field(default=None, description="Exact XCUITest element identifier (name) to match.")
+    name: str | None = Field(default=None, description="Exact XCUITest name attribute to match.")
+    label: str | None = Field(default=None, description="Exact XCUITest accessibility label to match.")
+    value: str | None = Field(default=None, description="Exact XCUITest value attribute to match.")
+    element_type: str | None = Field(default=None, description="Exact XCUIElementType* class name to match.")
+    predicate: str | None = Field(default=None, description="XCUITest -ios predicate string constraint.")
+    class_chain: str | None = Field(default=None, description="XCUITest -ios class chain query.")
+    xpath: str | None = Field(default=None, description="XPath expression for XCUITest lookup.")
+
+    def has_value(self) -> bool:
+        return any(isinstance(value, str) and value.strip() for value in self.model_dump().values())
+
+
+class _IOSTargetParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": IOS_TARGET_SCHEMA_DESCRIPTION})
+
+    target: str | None = Field(
+        default=None,
+        description="Exact trimmed iOS label, with exact name/value fallback only when no label matches. A non-empty structured locator takes precedence.",
+    )
+    locator: IOSLocator | None = Field(default=None, description="Optional structured iOS XCUITest locator. Provide at least one populated locator field.")
+
+    @model_validator(mode="after")
+    def _require_target(self) -> "_IOSTargetParams":
+        if self._has_target_value():
+            return self
+        raise ValueError("requires target or non-empty locator")
+
+    def _has_target_value(self) -> bool:
+        if isinstance(self.target, str) and self.target.strip():
+            return True
+        return self.locator is not None and self.locator.has_value()
+
+
+class IOSLaunchAppParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"description": "Launch or activate an iOS application. Reuses an active XCUITest session unless new_session or arguments require session recreation."},
+    )
+
+    bundle_id: str | None = Field(default=None, description="Optional iOS CFBundleIdentifier. Omit to use the configured bundle id.")
+    app_path: str | None = Field(default=None, description="Optional local .app or .ipa path for session creation or installation.")
+    arguments: list[str] | None = Field(default=None, description="Optional launch arguments.")
+    new_session: bool = Field(
+        default=False,
+        description="When true, recreate the XCUITest session cleanly; when false, activate or launch in the active session where possible.",
+    )
+
+
+class IOSStopAppParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Terminate the configured or supplied iOS application bundle id."})
+
+    bundle_id: str | None = Field(default=None, description="Optional iOS CFBundleIdentifier to terminate. Omit to use the configured bundle id.")
+
+
+class IOSTapOnParams(_IOSTargetParams):
+    pass
+
+
+class IOSTapAtParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Tap iOS logical screen coordinates."})
+
+    point: IOSPoint = Field(description="iOS logical screen point to tap.")
+    reference_screen_size: SkipJsonSchema[IOSScreenSize | None] = Field(default=None, description="Original logical screen size for proportional replay of recorded coordinates.")
+
+    def replay_params(self, context: object) -> dict[str, object]:
+        return _android_coordinate_replay(self.model_dump(mode="json", exclude_none=True), context)
+
+
+class IOSLongPressOnParams(_IOSTargetParams):
+    duration_ms: int = Field(default=800, strict=True, ge=100, le=60000, description="Long-press hold duration in milliseconds.")
+
+
+class IOSDoubleTapOnParams(_IOSTargetParams):
+    pass
+
+
+class IOSSwipeParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Provide exactly one swipe mode: full-screen direction, both start and end logical points, or target/non-empty locator plus direction. Only element mode accepts percent; replay references are internal point-mode parameters."
+        },
+    )
+
+    direction: IOSSwipeDirection | None = Field(default=None, description="Full-screen swipe direction, or element-relative direction when target/locator is supplied.")
+    target: str | None = Field(default=None, description="iOS semantic target for an element-relative swipe. Requires direction.")
+    locator: IOSLocator | None = Field(default=None, description="Non-empty iOS locator for an element-relative swipe. Requires direction.")
+    start: IOSPoint | None = Field(default=None, description="Start logical point for a coordinate swipe. Requires end; cannot mix with direction or target/locator.")
+    end: IOSPoint | None = Field(default=None, description="End logical point for a coordinate swipe. Requires start.")
+    percent: float | None = Field(
+        default=None,
+        strict=True,
+        gt=0,
+        le=1,
+        allow_inf_nan=False,
+        description="Element-only finite fraction of the usable bounds axis, greater than zero and at most one. Omitted/null means 1.0; other modes require null/omission.",
+    )
+    reference_screen_size: SkipJsonSchema[IOSScreenSize | None] = Field(default=None, description="Original logical screen size for proportional replay of recorded swipe coordinates.")
+    duration: int | None = Field(default=None, strict=True, ge=1, le=60000, description="Optional swipe duration in milliseconds, from 1 through 60000.")
+
+    def replay_params(self, context: object) -> dict[str, object]:
+        params = self.model_dump(mode="json", exclude_none=True)
+        return _android_coordinate_replay(params, context) if self.start is not None and self.end is not None else params
+
+    @model_validator(mode="after")
+    def _require_direction_or_points(self) -> "IOSSwipeParams":
+        has_target = self.target is not None or self.locator is not None
+        has_points = self.start is not None or self.end is not None
+        if has_points:
+            if self.start is None or self.end is None or self.direction is not None or has_target or self.percent is not None:
+                raise ValueError("point swipe requires both start and end without direction, target, locator, or percent")
+            return self
+        if self.reference_screen_size is not None:
+            raise ValueError("reference_screen_size is only valid for point-based Strict/Replay")
+        if self.direction is None:
+            raise ValueError("requires a direction or both start and end points")
+        if has_target:
+            if not ((isinstance(self.target, str) and self.target.strip()) or (self.locator is not None and self.locator.has_value())):
+                raise ValueError("element swipe requires target or non-empty locator")
+        elif self.percent is not None:
+            raise ValueError("percent is only valid for element swipes")
+        return self
+
+
+class IOSScrollToParams(_IOSTargetParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"description": "Scroll one uniquely resolved iOS scrollable container or element in direction by a bounded distance fraction."},
+    )
+
+    direction: IOSSwipeDirection = Field(description="Scroll direction on the resolved iOS element (`up`, `down`, `left`, `right`).")
+    distance: float = Field(default=1.0, strict=True, gt=0, le=1, allow_inf_nan=False, description="Bounded scroll distance ratio in (0, 1].")
+
+
+class IOSInputTextParams(_IOSTargetParams):
+    text: str = Field(description="Literal text to enter, or a runtime secret name when textType is runtimeSecret.")
+    clear: bool = Field(default=False, description="When true, clear existing text on the resolved field before entering text.")
+    # Name mirrors the authored text-entry payload contract.
+    textType: TextSourceType = Field(default="literal", description=TEXT_TYPE_DESCRIPTION)  # noqa: N815
+
+
+class IOSClearTextParams(_IOSTargetParams):
+    pass
+
+
+class IOSPressKeyParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Press one iOS physical/system button (`home`, `volume_up`, `volume_down`) or active-responder keyboard key (`enter`/`return`, `backspace`/`delete`, `tab`, `space`, or a single character)."
+        },
+    )
+
+    key: str = Field(description="iOS button or key name: home, volume_up, volume_down, enter, return, backspace, delete, tab, space, or a single printable character.")
+
+    @model_validator(mode="after")
+    def _require_key(self) -> "IOSPressKeyParams":
+        if self.key.strip():
+            return self
+        raise ValueError("requires non-empty key")
+
+
+class IOSHideKeyboardParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Dismiss the software keyboard if visible. No parameters are accepted."})
+
+
+class IOSHandleAlertParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Accept or dismiss an active native iOS system/application alert."})
+
+    action: Literal["accept", "dismiss"] = Field(description="Alert disposition (`accept` or `dismiss`).")
+    button_label: str | None = Field(default=None, description="Optional exact alert button label to activate.")
+
+    @model_validator(mode="after")
+    def _validate_button_label(self) -> "IOSHandleAlertParams":
+        if self.button_label is not None and not self.button_label.strip():
+            raise ValueError("button_label must be non-empty when supplied")
+        return self
+
+
+class IOSTakeScreenshotParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Capture an iOS PNG screenshot for evidence or debugging. No parameters are accepted."})
+
+
+class IOSUiSnapshotParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Read the current compact iOS XCUITest UI hierarchy and device clock context."})
+
+    max_depth: int | None = Field(default=None, ge=1, description="Optional maximum tree depth to include.")
+
+
+class IOSInspectElementParams(_IOSTargetParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Inspect one uniquely resolved iOS target or non-empty locator. Returns complete unclipped safe attributes; value is withheld on XCUIElementTypeSecureTextField."
+        },
+    )
+
+    attributes: list[Literal["type", "name", "label", "value", "enabled", "displayed", "selected", "accessible", "focused", "bounds"]] = Field(
+        default_factory=lambda: ["label", "name", "value"],
+        min_length=1,
+        description="Non-empty, duplicate-free safe attribute selection.",
+    )
+
+    @model_validator(mode="after")
+    def _require_unique_attributes(self) -> "IOSInspectElementParams":
+        if len(set(self.attributes)) != len(self.attributes):
+            raise ValueError("attributes must not contain duplicates")
+        return self
+
+
+class IOSInspectWithAIParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+    prompt: str = Field(min_length=1, max_length=4096, description="Read or locate visual content in the current iOS image without performing an action.")
+    mode: Literal["extract", "locate"] = "extract"
+    region: VisualRect | None = Field(default=None, description="Optional half-open region in full-image pixel coordinates.")
+    max_candidates: int = Field(default=5, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _validate_inspection(self) -> "IOSInspectWithAIParams":
+        if "\x00" in self.prompt or len(self.prompt.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank UTF-8 prompt of at most 4096 bytes without NUL")
+        region = self.region
+        if region is not None and not (0 <= region.left < region.right and 0 <= region.top < region.bottom):
+            raise ValueError("requires a nonempty nonnegative image region")
+        return self
+
+
+class IOSVisualExpectation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+
+    kind: Literal["visual_property", "exact_color", "display_identity"] = "visual_property"
+    property: str = Field(min_length=1)
+    value: str | bool | int | float | None
+    target: str | None = None
+    locator: IOSLocator | None = None
+
+
+class IOSTextAssertion(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "iOS text assertion. Provide contains or equals."})
+
+    contains: str | None = Field(default=None, description="Expected substring in visible iOS label/value/name text.")
+    equals: str | None = Field(default=None, description="Expected exact visible iOS label/value/name text.")
+
+    @model_validator(mode="after")
+    def _require_text_assertion(self) -> "IOSTextAssertion":
+        if isinstance(self.contains, str) or isinstance(self.equals, str):
+            return self
+        raise ValueError("requires contains or equals")
+
+
+class IOSElementState(IOSLocator):
+    enabled: bool | None = Field(default=None, description="Expected enabled state.")
+    selected: bool | None = Field(default=None, description="Expected selected state.")
+    focused: bool | None = Field(default=None, description="Expected focused state.")
+    accessible: bool | None = Field(default=None, description="Expected accessible state.")
+
+
+def _ios_assertion_element_schema(schema: dict[str, Any]) -> None:
+    properties = IOSElementState.model_json_schema()["properties"]
+    alternatives = []
+    for name in IOSLocator.model_fields:
+        variant_properties = deepcopy(properties)
+        variant_properties[name] = {"type": "string", "pattern": r"\S"}
+        alternatives.append({"type": "object", "properties": variant_properties, "required": [name], "additionalProperties": False})
+    schema["anyOf"] = alternatives
+
+
+class IOSAssertStateParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Assert existence, text, or state on one uniquely located iOS element. Required element must contain a non-empty locator. Optional text predicates take precedence over state predicates."
+        },
+    )
+
+    element: IOSElementState = Field(
+        description="Required iOS element with a non-empty locator and optional expected state values.",
+        json_schema_extra=_ios_assertion_element_schema,
+    )
+    text: IOSTextAssertion | None = Field(default=None, description="Text predicates applied only to the located element; take precedence over state predicates.")
+    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+
+    @model_validator(mode="after")
+    def _require_assertion(self) -> "IOSAssertStateParams":
+        if self.element.has_value():
+            return self
+        raise ValueError("requires element with a non-empty supported locator")
+
+
+class IOSAssertVisibleParams(_IOSTargetParams):
+    optional: bool | None = Field(default=None, description="When true, treat a missing target as an optional assertion outcome.")
+
+
+class IOSAssertNotVisibleParams(_IOSTargetParams):
+    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+
+
+class IOSAssertWithAIParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Evaluate only an image-space iOS visual assertion. Required assertion and surface; region is image_rect only, or omit it with full_screen_reason. Never locate/drive UI or replace exact accessibility facts."
+        },
+    )
+
+    assertion: str = Field(description="Pure visual appearance/image/Canvas expectation, not instructions or a UI action.")
+    surface: Literal["custom_canvas", "image_content", "map_view", "appearance"]
+    region: VisualRegion | None = None
+    expect: IOSVisualExpectation | None = None
+    full_screen_reason: str | None = None
+    optional: bool | None = None
+
+    @model_validator(mode="after")
+    def _require_prompt(self) -> "IOSAssertWithAIParams":
+        if not self.assertion.strip() or len(self.assertion.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank assertion of at most 4 KiB")
+        if self.region is None and not (self.full_screen_reason and self.full_screen_reason.strip()):
+            raise ValueError("full-image assertions require full_screen_reason")
+        return self
+
+
+@dataclass(frozen=True)
+class IOSActionDefinition:
+    fsq_action_name: str
+    driver_method: str
+    params_model: type[BaseModel]
+    step_kind: ExecutableStepKind
+    owner: Literal["driver", "platform", "harness"] = "driver"
+
+
+IOS_ACTION_DEFINITIONS: tuple[IOSActionDefinition, ...] = (
+    IOSActionDefinition("launchApp", "launch_app", IOSLaunchAppParams, "setup"),
+    IOSActionDefinition("stopApp", "stop_app", IOSStopAppParams, "teardown"),
+    IOSActionDefinition("tapOn", "tap_on", IOSTapOnParams, "action"),
+    IOSActionDefinition("tapAt", "tap_at", IOSTapAtParams, "action"),
+    IOSActionDefinition("longPressOn", "long_press_on", IOSLongPressOnParams, "action"),
+    IOSActionDefinition("doubleTapOn", "double_tap_on", IOSDoubleTapOnParams, "action"),
+    IOSActionDefinition("swipe", "swipe", IOSSwipeParams, "action"),
+    IOSActionDefinition("scrollTo", "scroll_to", IOSScrollToParams, "action"),
+    IOSActionDefinition("inputText", "input_text", IOSInputTextParams, "action"),
+    IOSActionDefinition("clearText", "clear_text", IOSClearTextParams, "action"),
+    IOSActionDefinition("pressKey", "press_key", IOSPressKeyParams, "action"),
+    IOSActionDefinition("hideKeyboard", "hide_keyboard", IOSHideKeyboardParams, "action"),
+    IOSActionDefinition("handleAlert", "handle_alert", IOSHandleAlertParams, "action"),
+    IOSActionDefinition("takeScreenshot", "take_screenshot", IOSTakeScreenshotParams, "observation"),
+    IOSActionDefinition("uiSnapshot", "ui_snapshot", IOSUiSnapshotParams, "observation"),
+    IOSActionDefinition("inspectElement", "inspect_element", IOSInspectElementParams, "observation"),
+    IOSActionDefinition("inspectWithAI", "inspect_with_ai", IOSInspectWithAIParams, "observation"),
+    IOSActionDefinition("assertState", "assert_state", IOSAssertStateParams, "assertion"),
+    IOSActionDefinition("assertVisible", "assert_visible", IOSAssertVisibleParams, "assertion"),
+    IOSActionDefinition("assertNotVisible", "assert_not_visible", IOSAssertNotVisibleParams, "assertion"),
+    IOSActionDefinition("assertWithAI", "assert_with_ai", IOSAssertWithAIParams, "assertion"),
+)
+IOS_ACTION_DEFINITIONS_BY_NAME: dict[str, IOSActionDefinition] = {definition.fsq_action_name: definition for definition in IOS_ACTION_DEFINITIONS}
 
 
 class StepCallInfo(BaseModel):

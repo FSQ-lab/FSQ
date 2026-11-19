@@ -28,3 +28,30 @@ class AndroidDeviceDiscoveryResult(BaseModel):
         if self.error_message is not None and not self.error_message.strip():
             raise ValueError("error_message must not be empty")
         return self
+
+
+class IOSDevice(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    udid: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    name: str = Field(min_length=1, max_length=256)
+    kind: Literal["simulator", "device"]
+    platform_version: str | None = Field(default=None, min_length=1, max_length=64)
+    state: Literal["booted", "shutdown", "connected", "unavailable", "unknown"]
+    interface: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class IOSDeviceDiscoveryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    devices: list[IOSDevice] = Field(default_factory=list)
+    error_code: Literal["unsupported_host", "runtime_missing", "discovery_timeout", "discovery_failed"] | None = None
+    error_message: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_error(self) -> "IOSDeviceDiscoveryResult":
+        if (self.error_code is None) != (self.error_message is None):
+            raise ValueError("error_code and error_message must be supplied together")
+        if self.error_message is not None and not self.error_message.strip():
+            raise ValueError("error_message must not be empty")
+        return self

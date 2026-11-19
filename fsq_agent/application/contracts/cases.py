@@ -11,9 +11,10 @@ from fsq_agent.models import RunEventSink
 class CaseCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     current_directory: Path
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     goal: str
     case_name: str | None = None
+    udid: str | None = None
 
 
 class CaseCreateResult(BaseModel):
@@ -36,9 +37,10 @@ CaseCreateEventSink = RunEventSink
 class CaseTestRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     current_directory: Path
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     case_path: Path
     suggest: bool = False
+    udid: str | None = None
 
 
 class CaseTestResult(BaseModel):
@@ -88,7 +90,7 @@ class CaseSaveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     candidate_path: Path
     destination_directory: Path
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     case_name: str
 
 

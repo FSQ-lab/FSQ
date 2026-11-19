@@ -26,8 +26,8 @@ def test_harness_protocol_compatibility_modules_alias_canonical_modules() -> Non
         ("fsq_agent.core.harness._web_driver", "fsq_agent.core.interfaces._web_driver"),
         ("fsq_agent.core.harness._windows_driver", "fsq_agent.core.interfaces._windows_driver"),
         ("fsq_agent.core.harness._macos_driver", "fsq_agent.core.interfaces._macos_driver"),
+        ("fsq_agent.core.harness._ios_driver", "fsq_agent.core.interfaces._ios_driver"),
     ]
-
     for legacy_name, canonical_name in pairs:
         assert importlib.import_module(legacy_name) is importlib.import_module(canonical_name)
 
@@ -41,7 +41,9 @@ def test_concrete_driver_and_harness_compatibility_modules_alias_canonical_modul
         ("fsq_agent.core.harness._android", "fsq_agent.harnesses._android"),
         ("fsq_agent.core.harness._web", "fsq_agent.harnesses._web"),
         ("fsq_agent.core.harness._windows", "fsq_agent.harnesses._windows"),
+        ("fsq_agent.core.harness._appium_connect_ios_driver", "fsq_agent.drivers.ios._appium_connect"),
         ("fsq_agent.core.harness._macos", "fsq_agent.harnesses._macos"),
+        ("fsq_agent.core.harness._ios", "fsq_agent.harnesses._ios"),
     ]
 
     for legacy_name, canonical_name in pairs:

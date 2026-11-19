@@ -14,6 +14,7 @@ from fsq_agent.config._paths import _set_hidden_best_effort
 from fsq_agent.config._user_provider import _WRITE_LOCK, _atomic_write, _register_workspace, list_workspace_registry
 from fsq_agent.models import (
     ConfigurationError,
+    IOSWorkspaceTarget,
     MacOSWorkspaceTarget,
     WebWorkspaceTarget,
     WindowsWorkspaceTarget,
@@ -25,7 +26,7 @@ from fsq_agent.models import (
     web_executable_matches_channel,
 )
 
-SUPPORTED_PLATFORMS = ("android", "web", "windows", "macos")
+SUPPORTED_PLATFORMS = ("android", "web", "windows", "macos", "ios")
 WORKSPACE_CONFIG_DIRECTORY = Path(".fsq/config")
 WEB_CHANNEL_EXECUTABLE_NAMES = {
     "chromium": {"chromium", "chromium.exe", "chromium-browser"},
@@ -43,6 +44,29 @@ CHROME_EXECUTABLE_NAMES = WEB_CHANNEL_EXECUTABLE_NAMES["chrome"]
 
 def _is_macos_app_bundle_or_executable(path: Path) -> bool:
     return (path.is_dir() and path.suffix.casefold() == ".app") or (path.is_file() and (os.name == "nt" or os.access(path, os.X_OK)))
+
+
+def _is_ios_app_bundle_or_ipa(path: Path) -> bool:
+    expanded = path.expanduser()
+    if not expanded.is_absolute() or "." in expanded.parts or ".." in expanded.parts:
+        return False
+    suffix = expanded.suffix.casefold()
+    if suffix not in {".app", ".ipa"}:
+        return False
+    current = Path(expanded.anchor)
+    try:
+        if current.is_symlink():
+            return False
+        for part in expanded.parts[1:]:
+            current /= part
+            if current.is_symlink():
+                return False
+        if suffix == ".app":
+            plist = expanded / "Info.plist"
+            return expanded.is_dir() and not plist.is_symlink() and plist.is_file() and os.access(plist, os.R_OK)
+        return expanded.is_file() and os.access(expanded, os.R_OK)
+    except OSError:
+        return False
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -240,7 +264,7 @@ def _load_registered_workspace_snapshot(
         ) from exc
     if workspace_root != entry.root_path.resolve() or config.name != entry.name:
         raise ConfigurationError("Registered workspace identity does not match its configuration.", context={"name": entry.name, "workspace_failure": "identity_conflict"})
-    if not (allow_unavailable_target and platform == "macos"):
+    if not (allow_unavailable_target and platform in {"macos", "ios"}):
         _validate_target_paths(config)
     return config, revision
 
@@ -446,7 +470,7 @@ def update_workspace_platform(
     user_config_root: str | Path | None = None,
 ) -> WorkspaceConfig:
     with _WRITE_LOCK:
-        current, current_revision = _load_registered_workspace_snapshot(name, platform, user_config_root, allow_unavailable_target=platform == "macos")
+        current, current_revision = _load_registered_workspace_snapshot(name, platform, user_config_root, allow_unavailable_target=platform in {"macos", "ios"})
         config_path = _workspace_config_path(current.root_path, platform)
         if current_revision != expected_revision:
             raise ConfigurationError(
@@ -500,6 +524,23 @@ def _validate_target_paths(config: WorkspaceConfig) -> None:
     elif isinstance(target, MacOSWorkspaceTarget) and target.app_path is not None:
         path = target.app_path
         description = "macOS application path"
+    elif isinstance(target, IOSWorkspaceTarget) and target.app_path is not None:
+        if not target.app_path.expanduser().is_absolute():
+            raise ConfigurationError(
+                "iOS application path must be an absolute non-symlink .app bundle or .ipa archive.",
+                context={"path": str(target.app_path), "workspace_failure": "configuration_conflict"},
+            )
+        if not target.app_path.expanduser().exists():
+            raise ConfigurationError(
+                "iOS application path does not exist.",
+                context={"path": str(target.app_path.expanduser()), "workspace_failure": "configuration_conflict"},
+            )
+        if not _is_ios_app_bundle_or_ipa(target.app_path):
+            raise ConfigurationError(
+                "iOS application path must identify an existing non-symlink .app bundle (with Info.plist) or .ipa archive.",
+                context={"path": str(target.app_path), "workspace_failure": "configuration_conflict"},
+            )
+        return
     if path is None:
         return
     normalized = path.expanduser().resolve()

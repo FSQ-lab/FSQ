@@ -8,7 +8,7 @@ Own host/runtime discovery, support classification, read-only readiness checks, 
 
 - `models`: runtime status facts and pure Web channel identity contracts.
 - Python standard-library host, filesystem, import, and subprocess facilities.
-- Optional `appium-connect-agent` (`appium_connect_agent.contracts.LocalSettings` and `appium_connect_agent.runtime.Runtime`), imported lazily for static `Runtime.diagnose(target_driver="mac2")` package and peer-compatibility inspection without spawning subprocesses, opening network sockets, or mutating Workspace configuration or `~/.appium-connect-agent/` component and record directories (acquiring only the upstream account coordination lock `runtime.lock`).
+- Optional `appium-connect-agent` (`appium_connect_agent.contracts.LocalSettings`, `appium_connect_agent.runtime.Runtime`, and `appium_connect_agent.automation.list_ios_devices`), imported lazily for static `Runtime.diagnose(target_driver="mac2" | "xcuitest")` package and peer-compatibility inspection without mutating Workspace configuration or `~/.appium-connect-agent/` component and record directories (acquiring only the upstream account coordination lock `runtime.lock`) and bounded read-only iOS Simulator / physical device discovery on macOS hosts.
 
 The module must not import Application, adapters, Config persistence, concrete drivers or harnesses, LLM providers, or Execution.
 
@@ -17,6 +17,8 @@ The module must not import Application, adapters, Config persistence, concrete d
 `PlatformRuntimeService` is the stable service for read-only Runtime `check`, exact-channel Web executable discovery, explicit executable validation, platform Target configuration/availability diagnosis from resolved settings, and ordered platform prerequisite diagnosis. Target and prerequisite diagnosis return safe normalized status facts without env values, unrestricted local target details, raw subprocess output, or backend objects. `PlatformRuntimeCheck` and `PlatformPrerequisiteCheck` remain owned by Models. Core's legacy export references the canonical service class.
 
 `AndroidDeviceDiscovery` is the canonical stable discovery service, exported here and re-exported by Core for compatibility. It returns model-owned `AndroidDeviceDiscoveryResult` facts and never selects or persists a device. Device serial and allowlisted model/transport metadata are returned only as necessary transient selection identities, not interpolated into unrelated errors or remediation commands.
+
+`IOSDeviceDiscovery` is the canonical stable iOS discovery service, exported here and re-exported by Core for compatibility. It delegates to public `appium_connect_agent.automation.list_ios_devices`, returns model-owned `IOSDeviceDiscoveryResult` facts (`udid`, `name`, `kind`, `platform_version`, `state`, `interface`), and never selects, boots, or persists a device.
 
 The public runtime boundary also exposes bounded read-only application lookup for Quick Test. It accepts one platform, an application name, an explicit or typed inferred native identity/path when supplied, and the applicable selected device, returning typed candidate identity facts and a complete/failed discovery outcome. An explicit or inferred identity scopes validation to that concrete reference; inference provenance is not rewritten as explicit input. Without a concrete identity, supported bounded name lookup remains available. Candidate cardinality is computed from actual normalized results within that lookup scope, never supplied by a model. These facts remain internal to Application coordination rather than a browser-visible installed-app catalog.
 
@@ -27,14 +29,14 @@ Android lookup validates the resolved package on the selected online authorized 
 - `__init__.py`: public exports only.
 - `_service.py`: platform-neutral dispatch and normalized result coordination.
 - `PlatformRuntimeService.check_prerequisites` accepts explicit `application_pending` and `require_explicit_selection` keyword context, both defaulting to false; native providers remain the prerequisite-fact authority.
-- `_android_devices.py`: canonical Android discovery service delegating to the private existing-server-only provider.
+- `_android_devices.py`, `_ios_devices.py`: canonical Android and iOS discovery services delegating to private read-only providers.
 - `_applications.py`: implementation of `PlatformRuntimeService.lookup_application`, accepting Models-owned `ApplicationLookupHint` assistance separately from explicit references and returning `ApplicationCandidate` and `ApplicationLookupResult` facts.
-- `providers/`: private Android, Web, Windows, and macOS runtime mechanics.
+- `providers/`: private Android, Web, Windows, macOS, and iOS runtime mechanics.
 
 ## Python Architecture
 
 - Architecture level: Level 3 Layered Application.
-- Public API: `PlatformRuntimeService` and `AndroidDeviceDiscovery`.
+- Public API: `PlatformRuntimeService`, `AndroidDeviceDiscovery`, and `IOSDeviceDiscovery`.
 - Internal modules: service implementation and platform providers.
 - Domain boundaries: host support/readiness and target discovery only.
 - Boundary models: normalized status facts come from `models`.
@@ -68,6 +70,13 @@ macOS prerequisite facts include explicit copyable repair commands only where a 
 - Safe guidance covers platform-tools setup, incomplete FSQ installation, managed `appium-connect-agent` runtime preparation (`Runtime.install(InstallRequest())`), Node.js/JDK prerequisites, manual ADB server startup, USB debugging/authorization, reconnection, explicit device selection and app installation/configuration repair. Commands are copy-only, host-appropriate and contain no private device/app values; parameterized instructions requiring user substitution remain explanatory text. No automated permission changes, reconnect/restart, app install, device reboot, forwarding, managed Appium startup, `Runtime.install(...)` execution, or Appium session creation occurs during diagnosis.
 - A ready result confirms these observable prerequisites only. Managed Appium process startup, device-side UiAutomator2 session initialization, automation permissions and Case-specific UI success remain execution concerns, clearly disclosed rather than reported as checked.
 
+
+### iOS diagnosis
+
+- Ordered details are `xcode_installation`, `xcode_developer_directory`, `appium_connect_runtime`, `device_connection`, `device_selection`, `application_identifier`, `application_path`, and `application_installation` on macOS hosts (or `not_applicable` on non-macOS hosts).
+- `xcode_installation` and `xcode_developer_directory` verify full Xcode installation and active full-Xcode developer directory (`Contents/Developer`). `appium_connect_runtime` performs strictly read-only, zero-subprocess, zero-network static inspection of `appium-connect-agent` package importability, unambiguous `node` executable resolution on `PATH` (without reading `~/.appium`), and `~/.appium-connect-agent/` (`records/installation.json` complete with verified Appium 3.7.0, idle/settled `records/service.json` and `records/maintenance.json`, and compatible installed `driver-home/node_modules/appium-xcuitest-driver` via `Runtime.diagnose(target_driver="xcuitest")`), supplying explicit copyable Python API repair commands (`Runtime(LocalSettings()).install(InstallRequest())`, `Runtime(LocalSettings()).ensure_managed_driver("xcuitest")`, `Runtime(LocalSettings()).cleanup_installation()`).
+- `device_connection` and `device_selection` inspect bounded read-only `list_ios_devices()` inventory without booting Simulators or starting WDA/Appium. Usable targets are `simulator` in `booted` state or `device` in `connected` state; `shutdown` Simulators and `unavailable` devices remain visible with actionable guidance. Explicit `udid` must match one usable target; omitted selection resolves only when exactly one usable target exists across booted Simulators and connected physical devices.
+- `application_identifier` and `application_path` validate configured `bundle_id` and `.app`/`.ipa` path shape/consistency (with at least one required). When the selected usable target is a booted Simulator and a `bundle_id` is configured without a standalone `.app`/`.ipa` installable bundle path, `application_installation` runs a bounded read-only `simctl appinfo <udid> <bundle_id>` check to distinguish installed vs absent Simulator apps; when an explicit `.app`/`.ipa` path is supplied or a physical device is selected without host-side read-only package certainty, `application_installation` reports `not_applicable` with clear execution-boundary disclosure rather than guessing installation state.
 ## Current Invariants
 
 - Current host support behavior remains unchanged.

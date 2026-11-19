@@ -4,17 +4,25 @@
 from typing import cast
 
 from fsq_agent.drivers.android._appium_connect import AppiumConnectAndroidDriver
+from fsq_agent.drivers.ios._appium_connect import AppiumConnectIOSDriver
 from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
 from fsq_agent.drivers.web._playwright import PlaywrightWebDriver
 from fsq_agent.drivers.windows._pywinauto import PywinautoWindowsDriver
 from fsq_agent.models import ConfigurationError, HarnessPlatform
 
-_BACKENDS = {"android": "appium_connect_agent", "web": "playwright", "windows": "pywinauto", "macos": "appium_connect_agent"}
+_BACKENDS = {
+    "android": "appium_connect_agent",
+    "web": "playwright",
+    "windows": "pywinauto",
+    "macos": "appium_connect_agent",
+    "ios": "appium_connect_agent",
+}
 _DRIVER_CLASSES: dict[HarnessPlatform, type[object]] = {
     "android": cast("type[object]", AppiumConnectAndroidDriver),
     "web": cast("type[object]", PlaywrightWebDriver),
     "windows": cast("type[object]", PywinautoWindowsDriver),
     "macos": cast("type[object]", AppiumConnectMacOSDriver),
+    "ios": cast("type[object]", AppiumConnectIOSDriver),
 }
 
 
@@ -64,4 +72,19 @@ class _DriverFactoryImplementation:
             page_source_max_depth=settings.page_source_max_depth,
             action_timeout_seconds=settings.action_timeout_seconds,
             new_command_timeout_seconds=settings.new_command_timeout_seconds,
+        )
+
+    def create_ios_driver(self, settings, *, bundle_id=None, udid=None):
+        _ensure_backend("ios", settings.backend)
+        return AppiumConnectIOSDriver(
+            udid=udid if udid is not None else settings.udid,
+            bundle_id=bundle_id if bundle_id is not None else settings.bundle_id,
+            app_path=settings.app_path,
+            page_source_max_depth=settings.page_source_max_depth,
+            action_timeout_seconds=settings.action_timeout_seconds,
+            new_command_timeout_seconds=settings.new_command_timeout_seconds,
+            wda_launch_timeout_ms=settings.wda_launch_timeout_ms,
+            xcode_org_id=settings.xcode_org_id,
+            xcode_signing_id=settings.xcode_signing_id,
+            updated_wda_bundle_id=settings.updated_wda_bundle_id,
         )

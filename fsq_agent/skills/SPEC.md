@@ -61,6 +61,8 @@ Web runs should configure `web-harness.md` alongside shared automation guidance.
 
 macOS runs should configure `macos-harness.md` alongside shared automation guidance. The macOS harness skill should describe desktop aliases, stable accessibility locators, explicit coordinate fallback, Appium Mac2 lifecycle expectations, `ui_snapshot` usage, deterministic assertions such as `assert_visible` and `assert_elements_order`, visual assertions through `assert_with_ai`, and credential text entry through `textType: runtimeSecret` when supported by active schemas.
 
+iOS runs should configure `ios-harness.md` alongside shared automation guidance. The iOS harness skill describes XCUITest mobile action aliases, structured `XCUIElementType*` locators (`accessibilityId`, `name`, `label`, `value`, `elementType`, `predicate`, `classChain`, `xpath`), logical-point coordinate semantics, safe interior swipe rules, `ui_snapshot` compact XML and `device_local_time` usage, `inspect_element` unclipped readback, `inspect_with_ai` locate/extract usage, `handle_alert` system alert handling, deterministic `assert_state`/`assert_visible`/`assert_not_visible` assertions, visual assertions through `assert_with_ai`, and credential text entry through `textType: runtimeSecret`.
+
 Additional platform skills must be separate platform-specific Markdown bundles instead of expanding existing platform skill files with unrelated platform rules.
 
 ## Current Invariants

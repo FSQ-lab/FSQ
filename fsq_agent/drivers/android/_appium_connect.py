@@ -22,7 +22,7 @@ from pydantic import BaseModel, ValidationError
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _android_driver_tool
-from fsq_agent.drivers.android._visual_inspection import _run_visual_inspection
+from fsq_agent.drivers._visual_inspection import _run_visual_inspection
 from fsq_agent.models import (
     AndroidAssertNotVisibleParams,
     AndroidAssertStateParams,

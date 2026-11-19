@@ -56,6 +56,7 @@ def test_platform_config_paths_are_package_owned() -> None:
         "web": config_root / "config.web.yaml",
         "windows": config_root / "config.windows.yaml",
         "macos": config_root / "config.macos.yaml",
+        "ios": config_root / "config.ios.yaml",
     } == PLATFORM_CONFIG_PATHS
     assert all(path.is_file() for path in PLATFORM_CONFIG_PATHS.values())
 

@@ -19,6 +19,14 @@ from fsq_agent.config import (
 )
 from fsq_agent.models import ConfigurationError, WorkspaceStatus
 
+_CONTROL_PLANE_PLATFORMS = frozenset({"android", "web", "windows", "macos"})
+
+
+def _require_control_plane_platform(platform: object) -> None:
+    if platform not in _CONTROL_PLANE_PLATFORMS:
+        msg = "Unsupported Control Plane workspace platform."
+        raise ValueError(msg)
+
 
 @dataclass(frozen=True)
 class WorkspaceAPIError(Exception):
@@ -53,8 +61,9 @@ def list_workspaces(user_config_root: Path | None) -> dict[str, list[dict[str, A
 
 def get_workspace(name: str, user_config_root: Path | None) -> dict[str, Any]:
     status = inspect_registered_workspace(name, user_config_root)
+    cp_platforms = [platform for platform in status.platforms if platform.platform in _CONTROL_PLANE_PLATFORMS]
     result = _status_projection(status)
-    result["platforms"] = [_platform_summary(name, platform.platform, user_config_root) if platform.status == "available" else _platform_status_projection(platform) for platform in status.platforms]
+    result["platforms"] = [_platform_summary(name, platform.platform, user_config_root) if platform.status == "available" else _platform_status_projection(platform) for platform in cp_platforms]
     _add_macos_diagnostic_eligibility(result, name, user_config_root)
     return result
 
@@ -90,6 +99,7 @@ def create_workspace_request(body: dict[str, Any], user_config_root: Path | None
             if not isinstance(item, dict):
                 raise TypeError("platform item must be an object")  # noqa: TRY301
             _require_exact_fields(item, {"platform", "target", "env"})
+            _require_control_plane_platform(item["platform"])
             configs.append(
                 {
                     "platform": item["platform"],
@@ -123,11 +133,11 @@ def add_workspace_platform_request(name: str, body: dict[str, Any], user_config_
     platform = body["platform"]
     target = body["target"]
     env = body["env"]
-    if not isinstance(platform, str) or not isinstance(target, dict) or not _valid_env(env):
+    if not isinstance(platform, str) or platform not in _CONTROL_PLANE_PLATFORMS or not isinstance(target, dict) or not _valid_env(env):
         raise WorkspaceAPIError(
             400,
             "invalid_workspace",
-            "platform must be a string, target must be an object, and env must contain string names and values.",
+            "platform must be a supported Control Plane platform, target must be an object, and env must contain string names and values.",
             "Correct the workspace fields and retry.",
         )
     add_workspace_platform(
@@ -150,6 +160,13 @@ def update_workspace_platform_request(
     body: dict[str, Any],
     user_config_root: Path | None,
 ) -> dict[str, Any]:
+    if platform not in _CONTROL_PLANE_PLATFORMS:
+        raise WorkspaceAPIError(
+            400,
+            "invalid_workspace",
+            "platform must be one of android, web, windows, or macos.",
+            "Select a supported Control Plane platform and retry.",
+        )
     _require_exact_fields(body, {"target", "env", "expectedRevision"})
     expected_revision = body["expectedRevision"]
     if not isinstance(expected_revision, str) or not expected_revision:
@@ -214,6 +231,13 @@ def map_workspace_exception(exc: BaseException) -> WorkspaceAPIError:
 
 
 def _load_exact_workspace_platform(name: str, platform: str, user_config_root: Path | None) -> WorkspaceConfig:
+    if platform not in _CONTROL_PLANE_PLATFORMS:
+        raise WorkspaceAPIError(
+            400,
+            "invalid_workspace",
+            "platform must be one of android, web, windows, or macos.",
+            "Select a supported Control Plane platform and retry.",
+        )
     if not isinstance(name, str) or not name:
         raise WorkspaceAPIError(404, "workspace_not_found", "Workspace is not registered.", "Refresh the workspace list.")
     normalized_name = name.casefold()
@@ -272,15 +296,34 @@ def _platform_summary(name: str, platform: str, user_config_root: Path | None) -
 
 
 def _status_projection(status: WorkspaceStatus) -> dict[str, Any]:
+    cp_platforms = [platform for platform in status.platforms if platform.platform in _CONTROL_PLANE_PLATFORMS]
+    available_count = sum(1 for item in cp_platforms if item.status == "available")
+    unavailable_count = sum(1 for item in cp_platforms if item.status != "available")
+    if status.status == "unavailable" and not status.platforms:
+        derived_status = status.status
+        derived_message = status.message
+        derived_action = status.action
+    elif available_count == 0:
+        derived_status = "unavailable"
+        derived_message = "No valid platform configuration is available."
+        derived_action = "Add or repair a supported platform configuration."
+    elif unavailable_count:
+        derived_status = "partial"
+        derived_message = "Some platform configurations are unavailable."
+        derived_action = "Repair unavailable platform configurations."
+    else:
+        derived_status = "available"
+        derived_message = "Workspace is available."
+        derived_action = None
     result: dict[str, Any] = {
         "name": status.name,
         "rootPath": str(status.root_path),
-        "status": status.status,
-        "message": status.message,
-        "platforms": [_platform_status_projection(platform) for platform in status.platforms],
+        "status": derived_status,
+        "message": derived_message,
+        "platforms": [_platform_status_projection(platform) for platform in cp_platforms],
     }
-    if status.action is not None:
-        result["action"] = status.action
+    if derived_action is not None:
+        result["action"] = derived_action
     return result
 
 

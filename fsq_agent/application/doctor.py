@@ -28,7 +28,7 @@ from fsq_agent.environments import PlatformRuntimeService
 from fsq_agent.models import ConfigurationError
 from fsq_agent.providers import check_provider_readiness
 
-_PLATFORMS = ("android", "web", "windows", "macos")
+_PLATFORMS = ("android", "web", "windows", "macos", "ios")
 _CHECK_ORDER = ("configuration", "runtime", "target_configuration", "target_availability", "strict_core", "provider", "suggestion_analyzer", "dynamic_agent")
 _COMMAND_DEPENDENCIES = {
     "case_test": ("configuration", "runtime", "target_configuration", "target_availability", "strict_core"),
@@ -112,6 +112,9 @@ def _diagnose_platform(platform: str, root: Path, workspace_platform, user_confi
     if platform == "android" and target_id is not None:
         settings = settings.model_copy(deep=True)
         settings.harness.android.serial = target_id
+    elif platform == "ios" and target_id is not None:
+        settings = settings.model_copy(deep=True)
+        settings.harness.ios.udid = target_id
     return diagnose_platform_settings(settings)
 
 
@@ -151,12 +154,12 @@ def diagnose_platform_settings(settings, *, context: PlatformDiagnosticContext |
         target_availability = _safe_check("target_availability", lambda: environment.check_target_availability(settings, prerequisite_facts))
     foundation = (runtime_check, target_configuration, target_availability)
     strict_core = _dependent_check("strict_core", (configuration, *foundation), lambda: _strict(settings))
-    if provider_checks or platform != "android":
+    if provider_checks or platform not in {"android", "ios"}:
         provider = _safe_check("provider", lambda: _provider_readiness(settings))
         suggestion = _safe_check("suggestion_analyzer", lambda: check_case_suggestion_readiness(settings))
         dynamic = _dependent_check("dynamic_agent", (*foundation, strict_core, provider), lambda: check_dynamic_agent_readiness(settings))
     else:
-        provider = DoctorStatusDetail(status="not_applicable", code="doctor.provider_not_requested", message="Provider readiness is not requested for Android Strict startup.")
+        provider = DoctorStatusDetail(status="not_applicable", code="doctor.provider_not_requested", message="Provider readiness is not requested for mobile Strict startup.")
         suggestion = provider
         dynamic = provider
     checks = DoctorChecks(
@@ -172,9 +175,14 @@ def diagnose_platform_settings(settings, *, context: PlatformDiagnosticContext |
     commands = _commands(checks)
     return DoctorPlatformResult(
         platform=platform,
-        target_id=(getattr(getattr(settings.harness, "android", None), "serial", None) or next((item.target_id for item in prerequisite_facts if item.identifier == "device_selection"), None))
-        if platform == "android"
-        else None,
+        target_id=(
+            getattr(getattr(settings.harness, "android", None), "serial", None)
+            if platform == "android"
+            else getattr(getattr(settings.harness, "ios", None), "udid", None)
+            if platform == "ios"
+            else None
+        )
+        or (next((item.target_id for item in prerequisite_facts if item.identifier == "device_selection"), None) if platform in {"android", "ios"} else None),
         status=_summary_status([commands.case_test.status, commands.case_test_suggest.status, commands.case_create.status]),
         prerequisites=prerequisites,
         checks=checks,

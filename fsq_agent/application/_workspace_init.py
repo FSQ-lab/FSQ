@@ -14,6 +14,7 @@ from fsq_agent.environments import PlatformRuntimeService
 from fsq_agent.models import (
     AndroidWorkspaceTarget,
     ConfigurationError,
+    IOSWorkspaceTarget,
     MacOSWorkspaceTarget,
     WebWorkspaceTarget,
     WindowsWorkspaceTarget,
@@ -174,13 +175,48 @@ def _target(request: WorkspaceInitializeRequest, runtime: PlatformRuntimeService
         resolved = target.app_path.expanduser().resolve()
         _validate_local_file(resolved, "Windows application path", executable=True)
         return target.model_copy(update={"app_path": resolved})
-    target = MacOSWorkspaceTarget(bundle_id=request.bundle_id, app_path=request.app_path)
-    if target.app_path is not None:
-        resolved = target.app_path.expanduser().resolve()
-        if not resolved.exists() or not ((resolved.is_dir() and resolved.suffix.casefold() == ".app") or resolved.is_file()):
-            raise ValueError("macOS application path must identify an existing app bundle or executable.")
-        target = target.model_copy(update={"app_path": resolved})
-    return target
+    if request.platform == "macos":
+        target = MacOSWorkspaceTarget(bundle_id=request.bundle_id, app_path=request.app_path)
+        if target.app_path is not None:
+            resolved = target.app_path.expanduser().resolve()
+            if not resolved.exists() or not ((resolved.is_dir() and resolved.suffix.casefold() == ".app") or resolved.is_file()):
+                raise ValueError("macOS application path must identify an existing app bundle or executable.")
+            target = target.model_copy(update={"app_path": resolved})
+        return target
+    ios_target = IOSWorkspaceTarget(
+        bundle_id=request.bundle_id,
+        app_path=request.app_path,
+        xcode_org_id=request.xcode_org_id,
+        xcode_signing_id=request.xcode_signing_id,
+        updated_wda_bundle_id=request.updated_wda_bundle_id,
+    )
+    if ios_target.app_path is not None:
+        raw_text = str(request.app_path or ios_target.app_path).replace("\\", "/")
+        if any(segment in {".", ".."} for segment in raw_text.split("/") if segment):
+            raise ValueError("iOS application path must not contain '.' or '..' traversal segments.")
+        expanded = ios_target.app_path.expanduser()
+        resolved_ios = expanded if expanded.is_absolute() else (request.current_directory.expanduser().resolve() / expanded)
+        if "." in resolved_ios.parts or ".." in resolved_ios.parts:
+            raise ValueError("iOS application path must not contain '.' or '..' traversal segments.")
+        current = Path(resolved_ios.anchor)
+        if current.is_symlink():
+            raise ValueError("iOS application path must not traverse symbolic links.")
+        for part in resolved_ios.parts[1:]:
+            current /= part
+            if current.is_symlink():
+                raise ValueError("iOS application path must not traverse symbolic links.")
+        suffix = resolved_ios.suffix.casefold()
+        if suffix == ".app":
+            plist = resolved_ios / "Info.plist"
+            if not resolved_ios.is_dir() or plist.is_symlink() or not plist.is_file():
+                raise ValueError("iOS .app path must identify an existing non-symlink Simulator app bundle containing Info.plist.")
+        elif suffix == ".ipa":
+            if not resolved_ios.is_file():
+                raise ValueError("iOS .ipa path must identify an existing non-symlink archive file.")
+        else:
+            raise ValueError("iOS application path must be a .app bundle directory or .ipa archive.")
+        ios_target = ios_target.model_copy(update={"app_path": resolved_ios})
+    return ios_target
 
 
 def _validate_local_file(path: Path, description: str, *, executable: bool) -> None:
@@ -201,12 +237,16 @@ def _validate_platform_options(request: WorkspaceInitializeRequest) -> None:
         "window_title_re": request.window_title_re,
         "launch_args": request.launch_args,
         "bundle_id": request.bundle_id,
+        "xcode_org_id": request.xcode_org_id,
+        "xcode_signing_id": request.xcode_signing_id,
+        "updated_wda_bundle_id": request.updated_wda_bundle_id,
     }
     allowed = {
         "android": {"app_id"},
         "web": {"browser_channel", "browser_executable_path"},
         "windows": {"app_path", "window_title_re", "launch_args"},
         "macos": {"app_path", "bundle_id"},
+        "ios": {"app_path", "bundle_id", "xcode_org_id", "xcode_signing_id", "updated_wda_bundle_id"},
     }[request.platform]
     invalid = sorted(name for name, value in supplied.items() if value is not None and name not in allowed)
     if invalid:

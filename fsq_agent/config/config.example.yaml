@@ -1,8 +1,8 @@
 # Reference-only configuration example.
 #
 # Public CLI platform runs use the sibling config.android.yaml,
-# config.web.yaml, config.windows.yaml, or config.macos.yaml presets. This
-# file is not a runtime preset and is ignored by default config discovery.
+# config.web.yaml, config.windows.yaml, config.macos.yaml, or config.ios.yaml
+# presets. This file is not a runtime preset and is ignored by default config
 # Copy pieces from here into a local config.yaml when experimenting manually.
 
 agent_runtime:

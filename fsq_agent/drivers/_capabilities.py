@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from fsq_agent.capabilities import CapabilityActionDefinition, discover_capability_definitions, platform_driver_capability
 from fsq_agent.models import (
     ANDROID_ACTION_DEFINITIONS,
+    IOS_ACTION_DEFINITIONS,
     MACOS_ACTION_DEFINITIONS,
     WEB_ACTION_DEFINITIONS,
     CapabilityDefinition,
@@ -138,6 +139,26 @@ _macos_driver_capability = platform_driver_capability(
     catalog=MACOS_DRIVER_ACTION_CATALOG,
 )
 
+IOS_DRIVER_ACTION_CATALOG = {
+    definition.fsq_action_name: CapabilityActionDefinition(
+        action_name=definition.fsq_action_name,
+        canonical_name=definition.driver_method,
+        executor_kind="driver",
+        owner=definition.owner,
+        params_model=definition.params_model,
+        step_kind=definition.step_kind,
+        method_name=definition.driver_method,
+        replay=ReplayPolicy(kind="fsq_command", alias=definition.fsq_action_name),
+    )
+    for definition in IOS_ACTION_DEFINITIONS
+    if definition.owner == "driver"
+}
+_ios_driver_capability = platform_driver_capability(
+    platform="ios",
+    backend=None,
+    catalog=IOS_DRIVER_ACTION_CATALOG,
+)
+
 
 def _android_driver_tool(
     fsq_action_name: str,
@@ -191,6 +212,19 @@ def _macos_driver_tool(
     )
 
 
+def _ios_driver_tool(
+    fsq_action_name: str,
+    *,
+    description: str,
+    metadata: dict[str, object] | None = None,
+) -> Callable[[F], F]:
+    return _ios_driver_capability(
+        fsq_action_name,
+        description=description,
+        metadata=metadata,
+    )
+
+
 def _discover_driver_function_schemas(
     driver: object,
     *,
@@ -238,6 +272,10 @@ def _default_driver_capability_definitions(*, platform: HarnessPlatform) -> list
         from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
 
         driver_class = AppiumConnectMacOSDriver
+    elif platform == "ios":
+        from fsq_agent.drivers.ios._appium_connect import AppiumConnectIOSDriver
+
+        driver_class = AppiumConnectIOSDriver
     else:
         return []
     return _discover_driver_capability_definitions(driver_class, platform=platform)

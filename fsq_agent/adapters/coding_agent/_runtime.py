@@ -737,6 +737,19 @@ class DefaultCodingAgentRuntime:
                     "configured_skill_names": [skill.name for skill in self.settings.skills],
                 }
             )
+        if self.settings.harness.platform == "ios":
+            ios = self.settings.harness.ios
+            payload.update(
+                {
+                    "backend": ios.backend,
+                    "bundle_id_configured": ios.bundle_id is not None,
+                    "app_path_configured": ios.app_path is not None,
+                    "udid_configured": ios.udid is not None,
+                    "action_timeout_seconds": ios.action_timeout_seconds,
+                    "new_command_timeout_seconds": ios.new_command_timeout_seconds,
+                    "configured_skill_names": [skill.name for skill in self.settings.skills],
+                }
+            )
         if harness is not None:
             payload["harness_class"] = type(harness).__name__
             driver = getattr(harness, "driver", None)
@@ -1154,7 +1167,10 @@ class DefaultCodingAgentRuntime:
             artifact_store=ArtifactStore(self.settings.output.runs_dir / run_id, secret_values=tuple(self.settings.runtime_secrets.private_values().values())),
             ai_assertion_evaluator=build_ai_assertion_evaluator(self.settings),
             runtime_secret_settings=self.settings.runtime_secrets,
-            app_id=self.settings.harness.android.app_id,
+            app_id=self.settings.harness.android.app_id if self.settings.harness.platform == "android" else None,
+            serial=self.settings.harness.android.serial if self.settings.harness.platform == "android" else None,
+            bundle_id=self.settings.harness.ios.bundle_id if self.settings.harness.platform == "ios" else None,
+            udid=self.settings.harness.ios.udid if self.settings.harness.platform == "ios" else None,
         )
 
     def _map_stream_event(self, event: AgentEvent, run_id: str, task_id: str) -> RunEvent | None:

@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 
 from PIL import Image, UnidentifiedImageError
 
-from fsq_agent.models import AndroidInspectElementParams, DeterministicFact, HarnessArtifactRef, HostCaptureEnvelopeV1
+from fsq_agent.models import AndroidInspectElementParams, DeterministicFact, HarnessArtifactRef, HostCaptureEnvelopeV1, IOSInspectElementParams
 
 
 class _CaptureRejectedError(Exception):
@@ -52,15 +52,22 @@ def _subject(expect):
     return None
 
 
-def _facts(driver, params, run_id, step_id):
+def _facts(driver, params, run_id, step_id, *, platform: str = "android"):
     expect = params.expect
-    if expect is None or expect.property not in {"text", "desc", "enabled", "checked", "selected", "clickable", "focused", "displayed"}:
+    allowed_props = (
+        {"name", "label", "value", "enabled", "selected", "focused", "displayed", "accessible"}
+        if platform == "ios"
+        else {"text", "desc", "enabled", "checked", "selected", "clickable", "focused", "displayed"}
+    )
+    if expect is None or expect.property not in allowed_props:
         return []
     subject = _subject(expect)
     if subject is None:
         return []
-    observed = driver.inspect_element(AndroidInspectElementParams(target=expect.target, locator=expect.locator, attributes=[expect.property]))
-    attribute = observed.get("attributes", {}).get(expect.property, {}) if isinstance(observed, dict) else {}
+    inspect_params_cls = IOSInspectElementParams if platform == "ios" else AndroidInspectElementParams
+    observed = driver.inspect_element(inspect_params_cls(target=expect.target, locator=expect.locator, attributes=(expect.property,)))
+    attrs_container = observed.get("output", observed) if isinstance(observed, dict) and isinstance(observed.get("output"), dict) else observed
+    attribute = attrs_container.get("attributes", {}).get(expect.property, {}) if isinstance(attrs_container, dict) else {}
     state = attribute.get("state", "unknown")
     if state not in {"value", "unknown", "not_applicable", "missing"}:
         state = "unknown"
@@ -123,7 +130,7 @@ def _png_image(data, budget):
     return image
 
 
-def _capture_visual(driver, store, invocation, policy, evaluator_available, phase):
+def _capture_visual(driver, store, invocation, policy, evaluator_available, phase, *, platform: str = "android"):
     context = invocation.context
     step_id = invocation.step_id
     params = invocation.params
@@ -143,7 +150,7 @@ def _capture_visual(driver, store, invocation, policy, evaluator_available, phas
     if store is None:
         return _terminal_ref(step_id, "capture_failed")
     try:
-        facts = _facts(driver, params, run_id, step_id)
+        facts = _facts(driver, params, run_id, step_id, platform=platform)
     except Exception as error:  # noqa: BLE001 - optional SDK observations have no shared exception hierarchy.
         return _terminal_ref(step_id, "capture_failed", diagnostics=getattr(error, "context", {}).get("capture_diagnostics", {}))
     exact = [fact for fact in facts if fact.state == "value" and fact.exact]

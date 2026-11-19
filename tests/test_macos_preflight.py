@@ -41,13 +41,15 @@ def test_start_preflight_respects_mode_and_provider(monkeypatch, mode, requires_
 
     calls = []
     settings = Settings(harness={"platform": "macos"})
-    monkeypatch.setattr("fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings", lambda value: calls.append(value) or diagnosis(provider=provider_ready))
+    monkeypatch.setattr(
+        "fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings", lambda value, **kwargs: calls.append((value, kwargs.get("provider_checks"))) or diagnosis(provider=provider_ready)
+    )
     if allowed:
         require_macos_preflight(settings, mode, requires_provider=requires_provider)
     else:
         with pytest.raises(MacOSPreflightError):
             require_macos_preflight(settings, mode, requires_provider=requires_provider)
-    assert calls == [settings]
+    assert calls == [(settings, False if mode == "strict" else None)]
 
 
 def test_start_failure_does_not_execute_or_leave_busy(monkeypatch, tmp_path):
@@ -147,7 +149,7 @@ def test_real_preparation_rechecks_without_allocating_run(tmp_path, monkeypatch,
     case = tmp_path / "test.fsq.yaml"
     case.write_text("schemaVersion: fsq.ai-test/v1\nname: test\nplatform: macos\n---\n- waitMs:\n    duration_ms: 1\n")
     calls = []
-    monkeypatch.setattr("fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings", lambda current: calls.append(current) or diagnosis(ready=False))
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings", lambda current, **_kwargs: calls.append(current) or diagnosis(ready=False))
     body = {"mode": mode, "workspaceName": "specific", "platform": "macos", "targetId": "macos-app", **({"goal": "Open Edge"} if mode == "explore" else {"casePath": "test.fsq.yaml"})}
     with pytest.raises(MacOSPreflightError):
         prepare_run(request_id="test-request", settings=settings, body=body)

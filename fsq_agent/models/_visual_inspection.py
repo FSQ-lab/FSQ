@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from fsq_agent.models._core import AndroidInspectWithAIParams, AssertionBudget
+from fsq_agent.models._core import AssertionBudget, _VisualInspectWithAIParams
 
 
 class VisualImageBounds(BaseModel):
@@ -34,12 +34,12 @@ class AIVisualInspectionResult(BaseModel):
     candidates: tuple[AIVisualCandidate, ...] = Field(default=(), max_length=20)
 
 
-class AIVisualInspectionRequest(AndroidInspectWithAIParams):
+class AIVisualInspectionRequest(_VisualInspectWithAIParams):
     """Trusted current-frame inputs shared by the driver and configured service."""
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True, str_strip_whitespace=True, allow_inf_nan=False)
 
-    platform: Literal["android", "ios"] = "android"
+    platform: Literal["android", "ios", "macos"] = "android"
     png_bytes: bytes = Field(exclude=True, repr=False)
     image_width: int = Field(gt=0)
     image_height: int = Field(gt=0)

@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 from types import SimpleNamespace
 from typing import Any
 from xml.etree import ElementTree
 
 import pytest
+from PIL import Image
+from pydantic import ValidationError
 
 from fsq_agent.core import ArtifactStore, HarnessInterface
 from fsq_agent.core.harness._ai_assertion_tool import AIAssertionBackendToolMixin
@@ -18,25 +21,40 @@ from fsq_agent.core.harness._macos import MacOSHarness
 from fsq_agent.models import (
     AIAssertionRequest,
     AIAssertionResult,
+    AIVisualInspectionRequest,
+    AIVisualInspectionResult,
+    AndroidVisualAssertionPolicy,
     ConfigurationError,
     ExecutableStep,
     HarnessContext,
     MacOSAssertElementsOrderParams,
+    MacOSAssertNotVisibleParams,
+    MacOSAssertStateParams,
     MacOSAssertVisibleParams,
     MacOSAssertWithAIParams,
     MacOSClickOnParams,
     MacOSDoubleClickOnParams,
     MacOSDragToParams,
     MacOSHoverOnParams,
+    MacOSInspectElementParams,
+    MacOSInspectWithAIParams,
     MacOSKillAppParams,
     MacOSLaunchAppParams,
+    MacOSLocator,
     MacOSPoint,
     MacOSPressKeyParams,
     MacOSRightClickOnParams,
+    MacOSScrollOnParams,
     MacOSTakeScreenshotParams,
     MacOSTypeTextParams,
     MacOSUiSnapshotParams,
 )
+
+
+def _valid_png_bytes(width: int = 80, height: int = 60) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGBA", (width, height), (30, 120, 200, 255)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _obs(value: object, state: str = "value") -> Any:
@@ -113,6 +131,10 @@ class FakeMacOSDriver(AIAssertionBackendToolMixin):
     def hover_on(self, params: MacOSHoverOnParams) -> dict[str, object]:
         return self._record("hover_on", params)
 
+    @_macos_driver_tool("scrollOn", description="Scroll on a macOS element or point.")
+    def scroll_on(self, params: MacOSScrollOnParams) -> dict[str, object]:
+        return self._record("scroll_on", params)
+
     @_macos_driver_tool("dragTo", description="Drag between macOS elements or points.")
     def drag_to(self, params: MacOSDragToParams) -> dict[str, object]:
         return self._record("drag_to", params)
@@ -121,7 +143,7 @@ class FakeMacOSDriver(AIAssertionBackendToolMixin):
     def take_screenshot(self, params: MacOSTakeScreenshotParams) -> bytes:
         recorded = params.model_dump(mode="json", exclude_none=True)
         self.calls.append(("take_screenshot", recorded))
-        return b"fake-png"
+        return _valid_png_bytes()
 
     @_macos_driver_tool("uiSnapshot", description="Return the macOS accessibility tree.")
     def ui_snapshot(self, params: MacOSUiSnapshotParams) -> dict[str, object]:
@@ -129,9 +151,27 @@ class FakeMacOSDriver(AIAssertionBackendToolMixin):
         self.calls.append(("ui_snapshot", recorded))
         return {"title": "Finder", "snapshot_type": "macos_accessibility_tree"}
 
+    @_macos_driver_tool("inspectElement", description="Inspect a macOS element.")
+    def inspect_element(self, params: MacOSInspectElementParams) -> dict[str, object]:
+        recorded = params.model_dump(mode="json", exclude_none=True)
+        self.calls.append(("inspect_element", recorded))
+        return {"status": "passed", "output": {"attributes": {attr: {"state": "value", "value": "Save"} for attr in params.attributes}}}
+
+    @_macos_driver_tool("inspectWithAI", description="Inspect current macOS frame with AI.")
+    def inspect_with_ai(self, params: MacOSInspectWithAIParams) -> dict[str, object]:
+        return self._record("inspect_with_ai", params)
+
     @_macos_driver_tool("assertVisible", description="Assert a macOS element is visible.")
     def assert_visible(self, params: MacOSAssertVisibleParams) -> dict[str, object]:
         return self._record("assert_visible", params)
+
+    @_macos_driver_tool("assertNotVisible", description="Assert a macOS element is not visible.")
+    def assert_not_visible(self, params: MacOSAssertNotVisibleParams) -> dict[str, object]:
+        return self._record("assert_not_visible", params)
+
+    @_macos_driver_tool("assert", description="Assert macOS element state or text.")
+    def assert_state(self, params: MacOSAssertStateParams) -> dict[str, object]:
+        return self._record("assert_state", params)
 
     @_macos_driver_tool("assertElementsOrder", description="Assert macOS elements appear in order.")
     def assert_elements_order(self, params: MacOSAssertElementsOrderParams) -> dict[str, object]:
@@ -142,9 +182,9 @@ class FakeMacOSDriver(AIAssertionBackendToolMixin):
         return self._run_ai_assertion_tool(params)
 
     def screenshot(self, params: object | None = None) -> bytes:
-        recorded = params.model_dump(mode="json", exclude_none=True) if hasattr(params, "model_dump") else None
+        recorded = params.model_dump(mode="json", exclude_none=True) if hasattr(params, "model_dump") else ({} if isinstance(params, dict) else None)
         self.calls.append(("screenshot", recorded))
-        return b"fake-png"
+        return _valid_png_bytes()
 
 
 def _step(action_name: str, params: dict[str, Any] | None = None) -> ExecutableStep:
@@ -165,14 +205,17 @@ def test_macos_harness_dispatches_fsq_action_names_to_driver() -> None:
         ("typeText", {"target": "Search", "text": "hello"}, "type_text"),
         ("pressKey", {"key": "Enter"}, "press_key"),
         ("hoverOn", {"target": "Menu"}, "hover_on"),
+        ("scrollOn", {"target": "List", "delta_y": -120}, "scroll_on"),
         ("dragTo", {"source": {"point": {"x": 1, "y": 2}}, "destination": {"target": "Trash"}}, "drag_to"),
         ("takeScreenshot", {}, "take_screenshot"),
         ("uiSnapshot", {}, "ui_snapshot"),
+        ("inspectElement", {"target": "Save", "attributes": ["label", "enabled"]}, "inspect_element"),
         ("assertVisible", {"target": "Save"}, "assert_visible"),
+        ("assertNotVisible", {"target": "Spinner"}, "assert_not_visible"),
+        ("assert", {"element": {"accessibilityId": "Save", "enabled": True}}, "assert_state"),
         ("assertElementsOrder", {"elements": [{"target": "File"}, {"target": "Edit"}]}, "assert_elements_order"),
         ("killApp", {}, "kill_app"),
     ]
-
     for action_name, params, _method_name in cases:
         result = harness.invoke_action(_step(action_name, params), context)
         assert result.status == "passed"
@@ -198,10 +241,14 @@ def test_macos_harness_action_space_returns_catalog_backed_schemas() -> None:
     schemas = {schema.name: schema for schema in harness.action_space()}
 
     assert "click_on" in schemas
+    assert "scroll_on" in schemas
     assert "ui_snapshot" in schemas
+    assert "inspect_element" in schemas
+    assert "inspect_with_ai" in schemas
+    assert "assert_not_visible" in schemas
+    assert "assert_state" in schemas
     assert "assert_elements_order" in schemas
-    assert "assert_with_ai" not in schemas
-    assert schemas["click_on"].driver_method == "click_on"
+    assert "assert_with_ai" in schemas
     assert schemas["click_on"].fsq_action_name == "clickOn"
     assert schemas["click_on"].platform == "macos"
     assert schemas["click_on"].metadata["driver_class"] == "FakeMacOSDriver"
@@ -248,7 +295,7 @@ def test_macos_harness_captures_screenshot_and_ui_snapshot_with_artifact_store(t
         phase="finalize",
     )
 
-    assert (tmp_path / screenshot_ref.path).read_bytes() == b"fake-png"
+    assert (tmp_path / screenshot_ref.path).read_bytes() == _valid_png_bytes()
     assert "Finder" in (tmp_path / snapshot_ref.path).read_text(encoding="utf-8")
     assert driver.calls[0] == ("context", None)
     assert ("screenshot", {}) in driver.calls
@@ -300,8 +347,9 @@ def test_macos_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> None:
             self.requests.append(request)
             return AIAssertionResult(
                 status="passed",
+                outcome="passed",
                 passed=True,
-                explanation="The expected macOS window is visible.",
+                explanation="The expected macOS canvas chart is visible.",
                 provider="fake",
                 model="fake-model",
                 artifact_refs=[request.screenshot_artifact_ref] if request.screenshot_artifact_ref else [],
@@ -312,24 +360,58 @@ def test_macos_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> None:
         driver=FakeMacOSDriver(),
         artifact_store=ArtifactStore(run_dir=tmp_path),
         ai_assertion_evaluator=evaluator,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
     )
 
-    result = harness.invoke_action(_step("assertWithAI", {"prompt": "The Save dialog is visible."}), harness.get_context())
+    result = harness.invoke_action(
+        _step(
+            "assertWithAI",
+            {
+                "assertion": "The preview canvas displays a blue bar chart.",
+                "surface": "custom_canvas",
+                "full_screen_reason": "The preview canvas fills the window.",
+            },
+        ),
+        harness.get_context(),
+    )
 
     assert result.status == "passed"
     assert result.action_name == "assertWithAI"
     assert len(evaluator.requests) == 1
     assert evaluator.requests[0].platform == "macos"
-    assert evaluator.requests[0].prompt == "The Save dialog is visible."
+    assert evaluator.requests[0].prompt == "The preview canvas displays a blue bar chart."
 
 
-def test_macos_harness_assert_with_ai_requires_evaluator() -> None:
-    harness = MacOSHarness(driver=FakeMacOSDriver())
+def test_macos_harness_assert_with_ai_without_evaluator_returns_incomplete(tmp_path) -> None:
+    harness = MacOSHarness(
+        driver=FakeMacOSDriver(),
+        artifact_store=ArtifactStore(run_dir=tmp_path),
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
 
-    result = harness.invoke_action(_step("assertWithAI", {"prompt": "anything"}), harness.get_context())
+    result = harness.invoke_action(
+        _step(
+            "assertWithAI",
+            {
+                "assertion": "The chart is visible.",
+                "surface": "custom_canvas",
+                "full_screen_reason": "Full window canvas.",
+            },
+        ),
+        harness.get_context(),
+    )
 
-    assert result.status == "failed"
-    assert result.failure_category == "configuration_error"
+    assert result.status == "incomplete"
+    assert result.failure_category is None
+    assert result.output["outcome"] == "inconclusive"
+    assert result.output["error_code"] == "provider_unavailable"
 
 
 def test_macos_harness_rejects_unknown_action() -> None:
@@ -393,15 +475,34 @@ class FakeMacElement:
         width: int = 10,
         height: int = 10,
         value: str | None = "",
+        label: str | None = None,
+        title: str | None = None,
+        text: str | None = None,
+        placeholder_value: str | None = None,
+        elem_id: str | None = None,
+        elem_type: str = "XCUIElementTypeTextField",
         displayed: bool = True,
         enabled: bool = True,
+        focused: bool = False,
+        selected: bool = False,
+        hittable: bool = True,
         accepts_element_input: bool = True,
     ) -> None:
         self.bounds = _bounds(x, y, width, height)
         self.value = value
+        self.label = label
+        self.title = title
+        self.text = text
+        self.placeholder_value = placeholder_value
+        self.elem_id = elem_id
+        self.elem_type = elem_type
         self.displayed = displayed
         self.enabled = enabled
+        self.focused = focused
+        self.selected = selected
+        self.hittable = hittable
         self.accepts_element_input = accepts_element_input
+        self.inspected_attributes: list[tuple[str, ...]] = []
         self.typed: list[str] = []
         self.macos_keys_sent: list[list[Any]] = []
         self.clicks = 0
@@ -413,19 +514,35 @@ class FakeMacElement:
 
     def inspect(self, *, attributes: tuple[str, ...], control: Any = None) -> Any:
         del control
+        self.inspected_attributes.append(tuple(attributes))
         results = []
         for name in attributes:
             if name == "bounds":
                 results.append(_attr_obs("bounds", self.bounds))
+            elif name == "type":
+                results.append(_attr_obs("type", self.elem_type))
+            elif name == "id":
+                results.append(_attr_obs("id", self.elem_id, state="value" if self.elem_id is not None else "missing"))
             elif name == "value":
-                if self.value is None:
-                    results.append(_attr_obs("value", None, state="missing"))
-                else:
-                    results.append(_attr_obs("value", self.value))
+                results.append(_attr_obs("value", self.value, state="value" if self.value is not None else "missing"))
+            elif name == "label":
+                results.append(_attr_obs("label", self.label, state="value" if self.label is not None else "missing"))
+            elif name == "title":
+                results.append(_attr_obs("title", self.title, state="value" if self.title is not None else "missing"))
+            elif name == "text":
+                results.append(_attr_obs("text", self.text, state="value" if self.text is not None else "missing"))
+            elif name == "placeholder_value":
+                results.append(_attr_obs("placeholder_value", self.placeholder_value, state="value" if self.placeholder_value is not None else "missing"))
             elif name == "displayed":
                 results.append(_attr_obs("displayed", self.displayed))
             elif name == "enabled":
                 results.append(_attr_obs("enabled", self.enabled))
+            elif name == "focused":
+                results.append(_attr_obs("focused", self.focused))
+            elif name == "selected":
+                results.append(_attr_obs("selected", self.selected))
+            elif name == "hittable":
+                results.append(_attr_obs("hittable", self.hittable))
             else:
                 results.append(_attr_obs(name, None, state="missing"))
         return SimpleNamespace(attributes=tuple(results))
@@ -506,6 +623,19 @@ class FakeMacDevice:
         del control
         self.session.pointer_calls.append(("hover_at", {"x": x, "y": y, "modifiers": key_modifier_flags}))
 
+    def scroll_at(
+        self,
+        x: int,
+        y: int,
+        *,
+        delta_x: float = 0.0,
+        delta_y: float = 0.0,
+        key_modifier_flags: int | None = None,
+        control: Any = None,
+    ) -> None:
+        del control
+        self.session.pointer_calls.append(("scroll_at", {"x": x, "y": y, "delta_x": delta_x, "delta_y": delta_y, "modifiers": key_modifier_flags}))
+
     def swipe_between(
         self,
         start_x: int,
@@ -522,7 +652,7 @@ class FakeMacDevice:
 
     def take_screenshot(self, *, control: Any = None) -> bytes:
         del control
-        return b"\x89PNG\r\n\x1a\nfake"
+        return _valid_png_bytes()
 
 
 class _MissingElementProxy:
@@ -553,12 +683,18 @@ class FakeMacSession:
             platform="macos",
         )
 
-    def element(self, by: str, value: str, *, predicate: str | None = None) -> Any:
+    def element(self, by: str, value: str, *, parent: Any = None, predicate: str | None = None) -> Any:
+        del parent
         for name, candidate_el in self.elements.items():
-            if by == "accessibility id" and value == name:
+            if by == "accessibility id" and (value == name or value == candidate_el.elem_id):
                 return candidate_el
             if f'"{name}"' in value or f"'{name}'" in value or (predicate and f'"{name}"' in predicate):
                 return candidate_el
+            if by == "-ios predicate string" and "amRect.x ==" in value:
+                bx, by_y, bw, bh = candidate_el.bounds.x, candidate_el.bounds.y, candidate_el.bounds.width, candidate_el.bounds.height
+                rect_clause = f"amRect.x == {bx} AND amRect.y == {by_y} AND amRect.width == {bw} AND amRect.height == {bh}"
+                if rect_clause in value and f'amType == "{candidate_el.elem_type}"' in value:
+                    return candidate_el
         return _MissingElementProxy()
 
     def observe_tree(self, *, control: Any = None) -> Any:
@@ -704,13 +840,15 @@ def test_appium_connect_macos_driver_failed_session_replacement_clears_old_sessi
 
     def fail_creation(params: MacOSLaunchAppParams) -> object:
         assert params.bundle_id == "com.example.App"
-        raise RuntimeError("boom")
+        raise RuntimeError("SECRET boom")
 
     monkeypatch.setattr(driver, "_create_session", fail_creation)
 
-    with pytest.raises(RuntimeError, match="boom"):
-        driver.launch_app(MacOSLaunchAppParams(bundle_id="com.example.App", new_session=True))
+    result = driver.launch_app(MacOSLaunchAppParams(bundle_id="com.example.App", new_session=True))
 
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "action_error"
+    assert "SECRET" not in json.dumps(result)
     assert old_session.lifecycle_calls == [("quit", None)]
     assert driver.context()["session_id"] is None
 
@@ -1155,3 +1293,558 @@ def test_appium_connect_macos_driver_close_retains_owned_handles_when_managed_cl
     assert cleanup_attempts == 2
     assert driver._runtime is None
     assert driver._session is None
+
+
+def test_macos_inspect_element_withholds_secure_text_field_and_masks_without_querying_value() -> None:
+    secure_el = FakeMacElement(
+        elem_id="pwd",
+        elem_type="XCUIElementTypeSecureTextField",
+        value="top-secret-password",
+        label="Password",
+    )
+    driver = AppiumConnectMacOSDriver(session=FakeMacSession({"pwd": secure_el}))
+
+    result = driver.inspect_element(MacOSInspectElementParams(target="pwd", attributes=("type", "label", "value", "text")))
+
+    assert result["status"] == "passed"
+    attrs = result["output"]["attributes"]
+    assert attrs["type"] == {"state": "value", "value": "XCUIElementTypeSecureTextField"}
+    assert attrs["label"] == {"state": "value", "value": "Password"}
+    assert attrs["value"] == {"state": "unavailable", "value": None, "reason": "protected_text"}
+    assert attrs["text"] == {"state": "unavailable", "value": None, "reason": "protected_text"}
+    # Never queried "value" or "text" after observing SecureTextField type!
+    for batch in secure_el.inspected_attributes:
+        assert "value" not in batch
+        assert "text" not in batch
+    assert "top-secret-password" not in json.dumps(result)
+
+    masked_el = FakeMacElement(elem_id="pin", elem_type="XCUIElementTypeTextField", value="••••••")
+    masked_driver = AppiumConnectMacOSDriver(session=FakeMacSession({"pin": masked_el}))
+    masked_res = masked_driver.inspect_element(MacOSInspectElementParams(target="pin", attributes=("value",)))
+    assert masked_res["output"]["attributes"]["value"] == {"state": "unavailable", "value": None, "reason": "protected_text"}
+
+
+def test_macos_scroll_on_resolves_element_center_without_coordinate_fallback_on_miss() -> None:
+    scroll_view = FakeMacElement(x=100, y=200, width=400, height=300, elem_type="XCUIElementTypeScrollView")
+    session = FakeMacSession({"ResultsList": scroll_view})
+    driver = AppiumConnectMacOSDriver(session=session)
+
+    passed = driver.scroll_on(MacOSScrollOnParams(target="ResultsList", delta_y=-240, modifiers=["SHIFT"]))
+    assert passed["status"] == "passed"
+    assert passed["output"] == {"point": {"x": 300, "y": 350}, "delta_x": 0.0, "delta_y": -240.0, "modifiers": ["SHIFT"]}
+    assert session.pointer_calls[-1] == ("scroll_at", {"x": 300, "y": 350, "delta_x": 0.0, "delta_y": -240.0, "modifiers": 1 << 1})
+
+    missed = driver.scroll_on(MacOSScrollOnParams(target="MissingList", point=MacOSPoint(x=10, y=20), delta_y=-100))
+    assert missed["status"] == "failed"
+    assert missed["failure_category"] == "target_resolution_error"
+    assert len(session.pointer_calls) == 1
+
+
+def test_macos_assert_not_visible_passes_on_hidden_or_missing_and_fails_when_visible() -> None:
+    hidden = FakeMacElement(displayed=False)
+    visible = FakeMacElement(displayed=True)
+    driver = AppiumConnectMacOSDriver(session=FakeMacSession({"HiddenDialog": hidden, "OpenDialog": visible}), action_timeout_seconds=1)
+
+    assert driver.assert_not_visible(MacOSAssertNotVisibleParams(target="HiddenDialog"))["status"] == "passed"
+    assert driver.assert_not_visible(MacOSAssertNotVisibleParams(target="AbsentDialog"))["status"] == "passed"
+
+    still_visible = driver.assert_not_visible(MacOSAssertNotVisibleParams(target="OpenDialog"))
+    assert still_visible["status"] == "failed"
+    assert still_visible["failure_category"] == "assertion_error"
+
+    with pytest.raises(ValidationError, match="coordinate-only point is rejected"):
+        MacOSAssertNotVisibleParams.model_validate({"locator": {"point": {"x": 10, "y": 20}}})
+
+
+def test_macos_assert_state_branch_minimal_text_boolean_and_existence() -> None:
+    toggle = FakeMacElement(
+        elem_id="dark_toggle",
+        elem_type="XCUIElementTypeCheckBox",
+        label="Dark Mode",
+        value="1",
+        enabled=True,
+        selected=True,
+        focused=False,
+    )
+    secure = FakeMacElement(elem_id="secret_box", elem_type="XCUIElementTypeSecureTextField", value="hunter2")
+    driver = AppiumConnectMacOSDriver(session=FakeMacSession({"dark_toggle": toggle, "secret_box": secure}))
+
+    # Existence-only branch inspects only ("enabled",)
+    toggle.inspected_attributes.clear()
+    exists_res = driver.assert_state(MacOSAssertStateParams.model_validate({"element": {"accessibilityId": "dark_toggle"}}))
+    assert exists_res["status"] == "passed"
+    assert exists_res["output"] == {"exists": True}
+    assert toggle.inspected_attributes[-1] == ("enabled",)
+
+    # Boolean state branch inspects only requested booleans in canonical order
+    toggle.inspected_attributes.clear()
+    state_res = driver.assert_state(MacOSAssertStateParams.model_validate({"element": {"accessibilityId": "dark_toggle", "selected": True, "focused": False}}))
+    assert state_res["status"] == "passed"
+    assert toggle.inspected_attributes[-1] == ("focused", "selected")
+
+    # Text precedence over mismatching state
+    text_res = driver.assert_state(
+        MacOSAssertStateParams.model_validate(
+            {
+                "element": {"accessibilityId": "dark_toggle", "selected": False},
+                "text": {"equals": "Dark Mode", "attribute": "label"},
+            }
+        )
+    )
+    assert text_res["status"] == "passed"
+
+    # SecureTextField text assertion fails safely without reading plaintext
+    secure.inspected_attributes.clear()
+    sec_res = driver.assert_state(
+        MacOSAssertStateParams.model_validate(
+            {
+                "element": {"accessibilityId": "secret_box"},
+                "text": {"contains": "hunter", "attribute": "value"},
+            }
+        )
+    )
+    assert sec_res["status"] == "failed"
+    assert sec_res["failure_category"] == "assertion_error"
+    assert sec_res["metadata"]["reason"] == "protected_or_unreadable_text"
+    assert all("value" not in batch for batch in secure.inspected_attributes)
+
+
+def test_macos_type_text_reanchors_text_dependent_locator_and_supports_secure_text_field() -> None:
+    # Element matched initially by mutable value="Draft", no accessibilityId -> binds by amType + amRect so post-write readback succeeds!
+    mutable_field = FakeMacElement(x=50, y=60, width=120, height=24, value="Draft", elem_type="XCUIElementTypeTextField")
+
+    class MutableValueSession(FakeMacSession):
+        def element(self, by: str, value: str, *, parent: Any = None, predicate: str | None = None) -> Any:
+            del parent, predicate
+            if by == "-ios predicate string" and 'value == "Draft"' in value:
+                return mutable_field if mutable_field.value == "Draft" else _MissingElementProxy()
+            if by == "-ios predicate string" and "amRect.x == 50" in value:
+                return mutable_field
+            return _MissingElementProxy()
+
+    driver = AppiumConnectMacOSDriver(session=MutableValueSession({"Draft": mutable_field}))
+    res = driver.type_text(MacOSTypeTextParams(locator=MacOSLocator(value="Draft"), text="Final Title", clear=True))
+    assert res["status"] == "passed"
+    assert mutable_field.value == "Final Title"
+
+    # Disabled element rejected before side effects
+    disabled_field = FakeMacElement(enabled=False, value="init")
+    disabled_driver = AppiumConnectMacOSDriver(session=FakeMacSession({"Disabled": disabled_field}))
+    dis_res = disabled_driver.type_text(MacOSTypeTextParams(target="Disabled", text="abc"))
+    assert dis_res["status"] == "failed"
+    assert dis_res["failure_category"] == "target_resolution_error"
+    assert disabled_field.clicks == 0
+    assert disabled_field.typed == []
+
+    # SecureTextField types without reading value or leaking secret
+    secure_field = FakeMacElement(elem_id="login_pwd", elem_type="XCUIElementTypeSecureTextField", value="••••")
+    sec_driver = AppiumConnectMacOSDriver(session=FakeMacSession({"login_pwd": secure_field}))
+    sec_res = sec_driver.type_text(MacOSTypeTextParams(locator=MacOSLocator(accessibilityId="login_pwd"), text="S3cr3t!", clear=True))
+    assert sec_res["status"] == "passed"
+    assert sec_res["output"] == {"protected": True}
+    assert secure_field.typed == ["S3cr3t!"]
+    assert all("value" not in batch for batch in secure_field.inspected_attributes)
+
+
+def test_macos_harness_validation_redacts_secret_input_and_enforces_deterministic_conflict(tmp_path) -> None:
+    driver = FakeMacOSDriver()
+    harness = MacOSHarness(
+        driver=driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path),
+        ai_assertion_evaluator=SimpleNamespace(
+            evaluate=lambda req, cancellation_check=None: AIAssertionResult(
+                status="passed",
+                outcome="passed",
+                passed=True,
+                explanation="Model claimed passed.",
+            )
+        ),
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
+
+    # Invalid parameter value must not be echoed in validation_errors
+    bad = harness.invoke_action(_step("typeText", {"text": "TOP_SECRET_VALUE", "extra_bad": "LEAK_ME"}), harness.get_context())
+    assert bad.status == "failed"
+    serialized_bad = json.dumps(bad.model_dump(mode="json"))
+    assert "TOP_SECRET_VALUE" not in serialized_bad
+    assert "LEAK_ME" not in serialized_bad
+
+    # Deterministic counterevidence forces failed with deterministic_conflict=True without model pass overriding it
+    conflict = harness.invoke_action(
+        _step(
+            "assertWithAI",
+            {
+                "assertion": "The Save button label says Cancel.",
+                "surface": "appearance",
+                "full_screen_reason": "Dialog check.",
+                "expect": {"kind": "visual_property", "property": "label", "value": "Cancel", "target": "Save"},
+            },
+        ),
+        harness.get_context(),
+    )
+    assert conflict.status == "failed"
+    assert conflict.failure_category == "assertion_error"
+    assert conflict.output["deterministic_conflict"] is True
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_inspect_with_ai_extract_and_locate_pointer_mapping_unavailable(tmp_path) -> None:
+    png_bytes = _valid_png_bytes(64, 48)
+
+    class SDKLikeDevice(FakeMacDevice):
+        def inspect_with_ai(self, prompt: str, *, provider: Any, mode: str = "extract", region: Any = None, max_candidates: int = 5, control: Any = None) -> Any:
+            del region, control
+            if mode == "locate":
+                err = RuntimeError("locate unsupported on macOS")
+                err.code = "pointer_mapping_unavailable"  # type: ignore[attr-defined]
+                err.request_state = "not_sent"  # type: ignore[attr-defined]
+                raise err
+            req = SimpleNamespace(
+                png_bytes=png_bytes,
+                prompt=prompt,
+                mode=mode,
+                max_candidates=max_candidates,
+                image_width=64,
+                image_height=48,
+                remaining_timeout_seconds=15.0,
+            )
+            resp = provider.inspect(req)
+            import hashlib
+
+            return SimpleNamespace(
+                summary=resp.summary,
+                mode="extract",
+                image_size=SimpleNamespace(width=64, height=48),
+                pointer_size=None,
+                png_sha256=hashlib.sha256(png_bytes).hexdigest(),
+                candidates=(),
+            )
+
+    session = FakeMacSession({})
+    session.device = SDKLikeDevice(session)
+    driver = AppiumConnectMacOSDriver(session=session)
+
+    class FakeVisualEvaluator:
+        def evaluate(self, request: AIAssertionRequest, *, cancellation_check=None) -> AIAssertionResult:
+            raise AssertionError("evaluate must not be called")
+
+        def inspect(self, request: AIVisualInspectionRequest, *, cancellation_check=None) -> AIVisualInspectionResult:
+            return AIVisualInspectionResult(summary="Extracted chart value: 42%", candidates=())
+
+    harness = MacOSHarness(
+        driver=driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path),
+        ai_assertion_evaluator=FakeVisualEvaluator(),
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
+
+    extract_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Read chart percentage", "mode": "extract"}), harness.get_context())
+    assert extract_res.status == "passed"
+    assert extract_res.output["summary"] == "Extracted chart value: 42%"
+    assert extract_res.output["candidates"] == []
+    assert len(extract_res.artifact_refs) == 1
+
+    locate_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Find chart icon", "mode": "locate"}), harness.get_context())
+    assert locate_res.status == "failed"
+    assert locate_res.failure_category == "observation_error"
+    assert locate_res.output["reason"] == "pointer_mapping_unavailable"
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_driver_worker_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    import time
+
+    del monkeypatch
+    started_evt = threading.Event()
+    observed_cancel: list[bool] = []
+
+    class SlowDevice(FakeMacDevice):
+        def take_screenshot(self, *, control: Any = None) -> bytes:
+            started_evt.set()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if control is not None and getattr(control, "cancellation", None) is not None and control.cancellation.is_set():
+                    observed_cancel.append(True)
+                    break
+                time.sleep(0.01)
+            return _valid_png_bytes()
+
+    session = FakeMacSession({})
+    session.device = SlowDevice(session)
+    driver = AppiumConnectMacOSDriver(session=session)
+
+    class CustomCancel(BaseException):
+        pass
+
+    def cancel_once_started() -> None:
+        if started_evt.is_set():
+            raise CustomCancel()
+
+    with pytest.raises(CustomCancel):
+        driver.screenshot({"cancellation_check": cancel_once_started, "timeout_seconds": 5.0})
+    assert observed_cancel == [True]
+    driver.close()
+
+
+def test_macos_driver_ensure_alive_and_quit_unknown_settlement() -> None:
+    import time
+
+    # Owned session idle >= 45s invokes ensure_alive; session_quit_unknown absorbed when dispose settles
+    ensure_alive_calls = 0
+    dispose_calls = 0
+
+    class ResourceStateError(RuntimeError):
+        def __init__(self) -> None:
+            super().__init__("quit timed out")
+            self.code = "session_quit_unknown"
+            self.request_state = "response_unknown"
+
+    class OwnedSession(FakeMacSession):
+        def ensure_alive(self, *, control: Any = None) -> None:
+            nonlocal ensure_alive_calls
+            del control
+            ensure_alive_calls += 1
+
+        def quit(self, *, control: Any = None) -> None:
+            del control
+            self.state = "uncertain"
+            raise ResourceStateError()
+
+        def dispose(self, *, control: Any = None) -> None:
+            nonlocal dispose_calls
+            del control
+            dispose_calls += 1
+            self.state = "disposed"
+
+    owned_driver = AppiumConnectMacOSDriver(bundle_id="com.example.App")
+    owned_session = OwnedSession({})
+    owned_driver._session = owned_session
+    owned_driver._borrowed_session = False
+    owned_driver._last_operation_finished_at = time.monotonic() - 60.0
+
+    snap = owned_driver.ui_snapshot(MacOSUiSnapshotParams())
+    assert snap["snapshot_type"] == "macos_accessibility_tree"
+    assert ensure_alive_calls == 1
+
+    # close() settles session_quit_unknown via dispose() without raising
+    owned_driver.close()
+    assert dispose_calls == 1
+    assert owned_driver._session is None
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_new_command_timeout_maps_none_to_zero_and_rejects_above_86400(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fsq_agent.models import MacOSHarnessSettings
+
+    assert MacOSHarnessSettings(new_command_timeout_seconds=None).new_command_timeout_seconds is None
+    assert MacOSHarnessSettings(new_command_timeout_seconds=86_400).new_command_timeout_seconds == 86_400.0
+    with pytest.raises(ValidationError):
+        MacOSHarnessSettings(new_command_timeout_seconds=86_401)
+
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeScope:
+        def __enter__(self) -> object:
+            return "fake-connection"
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class FakeRuntime:
+        managed_cleanup_pending = False
+
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def start_managed(self, **kwargs: object) -> FakeScope:
+            return FakeScope()
+
+    def fake_create_mac2_session(connection: object, **kwargs: object) -> FakeMacSession:
+        assert connection == "fake-connection"
+        captured_kwargs.update(kwargs)
+        return FakeMacSession({})
+
+    monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
+    monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", fake_create_mac2_session)
+
+    driver = AppiumConnectMacOSDriver(bundle_id="com.example.App", new_command_timeout_seconds=None)
+    try:
+        res = driver.launch_app(MacOSLaunchAppParams())
+        assert res["status"] == "passed"
+        assert captured_kwargs["new_command_timeout_seconds"] == 0.0
+    finally:
+        driver.close()
+
+
+def test_macos_ensure_alive_failure_quarantines_owned_session_and_observations_normalize_errors(tmp_path) -> None:
+    import time
+
+    class CommandError(RuntimeError):
+        def __init__(self, code: str = "command_failed") -> None:
+            super().__init__("remote Mac2 session died")
+            self.code = code
+            self.request_state = "response_received"
+
+    class DeadOwnedSession(FakeMacSession):
+        def ensure_alive(self, *, control: Any = None) -> None:
+            del control
+            raise CommandError("command_failed")
+
+    driver = AppiumConnectMacOSDriver(bundle_id="com.example.App")
+    dead_session = DeadOwnedSession({})
+    driver._session = dead_session
+    driver._borrowed_session = False
+    driver._last_operation_finished_at = time.monotonic() - 60.0
+    driver._session_settled = True  # avoid real quit in test teardown
+
+    try:
+        snap_res = driver.ui_snapshot(MacOSUiSnapshotParams())
+        assert snap_res["status"] == "failed"
+        assert snap_res["failure_category"] == "observation_error"
+        assert snap_res["metadata"]["reason"] == "session_unavailable"
+        assert snap_res["metadata"]["backend_code"] == "command_failed"
+        assert driver._cleanup_pending is True
+
+        shot_res = driver.take_screenshot(MacOSTakeScreenshotParams())
+        assert isinstance(shot_res, dict)
+        assert shot_res["status"] == "failed"
+        assert shot_res["failure_category"] == "observation_error"
+        assert shot_res["metadata"]["reason"] == "cleanup_pending"
+
+        # Automatic harness ui_snapshot capture still raises ToolExecutionError on failed dict
+        from fsq_agent.models import ToolExecutionError
+
+        harness = MacOSHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path))
+        with pytest.raises(ToolExecutionError) as cap_err:
+            harness.capture_artifact("ui_snapshot", "after-fail", harness.get_context(), "step-1", "finalize")
+        assert cap_err.value.context.get("capture_diagnostics", {}).get("reason") == "cleanup_pending"
+    finally:
+        driver._session = None
+        driver._cleanup_pending = False
+        driver.close()
+
+
+def test_macos_visual_facts_fail_closed_on_ambiguous_or_error_and_short_circuit_matching_exact(tmp_path) -> None:
+    class InspectConfigurableDriver(FakeMacOSDriver):
+        def __init__(self, inspect_response: dict[str, object]) -> None:
+            super().__init__()
+            self.inspect_response = inspect_response
+            self.screenshot_calls = 0
+
+        def inspect_element(self, params: MacOSInspectElementParams) -> dict[str, object]:
+            return self.inspect_response
+
+        def screenshot(self, params: object | None = None) -> bytes:
+            self.screenshot_calls += 1
+            return _valid_png_bytes()
+
+    evaluator = SimpleNamespace(
+        evaluate=lambda req, cancellation_check=None: pytest.fail("evaluator must not be called when pre-check fails or exact fact exists"),
+    )
+
+    def policy_fn(_ctx: object, _seq: int) -> AndroidVisualAssertionPolicy:
+        return AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        )
+
+    # 1. Ambiguous target during _facts fails closed with capture_failed without taking screenshot or uploading
+    amb_driver = InspectConfigurableDriver(
+        {
+            "status": "failed",
+            "failure_category": "target_resolution_error",
+            "error_message": "ambiguous",
+            "metadata": {"resolution_reason": "ambiguous", "backend_code": "target_ambiguous", "session_state": "active"},
+        }
+    )
+    amb_harness = MacOSHarness(
+        driver=amb_driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "amb"),
+        ai_assertion_evaluator=evaluator,
+        visual_assertion_policy_resolver=policy_fn,
+    )
+    amb_res = amb_harness.invoke_action(
+        _step(
+            "assertWithAI",
+            {
+                "assertion": "Save label matches",
+                "surface": "appearance",
+                "full_screen_reason": "Dialog check",
+                "expect": {"kind": "visual_property", "property": "label", "value": "Save", "target": "Save"},
+            },
+        ),
+        amb_harness.get_context(),
+    )
+    assert amb_res.status == "incomplete"
+    assert amb_res.output["error_code"] == "capture_failed"
+    assert amb_res.output["metadata"]["diagnostics"]["backend_code"] == "target_ambiguous"
+    assert amb_driver.screenshot_calls == 0
+
+    # 2. Exact accessible property match returns unsupported_surface (inconclusive/incomplete) without screenshot upload
+    exact_driver = InspectConfigurableDriver({"status": "passed", "output": {"attributes": {"label": {"state": "value", "value": "Save"}}}})
+    exact_harness = MacOSHarness(
+        driver=exact_driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "exact"),
+        ai_assertion_evaluator=evaluator,
+        visual_assertion_policy_resolver=policy_fn,
+    )
+    exact_res = exact_harness.invoke_action(
+        _step(
+            "assertWithAI",
+            {
+                "assertion": "Save label says Save",
+                "surface": "appearance",
+                "full_screen_reason": "Dialog check",
+                "expect": {"kind": "visual_property", "property": "label", "value": "Save", "target": "Save"},
+            },
+        ),
+        exact_harness.get_context(),
+    )
+    assert exact_res.status == "incomplete"
+    assert exact_res.output["error_code"] == "unsupported_surface"
+    assert exact_driver.screenshot_calls == 0
+
+
+def test_macos_inspect_with_ai_locate_without_evaluator_fails_provider_unavailable_before_session(tmp_path) -> None:
+    unlaunched_driver = AppiumConnectMacOSDriver(bundle_id="com.example.App")
+    harness = MacOSHarness(
+        driver=unlaunched_driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path),
+        ai_assertion_evaluator=None,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
+    res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Locate icon", "mode": "locate"}), harness.get_context())
+    assert res.status == "failed"
+    assert res.failure_category == "observation_error"
+    assert res.output["reason"] == "provider_unavailable"
+
+
+def test_macos_assert_not_visible_handles_toctou_disappearance_during_displayed_inspect() -> None:
+    class VanishingOnDisplayedElement(FakeMacElement):
+        def __init__(self) -> None:
+            super().__init__(displayed=True)
+            self.calls = 0
+
+        def inspect(self, *, attributes: tuple[str, ...], control: Any = None) -> Any:
+            self.calls += 1
+            if "displayed" in attributes:
+                raise TargetError("target_not_found")
+            return super().inspect(attributes=attributes, control=control)
+
+    driver = AppiumConnectMacOSDriver(session=FakeMacSession({"Spinner": VanishingOnDisplayedElement()}), action_timeout_seconds=1)
+    res = driver.assert_not_visible(MacOSAssertNotVisibleParams(target="Spinner"))
+    assert res["status"] == "passed"
+    assert res["output"] == {"visible": False}

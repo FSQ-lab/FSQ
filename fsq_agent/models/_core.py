@@ -448,22 +448,26 @@ class VisualRect(BaseModel):
     bottom: int
 
 
-class AndroidInspectWithAIParams(BaseModel):
+class _VisualInspectWithAIParams(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
 
-    prompt: str = Field(min_length=1, max_length=4096, description="Read or locate visual content in the current Android image without performing an action.")
+    prompt: str = Field(min_length=1, max_length=4096)
     mode: Literal["extract", "locate"] = "extract"
     region: VisualRect | None = Field(default=None, description="Optional half-open region in full-image coordinates.")
     max_candidates: int = Field(default=5, ge=1, le=20)
 
     @model_validator(mode="after")
-    def _validate_inspection(self) -> "AndroidInspectWithAIParams":
+    def _validate_inspection(self) -> "_VisualInspectWithAIParams":
         if "\x00" in self.prompt or len(self.prompt.encode("utf-8")) > 4096:
             raise ValueError("requires a nonblank UTF-8 prompt of at most 4096 bytes without NUL")
         region = self.region
         if region is not None and not (0 <= region.left < region.right and 0 <= region.top < region.bottom):
             raise ValueError("requires a nonempty nonnegative image region")
         return self
+
+
+class AndroidInspectWithAIParams(_VisualInspectWithAIParams):
+    prompt: str = Field(min_length=1, max_length=4096, description="Read or locate visual content in the current Android image without performing an action.")
 
 
 class VisualRegion(BaseModel):
@@ -1079,6 +1083,94 @@ class _MacOSElementRef(BaseModel):
         raise ValueError("requires target or non-empty locator")
 
 
+MacOSInspectAttribute: TypeAlias = Literal[
+    "id",
+    "text",
+    "type",
+    "label",
+    "title",
+    "value",
+    "placeholder_value",
+    "element_type",
+    "enabled",
+    "focused",
+    "selected",
+    "hittable",
+    "displayed",
+    "bounds",
+]
+
+
+class MacOSLocatorFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accessibilityId: str | None = Field(default=None, description="macOS accessibility id to match.")  # noqa: N815
+    name: str | None = Field(default=None, description="Exact semantic name matching identity/name/label/value/title for compatibility. All additional fields still constrain the same element.")
+    label: str | None = Field(default=None, description="macOS accessibility label to match.")
+    value: str | None = Field(default=None, description="macOS accessibility value to match.")
+    title: str | None = Field(default=None, description="macOS accessibility title to match.")
+    role: str | None = Field(default=None, description="macOS accessibility role to match.")
+    controlType: str | None = Field(default=None, description="macOS control type to match.")  # noqa: N815
+    className: str | None = Field(default=None, description="macOS class name to match.")  # noqa: N815
+    xpath: str | None = Field(default=None, description="XPath expression for Appium Mac2 lookup.")
+    predicate: str | None = Field(default=None, description="Appium predicate string for macOS lookup.")
+
+    def has_element_value(self) -> bool:
+        return any(
+            isinstance(value, str) and value.strip()
+            for value in (
+                self.accessibilityId,
+                self.name,
+                self.label,
+                self.value,
+                self.title,
+                self.role,
+                self.controlType,
+                self.className,
+                self.xpath,
+                self.predicate,
+            )
+        )
+
+    def to_locator(self) -> MacOSLocator:
+        return MacOSLocator.model_validate({name: getattr(self, name) for name in MacOSLocatorFields.model_fields if getattr(self, name) is not None})
+
+
+class _MacOSStructuralTargetParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Provide target or non-empty element locator. Coordinate-only points are rejected."})
+
+    target: str | None = Field(default=None, description="macOS semantic target name for an element.")
+    locator: MacOSLocator | None = Field(default=None, description="Structured macOS locator for an element without coordinate-only targeting.")
+
+    @model_validator(mode="after")
+    def _require_structural_element(self) -> "_MacOSStructuralTargetParams":
+        if self.locator is not None and self.locator.point is not None and not self._locator_has_element_fields(self.locator):
+            raise ValueError("requires target or non-empty element locator; coordinate-only point is rejected")
+        if isinstance(self.target, str) and self.target.strip():
+            return self
+        if self.locator is not None and self._locator_has_element_fields(self.locator):
+            return self
+        raise ValueError("requires target or non-empty element locator")
+
+    @staticmethod
+    def _locator_has_element_fields(locator: MacOSLocator) -> bool:
+        return any(
+            isinstance(value, str) and value.strip()
+            for value in (
+                locator.accessibilityId,
+                locator.name,
+                locator.label,
+                locator.value,
+                locator.title,
+                locator.role,
+                locator.controlType,
+                locator.className,
+                locator.xpath,
+                locator.predicate,
+            )
+        )
+
+
 class MacOSLaunchAppParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -1118,6 +1210,41 @@ class MacOSRightClickOnParams(_MacOSTargetParams):
 
 class MacOSHoverOnParams(_MacOSTargetParams):
     duration_ms: int | None = Field(default=None, ge=1, description="Optional hover duration in milliseconds.")
+
+
+class MacOSScrollOnParams(_MacOSTargetParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Scroll on a uniquely resolved macOS element center or explicit coordinate-only point via Appium Mac2 macos: scroll. "
+                "Provide finite delta_x and/or delta_y (at least one non-zero). Under macOS CGEvent scroll wheel semantics, negative delta_y scrolls content down (toward lower items) and positive delta_y scrolls content up."
+            )
+        },
+    )
+
+    delta_x: float = Field(default=0.0, allow_inf_nan=False, description="Horizontal CGEvent wheel scroll delta. Rejects booleans and NaN/Inf.")
+    delta_y: float = Field(default=0.0, allow_inf_nan=False, description="Vertical CGEvent wheel scroll delta. Negative values scroll content down; positive values scroll content up.")
+    modifiers: list[str] | None = Field(
+        default=None,
+        description="Optional keyboard modifiers held while scrolling: COMMAND, CONTROL, OPTION or ALT, SHIFT, CAPS_LOCK, FUNCTION.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_bool_deltas(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            for field_name in ("delta_x", "delta_y"):
+                raw = value.get(field_name)
+                if raw is not None and (isinstance(raw, bool) or not isinstance(raw, (int, float))):
+                    raise ValueError(f"{field_name} must be a finite int or float")
+        return value
+
+    @model_validator(mode="after")
+    def _require_nonzero_scroll_delta(self) -> "MacOSScrollOnParams":
+        if self.delta_x != 0.0 or self.delta_y != 0.0:
+            return self
+        raise ValueError("requires non-zero delta_x or delta_y")
 
 
 class MacOSTypeTextParams(BaseModel):
@@ -1207,17 +1334,149 @@ class MacOSAssertElementsOrderParams(BaseModel):
         return self
 
 
-class MacOSAssertWithAIParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Evaluate an explicit macOS visual assertion with AI."})
+class MacOSInspectElementParams(_MacOSStructuralTargetParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Inspect one uniquely resolved macOS target or non-empty element locator. "
+                "Returns unclipped values and explicit observation states; SecureTextField text and value are withheld before reading."
+            )
+        },
+    )
 
-    prompt: str = Field(description="Non-empty visual assertion prompt to evaluate against current evidence.")
+    attributes: tuple[MacOSInspectAttribute, ...] = Field(
+        default=("label", "value", "title", "text"),
+        min_length=1,
+        max_length=14,
+        description="Non-empty, duplicate-free Mac2 attribute selection. SecureTextField text/value are withheld via type pre-check.",
+    )
+
+    @model_validator(mode="after")
+    def _require_unique_attributes(self) -> "MacOSInspectElementParams":
+        if len(set(self.attributes)) != len(self.attributes):
+            raise ValueError("attributes must not contain duplicates")
+        return self
+
+
+class MacOSInspectWithAIParams(_VisualInspectWithAIParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+        json_schema_extra={
+            "description": (
+                "Read pixel-only visual content in the current macOS frame with mode='extract' without pass/fail verdicts or UI actions. "
+                "mode='locate' currently returns pointer_mapping_unavailable on macOS under the pinned SDK."
+            )
+        },
+    )
+
+    prompt: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Read pixel-only content in the current macOS image without performing an action. Locate mode currently returns pointer_mapping_unavailable on macOS.",
+    )
+
+
+class MacOSAssertNotVisibleParams(_MacOSStructuralTargetParams):
+    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+
+
+class MacOSTextAssertion(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"description": "macOS text assertion on the located element. Provide exactly one of contains or equals."},
+    )
+
+    contains: str | None = Field(default=None, description="Expected substring in the selected macOS text attribute.")
+    equals: str | None = Field(default=None, description="Expected exact string in the selected macOS text attribute.")
+    attribute: Literal["auto", "value", "label", "title", "text", "placeholder_value"] = Field(
+        default="auto",
+        description="Attribute to evaluate: 'auto' selects the first available value in (value, label, title, text) after SecureTextField check.",
+    )
+
+    @model_validator(mode="after")
+    def _require_single_text_predicate(self) -> "MacOSTextAssertion":
+        has_contains = isinstance(self.contains, str)
+        has_equals = isinstance(self.equals, str)
+        if has_contains != has_equals:
+            return self
+        raise ValueError("requires exactly one of contains or equals")
+
+
+class MacOSElementState(MacOSLocatorFields):
+    enabled: bool | None = Field(default=None, description="Expected enabled state.")
+    focused: bool | None = Field(default=None, description="Expected focused state.")
+    selected: bool | None = Field(default=None, description="Expected selected state.")
+    hittable: bool | None = Field(default=None, description="Expected hittable state.")
+    displayed: bool | None = Field(default=None, description="Expected displayed state.")
+
+
+def _macos_assertion_element_schema(schema: dict[str, Any]) -> None:
+    properties = MacOSElementState.model_json_schema()["properties"]
+    alternatives = []
+    for name in MacOSLocatorFields.model_fields:
+        variant_properties = deepcopy(properties)
+        variant_properties[name] = {"type": "string", "pattern": r"\S"}
+        alternatives.append({"type": "object", "properties": variant_properties, "required": [name], "additionalProperties": False})
+    schema["anyOf"] = alternatives
+
+
+class MacOSAssertStateParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Assert existence, text, or boolean state on one uniquely located macOS element. Required element must contain a non-empty locator. Optional text predicates take precedence over state predicates."
+        },
+    )
+
+    element: MacOSElementState = Field(
+        description="Required macOS element with a non-empty locator and optional expected boolean state values.",
+        json_schema_extra=_macos_assertion_element_schema,
+    )
+    text: MacOSTextAssertion | None = Field(default=None, description="Text predicate applied only to the located element; takes precedence over boolean state predicates.")
     optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
 
     @model_validator(mode="after")
-    def _require_prompt(self) -> "MacOSAssertWithAIParams":
-        if self.prompt.strip():
+    def _require_element_locator(self) -> "MacOSAssertStateParams":
+        if self.element.has_element_value():
             return self
-        raise ValueError("requires non-empty prompt")
+        raise ValueError("requires element with a non-empty supported macOS locator")
+
+
+class MacOSVisualExpectation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True, allow_inf_nan=False)
+
+    kind: Literal["visual_property", "exact_color", "display_identity"] = "visual_property"
+    property: str = Field(min_length=1)
+    value: str | bool | int | float | None
+    target: str | None = None
+    locator: MacOSLocator | None = None
+
+
+class MacOSAssertWithAIParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Evaluate only an image-space macOS visual assertion. Required assertion and surface; region is image_rect only, or omit it with full_screen_reason. Never locate/drive UI or replace exact accessibility facts."
+        },
+    )
+
+    assertion: str = Field(description="Pure visual appearance/image/Canvas expectation, not instructions or a UI action.")
+    surface: Literal["custom_canvas", "image_content", "map_view", "appearance"]
+    region: VisualRegion | None = None
+    expect: MacOSVisualExpectation | None = None
+    full_screen_reason: str | None = None
+    optional: bool | None = None
+
+    @model_validator(mode="after")
+    def _require_prompt(self) -> "MacOSAssertWithAIParams":
+        if not self.assertion.strip() or len(self.assertion.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank assertion of at most 4 KiB")
+        if self.region is None and not (self.full_screen_reason and self.full_screen_reason.strip()):
+            raise ValueError("full-image assertions require full_screen_reason")
+        return self
 
 
 @dataclass(frozen=True)
@@ -1238,10 +1497,15 @@ MACOS_ACTION_DEFINITIONS: tuple[MacOSActionDefinition, ...] = (
     MacOSActionDefinition("typeText", "type_text", MacOSTypeTextParams, "action"),
     MacOSActionDefinition("pressKey", "press_key", MacOSPressKeyParams, "action"),
     MacOSActionDefinition("hoverOn", "hover_on", MacOSHoverOnParams, "action"),
+    MacOSActionDefinition("scrollOn", "scroll_on", MacOSScrollOnParams, "action"),
     MacOSActionDefinition("dragTo", "drag_to", MacOSDragToParams, "action"),
     MacOSActionDefinition("takeScreenshot", "take_screenshot", MacOSTakeScreenshotParams, "observation"),
     MacOSActionDefinition("uiSnapshot", "ui_snapshot", MacOSUiSnapshotParams, "observation"),
+    MacOSActionDefinition("inspectElement", "inspect_element", MacOSInspectElementParams, "observation"),
+    MacOSActionDefinition("inspectWithAI", "inspect_with_ai", MacOSInspectWithAIParams, "observation"),
     MacOSActionDefinition("assertVisible", "assert_visible", MacOSAssertVisibleParams, "assertion"),
+    MacOSActionDefinition("assertNotVisible", "assert_not_visible", MacOSAssertNotVisibleParams, "assertion"),
+    MacOSActionDefinition("assert", "assert_state", MacOSAssertStateParams, "assertion"),
     MacOSActionDefinition("assertElementsOrder", "assert_elements_order", MacOSAssertElementsOrderParams, "assertion"),
     MacOSActionDefinition("assertWithAI", "assert_with_ai", MacOSAssertWithAIParams, "assertion"),
 )

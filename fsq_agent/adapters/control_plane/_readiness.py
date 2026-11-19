@@ -176,7 +176,7 @@ class MacOSPreflightError(PlatformPreflightError):
 def require_macos_preflight(settings: Settings, mode: str, *, requires_provider: bool = False) -> None:
     if settings.harness.platform != "macos":
         return
-    diagnosis = diagnose_platform_settings(settings)
+    diagnosis = diagnose_platform_settings(settings, provider_checks=False) if mode == "strict" else diagnose_platform_settings(settings)
     verdict = diagnosis.commands.case_create if mode == "explore" else diagnosis.commands.case_test
     if verdict.status != "ready" or (requires_provider and diagnosis.checks.provider.status != "ready"):
         raise MacOSPreflightError(diagnosis, mode, requires_provider)

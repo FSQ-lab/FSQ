@@ -68,14 +68,14 @@ def test_common_platform_tools_use_shared_declaration_layer() -> None:
     assert set(definitions) == {"wait_ms"}
 
 
-@pytest.mark.parametrize("platform", ["android", "web", "windows", "macos"])
+@pytest.mark.parametrize("platform", ["android", "web", "windows", "macos", "ios"])
 def test_provider_requirement_is_derived_from_platform_registry_metadata(platform: str) -> None:
     snapshot = build_capability_registry(platform=platform).snapshot()
     required_names = provider_required_capability_names(platform)
 
-    assert required_names == (frozenset() if platform == "android" else frozenset({"assert_with_ai"}))
-    assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, required_names) is (platform != "android")
-    assert steps_require_provider([SimpleNamespace(action_name="assert_with_ai")], snapshot, required_names) is (platform != "android")
+    assert required_names == (frozenset() if platform in {"android", "ios", "macos"} else frozenset({"assert_with_ai"}))
+    assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, required_names) is (platform not in {"android", "ios", "macos"})
+    assert steps_require_provider([SimpleNamespace(action_name="assert_with_ai")], snapshot, required_names) is (platform not in {"android", "ios", "macos"})
     assertion_names = ai_assertion_capability_names(platform)
     assert assertion_names == frozenset({"assert_with_ai"})
     assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, assertion_names)

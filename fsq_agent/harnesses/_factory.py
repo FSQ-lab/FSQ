@@ -119,7 +119,15 @@ class _HarnessFactoryImplementation:
                 harness_type = IOSHarness
             else:
                 raise ConfigurationError("Unsupported harness platform.", context={"platform": platform, "supported": ["android", "web", "windows", "macos", "ios"]})  # noqa: TRY301
-            visual_policy = harness_settings.android.visual_assertion_policy if platform == "android" else harness_settings.ios.visual_assertion_policy if platform == "ios" else None
+            visual_policy = (
+                harness_settings.android.visual_assertion_policy
+                if platform == "android"
+                else harness_settings.ios.visual_assertion_policy
+                if platform == "ios"
+                else harness_settings.macos.visual_assertion_policy
+                if platform == "macos"
+                else None
+            )
             return harness_type(
                 driver=driver,
                 artifact_store=artifact_store,

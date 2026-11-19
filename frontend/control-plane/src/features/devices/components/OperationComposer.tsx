@@ -125,7 +125,7 @@ export function OperationComposer(props: OperationComposerProps) {
       {selectedCase && <dl className="case-summary">
         <div><dt>Platform</dt><dd>{selectedCase.platform ?? 'Unknown'}</dd></div>
         <div><dt>Commands</dt><dd>{selectedCase.commandCount}</dd></div><div><dt>Validation</dt><dd>{selectedCase.validationStatus}</dd></div>
-        <div><dt>AI assertion</dt><dd>{selectedCase.requiresAiAssertion ? props.android ? 'Visual check; may remain unverified' : 'Provider required' : 'Not required'}</dd></div>
+        <div><dt>AI assertion</dt><dd>{selectedCase.requiresAiAssertion ? (props.android || props.macos) ? 'Visual check; may remain unverified' : 'Provider required' : 'Not required'}</dd></div>
       </dl>}
       {props.cases.length > selectableCases.length && <p className="field-help">{props.cases.length - selectableCases.length} invalid or platform-mismatched case(s) are unavailable.</p>}
     </div>}
@@ -133,6 +133,6 @@ export function OperationComposer(props: OperationComposerProps) {
     {props.errorMessage && <div className="inline-error" role="alert"><strong>{props.errorMessage}</strong>{props.errorAction && <span>{props.errorAction}</span>}</div>}
     <div className="composer-start"><p id="start-blocked-reason" className="field-help">{props.setupHint || (!props.canStart ? props.blockedReason || "Provide the required source and check the environment." : "Ready to start on the selected target.")}</p>
     <button className="button button--primary start-button" type="button" disabled={!props.canStart} aria-describedby="start-blocked-reason" onClick={props.onStart}><Play aria-hidden="true"/>{props.starting && (props.macos||props.android)?'Checking environment…':props.mode === 'explore' ? 'Start exploration' : 'Start strict replay'}</button>
-    </div></div><aside className="composer-environment" aria-label="Environment checks">{props.setupHint ? <div className="preflight-setup"><h2>Environment</h2><span className="status-badge">Not checked</span><p>{props.setupHint}</p></div> : <PreflightStatus mode={props.mode} workspace={props.readiness?.workspace} provider={props.readiness?.provider} target={props.readiness?.target} strict={props.readiness?.strict} requiresProvider={selectedCase?.requiresAiAssertion && !props.android} loading={props.discoveryLoading} diagnostics={props.readiness} macos={props.macos} android={props.android} onRecheck={props.onRecheck} onRepair={props.onRepair} locked={props.starting}/>}</aside>
+    </div></div><aside className="composer-environment" aria-label="Environment checks">{props.setupHint ? <div className="preflight-setup"><h2>Environment</h2><span className="status-badge">Not checked</span><p>{props.setupHint}</p></div> : <PreflightStatus mode={props.mode} workspace={props.readiness?.workspace} provider={props.readiness?.provider} target={props.readiness?.target} strict={props.readiness?.strict} requiresProvider={selectedCase?.requiresAiAssertion && !props.android && !props.macos} loading={props.discoveryLoading} diagnostics={props.readiness} macos={props.macos} android={props.android} onRecheck={props.onRecheck} onRepair={props.onRepair} locked={props.starting}/>}</aside>
   </div>;
 }

@@ -92,3 +92,9 @@ def test_package_macos_skill_preserves_element_only_guidance(tmp_path: Path) -> 
     assert "Honor explicit element-only requests" in macos.instructions
     assert "Detail-page variant selection does not substitute for result-list filtering" in macos.instructions
     assert "Existing cart contents are initial state, not proof of a new add" in macos.instructions
+    assert "Do not routinely call `kill_app` at the end of a task" in macos.instructions
+    assert "End each macOS case with `kill_app`" not in macos.instructions
+    assert "`scroll_on`" in macos.instructions
+    assert "`inspect_element`" in macos.instructions
+    assert "`inspect_with_ai`" in macos.instructions
+    assert "`assert_not_visible`" in macos.instructions

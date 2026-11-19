@@ -9,7 +9,7 @@ harness:
     backend: appium_connect_agent
     page_source_max_depth: 12
     action_timeout_seconds: 10
-    new_command_timeout_seconds: 300
+    new_command_timeout_seconds: 900.0
 
 execution:
   post_action_delay_seconds:

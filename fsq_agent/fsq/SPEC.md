@@ -61,6 +61,8 @@ Android command block:
 | `longPressOn: {...}` | `long_press_on` | validated `AndroidLongPressOnParams` dump |
 | `swipe: {...}` | `swipe` | validated `AndroidSwipeParams` dump |
 | `assert: {element: ..., text: ...}` | `assert_state` | validated `AndroidAssertStateParams` dump |
+| `inspectElement: {target: Title, attributes: [text, desc]}` | `inspect_element` | validated `AndroidInspectElementParams` dump |
+| `inspectWithAI: {prompt: ..., mode: extract}` | `inspect_with_ai` | validated `AndroidInspectWithAIParams` dump |
 | `assertWithAI: {assertion: ..., surface: ..., region: ..., expect: ...}` | `assert_with_ai` | validated structured `AndroidAssertWithAIParams` dump; no prompt-only or visual-driving alias |
 | `inputText: {text: TEST_ACCOUNT_EMAIL, textType: runtimeSecret, ...}` | `input_text` | validated `AndroidInputTextParams` dump preserving `textType: runtimeSecret` for core runtime-secret resolution |
 
@@ -94,12 +96,17 @@ macOS command block:
 | `typeText: {target: Search, text: query}` | `type_text` | validated `MacOSTypeTextParams` dump |
 | `pressKey: {key: Enter}` | `press_key` | validated `MacOSPressKeyParams` dump |
 | `hoverOn: {target: Menu}` | `hover_on` | validated `MacOSHoverOnParams` dump |
+| `scrollOn: {target: Results, delta_y: -120.0}` | `scroll_on` | validated `MacOSScrollOnParams` dump |
 | `dragTo: {source: {target: File}, destination: {target: Folder}}` | `drag_to` | validated `MacOSDragToParams` dump |
 | `takeScreenshot: {}` | `take_screenshot` | validated `MacOSTakeScreenshotParams` dump |
 | `uiSnapshot: {}` | `ui_snapshot` | validated `MacOSUiSnapshotParams` dump |
+| `inspectElement: {target: Title, attributes: [label, value]}` | `inspect_element` | validated `MacOSInspectElementParams` dump |
+| `inspectWithAI: {prompt: ..., mode: extract}` | `inspect_with_ai` | validated `MacOSInspectWithAIParams` dump |
 | `assertVisible: {target: Done}` | `assert_visible` | validated `MacOSAssertVisibleParams` dump |
+| `assertNotVisible: {target: Spinner}` | `assert_not_visible` | validated `MacOSAssertNotVisibleParams` dump |
+| `assert: {element: ..., text: ...}` | `assert_state` | validated `MacOSAssertStateParams` dump |
 | `assertElementsOrder: {direction: vertical, elements: [...]}` | `assert_elements_order` | validated `MacOSAssertElementsOrderParams` dump |
-| `assertWithAI: {prompt: ...}` | `assert_with_ai` | validated `MacOSAssertWithAIParams` dump |
+| `assertWithAI: {assertion: ..., surface: ..., region: ..., expect: ...}` | `assert_with_ai` | validated structured `MacOSAssertWithAIParams` dump; no prompt-only or visual-driving alias |
 
 Shared command block:
 
@@ -120,7 +127,7 @@ Step kind mapping for known actions is owned by capability metadata:
 | `startBrowser` | `setup` |
 | `closeBrowser` | `teardown` |
 | `assert`, `assertVisible`, `assertNotVisible`, `assertText`, `assertElementsOrder`, `assertWithAI` | `assertion` |
-| `takeScreenshot`, `startRecording`, `stopRecording`, `uiSnapshot` | `observation` |
+| `takeScreenshot`, `startRecording`, `stopRecording`, `uiSnapshot`, `inspectElement`, `inspectWithAI` | `observation` |
 | `waitMs` | `action` |
 | all other commands | `action` |
 
@@ -173,7 +180,7 @@ Invalid FSQ YAML raises `ConfigurationError` with the failing path. Unsupported 
 - `waitMs` is a generated strict replay alias for the inherited `wait_ms` CommonTool capability. It is validated by `WaitMsParams`, converted into an `ExecutableStep(action_name="wait_ms")`, and later handled by `StepRunner` through the normal registry path without invoking Android gesture or Web page actions.
 - `assertWithAI` is parsed and validated like any other authored assertion command. This module does not evaluate AI assertions, build provider-backed evaluators, capture screenshots, or decide assertion verdicts.
 - Web replay aliases such as `startBrowser`, `closeBrowser`, `navigateTo`, `navigateBack`, `clickOn`, `typeText`, `selectOption`, `hoverOn`, `waitFor`, `takeScreenshot`, `assertText`, and `uiSnapshot` are accepted only when the supplied registry snapshot contains the corresponding Web capabilities. Android registries must not accept Web-only replay aliases, and Web registries must not accept Android-only replay aliases.
-- macOS replay aliases such as `launchApp`, `killApp`, `clickOn`, `doubleClickOn`, `rightClickOn`, `typeText`, `pressKey`, `hoverOn`, `dragTo`, `takeScreenshot`, `uiSnapshot`, `assertVisible`, `assertElementsOrder`, and `assertWithAI` are accepted only when the supplied registry snapshot contains the corresponding macOS capabilities. Shared replay aliases resolve to the active platform's capability definition from the registry snapshot; replay aliases unique to another platform remain invalid.
+- macOS replay aliases such as `launchApp`, `killApp`, `clickOn`, `doubleClickOn`, `rightClickOn`, `typeText`, `pressKey`, `hoverOn`, `scrollOn`, `dragTo`, `takeScreenshot`, `uiSnapshot`, `inspectElement`, `inspectWithAI`, `assertVisible`, `assertNotVisible`, `assert`, `assertElementsOrder`, and `assertWithAI` are accepted only when the supplied registry snapshot contains the corresponding macOS capabilities. Shared replay aliases resolve to the active platform's capability definition from the registry snapshot; replay aliases unique to another platform remain invalid.
 - `launchApp`/`killApp` and `startBrowser`/`closeBrowser` are treated as setup and teardown step kinds for strict-core execution. A trailing `closeBrowser` command should be passed to `StepSequenceRunner` as teardown so it still executes after an earlier normal-step failure.
 - Commands marked `optional: true` are still converted into executable steps; optional/non-blocking execution semantics do not belong to this adapter.
 - Parsed FSQ cases are not converted into LLM `Task` descriptions. For normal LLM `run --case-yaml` and `run --case-dir`, the CLI reads raw file text and builds goal/reference tasks without calling this module or executing lifecycle hooks.

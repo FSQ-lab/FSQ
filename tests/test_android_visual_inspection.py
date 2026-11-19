@@ -387,7 +387,7 @@ def test_each_inspection_requires_new_context_and_capture_sequence(sdk_inspectio
 
 
 def test_capture_age_is_checked_after_persistence_before_upload(sdk_inspection, tmp_path, monkeypatch):
-    from fsq_agent.drivers.android import _visual_inspection
+    from fsq_agent.drivers import _visual_inspection
 
     state, create = sdk_inspection
     clock = [100]

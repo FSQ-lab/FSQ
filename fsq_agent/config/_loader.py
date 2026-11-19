@@ -13,12 +13,14 @@ from fsq_agent.config._settings import Settings
 from fsq_agent.config._user_provider import refresh_provider_settings
 from fsq_agent.config._workspace import (
     WEB_CHANNEL_EXECUTABLE_NAMES,
+    _is_ios_app_bundle_or_ipa,
     _is_macos_app_bundle_or_executable,
     load_workspace_config,
 )
 from fsq_agent.models import (
     AndroidWorkspaceTarget,
     ConfigurationError,
+    IOSWorkspaceTarget,
     MacOSWorkspaceTarget,
     WebWorkspaceTarget,
     WindowsWorkspaceTarget,
@@ -32,6 +34,7 @@ _PLATFORM_CONFIG_FILENAMES = {
     "web": "config.web.yaml",
     "windows": "config.windows.yaml",
     "macos": "config.macos.yaml",
+    "ios": "config.ios.yaml",
 }
 
 
@@ -160,6 +163,12 @@ def load_workspace_platform_settings(
     elif isinstance(target, MacOSWorkspaceTarget):
         settings.harness.macos.bundle_id = target.bundle_id
         settings.harness.macos.app_path = target.app_path
+    elif isinstance(target, IOSWorkspaceTarget):
+        settings.harness.ios.bundle_id = target.bundle_id
+        settings.harness.ios.app_path = target.app_path
+        settings.harness.ios.xcode_org_id = target.xcode_org_id
+        settings.harness.ios.xcode_signing_id = target.xcode_signing_id
+        settings.harness.ios.updated_wda_bundle_id = target.updated_wda_bundle_id
 
     settings.runtime_secrets.set_values(workspace_config.env)
     settings = refresh_provider_settings(settings, user_config_root)
@@ -276,7 +285,7 @@ def validate_runtime_settings(settings: Settings) -> None:
 
 def validate_strict_core_settings(settings: Settings, requires_ai_assertion: bool = False) -> None:
     _validate_harness_settings(settings)
-    if requires_ai_assertion and settings.harness.platform != "android":
+    if requires_ai_assertion and settings.harness.platform not in {"android", "ios"}:
         validate_provider_settings(settings)
 
 
@@ -352,9 +361,12 @@ def _validate_harness_settings(settings: Settings) -> None:
     if settings.harness.platform == "macos":
         _validate_macos_harness_settings(settings)
         return
+    if settings.harness.platform == "ios":
+        _validate_ios_harness_settings(settings)
+        return
     raise ConfigurationError(
         "Unsupported harness platform.",
-        context={"platform": settings.harness.platform, "supported": ["android", "web", "windows", "macos"]},
+        context={"platform": settings.harness.platform, "supported": ["android", "web", "windows", "macos", "ios"]},
     )
 
 
@@ -457,5 +469,32 @@ def _validate_macos_harness_settings(settings: Settings) -> None:
     if not _is_macos_app_bundle_or_executable(app_path):
         raise ConfigurationError(
             "Configured macOS app path must point to an application bundle or executable.",
+            context={"config_key": "target.app_path", "path": str(app_path)},
+        )
+
+
+def _validate_ios_harness_settings(settings: Settings) -> None:
+    if settings.harness.ios.backend != "appium_connect_agent":
+        raise ConfigurationError(
+            "Unsupported iOS harness backend.",
+            context={"backend": settings.harness.ios.backend, "supported": ["appium_connect_agent"]},
+        )
+    app_path = settings.harness.ios.app_path
+    bundle_id = settings.harness.ios.bundle_id
+    if app_path is None and bundle_id is None:
+        raise ConfigurationError(
+            "iOS app identity is not configured.",
+            context={"config_keys": ["target.bundle_id", "target.app_path"]},
+        )
+    if app_path is None:
+        return
+    if not app_path.expanduser().exists():
+        raise ConfigurationError(
+            "Configured iOS app path does not exist.",
+            context={"config_key": "target.app_path", "path": str(app_path)},
+        )
+    if not _is_ios_app_bundle_or_ipa(app_path):
+        raise ConfigurationError(
+            "Configured iOS app path must point to an absolute non-symlink .app bundle (with Info.plist) or .ipa archive.",
             context={"config_key": "target.app_path", "path": str(app_path)},
         )

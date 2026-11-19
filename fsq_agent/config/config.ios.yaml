@@ -1,0 +1,34 @@
+agent_runtime:
+  max_turns: 100
+  reasoning_effort: mid
+  tracing_enabled: true
+
+harness:
+  platform: ios
+  ios:
+    backend: appium_connect_agent
+    page_source_max_depth: 12
+    action_timeout_seconds: 15
+    new_command_timeout_seconds: 900.0
+
+execution:
+  post_action_delay_seconds:
+    platform: 1.0
+    common: 0.0
+
+agent_context:
+  knowledge:
+    skills:
+      items:
+        - name: automation-basics
+          description: Semantic action and evidence guidance for local runs.
+          kind: markdown
+          path: automation-basics.md
+          required: true
+        - name: ios-harness
+          description: iOS XCUITest harness action selection and recovery guidance.
+          kind: markdown
+          path: ios-harness.md
+          required: true
+    pre_plan:
+          dir: .

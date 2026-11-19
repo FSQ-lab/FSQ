@@ -665,3 +665,63 @@ def test_workspace_file_browser_rejects_symlinked_managed_root_when_supported(tm
     assert status == 400
     assert error["code"] == "invalid_workspace_path"
     assert "private" not in str(error)
+
+
+def test_control_plane_omits_cli_only_ios_platforms_and_runs_from_workspace_and_history_surfaces(
+    tmp_path: Path,
+) -> None:
+    from fsq_agent.config import IOSWorkspaceTarget, add_workspace_platform
+
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    server = _server(tmp_path)
+    _create(server, parent)
+    add_workspace_platform(
+        name="checkout",
+        platform="ios",
+        target=IOSWorkspaceTarget(bundle_id="com.apple.Preferences"),
+        env={"IOS_SECRET": "do-not-expose"},
+        user_config_root=tmp_path / "user",
+    )
+    ios_run_dir = parent / ".fsq" / "runs" / "ios" / "20261119T010000Z-iosrun"
+    ios_run_dir.mkdir(parents=True)
+    (ios_run_dir / "run.json").write_text(
+        '{"schema_version": "fsq.run/v2", "run_id": "20261119T010000Z-iosrun", "platform": "ios", "mode": "strict", "status": "succeeded"}',
+        encoding="utf-8",
+    )
+
+    list_status, listed, _ = server.handle_get("/api/control-plane/workspaces", peer_host="127.0.0.1")
+    detail_status, detail, _ = server.handle_get("/api/control-plane/workspaces/checkout", peer_host="127.0.0.1")
+    ios_detail_status, ios_detail_err, _ = server.handle_get(
+        "/api/control-plane/workspaces/checkout/platforms/ios",
+        peer_host="127.0.0.1",
+    )
+    ios_add_status, ios_add_err = server.handle_post(
+        "/api/control-plane/workspaces/checkout/platforms",
+        {"platform": "ios", "target": {"bundleId": "com.apple.Preferences"}, "env": {}},
+        peer_host="127.0.0.1",
+    )
+    history_status, history, _ = server.handle_get(
+        "/api/control-plane/history",
+        {"workspace": ["checkout"]},
+        peer_host="127.0.0.1",
+    )
+    ios_history_status, ios_history_err, _ = server.handle_get(
+        "/api/control-plane/history",
+        {"workspace": ["checkout"], "platform": ["ios"]},
+        peer_host="127.0.0.1",
+    )
+
+    assert list_status == detail_status == history_status == 200
+    assert [p["platform"] for p in listed["workspaces"][0]["platforms"]] == ["android"]
+    assert [p["platform"] for p in detail["platforms"]] == ["android"]
+    assert "do-not-expose" not in str(listed)
+    assert "do-not-expose" not in str(detail)
+    assert ios_detail_status == 400
+    assert ios_detail_err["code"] == "invalid_workspace"
+    assert ios_add_status == 400
+    assert ios_add_err["code"] == "invalid_workspace"
+    assert history["platforms"] == ["android"]
+    assert all(entry["platform"] != "ios" for entry in history["runs"])
+    assert ios_history_status == 400
+    assert ios_history_err["code"] == "invalid_request"

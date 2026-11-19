@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING, Protocol
 
 from fsq_agent.harnesses._android import AndroidHarness
+from fsq_agent.harnesses._ios import IOSHarness
 from fsq_agent.harnesses._macos import MacOSHarness
 from fsq_agent.harnesses._resources import OwnedResources
 from fsq_agent.harnesses._web import WebHarness
@@ -18,6 +19,7 @@ from fsq_agent.models import (
     HarnessContext,
     HarnessPlatform,
     HarnessSettings,
+    IOSHarnessSettings,
     MacOSHarnessSettings,
     RuntimeSecretSettings,
     WebHarnessSettings,
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
         AIAssertionEvaluatorProtocol,
         AndroidDriverInterface,
         HarnessInterface,
+        IOSDriverInterface,
         MacOSDriverInterface,
         WebDriverInterface,
         WindowsDriverInterface,
@@ -53,6 +56,14 @@ class _DriverFactoryProtocol(Protocol):
 
     def create_macos_driver(self, settings: MacOSHarnessSettings) -> MacOSDriverInterface: ...
 
+    def create_ios_driver(
+        self,
+        settings: IOSHarnessSettings,
+        *,
+        bundle_id: str | None = None,
+        udid: str | None = None,
+    ) -> IOSDriverInterface: ...
+
 
 class _HarnessFactoryProtocol(Protocol):
     def create_harness(
@@ -66,6 +77,8 @@ class _HarnessFactoryProtocol(Protocol):
         runtime_secret_settings: RuntimeSecretSettings | None = None,
         app_id: str | None = None,
         serial: str | None = None,
+        bundle_id: str | None = None,
+        udid: str | None = None,
     ) -> HarnessInterface: ...
 
 
@@ -84,6 +97,8 @@ class _HarnessFactoryImplementation:
         runtime_secret_settings: RuntimeSecretSettings | None = None,
         app_id: str | None = None,
         serial: str | None = None,
+        bundle_id: str | None = None,
+        udid: str | None = None,
     ) -> HarnessInterface:
         driver = None
         try:
@@ -99,8 +114,12 @@ class _HarnessFactoryImplementation:
             elif platform == "macos":
                 driver = self.driver_factory.create_macos_driver(harness_settings.macos)
                 harness_type = MacOSHarness
+            elif platform == "ios":
+                driver = self.driver_factory.create_ios_driver(harness_settings.ios, bundle_id=bundle_id, udid=udid)
+                harness_type = IOSHarness
             else:
-                raise ConfigurationError("Unsupported harness platform.", context={"platform": platform, "supported": ["android", "web", "windows", "macos"]})  # noqa: TRY301
+                raise ConfigurationError("Unsupported harness platform.", context={"platform": platform, "supported": ["android", "web", "windows", "macos", "ios"]})  # noqa: TRY301
+            visual_policy = harness_settings.android.visual_assertion_policy if platform == "android" else harness_settings.ios.visual_assertion_policy if platform == "ios" else None
             return harness_type(
                 driver=driver,
                 artifact_store=artifact_store,
@@ -109,10 +128,10 @@ class _HarnessFactoryImplementation:
                 **(
                     {
                         "visual_assertion_policy_resolver": visual_assertion_policy_resolver,
-                        "visual_assertion_budget": harness_settings.android.visual_assertion_policy.budget,
-                        "visual_assertion_provider_available": harness_settings.android.visual_assertion_policy.provider_available,
+                        "visual_assertion_budget": visual_policy.budget,
+                        "visual_assertion_provider_available": visual_policy.provider_available,
                     }
-                    if platform == "android"
+                    if visual_policy is not None
                     else {}
                 ),
             )

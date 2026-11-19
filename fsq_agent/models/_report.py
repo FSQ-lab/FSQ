@@ -51,7 +51,7 @@ class PublicRunReport(BaseModel):
     @classmethod
     def valid_run(cls, value):
         _identifier(value.get("run_id"))
-        if value.get("platform") not in {None, "android", "web", "windows", "macos"}:
+        if value.get("platform") not in {None, "android", "web", "windows", "macos", "ios"}:
             raise ValueError("Unsupported report platform.")
         gate = value.get("gate")
         if not isinstance(gate, dict) or gate.get("status") not in {"passed", "failed", "error", "incomplete"}:
@@ -109,7 +109,7 @@ class PublicRunReport(BaseModel):
             raise ValueError("Passing report cannot contain unresolved verification or evidence.")
         if self.evidence.get("required_missing") or self.evidence.get("errors"):
             raise ValueError("Passing report has missing required evidence.")
-        if self.run.get("platform") not in {"web", "android", "windows", "macos"} or self.run.get("mode") not in {"strict", "explore"}:
+        if self.run.get("platform") not in {"web", "android", "windows", "macos", "ios"} or self.run.get("mode") not in {"strict", "explore"}:
             raise ValueError("Passing report requires established platform and execution mode.")
         if not isinstance(total, int) or isinstance(total, bool) or total < 0:
             raise ValueError("Passing report requires known logical counts.")

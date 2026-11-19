@@ -14,7 +14,7 @@ Own concrete runtime gateways that combine inherited CommonTools, one injected p
 
 ## Public Interface
 
-Concrete Android, Web, Windows, and macOS harness classes remain private. `core.interfaces.HarnessFactory` is the stable public construction boundary and returns `HarnessInterface`.
+Concrete Android, Web, Windows, macOS, and iOS harness classes remain private. `core.interfaces.HarnessFactory` is the stable public construction boundary and returns `HarnessInterface`.
 
 Factory-created Harnesses own their created Driver and receive ownership of the supplied run-local evaluator. `close()` attempts disposal of both through their public contracts, retains the first cleanup failure if more than one fails, and does not repeat successfully completed disposal. A construction failure releases resources created or transferred to the factory before propagating its primary failure. No cleanup call is exposed as a capability or recorded as an application lifecycle action.
 
@@ -22,7 +22,7 @@ The sole external importer of private `_factory._HarnessFactoryImplementation` i
 
 ## Internal Structure
 
-- Private platform harness modules for Android, Web, Windows, and macOS.
+- Private platform harness modules for Android, Web, Windows, macOS, and iOS.
 - Private CommonTool routing and capability-schema adaptation shared by platform harnesses.
 - Private composition implementation behind the public Core factory boundary.
 
@@ -46,10 +46,10 @@ Harnesses classify backend failures through normalized contracts, preserve cance
 - Harnesses do not duplicate driver action bodies.
 - Capture services preserve execution identity, phase/reason, independent screenshot/UI snapshot outcomes, and supplied snapshot coverage/compaction metadata. Unknown coverage remains unknown. Allocation and durable acknowledgement use injected Core evidence boundaries, not manually constructed paths or a second journal.
 - Concrete harness selection is lazy and hidden behind `core.interfaces.HarnessFactory`.
-- Android `action_space()` exposes deterministic/structural tools, assertion-only `assert_with_ai`, and read-only `inspect_with_ai` (`inspectWithAI`). Inspection never invokes UI actions and does not change assertion tri-state or deterministic-counterevidence rules. Authored visual capabilities remain recognizable without a provider and return safe non-success semantics; other platforms' filtering is unchanged.
-- Android assertion invocation binds trusted execution identity, Run-local artifact services, cancellation, upload policy, and current structural facts to the driver. Its privacy-approved screenshot is the step screenshot evidence; generic pre-capture must not take or persist another screenshot before the visual privacy gate. Screenshot and UI-snapshot availability remain independent, including explicit non-capture reasons. No per-step frame cache survives invocation completion.
-- Android result normalization preserves `incomplete`, `outcome`, reason, capture envelope, deterministic-conflict facts, and artifact references instead of treating an unknown/non-failed status as passed. Optional assertions do not promote inconclusive outcomes to success.
-- Android visual inspection binds the existing evaluator runtime and current invocation context to the driver, resolving the existing `(context, capture_sequence)` authorization callback for that capture. The SDK provider callback persists the authorized actual SDK image and returns its artifact reference through normal action-result evidence; observation execution performs no generic prepare/finalize screenshot. No second resolver parameter, provider session, unchecked screenshot, or frame cache is introduced.
+- Android and iOS `action_space()` expose deterministic/structural tools, assertion-only `assert_with_ai`, and read-only `inspect_with_ai` (`inspectWithAI`). Inspection never invokes UI actions and does not change assertion tri-state or deterministic-counterevidence rules. Authored visual capabilities remain recognizable without a provider and return safe non-success semantics; other platforms' filtering is unchanged.
+- Android and iOS assertion invocation bind trusted execution identity, Run-local artifact services, cancellation, upload policy, and current structural facts to the driver. Their privacy-approved screenshot is the step screenshot evidence; generic pre-capture must not take or persist another screenshot before the visual privacy gate. Screenshot and UI-snapshot availability remain independent, including explicit non-capture reasons. No per-step frame cache survives invocation completion.
+- Android and iOS result normalization preserve `incomplete`, `outcome`, reason, capture envelope, deterministic-conflict facts, and artifact references instead of treating an unknown/non-failed status as passed. Optional assertions do not promote inconclusive outcomes to success.
+- Android and iOS visual inspection bind the existing evaluator runtime and current invocation context to the driver, resolving the existing `(context, capture_sequence)` authorization callback for that capture. The SDK provider callback persists the authorized actual SDK image and returns its artifact reference through normal action-result evidence; observation execution performs no generic prepare/finalize screenshot. No second resolver parameter, provider session, unchecked screenshot, or frame cache is introduced.
 - Online schemas preserve model-owned exclusion of replay-only coordinate references. Internal Strict validation and coordinate recording retain those fields; online invocation cannot supply them through an undeclared argument.
 - Closing releases owned backend/session/worker resources without starting a browser, device, or application, restarting ADB, or inventing an authored close/kill step. Shared externally owned resources are supplied through wrappers whose disposal does not release the borrowed resource.
 - Old `core.harness` imports forward to canonical Drivers, Harnesses, or Core Interfaces without duplicate state.

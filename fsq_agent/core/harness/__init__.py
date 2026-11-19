@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 from fsq_agent.core.harness._android_devices import AndroidDeviceDiscovery
+from fsq_agent.core.harness._ios_devices import IOSDeviceDiscovery
 from fsq_agent.core.interfaces import (
     AIAssertionEvaluatorProtocol,
     AIVisualInspectionEvaluatorProtocol,
@@ -10,6 +11,7 @@ from fsq_agent.core.interfaces import (
     DriverObservationInterface,
     HarnessFactory,
     HarnessInterface,
+    IOSDriverInterface,
     MacOSDriverInterface,
     WebDriverInterface,
     WindowsDriverInterface,
@@ -24,6 +26,8 @@ __all__ = [
     "DriverObservationInterface",
     "HarnessFactory",
     "HarnessInterface",
+    "IOSDeviceDiscovery",
+    "IOSDriverInterface",
     "MacOSDriverInterface",
     "WebDriverInterface",
     "WindowsDriverInterface",

@@ -70,7 +70,7 @@ class AIAssertionBackendToolMixin:
 
     def _run_ai_assertion_tool(self, params: BaseModel) -> dict[str, object]:
         runtime = getattr(self, "_ai_assertion_tool_runtime", None)
-        if runtime is not None and runtime.platform == "android":
+        if runtime is not None and runtime.platform in {"android", "ios"}:
             return self._run_android_ai_assertion_tool(params, runtime)
         if runtime is None or runtime.ai_assertion_evaluator is None:
             return self._failed_ai_assertion_tool("configuration_error", "assertWithAI requires an AI assertion evaluator.")
@@ -154,7 +154,7 @@ class AIAssertionBackendToolMixin:
             result = AIAssertionResult(status="inconclusive", outcome="inconclusive", passed=False, explanation="A trusted decision for the current capture is required.", error_code="privacy_blocked")
             return self._android_assertion_output(result, [screenshot], params.assertion)
         request = AIAssertionRequest(
-            platform="android",
+            platform=runtime.platform,
             prompt=params.assertion,
             surface=params.surface,
             region=params.region,
@@ -175,7 +175,7 @@ class AIAssertionBackendToolMixin:
         result = runtime.ai_assertion_evaluator.evaluate(request, cancellation_check=invocation.context.cancellation_check)
         if result.outcome is None:
             result = AIAssertionResult(
-                status="inconclusive", outcome="inconclusive", passed=False, explanation="The evaluator did not return an Android visual verdict.", error_code="invalid_output", capture=request.capture
+                status="inconclusive", outcome="inconclusive", passed=False, explanation="The evaluator did not return a visual verdict.", error_code="invalid_output", capture=request.capture
             )
         return self._android_assertion_output(result, self._unique_ai_assertion_artifact_refs([screenshot, *result.artifact_refs]), params.assertion)
 

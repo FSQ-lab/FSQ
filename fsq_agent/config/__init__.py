@@ -37,6 +37,7 @@ from fsq_agent.config._workspace import (
 )
 from fsq_agent.models import (
     AndroidWorkspaceTarget,
+    IOSWorkspaceTarget,
     MacOSWorkspaceTarget,
     WebWorkspaceTarget,
     WindowsWorkspaceTarget,
@@ -51,6 +52,7 @@ from fsq_agent.models import (
 __all__ = [
     "PLATFORM_CONFIG_PATHS",
     "AndroidWorkspaceTarget",
+    "IOSWorkspaceTarget",
     "MacOSWorkspaceTarget",
     "Settings",
     "UserProviderConfig",

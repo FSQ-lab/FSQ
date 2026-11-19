@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from fsq_agent.environments.providers._android import ANDROID_RUNTIME_PROVIDER, android_prerequisites
+from fsq_agent.environments.providers._ios import IOS_RUNTIME_PROVIDER, ios_prerequisites
 from fsq_agent.environments.providers._macos import MACOS_RUNTIME_PROVIDER, _macos_prerequisites
 from fsq_agent.environments.providers._web import WEB_NAMES, WEB_RUNTIME_PROVIDER, web_candidate_paths
 from fsq_agent.environments.providers._windows import WINDOWS_RUNTIME_PROVIDER
@@ -17,12 +18,13 @@ if TYPE_CHECKING:
     from fsq_agent.environments.providers._runtime import RuntimeProvider
     from fsq_agent.models import ApplicationLookupHint
 
-Platform = Literal["android", "web", "windows", "macos"]
+Platform = Literal["android", "web", "windows", "macos", "ios"]
 _PROVIDERS: dict[Platform, RuntimeProvider] = {
     "android": ANDROID_RUNTIME_PROVIDER,
     "web": WEB_RUNTIME_PROVIDER,
     "windows": WINDOWS_RUNTIME_PROVIDER,
     "macos": MACOS_RUNTIME_PROVIDER,
+    "ios": IOS_RUNTIME_PROVIDER,
 }
 
 
@@ -63,6 +65,17 @@ class PlatformRuntimeService:
             facts = prerequisites if prerequisites is not None else self.check_prerequisites(settings)
             failed = next((item for item in facts if item.status != "ready"), None)
             return (False, failed.message, failed.action or "Recheck Android environment.") if failed else (True, "The selected Android device and application are available.", "")
+        if settings.harness.platform == "ios":
+            facts = prerequisites if prerequisites is not None else self.check_prerequisites(settings)
+            failed = next((item for item in facts if item.status in {"unavailable", "error"}), None)
+            if failed is not None:
+                return False, failed.message, failed.action or "Recheck iOS environment."
+            if any(item.status == "not_applicable" and item.code == "ios.dependency_unavailable" for item in facts):
+                blocked_item = next(item for item in facts if item.status == "not_applicable" and item.code == "ios.dependency_unavailable")
+                return False, blocked_item.message, blocked_item.action or "Recheck iOS environment."
+            if platform.system() != "Darwin":
+                return False, "iOS prerequisites require a macOS host.", "Run iOS platform tests on a macOS host."
+            return True, "The selected iOS target and application prerequisites are available.", ""
         configured, message, action = self.check_target_configuration(settings)
         if not configured:
             return configured, message, action
@@ -91,6 +104,10 @@ class PlatformRuntimeService:
             if application_pending or require_explicit_selection:
                 return android_prerequisites(settings.harness.android, application_pending=application_pending, require_explicit_selection=require_explicit_selection)
             return android_prerequisites(settings.harness.android)
+        if settings.harness.platform == "ios":
+            if application_pending or require_explicit_selection:
+                return ios_prerequisites(settings.harness.ios, application_pending=application_pending, require_explicit_selection=require_explicit_selection)
+            return ios_prerequisites(settings.harness.ios)
         if settings.harness.platform != "macos":
             return ()
         if application_pending:
@@ -115,4 +132,18 @@ def _target_configuration_valid(settings, service: PlatformRuntimeService) -> bo
         has_identity = bool((settings.harness.macos.bundle_id or "").strip()) or executable is not None
         path_valid = executable is None or (Path(executable).exists() and (Path(executable).suffix.casefold() == ".app" or Path(executable).is_file()))
         return has_identity and path_valid
+    if selected == "ios":
+        bundle_id = (settings.harness.ios.bundle_id or "").strip()
+        udid = (settings.harness.ios.udid or "").strip()
+        app_path = settings.harness.ios.app_path
+        has_identity = bool(bundle_id) or app_path is not None
+        bundle_valid = not bundle_id or not any(character.isspace() for character in bundle_id)
+        udid_valid = not udid or not any(character.isspace() for character in udid)
+        if app_path is None:
+            path_valid = True
+        else:
+            resolved = Path(app_path).expanduser()
+            suffix = resolved.suffix.casefold()
+            path_valid = (suffix == ".app" and resolved.is_dir()) or (suffix == ".ipa" and resolved.is_file())
+        return has_identity and bundle_valid and udid_valid and path_valid
     return False

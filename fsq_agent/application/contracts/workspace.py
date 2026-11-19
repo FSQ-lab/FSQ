@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from fsq_agent.application.contracts.doctor import DoctorPlatformResult
 from fsq_agent.config import Settings
-from fsq_agent.models import AndroidDevice, AndroidWorkspaceTarget, MacOSWorkspaceTarget, VerificationResult, WebWorkspaceTarget, WindowsWorkspaceTarget
+from fsq_agent.models import AndroidDevice, AndroidWorkspaceTarget, IOSWorkspaceTarget, MacOSWorkspaceTarget, VerificationResult, WebWorkspaceTarget, WindowsWorkspaceTarget
 
 
 class WorkspaceRequest(BaseModel):
@@ -25,7 +25,7 @@ class WorkspaceResult(BaseModel):
 class WorkspaceInitializeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     current_directory: Path
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     name: str | None = None
     app_id: str | None = None
     browser_channel: Literal["chromium", "chrome", "chrome-beta", "chrome-dev", "chrome-canary", "msedge", "msedge-beta", "msedge-dev", "msedge-canary"] | None = None
@@ -34,6 +34,9 @@ class WorkspaceInitializeRequest(BaseModel):
     window_title_re: str | None = None
     launch_args: str | None = None
     bundle_id: str | None = None
+    xcode_org_id: str | None = None
+    xcode_signing_id: str | None = None
+    updated_wda_bundle_id: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     update_existing: bool = False
     user_config_root: Path | None = None
@@ -44,7 +47,7 @@ class WorkspaceInitializeResult(BaseModel):
     status: Literal["initialized", "platform_added", "unchanged", "updated"]
     name: str
     root_path: Path
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     driver_status: Literal["ready"]
     browser_executable_path: Path | None = None
 
@@ -120,7 +123,7 @@ class QuickTestPrepareResult(BaseModel):
     root_path: Path
     platform_revision: str
     target_id: str
-    target: AndroidWorkspaceTarget | WebWorkspaceTarget | WindowsWorkspaceTarget | MacOSWorkspaceTarget
+    target: AndroidWorkspaceTarget | WebWorkspaceTarget | WindowsWorkspaceTarget | MacOSWorkspaceTarget | IOSWorkspaceTarget
     application: str
     settings: Settings = Field(exclude=True, repr=False)
     requires_web_search_evidence: bool = False
@@ -130,10 +133,10 @@ class QuickTestRunResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     workspace_name: str
     root_path: Path
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     platform_revision: str
     target_id: str
-    target: AndroidWorkspaceTarget | WebWorkspaceTarget | WindowsWorkspaceTarget | MacOSWorkspaceTarget
+    target: AndroidWorkspaceTarget | WebWorkspaceTarget | WindowsWorkspaceTarget | MacOSWorkspaceTarget | IOSWorkspaceTarget
     application: str
     run_id: str | None = None
     status: Literal["success", "failed", "inconclusive", "cancelled", "error"]

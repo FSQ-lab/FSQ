@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fsq_agent.models import PublicRunReport, RunArtifactIndex, RunMetadata, RunResultSummary, RunRuntime, RunSource, RunStepCounts
 
-Platform = Literal["android", "web", "windows", "macos"]
+Platform = Literal["android", "web", "windows", "macos", "ios"]
 RunMode = Literal["strict", "explore"]
 RunStatus = Literal["preparing", "running", "finalizing", "success", "failed", "inconclusive", "cancelled", "error", "interrupted"]
 
@@ -44,6 +44,7 @@ class _RunScope(BaseModel):
 
 class ListRunsRequest(_RunScope):
     platform: Platform | None = None
+    allowed_platforms: tuple[Platform, ...] | None = None
     statuses: tuple[RunStatus, ...] = ()
     mode: RunMode | None = None
     since: str | None = None

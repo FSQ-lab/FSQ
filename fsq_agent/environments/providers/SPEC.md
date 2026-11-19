@@ -2,11 +2,11 @@
 
 ## Purpose
 
-Own private Android, Web, Windows, and macOS host/runtime providers used by `PlatformRuntimeService`, including bounded installed-application lookup mechanics. These are not LLM providers and do not perform platform automation.
+Own private Android, Web, Windows, macOS, and iOS host/runtime providers used by `PlatformRuntimeService`, including bounded installed-application lookup mechanics. These are not LLM providers and do not perform platform automation.
 
 ## Dependencies
 
-Providers use standard-library host, import, and filesystem facilities, public Models contracts, and optional lazy imports of `appium_connect_agent.contracts.LocalSettings` and `appium_connect_agent.runtime.Runtime` for static `Runtime.diagnose(target_driver="mac2")` inspection (acquiring only the upstream account coordination lock `runtime.lock` without mutating Workspace state or `~/.appium-connect-agent/` component and record directories). They must not invoke package managers or import adapters, Application, Config persistence, concrete drivers or harnesses, Execution, or top-level LLM `providers`.
+Providers use standard-library host, import, and filesystem facilities, public Models contracts, and optional lazy imports of `appium_connect_agent.contracts.LocalSettings`, `appium_connect_agent.runtime.Runtime`, and `appium_connect_agent.automation.list_ios_devices` for static `Runtime.diagnose(target_driver="mac2" | "xcuitest")` inspection (acquiring only the upstream account coordination lock `runtime.lock` without mutating Workspace state or `~/.appium-connect-agent/` component and record directories) and read-only iOS device discovery. They must not invoke package managers or import adapters, Application, Config persistence, concrete drivers or harnesses, Execution, or top-level LLM `providers`.
 
 ## Public Interface
 
@@ -14,7 +14,7 @@ No public package API. Providers are selected internally by `environments`.
 
 ## Internal Structure
 
-- Private Android, Web, Windows, and macOS provider modules.
+- Private Android, Web, Windows, macOS, and iOS provider modules.
 - `_applications.py`: bounded native application metadata lookup and exact-channel Web dispatch; `_adb_transport.py` also supplies the fixed existing-server-only package inventory query.
 
 ## Python Architecture

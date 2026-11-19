@@ -12,7 +12,7 @@ __all__ = ["list_environments"]
 
 def list_environments(current_directory: Path, platform: str | None = None) -> list[EnvironmentSummary]:
     workspace = require_initialized_workspace(WorkspaceRequest(current_directory=current_directory))
-    platforms = [platform] if platform else ["android", "web", "windows", "macos"]
+    platforms = [platform] if platform else ["android", "web", "windows", "macos", "ios"]
     environments = []
     for item in platforms:
         try:

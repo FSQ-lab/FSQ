@@ -37,7 +37,7 @@ def allocate_run(
     target_root.mkdir(parents=True, exist_ok=True)
     for _ in range(5):
         run_id = f"{slug}-{moment.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(3)}"
-        if any((runs_root / candidate / run_id).exists() for candidate in ("android", "web", "windows", "macos")):
+        if any((runs_root / candidate / run_id).exists() for candidate in ("android", "web", "windows", "macos", "ios")):
             continue
         run_dir = target_root / run_id
         try:
@@ -379,7 +379,7 @@ class RunLifecycleService:
                 safe_config["agent_runtime"] = safe_policy
         import platform as python_platform
 
-        packages = {"web": "playwright", "android": "appium-connect-agent", "windows": "pywinauto", "macos": "appium-connect-agent"}
+        packages = {"web": "playwright", "android": "appium-connect-agent", "windows": "pywinauto", "macos": "appium-connect-agent", "ios": "appium-connect-agent"}
         try:
             backend_version = version(packages[metadata.platform])
         except PackageNotFoundError:

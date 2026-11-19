@@ -48,6 +48,12 @@ macOS declaration block:
 - macOS reuses the existing neutral decorators, catalog validation, discovery, replay metadata, step-kind metadata, and backend metadata contracts. It must not introduce a macOS-only decorator, direct MCP schema importer, runtime Appium discovery path, default evidence metadata, or live `harness` executor kind in `capabilities`.
 - macOS catalog entries are declaration-time validation inputs only. Registry/bootstrap code chooses whether macOS entries are active based on `harness.platform == "macos"`.
 
+iOS declaration block:
+
+- iOS `appium_connect_agent` driver methods use catalog-backed `platform_driver_capability` entries with iOS mobile replay aliases and parameter models, including lifecycle actions `launchApp`/`stopApp`, mobile touch and gesture actions `tapOn`, `tapAt`, `longPressOn`, `doubleTapOn`, `swipe`, and `scrollTo`, text/key/system actions `inputText`, `clearText`, `pressKey`, `hideKeyboard`, and `handleAlert`, observations `takeScreenshot`, `uiSnapshot`, `inspectElement`, and `inspectWithAI`, and assertions `assertState`, `assertVisible`, `assertNotVisible`, and `assertWithAI`.
+- iOS reuses the existing neutral decorators, catalog validation, discovery, replay metadata, step-kind metadata, and backend metadata contracts without introducing an iOS-only decorator, MCP schema importer, runtime Appium discovery path, default evidence metadata, or live `harness` executor kind.
+- iOS catalog entries are declaration-time validation inputs only. Registry/bootstrap code chooses whether iOS entries are active based on `harness.platform == "ios"`.
+
 ## Internal Structure
 
 - `__init__.py`: Public exports only.

@@ -3,6 +3,7 @@
 
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Literal
 
@@ -10,6 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 
 from fsq_agent.models._core import AndroidVisualAssertionPolicy
 from fsq_agent.models._skills import SkillConfig
+
+_IOS_BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
+_IOS_XCODE_ORG_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 class AgentSettings(BaseModel):
@@ -227,14 +231,102 @@ class MacOSHarnessSettings(BaseModel):
         self._app_path = Path(value) if value else None
 
 
+class IOSHarnessSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backend: Literal["appium_connect_agent"] = "appium_connect_agent"
+    page_source_max_depth: int = Field(default=12, ge=1)
+    action_timeout_seconds: int = Field(default=15, ge=1)
+    new_command_timeout_seconds: float | None = Field(default=900.0, ge=0, le=86400.0, allow_inf_nan=False)
+    wda_launch_timeout_ms: int | None = Field(default=None, ge=1000, le=600000)
+    _bundle_id: str | None = PrivateAttr(default=None)
+    _app_path: Path | None = PrivateAttr(default=None)
+    _xcode_org_id: str | None = PrivateAttr(default=None)
+    _xcode_signing_id: str | None = PrivateAttr(default=None)
+    _updated_wda_bundle_id: str | None = PrivateAttr(default=None)
+    _udid: str | None = PrivateAttr(default=None)
+    _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)
+
+    @field_validator("wda_launch_timeout_ms", mode="before")
+    @classmethod
+    def validate_wda_launch_timeout(cls, value: Any) -> int | None:
+        if value is not None and type(value) is not int:
+            raise ValueError("wda_launch_timeout_ms must be a built-in integer or None")
+        return value
+
+    @field_validator("new_command_timeout_seconds", mode="before")
+    @classmethod
+    def validate_new_command_timeout(cls, value: Any) -> float | None:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("new_command_timeout_seconds must be a finite nonnegative number or None")
+        return value
+
+    @property
+    def visual_assertion_policy(self) -> AndroidVisualAssertionPolicy:
+        return self._visual_assertion_policy
+
+    @visual_assertion_policy.setter
+    def visual_assertion_policy(self, value: AndroidVisualAssertionPolicy) -> None:
+        self._visual_assertion_policy = AndroidVisualAssertionPolicy.model_validate(value)
+
+    @property
+    def bundle_id(self) -> str | None:
+        return self._bundle_id
+
+    @bundle_id.setter
+    def bundle_id(self, value: str | None) -> None:
+        self._bundle_id = value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def app_path(self) -> Path | None:
+        return self._app_path
+
+    @app_path.setter
+    def app_path(self, value: str | Path | None) -> None:
+        self._app_path = Path(value) if value else None
+
+    @property
+    def xcode_org_id(self) -> str | None:
+        return self._xcode_org_id
+
+    @xcode_org_id.setter
+    def xcode_org_id(self, value: str | None) -> None:
+        self._xcode_org_id = value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def xcode_signing_id(self) -> str | None:
+        return self._xcode_signing_id
+
+    @xcode_signing_id.setter
+    def xcode_signing_id(self, value: str | None) -> None:
+        self._xcode_signing_id = value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def updated_wda_bundle_id(self) -> str | None:
+        return self._updated_wda_bundle_id
+
+    @updated_wda_bundle_id.setter
+    def updated_wda_bundle_id(self, value: str | None) -> None:
+        self._updated_wda_bundle_id = value.strip() if isinstance(value, str) and value.strip() else None
+
+    @property
+    def udid(self) -> str | None:
+        return self._udid
+
+    @udid.setter
+    def udid(self, value: str | None) -> None:
+        self._udid = value.strip() if isinstance(value, str) and value.strip() else None
+
+
 class HarnessSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["android", "web", "windows", "macos"] = "android"
+    platform: Literal["android", "web", "windows", "macos", "ios"] = "android"
     android: AndroidHarnessSettings = Field(default_factory=AndroidHarnessSettings)
     web: WebHarnessSettings = Field(default_factory=WebHarnessSettings)
     windows: WindowsHarnessSettings = Field(default_factory=WindowsHarnessSettings)
     macos: MacOSHarnessSettings = Field(default_factory=MacOSHarnessSettings)
+    ios: IOSHarnessSettings = Field(default_factory=IOSHarnessSettings)
 
 
 class PostActionDelaySettings(BaseModel):
@@ -430,13 +522,65 @@ class MacOSWorkspaceTarget(BaseModel):
         return self
 
 
-WorkspaceTarget = AndroidWorkspaceTarget | WebWorkspaceTarget | WindowsWorkspaceTarget | MacOSWorkspaceTarget
+class IOSWorkspaceTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str | None = None
+    app_path: Path | None = None
+    xcode_org_id: str | None = None
+    xcode_signing_id: str | None = None
+    updated_wda_bundle_id: str | None = None
+
+    @field_validator("bundle_id", "updated_wda_bundle_id")
+    @classmethod
+    def normalize_bundle_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if not normalized.isascii() or _IOS_BUNDLE_ID_RE.fullmatch(normalized) is None:
+            raise ValueError("invalid iOS bundle identifier")
+        return normalized
+
+    @field_validator("xcode_org_id")
+    @classmethod
+    def normalize_xcode_org_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if not normalized.isascii() or _IOS_XCODE_ORG_ID_RE.fullmatch(normalized) is None:
+            raise ValueError("invalid iOS xcode_org_id")
+        return normalized
+
+    @field_validator("xcode_signing_id")
+    @classmethod
+    def normalize_xcode_signing_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if not 1 <= len(normalized) <= 128 or not normalized.isascii() or not normalized.isprintable() or any(unicodedata.category(char) == "Cc" for char in normalized):
+            raise ValueError("invalid iOS xcode_signing_id")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> "IOSWorkspaceTarget":
+        if self.bundle_id is None and self.app_path is None:
+            raise ValueError("iOS target requires bundle_id or app_path")
+        return self
+
+
+WorkspaceTarget = AndroidWorkspaceTarget | WebWorkspaceTarget | WindowsWorkspaceTarget | MacOSWorkspaceTarget | IOSWorkspaceTarget
 
 
 class WorkspacePlatformCreateInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     target: WorkspaceTarget
     env: dict[str, str] = Field(default_factory=dict)
 
@@ -452,6 +596,7 @@ class WorkspacePlatformCreateInput(BaseModel):
             "web": WebWorkspaceTarget,
             "windows": WindowsWorkspaceTarget,
             "macos": MacOSWorkspaceTarget,
+            "ios": IOSWorkspaceTarget,
         }
         target_model = target_models.get(platform)
         if target_model is not None and not isinstance(target, BaseModel):
@@ -479,6 +624,7 @@ class WorkspacePlatformCreateInput(BaseModel):
             "web": WebWorkspaceTarget,
             "windows": WindowsWorkspaceTarget,
             "macos": MacOSWorkspaceTarget,
+            "ios": IOSWorkspaceTarget,
         }
         if not isinstance(self.target, expected_types[self.platform]):
             raise ValueError("workspace target does not match platform")  # noqa: TRY004 - Pydantic validators require ValueError.
@@ -491,7 +637,7 @@ class WorkspaceConfig(BaseModel):
     version: Literal[2]
     name: str = Field(min_length=1, max_length=128)
     root_path: Path
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     target: WorkspaceTarget
     env: dict[str, str] = Field(default_factory=dict)
 
@@ -507,6 +653,7 @@ class WorkspaceConfig(BaseModel):
             "web": WebWorkspaceTarget,
             "windows": WindowsWorkspaceTarget,
             "macos": MacOSWorkspaceTarget,
+            "ios": IOSWorkspaceTarget,
         }
         target_model = target_models.get(platform)
         if target_model is not None and not isinstance(target, BaseModel):
@@ -546,6 +693,7 @@ class WorkspaceConfig(BaseModel):
             "web": WebWorkspaceTarget,
             "windows": WindowsWorkspaceTarget,
             "macos": MacOSWorkspaceTarget,
+            "ios": IOSWorkspaceTarget,
         }
         if not isinstance(self.target, expected_types[self.platform]):
             raise ValueError("workspace target does not match platform")  # noqa: TRY004 - Pydantic validators require ValueError.
@@ -577,7 +725,7 @@ class WorkspaceRegistryEntry(BaseModel):
 class WorkspacePlatformStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     config_path: Path
     status: Literal["available", "unavailable"]
     message: str
@@ -601,7 +749,7 @@ class WorkspaceInitResult(BaseModel):
     status: Literal["initialized", "platform_added", "unchanged", "updated"]
     name: str = Field(min_length=1, max_length=128)
     root_path: Path
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
 
     @field_validator("name")
     @classmethod

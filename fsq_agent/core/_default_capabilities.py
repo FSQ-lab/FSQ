@@ -56,3 +56,7 @@ def windows_capability_definitions(*, include_ai_assertion: bool = True) -> list
 
 def macos_capability_definitions(*, include_ai_assertion: bool = True) -> list[CapabilityDefinition]:
     return _platform_capability_definitions(platform="macos", include_ai_assertion=include_ai_assertion)
+
+
+def ios_capability_definitions(*, include_ai_assertion: bool = True) -> list[CapabilityDefinition]:
+    return _platform_capability_definitions(platform="ios", include_ai_assertion=include_ai_assertion)

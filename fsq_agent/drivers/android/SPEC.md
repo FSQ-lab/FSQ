@@ -105,7 +105,7 @@ Ordinary actions, observations, and context acquisition never dispose, reconnect
 ## Internal Structure
 
 - Private `AppiumConnectAndroidDriver` backend implementation and Android capability declarations.
-- `_visual_inspection.py`: private public-SDK visual provider adapter, same-frame evidence handoff, safe observation results, and driver integration; no host coordinate mapping.
+- Consumes package-internal `drivers._visual_inspection` for public-SDK visual provider adaptation, same-frame evidence handoff, and safe observation results without host coordinate mapping.
 
 ## Python Architecture
 

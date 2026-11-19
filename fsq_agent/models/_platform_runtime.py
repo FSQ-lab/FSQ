@@ -46,7 +46,7 @@ def web_executable_matches_channel(channel: WebBrowserChannel, executable: Path)
 class PlatformRuntimeCheck(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     status: Literal["ready", "missing", "unsupported"]
     ready: bool
     message: str
@@ -73,5 +73,5 @@ class PlatformPrerequisiteCheck(BaseModel):
     @model_validator(mode="after")
     def _selection_identity_only(self) -> "PlatformPrerequisiteCheck":
         if self.target_id is not None and self.identifier != "device_selection":
-            raise ValueError("target_id belongs only to Android device selection.")
+            raise ValueError("target_id belongs only to mobile device selection.")
         return self

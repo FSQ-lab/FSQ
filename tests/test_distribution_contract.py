@@ -269,17 +269,19 @@ def test_sdist_uses_tracked_package_runtime_resources() -> None:
     includes = set(sdist["include"])
 
     assert "/fsq_agent" in includes
-    assert not {"/config.android.yaml", "/config.web.yaml", "/config.windows.yaml", "/config.macos.yaml", "/knowledge/skills"} & includes
+    assert not {"/config.android.yaml", "/config.web.yaml", "/config.windows.yaml", "/config.macos.yaml", "/config.ios.yaml", "/knowledge/skills"} & includes
     for path in (
         ROOT / "fsq_agent/config/config.android.yaml",
         ROOT / "fsq_agent/config/config.web.yaml",
         ROOT / "fsq_agent/config/config.windows.yaml",
         ROOT / "fsq_agent/config/config.macos.yaml",
+        ROOT / "fsq_agent/config/config.ios.yaml",
         ROOT / "fsq_agent/config/config.example.yaml",
         ROOT / "fsq_agent/resources/skills/android-harness.md",
         ROOT / "fsq_agent/resources/skills/web-harness.md",
         ROOT / "fsq_agent/resources/skills/windows-harness.md",
         ROOT / "fsq_agent/resources/skills/macos-harness.md",
+        ROOT / "fsq_agent/resources/skills/ios-harness.md",
         ROOT / "fsq_agent/resources/skills/automation-basics.md",
         ROOT / "fsq_agent/resources/skills/fsq/SKILL.md",
         ROOT / "fsq_agent/resources/skills/fsq/assets/getting-started.web.fsq.yaml",
@@ -494,11 +496,13 @@ def test_ci_verifies_all_runtime_package_resources() -> None:
         "fsq_agent/config/config.web.yaml",
         "fsq_agent/config/config.windows.yaml",
         "fsq_agent/config/config.macos.yaml",
+        "fsq_agent/config/config.ios.yaml",
         "fsq_agent/config/config.example.yaml",
         "fsq_agent/resources/skills/android-harness.md",
         "fsq_agent/resources/skills/web-harness.md",
         "fsq_agent/resources/skills/windows-harness.md",
         "fsq_agent/resources/skills/macos-harness.md",
+        "fsq_agent/resources/skills/ios-harness.md",
         "fsq_agent/resources/skills/automation-basics.md",
         "fsq_agent/agent/templates/agent_instructions.j2",
         "fsq_agent/agent/templates/task_input.j2",

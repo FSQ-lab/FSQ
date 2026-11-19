@@ -14,7 +14,7 @@ class PlatformDiagnosticContext(BaseModel):
     """Explicit unresolved dependencies for shared, target-independent diagnosis."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     application_pending: bool = False
     workspace_pending: bool = False
     require_explicit_selection: bool = False
@@ -28,9 +28,9 @@ class PlatformDiagnosticContext(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _android_scope_only(self):
-        if self.target_id is not None and self.platform != "android":
-            raise ValueError("target_id is Android-only.")
+    def _mobile_scope_only(self):
+        if self.target_id is not None and self.platform not in {"android", "ios"}:
+            raise ValueError("target_id is supported only for Android and iOS.")
         return self
 
 
@@ -42,14 +42,14 @@ class DoctorRequest(BaseModel):
 class RegisteredPlatformDoctorRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     workspace_name: str = Field(min_length=1, max_length=200)
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     user_config_root: Path | None = None
     target_id: str | None = Field(default=None, min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_.:@-]+$")
 
     @model_validator(mode="after")
-    def _android_target_only(self):
-        if self.target_id is not None and self.platform != "android":
-            raise ValueError("target_id is Android-only.")
+    def _mobile_target_only(self):
+        if self.target_id is not None and self.platform not in {"android", "ios"}:
+            raise ValueError("target_id is supported only for Android and iOS.")
         return self
 
 
@@ -92,7 +92,7 @@ class DoctorCommands(BaseModel):
 
 class DoctorPlatformResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     target_id: str | None = None
     status: SummaryStatus
     prerequisites: tuple[DoctorPrerequisite, ...] = ()

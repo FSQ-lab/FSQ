@@ -25,7 +25,7 @@ def format_case(request: CaseFormatRequest) -> CaseFormatResult:
         before = path.read_bytes()
         source_stat = path.stat()
         case = FsqCaseLoader().load_text(before.decode("utf-8"), path)
-        if case.config.platform not in {"web", "android", "windows", "macos"}:
+        if case.config.platform not in {"web", "android", "windows", "macos", "ios"}:
             _invalid("Unsupported platform.", "case.platform", ["platform"])
         snapshot = build_capability_registry(platform=case.config.platform).snapshot()
         canonical = FsqCaseSerializer(snapshot).serialize(case)

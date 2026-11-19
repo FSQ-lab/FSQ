@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fsq_agent.models._core import AssertionBudget, DeterministicFact, HarnessArtifactRef, HarnessPlatform, HostCaptureEnvelopeV1, VisualExpectation, VisualRegion
+from fsq_agent.models._core import AssertionBudget, DeterministicFact, HarnessArtifactRef, HarnessPlatform, HostCaptureEnvelopeV1, IOSVisualExpectation, VisualExpectation, VisualRegion
 
 AIAssertionStatus = Literal["passed", "failed", "error", "inconclusive"]
 AIAssertionOutcome = Literal["passed", "failed", "inconclusive"]
@@ -51,7 +51,7 @@ class AIAssertionRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     surface: Literal["custom_canvas", "image_content", "map_view", "appearance"] | None = None
     region: VisualRegion | None = None
-    expect: VisualExpectation | None = None
+    expect: VisualExpectation | IOSVisualExpectation | None = None
     capture: HostCaptureEnvelopeV1 | None = None
     deterministic_evidence: list[DeterministicFact] = Field(default_factory=list)
     budget: AssertionBudget = Field(default_factory=AssertionBudget)

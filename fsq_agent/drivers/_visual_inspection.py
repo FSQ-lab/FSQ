@@ -74,13 +74,14 @@ def _provider_reason(error):
     }.get(getattr(error, "category", None), "provider_error")
 
 
-def _failure(reason, provider=None, diagnostics=None):
+def _failure(reason, provider=None, diagnostics=None, *, platform="android"):
     refs = [provider.artifact] if provider is not None and provider.artifact is not None else []
     capture = provider.capture if provider is not None else None
+    platform_label = "iOS" if platform == "ios" else "Android"
     return {
         "status": "failed",
         "failure_category": "observation_error",
-        "error_message": "Android visual inspection is unavailable.",
+        "error_message": f"{platform_label} visual inspection is unavailable.",
         "output": {"reason": reason, "summary": None, "candidates": [], "capture": capture},
         "artifact_refs": refs,
         "metadata": {"reason": reason, **(diagnostics or {}), **({"provider_provenance": provider.provenance} if provider is not None and provider.provenance else {})},
@@ -167,6 +168,7 @@ class _InspectionProvider:
         if remaining <= 0:
             raise _CaptureRejectedError("budget_exceeded")
         neutral = AIVisualInspectionRequest(
+            platform=self.runtime.platform if self.runtime.platform in {"android", "ios"} else "android",
             png_bytes=request.png_bytes,
             prompt=request.prompt,
             mode=request.mode,
@@ -207,21 +209,22 @@ class _InspectionProvider:
 def _run_visual_inspection(driver, params):
     runtime = getattr(driver, "_ai_assertion_tool_runtime", None)
     invocation = getattr(driver, "_ai_assertion_tool_invocation", None)
+    platform = getattr(runtime, "platform", "android") if runtime is not None else "android"
     if runtime is None or invocation is None:
-        return _failure("privacy_blocked")
+        return _failure("privacy_blocked", platform=platform)
     check = invocation.context.cancellation_check
     if check is not None:
         check()
     policy = invocation.visual_assertion_policy
     if policy is None or not policy.allow_provider_upload or policy.frame_sensitivity != "non_sensitive":
-        return _failure("privacy_blocked")
+        return _failure("privacy_blocked", platform=platform)
     evaluator = runtime.ai_assertion_evaluator
     if policy.provider_available is False or not callable(getattr(evaluator, "inspect", None)):
-        return _failure("provider_unavailable")
+        return _failure("provider_unavailable", platform=platform)
     if runtime.artifact_store is None:
-        return _failure("capture_failed")
+        return _failure("capture_failed", platform=platform)
     if len(params.prompt.encode("utf-8")) > policy.budget.max_prompt_bytes:
-        return _failure("budget_exceeded")
+        return _failure("budget_exceeded", platform=platform)
     cancellation = Event()
     provider = _InspectionProvider(runtime, invocation, params, cancellation, time.monotonic_ns())
 
@@ -254,7 +257,7 @@ def _run_visual_inspection(driver, params):
         inspection = driver._run_on_worker(inspect_on_owner, cancellation_check=check_on_caller, cancellation_event=cancellation)
         check_on_caller()
         if provider.artifact is None or provider.calls != 1 or inspection.png_sha256 != provider.capture["png_sha256"]:
-            return _failure("capture_failed", provider)
+            return _failure("capture_failed", provider, platform=platform)
         # Serialization only: all pointer geometry below is produced by the SDK.
         output = {
             "summary": inspection.summary,
@@ -289,5 +292,5 @@ def _run_visual_inspection(driver, params):
         code = getattr(error, "code", None)
         reason = provider.reason or (code if code in _SDK_REASONS else "capture_failed")
         diagnostics = driver._safe_diagnostics(error, stage="inspect_with_ai")
-        return _failure(reason, provider, diagnostics)
+        return _failure(reason, provider, diagnostics, platform=platform)
     return {"status": "passed", "output": output, "artifact_refs": [provider.artifact]}

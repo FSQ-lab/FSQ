@@ -42,11 +42,17 @@ from fsq_agent.execution import RunArtifactIndex, RunLifecycleService, RunResult
 from fsq_agent.models import ReportGenerationError, RunReportExportOptions, RunShareProfile, RunStepCounts
 from fsq_agent.report import RunReportService, generate_static_run_report
 
-PLATFORMS = ("android", "web", "windows", "macos")
+PLATFORMS = ("android", "web", "windows", "macos", "ios")
 
 
 def list_runs(request: ListRunsRequest) -> ListRunsResult:
-    name, root, platforms = _workspace_scope(request.current_directory, request.platform, request.workspace_name, request.user_config_root)
+    name, root, platforms = _workspace_scope(
+        request.current_directory,
+        request.platform,
+        request.workspace_name,
+        request.user_config_root,
+        allowed_platforms=request.allowed_platforms,
+    )
     summaries = [_summary(path, platform, name) for platform in platforms for path in _run_directories(root, platform)]
     warnings = _mark_conflicts(summaries)
     threshold = _since_threshold(request.since)
@@ -115,7 +121,14 @@ def generate_run_html(request: GenerateRunHtmlRequest) -> GenerateRunHtmlResult:
     return GenerateRunHtmlResult(run_id=shown.run.run_id, platform=shown.run.platform, html_path=str(path.relative_to(root)))
 
 
-def _workspace_scope(current: Path | None, platform: str | None, workspace_name: str | None = None, user_config_root: Path | None = None) -> tuple[str, Path, tuple]:
+def _workspace_scope(
+    current: Path | None,
+    platform: str | None,
+    workspace_name: str | None = None,
+    user_config_root: Path | None = None,
+    *,
+    allowed_platforms: tuple[str, ...] | None = None,
+) -> tuple[str, Path, tuple]:
     entries = list_workspace_registry(user_config_root) if user_config_root else list_workspace_registry()
     if workspace_name is not None:
         entry = next((item for item in entries if item.name.casefold() == workspace_name.casefold()), None)
@@ -125,13 +138,14 @@ def _workspace_scope(current: Path | None, platform: str | None, workspace_name:
     if entry is None or not entry.root_path.is_dir():
         raise _error(ApplicationErrorCode.WORKSPACE_NOT_INITIALIZED, "Registered Workspace is unavailable.", "Select a readable registered Workspace.")
     root = entry.root_path.resolve()
+    scope_platforms = tuple(item for item in PLATFORMS if item in allowed_platforms) if allowed_platforms is not None else PLATFORMS
     known = set()
     try:
-        known.update(item.platform for item in inspect_registered_workspace(entry.name, user_config_root, validate_target_paths=False).platforms)
+        known.update(item.platform for item in inspect_registered_workspace(entry.name, user_config_root, validate_target_paths=False).platforms if item.platform in scope_platforms)
     except Exception as exc:
         raise _error(ApplicationErrorCode.CONFIGURATION_INVALID, "Workspace platform inventory is unavailable.", "Repair the registered Workspace configuration.") from exc
-    known.update(item for item in PLATFORMS if (root / ".fsq" / "runs" / item).is_dir() and not (root / ".fsq" / "runs" / item).is_symlink())
-    platforms = tuple(item for item in PLATFORMS if item in known)
+    known.update(item for item in scope_platforms if (root / ".fsq" / "runs" / item).is_dir() and not (root / ".fsq" / "runs" / item).is_symlink())
+    platforms = tuple(item for item in scope_platforms if item in known)
     if platform is not None and platform not in platforms:
         raise _error(ApplicationErrorCode.CONFIGURATION_INVALID, "The requested Workspace platform cannot be identified.", "Select a recorded platform.")
     return entry.name, root, (platform,) if platform else platforms
@@ -665,7 +679,7 @@ class _ExportManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     schema_version: Literal["fsq.export/v1"]
     run_id: str
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     export_id: str
     files: tuple[_ExportFile, ...]
 

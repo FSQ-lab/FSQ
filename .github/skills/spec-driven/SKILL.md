@@ -43,16 +43,15 @@ Before writing or updating any `SPEC.md`, apply this filter:
 ```text
 explicit /spec-driven <confirmed-design-document-path | direct-project-change-request>
   -> resolve and clarify the input
-  -> read current SPEC and implementation evidence
+  -> read relevant module SPEC.md and relevant root SPEC.md sections + implementation evidence
   -> determine whether a SPEC delta is required
   -> if required: update root/module SPEC.md and get user confirmation
   -> if none: record existing-SPEC and defect evidence
+  -> classify audit path: Fast-Path vs Standard independent audit
   -> implement against confirmed SPEC.md
-  -> run fast self-checks and freeze the pending-review snapshot
-  -> run verification and the first bidirectional spec-implementation-audit in parallel where safe
-  -> join all results and resolve authority/environment blockers
-  -> batch-fix complete finding set
-  -> from round 2, freeze repairs and join repair-only audit with affected verification
+  -> run local Ruff + affected-scope focused tests until green (mandatory pre-audit gate)
+  -> if Fast-Path: main Agent inspects diff against SPEC/scope and completes
+  -> if Standard: freeze pending-review snapshot -> run independent bidirectional audit (exception-only report) -> batch-fix findings -> repair-only re-verify + re-audit
   -> final report
 ```
 
@@ -74,7 +73,7 @@ When translating a design document into SPEC updates, copy only the resulting cu
 
 ## SPEC Delta Decision
 
-Before modifying non-SPEC project files, read the root and relevant module specs plus enough implementation and verification evidence to classify the request.
+Before modifying non-SPEC project files, read the relevant module `SPEC.md` files and the relevant sections of root `SPEC.md` plus enough implementation and verification evidence to classify the request.
 
 A no-SPEC-delta path is allowed only when all of these are true:
 
@@ -86,6 +85,24 @@ A no-SPEC-delta path is allowed only when all of these are true:
 Record the no-SPEC-delta decision before implementation with precise SPEC references, defect evidence, and the boundaries expected to remain unchanged. A user label such as `bugfix` or `no-spec-delta` is not proof and does not control this decision.
 
 If any condition is unproven, current SPEC is missing or wrong, or the requested behavior conflicts with SPEC, a SPEC delta is required. Update the relevant current-fact specs and get user confirmation before modifying non-SPEC project files. Never add artificial SPEC text solely to manufacture a delta.
+
+## Fast-Path Lightweight Channel
+
+A change qualifies for **Fast-Path** only when it requires no SPEC delta (or updates only non-contract release/documentation metadata) and falls strictly within one or more of these bounded categories:
+
+- Pure version bumps or package/release metadata preparation.
+- User/developer documentation, `CHANGELOG`, or release notes updates.
+- Pure test repairs, test isolation adjustments, or cross-platform skip/marker fixes that do not weaken contract assertions.
+- Pure formatting or lint remediation preserving runtime behavior and public exports.
+- Localized `no-SPEC-delta` bug fixes that do NOT touch public interfaces, security or privacy boundaries, session/process/device lifecycle, runtime dependencies, or publication/release permissions.
+
+If any part of the diff touches an excluded boundary or requires a behavioral SPEC delta, Fast-Path is disallowed; use the Standard independent audit lifecycle.
+
+When Fast-Path applies:
+
+1. Complete implementation within the declared scope.
+2. Pass the local pre-review verification gate (pinned Ruff lint/format checks where Python is touched, plus focused tests for affected modules and direct consumers, or equivalent frontend/build checks).
+3. Exempt the independent `Reviewer` subagent: the main Agent (or Tech Lead) directly inspects the exact `git diff` against the recorded SPEC basis and task scope, confirms no excluded boundary was crossed, and proceeds to the final report.
 
 ## Python Architecture Integration
 
@@ -158,7 +175,7 @@ Frontend rules do not create a new user entry point and must not be fetched from
 
 ### New module or feature
 
-1. Read root `SPEC.md` and relevant module `SPEC.md` files.
+1. Read relevant module `SPEC.md` files and relevant sections of root `SPEC.md`.
 2. Read the resolved design document or direct project change request.
 3. Decide which module owns the feature, or whether a new module is needed.
 4. For Python work, choose the Python architecture level and write the rationale into SPEC.
@@ -171,7 +188,7 @@ Frontend rules do not create a new user entry point and must not be fetched from
 
 ### Existing functionality change
 
-1. Read root `SPEC.md` and current module specs for every touched module.
+1. Read current module specs for every touched module and relevant sections of root `SPEC.md`.
 2. Read the resolved design document or direct project change request.
 3. Determine impact: public interface, module contract, internal-only, or cross-module dependency change.
 4. Apply the SPEC delta decision rules.
@@ -215,13 +232,13 @@ Do not add `Testing Contract` or `Design Decisions` as default sections for new 
 
 After required project SPEC confirmation or a recorded no-SPEC-delta decision:
 
-1. Re-read confirmed root/module specs.
+1. Re-read confirmed module specs and relevant root `SPEC.md` sections.
 2. Implement only what the confirmed specs require.
 3. If implementation reveals a missing or wrong SPEC decision, stop and update SPEC first.
 4. Keep edits scoped to affected modules and tests.
 5. For behavior changes, write or update tests before production code unless the user explicitly accepts a generated-code or throwaway exception.
 6. For frontend work, follow the confirmed framework/language contract and the staged frontend implementation rules; do not mix a partial migration into an existing exception.
-7. Run the agreed fast self-checks before handoff, preserving failures. Schedule remaining required verification with the independent audit under the parallel review lifecycle below; no required check is waived.
+7. Pass local Ruff validation and affected-scope focused tests before freezing a snapshot or dispatching Reviewer. Do not launch an independent audit while local checks are still running or failing.
 
 ## Agent Team Orchestration
 
@@ -231,69 +248,48 @@ When the workspace agent team is available, Tech Lead is the coordinator for thi
 2. Use Designer only for actual interaction or design choices, not merely because existing UI, CLI, accessibility, or failure behavior is touched.
 3. Tech Lead owns the SPEC-delta decision and all user confirmation gates. Read-only team output is advisory until persisted in an authorized authoritative file.
 4. After SPEC confirmation or a recorded no-SPEC-delta decision, give Developer one bounded implementation task at a time with exclusive file ownership and required verification.
-5. At pending-review, Tech Lead freezes and identifies the complete audit snapshot below. Give Reviewer a fresh, independent task package that directs it to `.github/skills/spec-implementation-audit/SKILL.md`, the confirmed SPEC versions, authorized task scope, assigned review lane, verification plan/status, and complete artifact identities.
-6. Tech Lead runs verification directly or assigns one bounded verification-only task to Developer after its implementation handoff. That task may execute checks but not modify project inputs or start repairs. Review and verification can run concurrently; Developer still handles only one assigned task at a time.
-7. Join all results, resolve decisions and conflicts, and return one implementation repair batch to the original Developer. Use Reviewer for repair-only follow-up in parallel with affected verification. Tech Lead owns integration validation and the final Done decision.
+5. Before pending-review freeze, require local Ruff lint/format checks and affected-scope focused tests to be completely green. If the change qualifies for Fast-Path above, Tech Lead verifies the diff and targeted checks directly without spawning Reviewer.
+6. For Standard changes, Tech Lead freezes the snapshot (base commit or exact scoped `git diff` plus any in-scope untracked files) after local checks are green, and gives Reviewer a lean, independent task package pointing to `.github/skills/spec-implementation-audit/SKILL.md`, the affected module `SPEC.md` files and relevant root `SPEC.md` sections, authorized task scope, assigned review lane, and passed local verification results. Do not run local tests in parallel with dispatching Reviewer, and do not require Reviewer to read unrelated root `SPEC.md` sections or perform manual byte-size/entry-count/double-hash diff ceremony.
+7. Join audit results, resolve any authority/scope decisions, and return one implementation repair batch to the original Developer. After repairs pass local Ruff and affected focused tests, run repair-only Reviewer follow-up on the repair delta. Tech Lead owns integration validation and the final Done decision.
 
 If custom-agent invocation is unavailable, state that limitation and follow the same role separation directly. Do not pretend delegation occurred, and do not weaken the independent audit requirement.
 
 ## Project Audit Lifecycle
 
-After Developer's fast self-checks and pending-review handoff, freeze the snapshot and start required verification alongside `audit_mode=full` where safe. The first audit independently establishes both the applicable SPEC inventory and the actual behavior inventory from confirmed SPEC inputs and the complete diff. It checks SPEC-to-code correctness and code-to-SPEC grounding/scope. Finding the first blocker must not end the pass, and implementation repair must not begin while any review or verification task is still running.
+Local verification is a strict prerequisite gate, never a parallel background track alongside Reviewer dispatch:
 
-Default scheduling is one combined independent Reviewer using valid existing evidence, with any outstanding verification in parallel where safe. Split into forward and reverse Reviewers only when substantial separate context addresses a concrete SPEC/acceptance-criterion risk that justifies the cost and available agent capabilities permit it. Assign both the same snapshot and explicit complementary coverage. If safe concurrency or agent capacity is unavailable, serialize without dropping a lane or verification obligation, and report the limitation.
+1. Run pinned Ruff lint and format checks (when Python files are touched) and focused tests for affected modules and direct consumers (plus affected frontend typecheck/test/build checks when frontend files are touched).
+2. Do not freeze the audit snapshot or start `Reviewer` until local Ruff and affected-scope focused tests are green.
+3. If the task qualifies for Fast-Path, main Agent/Tech Lead performs direct diff verification against the recorded SPEC basis and scope without spawning an independent Reviewer.
+4. Otherwise, freeze the snapshot and run `audit_mode=full` with one independent combined Reviewer by default. Split into `forward` and `reverse` Reviewers only when substantial separate context addresses a concrete SPEC/acceptance-criterion risk that justifies the cost.
 
-From round 2 onward, use `audit_mode=repair-only`: audit the previous round's finding repairs, including reverse grounding of behaviors introduced by the repair delta. Carry unresolved and repair-introduced findings forward, retain unaffected passing verdicts only with unchanged evidence, and do not rebuild the full inventories or search for unrelated new issues. Freeze each repair batch and run its review alongside affected verification. The audit skill owns the detailed scope and verdict rules.
+The first Standard audit independently checks both SPEC-to-code completeness/correctness and code-to-SPEC grounding/scope across the affected module `SPEC.md` files, relevant root `SPEC.md` sections, and exact diff, emitting an exception-only report (findings, unverified/out-of-scope items, and concise coverage declaration rather than exhaustive per-item pass tables). Finding the first blocker must not end the pass early.
 
-### Verification Scheduling And Join
+From round 2 onward, use `audit_mode=repair-only`: after the repair batch passes local Ruff and affected focused tests, audit only the previous round's finding repairs and reverse grounding of behaviors introduced by the repair delta. Carry unresolved and repair-introduced findings forward without rebuilding full inventories or re-auditing unchanged files.
 
-Local verification targets diff impact: changed behavior, directly affected consumers, and relevant boundary/negative cases. Existing CI owns the full suite and platform matrix; do not routinely duplicate them locally. Map checks to affected SPEC/acceptance criteria and retain every explicitly required verification obligation. Risk follows behavior and boundaries, not line count: a high-risk one-line change can require substantial focused coverage.
+### Local Verification Gate
 
-Agents may autonomously expand local checks, including a full suite, only with a concrete evidence gap and a recorded reason the expansion closes it. For a local full run, explain why focused checks or CI evidence are insufficient and why the full run helps. "For insurance" or "a shared module changed" alone is not enough. Missing specialized CI coverage calls for the relevant targeted check, not automatically a full suite; changing CI configuration still requires task scope and authorization.
+Local verification targets diff impact: pinned Ruff lint/format validation plus focused pytest checks for changed modules, directly affected consumers, and relevant boundary/negative cases (and corresponding frontend/package checks when touched). GitHub Actions CI owns the complete pytest suite and cross-platform matrix; do not routinely run the full pytest suite locally.
 
-Before launching a needed check, record its unique owner, exact command, working directory, tested inputs/snapshot, relevant environment, coverage, and resource/output isolation. Reuse verifiable raw results when those inputs, environment, and coverage still match; link earlier evidence to the frozen snapshot. A change invalidates affected checks, not unrelated proof. Do not repeat a check because a different role is consuming it. The audit skill owns independent evidence assessment and verdicts.
+Agents may expand local checks only with a concrete evidence gap and a recorded reason the expansion closes it. Reuse verifiable raw results when inputs, environment, and coverage still match. Use check modes (`ruff check`, `ruff format --check`), not autofix or snapshot-update modes, once ready to freeze for review. Collect exact commands, exit status, and tested scope so Reviewer can consume the green verification summary and raw evidence without rerunning checks.
 
-Use existing runner concurrency only when tests are isolated. Bound workers to available resources. Checks sharing devices, databases, fixed ports, generated files, or output directories must be isolated or serialized. Use check modes, not autofix, source generation, or snapshot-update modes that alter audit inputs. Builds and tests may write declared isolated outputs, not mutate the frozen source/SPEC/configuration inputs. External or device operations still require their own authorization.
+### Lean Snapshot And Reviewer Input
 
-Isolate test user configuration without discarding reusable download caches by default. Clean-install contracts require a fresh installation environment and source-free execution where the contract demands it; an empty download cache is a separate requirement, not a synonym for a clean install. Reuse must not mask a stale installation or bypass network/organization policy.
+Keep Reviewer inputs minimal and high-signal:
 
-Collect exact commands, exit status, raw output/evidence locations, tested inputs, and `passed|failed|blocked|cancelled` for each check, including matching CI run/commit identity where used. A timeout, missing result, or unavailable environment is not a pass. Reviewers may complete static analysis while checks run; verification-dependent verdicts remain pending until the responsible Reviewer consumes the results.
+1. Identify the snapshot by base commit / commit range or exact scoped `git diff` (for example `git diff <base> -- <allowed-paths>`) plus explicit paths of any in-scope untracked project files. Account for pre-existing user work without overwriting or silently absorbing unrelated changes.
+2. Pass only the affected module `SPEC.md` files and the relevant sections of root `SPEC.md` (such as touched architecture edges or applicable Development Rules), confirmed SPEC delta evidence (or recorded `no-SPEC-delta` basis), authorized task scope, and the already-green local verification commands/results.
+3. Do not force Reviewer to read the entire root `SPEC.md` end-to-end when only specific sections apply, and do not generate temporary diff files solely to manually cross-check byte sizes, `diff --git` entry counts, or pre/post double SHA-256 regeneration ceremonies.
+4. Do not edit in-scope files while Reviewer is running. Before claiming completion, confirm via `git status` / `git diff` that the worktree or commit HEAD still matches the reviewed state and passed local checks.
 
-Wait for all review lanes and verification tasks to finish or explicitly stop them before changing inputs. A blocked/cancelled/incomplete lane prevents a complete aggregate result; restore the missing coverage or report the blocker, rather than issuing a partial repair batch. Completed checks that fail still contribute their full evidence and repairable findings to the aggregate.
+After the audit result returns:
 
-Tech Lead then checks snapshot identity agreement, forward and reverse coverage, and all required verification results. Merge duplicate root causes while preserving lane/source finding IDs and affected items. Resolve contradictory reviewer conclusions with the reviewers, not by selecting the more permissive verdict. Classify findings as implementation, SPEC/human decision, or verification environment. Only after this join and prerequisite decisions may the original Developer receive one consolidated repair batch. No passing lane overrides a failed or incomplete one.
+1. Group open findings by implementation repair, authority/human decision, or verification environment.
+2. Resolve authority/human decisions before starting an implementation repair batch when they can change or prevent that repair.
+3. Repair all in-scope implementation-fixable blocking findings in one batch, re-run local Ruff and affected focused tests until green, and then run `audit_mode=repair-only` on the repair delta.
+4. Repeat until no unresolved blocking findings remain, up to at most two automatic repair rounds. If blocking findings remain after two repair rounds or a round makes no substantive progress, pause and present the open findings, evidence, and concrete human decision options.
 
-### Audit Artifact And Identity Gate
-
-Freeze one review evidence package for the complete change scope: precise confirmed SPEC inputs, actual complete in-scope diff, necessary source context, and verification commands/raw results. Full means the complete change scope, not a repository-wide historical audit. Prefer a complete Git diff or immutable commit range plus a compact identity manifest, not repository copies or repeated semantic reads of unrelated SPEC files.
-
-For the first worktree audit, create the complete in-scope tracked diff as a file directly through Git, such as `git diff HEAD --no-ext-diff --no-textconv --binary --output=<artifact> -- <allowed-paths>`. Include both staged and unstaged changes, declare the base, and account for pre-existing changes without overwriting or silently accepting unrelated user work. For a repair-only pass, create the complete repair delta through Git between the previous audited snapshot and the current snapshot, including new or deleted repair files. Never use terminal-captured stdout or a tool's overflow wrapper as the audit artifact.
-
-Before starting the reviewer:
-
-1. Record the artifact's absolute path, SHA-256, byte size, and `diff --git` entry count.
-2. Record Git's complete changed-path inventory for the declared audit scope and verify its count and paths agree with the artifact.
-3. Verify that no in-scope untracked project file is omitted. Include each such file as a separate complete artifact with its path and SHA-256, or stop as `audit-blocked`.
-4. Give the reviewer the artifact identities and require it to validate them before auditing. A missing, truncated, wrapped, mismatched, or unreadable artifact is `audit-blocked`; do not substitute a live diff or an implementation summary.
-5. For repair-only passes, include the previous independent report and snapshot, map the repair delta to its finding IDs, and verify that code and SPEC evidence outside the repair scope is unchanged. Do not require the reviewer to re-audit unchanged content.
-6. Include exact root and relevant module SPEC content identities and confirmation evidence, the authorized scope, and the necessary frozen source context outside the diff. Use immutable Git object/path references for unchanged inputs; capture only necessary non-immutable inputs completely with their identities. All review lanes and verification tasks must name this same snapshot or explicitly link valid reused evidence to it. Independently check that SPEC edits match what the user confirmed; code and SPEC changing together is not confirmation.
-
-Treat the verified artifact identities as the audit snapshot. Do not intentionally edit its project inputs while any review lane or verification task is running. Use an isolated snapshot only if needed to keep inputs stable, preserving all in-scope tracked/untracked inputs and necessary context; integrity does not require copying the entire repository. After the joined result and immediately before claiming completion, regenerate the worktree artifacts with the same commands and compare their SHA-256 values, path inventory, SPEC identities, and source-context identities with the audited/tested snapshot and inherited evidence. A mismatch blocks completion: re-verify and re-audit affected evidence, or ask for a scope decision if the changes are unrelated. Preserve unaffected coverage; do not automatically restart a full audit. For an audited commit range, record the exact immutable base and head object ids instead of a worktree artifact hash.
-
-Each audit result must declare its mode and review lane and contain precise SPEC references (or explicitly absent grounding), concrete diff evidence, verdicts, repair ownership, complete coverage for its assigned scope, and the full finding status for that scope. The aggregate retains both coverage inventories and all verification statuses. A repair-only report accounts for every previous-round finding and repair-introduced findings, including unresolved findings carried from earlier rounds. Missing required authority inputs, tools, or artifacts permit an early `audit-blocked` result, not a passing verdict or a consumed repair round. User pause and safety/authorization stops under root `AGENTS.md` take precedence over completing a pass; report interrupted coverage as incomplete, never passed.
-
-After the complete result returns:
-
-1. Group all open findings by implementation repair, authority/human decision, or verification environment.
-2. Resolve authority/human decisions and verification-environment blockers before starting an implementation repair batch when they can change or prevent that repair.
-3. Repair all in-scope implementation-fixable blocking findings in one batch. Do not trigger another audit after only a partial repair.
-4. Freeze the entire repair batch and run affected verification alongside independent repair-only review where safe.
-5. Join both results using the previous aggregate report, repair delta, and relevant SPEC evidence. Reverse-check repair-introduced behaviors; do not reopen unrelated passing items or expand the pass into a new full audit.
-6. Repeat repair-only audit, complete repair, and verification rounds until no unresolved blocking findings remain, subject to the repair limit below.
-
-The implementation agent may explain its repair but may not declare audit findings resolved. Only the independent reviewer determines whether each repair satisfies the previous finding. Supply the previous independent report as the follow-up scope, not a persuasive implementation summary.
-
-Run at most two automatic repair rounds; switching to repair-only mode does not reset this count. If the audit after the second repair round still has blocking findings, or one complete repair and re-audit round makes no substantive progress, pause automatic repair and present the complete current finding status, current evidence, attempted repair rounds, reviewer rationale, and concrete human decision options. The findings remain blocking until an allowed decision and any required project SPEC confirmation are complete.
+The implementation agent may explain its repair but may not declare audit findings resolved; in Standard mode only the independent Reviewer closes findings.
 
 ## Consolidated Project Implementation Audit
 
@@ -305,10 +301,10 @@ Before claiming project completion, read and run:
 .github/skills/spec-implementation-audit/SKILL.md
 ```
 
-Audit against the current project authority inputs and actual diff:
+Audit (via independent Reviewer in Standard mode, or main-Agent diff check in Fast-Path) against the applicable project authority inputs and actual diff:
 
 ```text
-root SPEC.md + relevant module SPEC.md files + actual diff
+relevant root SPEC.md sections + affected module SPEC.md files + exact git diff / base commit
 ```
 
 Tests, lint, and summaries are supporting evidence only. They do not replace diff-based SPEC audit.
@@ -319,26 +315,20 @@ If project SPEC itself needs correction, stop project implementation, update and
 
 Do not claim completion while any blocking finding remains. Completion also requires:
 
-- a complete first audit plus complete repair-only coverage of each previous round's findings;
-- complete forward and reverse coverage, including repair-introduced behaviors, with no unresolved grounding or scope gaps;
-- all review lanes and verification tasks joined against the same frozen snapshot, with no pending verification-dependent verdicts or unresolved reviewer conflicts;
-- a matching post-audit artifact identity check linking the current worktree or immutable commit range to that audit chain;
-- the first pass's complete applicable-item inventory, with unaffected passing evidence unchanged;
-- concrete diff evidence and an initial or repair verdict for every item;
-- no unresolved implementation-fixable blocking finding in the carried-forward finding set;
-- required verification passed; failed, missing, cancelled, or unavailable verification remains blocking;
+- local Ruff validation and affected-scope focused tests passed before review/completion;
+- for Fast-Path: qualifying boundary check, direct diff verification against SPEC/scope, and zero excluded-surface changes;
+- for Standard mode: complete bidirectional independent audit (`full` first pass plus `repair-only` coverage of any prior findings) with concise scope declaration and zero unresolved blocking findings;
+- worktree/commit state unchanged since the green local gate and final review;
 - any accepted `needs-human-decision` recorded explicitly.
 
-These gates do not require a new full audit after repairs. Unrelated changes cannot inherit coverage and require a scope decision. They govern Done, not whether Tech Lead can promptly deliver an accurate partial milestone under its role instructions. Pending required CI, review, or external approval remains blocking for the affected completion stage; do not relabel it to ship.
+Pending required CI, external review, or release approval remains blocking for merge/release, without preventing prompt PR creation or milestone reporting when authorized.
 
 ## Required Final Report
 
 End with:
 
-- Input type: confirmed design document or direct project change request.
-- Project specs updated and confirmed, or the no-SPEC-delta decision with precise SPEC and defect evidence.
+- Input type (`confirmed design document` or `direct project change request`) and audit channel (`Fast-Path` or `Standard`).
+- Project specs updated and confirmed, or the `no-SPEC-delta` decision with precise SPEC and defect evidence.
 - Files implemented.
-- Verification commands run and results.
-- Review-lane assignments, concurrency or serialization used, snapshot-matched verification evidence, and the joined forward/reverse coverage result.
-- Audited SPEC inputs, full and repair-only audit identities or exact commit ranges, post-audit identity result, and cumulative finding status. Distinguish the full first pass from later repair-only passes.
-- Complete current finding status, repair rounds performed, and any accepted human decisions.
+- Local verification commands run and results (Ruff + affected-scope focused tests).
+- Audit coverage summary (Fast-Path diff check or Standard Reviewer lane/mode, SPEC sections/files checked, base commit or diff scope) and exception-only finding status (open/resolved findings, unverified or out-of-scope items, repair rounds performed, and any accepted human decisions).

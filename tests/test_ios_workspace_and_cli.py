@@ -47,12 +47,18 @@ def _write_fake_ios_app_bundle(app_dir: Path) -> Path:
     return app_dir
 
 
-def test_ios_workspace_init_and_signing_persistence_without_persisting_udid(tmp_path: Path) -> None:
+def test_ios_workspace_init_and_signing_persistence_without_persisting_udid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     ws_dir = tmp_path / "ios-ws"
     ws_dir.mkdir()
     user_root = tmp_path / "user"
     app_bundle = _write_fake_ios_app_bundle(tmp_path / "Sample.app")
-
+    monkeypatch.setattr(
+        "fsq_agent.environments.providers._runtime.platform.system",
+        lambda: "Darwin",
+    )
     res = initialize_workspace(
         WorkspaceInitializeRequest(
             current_directory=ws_dir,
@@ -140,6 +146,14 @@ def test_ios_doctor_registered_platform_respects_target_id_without_invalid_targe
     ws_dir = tmp_path / "ios-doc-ws"
     ws_dir.mkdir()
     user_root = tmp_path / "user"
+    monkeypatch.setattr(
+        "fsq_agent.environments.providers._runtime.platform.system",
+        lambda: "Darwin",
+    )
+    monkeypatch.setattr(
+        "fsq_agent.environments._service.platform.system",
+        lambda: "Darwin",
+    )
 
     init_res = initialize_workspace(
         WorkspaceInitializeRequest(
@@ -195,6 +209,27 @@ def test_ios_doctor_registered_platform_respects_target_id_without_invalid_targe
     )
     assert selected.platforms[0].target_id == "SIM-UDID-1"
     assert selected.platforms[0].commands.case_test.status == "ready"
+
+
+def test_ios_workspace_init_rejects_non_darwin_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws_dir = tmp_path / "ios-linux-ws"
+    ws_dir.mkdir()
+    monkeypatch.setattr(
+        "fsq_agent.environments.providers._runtime.platform.system",
+        lambda: "Linux",
+    )
+    with pytest.raises(ApplicationError, match="ios platform runtime is unsupported on this host"):
+        initialize_workspace(
+            WorkspaceInitializeRequest(
+                current_directory=ws_dir,
+                platform="ios",
+                bundle_id="com.apple.Preferences",
+                user_config_root=tmp_path / "user",
+            )
+        )
 
 
 @pytest.mark.asyncio

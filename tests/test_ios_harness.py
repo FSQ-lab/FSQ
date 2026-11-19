@@ -631,6 +631,7 @@ def test_ios_deterministic_assertions_and_visual_ai_parity(tmp_path: Path) -> No
     assert open_res.artifact_refs[0].metadata["capture"]["pointer_mapping_state"] == "unverified"
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_ios_inspect_with_ai_projects_ios_platform_and_candidates(tmp_path: Path) -> None:
     from fsq_agent.models import AIVisualCandidate, AIVisualInspectionResult, AndroidVisualAssertionPolicy, IOSInspectWithAIParams, VisualImageBounds
 

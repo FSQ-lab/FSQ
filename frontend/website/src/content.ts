@@ -27,6 +27,7 @@ export const websiteContent = {
   logo: { source: logoUrl, alt: 'FSQ — Fully Self Quality' },
   navigation: {
     label: 'Main navigation', home: 'FSQ website home', workflow: 'How it works',
+    benchmarks: 'Benchmarks',
     setup: 'Try FSQ', repository: 'GitHub repository',
   },
   skipLink: 'Skip to content',

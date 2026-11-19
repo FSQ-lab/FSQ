@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { websiteContent as content } from './content';
+import { BenchmarkSection } from './BenchmarkSection';
 
 const externalLinkProps = { target: '_blank', rel: 'noreferrer' } as const;
 function Arrow() { return <span aria-hidden="true">↗</span>; }
@@ -90,7 +91,7 @@ export function WebsiteApp() {
       <header className="site-header shell">
         <a className="brand" href={content.canonicalUrl} aria-label={content.navigation.home}><img src={content.logo.source} alt={content.logo.alt} width="400" height="120" /></a>
         <nav aria-label={content.navigation.label}>
-          <a href="#workflow">{content.navigation.workflow}</a><a href="#setup">{content.navigation.setup}</a>
+          <a href="#workflow">{content.navigation.workflow}</a><a href="#benchmarks">{content.navigation.benchmarks}</a><a href="#setup">{content.navigation.setup}</a>
           <a href={content.links.repository} {...externalLinkProps}>{content.navigation.repository} <Arrow /></a>
         </nav>
       </header>
@@ -115,6 +116,7 @@ export function WebsiteApp() {
             ))}
           </div>
         </section>
+        <BenchmarkSection />
         <section className="section shell setup" id="setup" aria-labelledby="setup-title">
           <p className="section-label">{content.setup.label}</p><h2 id="setup-title">{content.setup.title}</h2>
           <p className="section-intro">{content.setup.introduction} <a href={content.links.prerequisites} {...externalLinkProps}>Check prerequisites <Arrow /></a></p>

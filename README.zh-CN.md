@@ -17,6 +17,7 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11 或更高版本"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT 许可证"></a>
   <img src="https://img.shields.io/badge/status-alpha-orange" alt="Alpha 状态">
+  <a href="https://github.com/FSQ-lab/benchmarks/tree/main/androidworld"><img src="https://img.shields.io/badge/AndroidWorld-95.69%25%20%28111%2F116%29-brightgreen" alt="AndroidWorld：95.69%（111/116）"></a>
 </p>
 
 <p align="center">
@@ -110,6 +111,27 @@ Web 是便于开始的试用选项；视频录制的是 Android。选择浏览�
 - **另行选择确定性重放：**原样审查返回的 Case 后，再单独请求 Strict Replay。重放会再次操作目标，需检查前置条件与副作用；Quick Test 不会自动重放。
 
 FSQ 支持 Web、Android、Windows 和 macOS 目标，请查看[平台前置条件](docs/platform-prerequisites.md)。
+
+## 基准测评
+
+已冻结的 AndroidWorld 实验 `full116-33113e4`：
+
+| 指标 | 结果 |
+| --- | --- |
+| 任务成功率（pass@1） | **95.69%（111/116 个任务）** |
+| 无效结果 | **0** |
+| 整题重试 | **0** |
+
+冻结版本：FSQ `33113e4` · appium-connect-agent `9d197f1` · AndroidWorld `668267e` · seed `30` · 客户端选择的模型 `gpt-6.1-sol`。
+
+- **单一配置模型：**规划、执行、验证和视觉检查均使用同一选定模型，包含多次独立推理调用，并非单次请求。
+- **仅通用 Skill：**使用两个通用 Skill，不使用测试应用专属 Skill。
+- **严格写入预算：**每题最多 `int(10 × complexity)` 次获准的 Harness 写入派发；失败派发照扣，被拒绝的派发不计费，读取与断言不计入。
+- **披露评分契约：**113 项原版任务，加上 `001`、`014`、`076` 三项 task-contract 修正；采用 mode B 外层单次结算，每题仅尝试一次。
+
+这**不是未经修改的上游或 stock-strict 官方榜单成绩**。各题使用独立 Workspace，不加载跨题知识，但共享模拟器和 host。模型身份仅由客户端选择，未经 Provider 认证；历史服务 birth-anchor 审计尚不完整。范围与限制见 [METHOD](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md)。
+
+[英文报告](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.md) · [中文报告](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.zh-CN.md) · [完整 ZIP 证据（Release）](https://github.com/FSQ-lab/benchmarks/releases/tag/androidworld-2026-11-19) · [结果 CSV](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/results.csv) · [官网基准测评](https://fsq-lab.github.io/FSQ/#benchmarks)
 
 ## 一起完善 FSQ
 

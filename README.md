@@ -17,6 +17,7 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11 or newer"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/status-alpha-orange" alt="Alpha status">
+  <a href="https://github.com/FSQ-lab/benchmarks/tree/main/androidworld"><img src="https://img.shields.io/badge/AndroidWorld-95.69%25%20%28111%2F116%29-brightgreen" alt="AndroidWorld: 95.69% (111/116)"></a>
 </p>
 
 <p align="center">
@@ -110,6 +111,27 @@ After the run, inspect the report and captured page evidence. Treat failed, inco
 - **Choose deterministic replay:** review any returned Case unchanged, then separately request Strict Replay. Replay operates the target again and requires prerequisite and side-effect checks; Quick Test never runs it automatically.
 
 FSQ supports Web, Android, Windows, and macOS targets, subject to [platform prerequisites](docs/platform-prerequisites.md).
+
+## Benchmarks
+
+Frozen AndroidWorld campaign `full116-33113e4`:
+
+| Metric | Result |
+| --- | --- |
+| Task success (pass@1) | **95.69% (111/116 tasks)** |
+| Invalid results | **0** |
+| Whole-task retries | **0** |
+
+Frozen versions: FSQ `33113e4` · appium-connect-agent `9d197f1` · AndroidWorld `668267e` · seed `30` · client-selected `gpt-6.1-sol`.
+
+- **One configured model:** planning, execution, verification, and visual inspection use the same selected model across separate inference calls—not one request.
+- **Generic skills only:** two general-purpose skills; no test-app-specific skills.
+- **Strict write budget:** `int(10 × complexity)` admitted Harness write dispatches per task; failed dispatches count, rejected dispatches do not; reads and assertions are excluded.
+- **Disclosed grading contract:** 113 original tasks plus task-contract corrections for `001`, `014`, and `076`; mode B outer-single-settlement, one whole-task attempt.
+
+This is **not an unmodified-upstream or stock-strict leaderboard result**. Task Workspaces are separate, with no loaded cross-task knowledge, but share an emulator and host. Model identity is client-selected, not provider-attested; the historical service birth-anchor audit is incomplete. See [METHOD](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md) for scope and limitations.
+
+[English report](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.md) · [中文报告](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.zh-CN.md) · [Full ZIP evidence (Release)](https://github.com/FSQ-lab/benchmarks/releases/tag/androidworld-2026-11-19) · [Results CSV](https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/results.csv) · [Website benchmarks](https://fsq-lab.github.io/FSQ/#benchmarks)
 
 ## Help shape FSQ
 

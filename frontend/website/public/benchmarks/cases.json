@@ -1,0 +1,199 @@
+{
+  "schema_version": 1,
+  "benchmark": "AndroidWorld",
+  "campaign": "full116-33113e4",
+  "score": {
+    "reward": 111.0,
+    "tasks": 116,
+    "percent": 95.69,
+    "invalid": 0,
+    "whole_task_retries": 0
+  },
+  "evidence_repository": "https://github.com/FSQ-lab/benchmarks",
+  "report_en": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.md",
+  "report_zh": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/README.zh-CN.md",
+  "method": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md",
+  "results": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/results.csv",
+  "release": "https://github.com/FSQ-lab/benchmarks/releases/tag/androidworld-2026-11-19",
+  "required_disclosure": "Three task-contract corrections (001,014,076); not an unmodified upstream or stock-strict leaderboard result. No test-app-specific skills; two generic skills. Separate workspaces with no loaded cross-task knowledge; shared emulator and host identity. Client model identity only. Historical service birth-anchor audit incomplete.",
+  "cases": [
+    {
+      "index": 13,
+      "name": "ExpenseAddMultipleFromGallery",
+      "reward": 1.0,
+      "goal": "Add the expenses from expenses.jpg in Simple Gallery Pro to pro expense.",
+      "complexity": 6,
+      "writes": 44,
+      "maximum": 60,
+      "failed": 0,
+      "evaluatorCalls": 1,
+      "apps": [
+        "Simple Gallery Pro",
+        "Pro Expense"
+      ],
+      "highlight_en": "Read three expenses from an image, enter them across apps, and check saved records.",
+      "highlight_zh": "从图片读取三笔支出，跨应用录入并回查保存结果。",
+      "task_id": "013-ExpenseAddMultipleFromGallery",
+      "index_base": 0,
+      "image": "013-ExpenseAddMultipleFromGallery.webp",
+      "image_bytes": 72878,
+      "image_dimensions": [
+        1080,
+        2400
+      ],
+      "image_source": "Representative recorded observation, not necessarily the last frame",
+      "single_model": "gpt-6.1-sol via GitHub Copilot; client-selected model across planning, execution, verification and visual inspection",
+      "budget_note": "Admitted Android harness write-capability dispatches, including failed writes and app launches; reads and assertions excluded; input_text is composite",
+      "protocol": "mode B outer-single-settlement; one whole-task attempt; no whole-task retries",
+      "disclosure_url": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md"
+    },
+    {
+      "index": 46,
+      "name": "RecipeAddMultipleRecipesFromImage",
+      "reward": 1.0,
+      "goal": "Add the recipes from recipes.jpg in Simple Gallery Pro to the Broccoli recipe app.",
+      "complexity": 6,
+      "writes": 56,
+      "maximum": 60,
+      "failed": 1,
+      "evaluatorCalls": 1,
+      "apps": [
+        "Simple Gallery Pro",
+        "Broccoli"
+      ],
+      "highlight_en": "Turn text in a recipe image into three structured recipes; this is not food-photo recognition.",
+      "highlight_zh": "将菜谱图片文字转为三份结构化菜谱，不是菜肴照片识别。",
+      "task_id": "046-RecipeAddMultipleRecipesFromImage",
+      "index_base": 0,
+      "image": "046-RecipeAddMultipleRecipesFromImage.webp",
+      "image_bytes": 88590,
+      "image_dimensions": [
+        1080,
+        2400
+      ],
+      "image_source": "Representative recorded observation, not necessarily the last frame",
+      "single_model": "gpt-6.1-sol via GitHub Copilot; client-selected model across planning, execution, verification and visual inspection",
+      "budget_note": "Admitted Android harness write-capability dispatches, including failed writes and app launches; reads and assertions excluded; input_text is composite",
+      "protocol": "mode B outer-single-settlement; one whole-task attempt; no whole-task retries",
+      "disclosure_url": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md"
+    },
+    {
+      "index": 60,
+      "name": "RetroPlaylistDuration",
+      "reward": 1.0,
+      "goal": "Create a playlist in Retro Music titled \"Reggae Rhythms 51\" with a duration between 45 and 50 minutes using the provided songs.",
+      "complexity": 3,
+      "writes": 30,
+      "maximum": 30,
+      "failed": 2,
+      "evaluatorCalls": 1,
+      "apps": [
+        "Retro Music"
+      ],
+      "highlight_en": "Save a seven-song playlist lasting 46:29 within the requested 45–50 minute interval.",
+      "highlight_zh": "创建七首、46:29的歌单，满足45–50分钟约束。",
+      "task_id": "060-RetroPlaylistDuration",
+      "index_base": 0,
+      "image": "060-RetroPlaylistDuration.webp",
+      "image_bytes": 34602,
+      "image_dimensions": [
+        1080,
+        2400
+      ],
+      "image_source": "Representative recorded observation, not necessarily the last frame",
+      "single_model": "gpt-6.1-sol via GitHub Copilot; client-selected model across planning, execution, verification and visual inspection",
+      "budget_note": "Admitted Android harness write-capability dispatches, including failed writes and app launches; reads and assertions excluded; input_text is composite",
+      "protocol": "mode B outer-single-settlement; one whole-task attempt; no whole-task retries",
+      "disclosure_url": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md"
+    },
+    {
+      "index": 27,
+      "name": "MarkorCreateNoteAndSms",
+      "reward": 1.0,
+      "goal": "Create a new note in Markor named fair_ant_XOdi.txt with the following text: Actions speak louder than words.. Share the entire content of the note with the phone number +13192815309 via SMS using Simple SMS Messenger",
+      "complexity": 1.8,
+      "writes": 18,
+      "maximum": 18,
+      "failed": 1,
+      "evaluatorCalls": 1,
+      "apps": [
+        "Markor",
+        "Simple SMS Messenger"
+      ],
+      "highlight_en": "Save a note and share its exact text by SMS; sent does not mean delivered to a recipient.",
+      "highlight_zh": "保存笔记并跨应用分享为短信；已发送不代表对端已送达。",
+      "task_id": "027-MarkorCreateNoteAndSms",
+      "index_base": 0,
+      "image": "027-MarkorCreateNoteAndSms.webp",
+      "image_bytes": 74134,
+      "image_dimensions": [
+        1080,
+        2400
+      ],
+      "image_source": "Representative recorded observation, not necessarily the last frame",
+      "single_model": "gpt-6.1-sol via GitHub Copilot; client-selected model across planning, execution, verification and visual inspection",
+      "budget_note": "Admitted Android harness write-capability dispatches, including failed writes and app launches; reads and assertions excluded; input_text is composite",
+      "protocol": "mode B outer-single-settlement; one whole-task attempt; no whole-task retries",
+      "disclosure_url": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md"
+    },
+    {
+      "index": 91,
+      "name": "SportsTrackerTotalDistanceForCategoryOverInterval",
+      "reward": 1.0,
+      "goal": "What was the total distance covered for kayaking activities in the OpenTracks app from October 09 2023 to October 10 2023? Express your answer as a single number in meters rounded to the nearest integer.",
+      "complexity": 2,
+      "writes": 19,
+      "maximum": 20,
+      "failed": 0,
+      "evaluatorCalls": 1,
+      "apps": [
+        "OpenTracks"
+      ],
+      "highlight_en": "Filter kayaking activities by date and sum two distances to 6510 meters; the image shows one contributing record.",
+      "highlight_zh": "按日期筛选皮划艇活动并合计6510米；代表图是一条参与汇总的明细。",
+      "task_id": "091-SportsTrackerTotalDistanceForCategoryOverInterval",
+      "index_base": 0,
+      "image": "091-SportsTrackerTotalDistanceForCategoryOverInterval.webp",
+      "image_bytes": 86284,
+      "image_dimensions": [
+        1080,
+        2400
+      ],
+      "image_source": "Representative recorded observation, not necessarily the last frame",
+      "single_model": "gpt-6.1-sol via GitHub Copilot; client-selected model across planning, execution, verification and visual inspection",
+      "budget_note": "Admitted Android harness write-capability dispatches, including failed writes and app launches; reads and assertions excluded; input_text is composite",
+      "protocol": "mode B outer-single-settlement; one whole-task attempt; no whole-task retries",
+      "disclosure_url": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md"
+    },
+    {
+      "index": 2,
+      "name": "BrowserDraw",
+      "reward": 1.0,
+      "goal": "Open the file task.html in Downloads in the file manager; when prompted open it with Chrome. Then create a drawing using the three colors shown at the top and hit submit.",
+      "complexity": 2,
+      "writes": 19,
+      "maximum": 20,
+      "failed": 0,
+      "evaluatorCalls": 1,
+      "apps": [
+        "Files",
+        "Chrome"
+      ],
+      "highlight_en": "Use three requested colors on a local browser canvas and submit to receive Success; the drawing is simple lines.",
+      "highlight_zh": "在本地浏览器画布使用三种指定颜色并提交获得Success，画作是简单线条。",
+      "task_id": "002-BrowserDraw",
+      "index_base": 0,
+      "image": "002-BrowserDraw.webp",
+      "image_bytes": 43050,
+      "image_dimensions": [
+        1080,
+        2400
+      ],
+      "image_source": "Representative recorded observation, not necessarily the last frame",
+      "single_model": "gpt-6.1-sol via GitHub Copilot; client-selected model across planning, execution, verification and visual inspection",
+      "budget_note": "Admitted Android harness write-capability dispatches, including failed writes and app launches; reads and assertions excluded; input_text is composite",
+      "protocol": "mode B outer-single-settlement; one whole-task attempt; no whole-task retries",
+      "disclosure_url": "https://github.com/FSQ-lab/benchmarks/blob/main/androidworld/METHOD.md"
+    }
+  ]
+}

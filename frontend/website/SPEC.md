@@ -32,6 +32,12 @@ The Website does not execute FSQ, collect credentials or visitor input, replace 
 - The demonstration initially shows a repository-owned 16:9 real-device/execution poster, an accessible play button, and a duration label. Activating the button replaces the poster in place with native HTML video controls for playback, pause, seeking, and fullscreen where supported. The player uses the approved external GitHub video attachment and same-origin captions; no external video URL is assigned to a loading element before activation, and there is no page-load autoplay or third-party iframe/player library.
 - Explicit GitHub-video and YouTube links remain available independently of playback. Loading and playback errors expose nearby status or fallback guidance without hiding those links or the rest of the page. Playback start is claimed only after the browser confirms playback; rejected playback leaves native/manual controls usable.
 - Primary project links use `FSQ-lab/FSQ`; `microsoft/FSQ` is not presented as the canonical project.
+- Navigation includes `Benchmarks` linking to `#benchmarks`. The AndroidWorld benchmark section follows `How it works` and precedes `Try FSQ`, retaining the warm-white, pale-green, deep-green visual system and the existing Quick Test journey.
+- The benchmark result is `95.69% (111 / 116 tasks, pass@1)` with `0 invalid · 0 task retries`. Its frozen experiment identifies FSQ `33113e4`, appium-connect-agent `9d197f1`, AndroidWorld `668267e`, `seed=30`, and client-selected `gpt-6.1-sol`.
+- Four evidence-linked explanations cover Single-Model Architecture (Not Multi-Model), Zero App-Specific Skills, Strict Step Budget & True `pass@1`, and Transparent Upstream Grading. Planning, execution, internal verification, and `inspect_with_ai` use the same configured model without a dedicated grounding or verification model. Two generic skills, not app-specific cards or scripts, are loaded. Each task has the `int(10 × complexity)` admitted Harness write-action cap; admitted writes remain charged on failure, denied dispatches consume no admission, reads/assertions are excluded, and composite text entry is one dispatch. Separate task Workspaces load no cross-task knowledge; they share the emulator and host identity. These statements do not claim no benchmark-informed generic guidance or one inference call.
+- Grading disclosures identify 113 unchanged upstream tasks and three task-contract corrections (`001`, `014`, `076`), mode B outer-single-settlement, one whole-task attempt, and no whole-task retries. The result is not described as an unmodified-upstream or stock-strict leaderboard score. Method links expose client-only model identity and incomplete historical service birth-anchor audit rather than implying those limitations are resolved.
+- Six featured full-reward cases (`013`, `046`, `060`, `027`, `091`, `002`) use the reviewed handoff's WebP observations, original task goals, and admitted/max write counts. A responsive semantic card grid links each screenshot to its full-size same-origin image; captions identify representative observations rather than final-state or standalone grading proof. The playlist duration `46:29` and sports-distance answer `6,510 m` remain evidence-backed case details.
+- The evidence repository card links to `https://github.com/FSQ-lab/benchmarks`, English `androidworld/README.md`, Chinese `androidworld/README.zh-CN.md`, `androidworld/METHOD.md`, `androidworld/results.csv`, and Release tag `androidworld-2026-11-19`. It directs readers to all 116 tasks and five non-passing case analyses. Links are normal user-initiated navigation, not runtime API calls; public publication requires the evidence destinations to be available.
 
 ## Data And State Flow
 
@@ -49,6 +55,7 @@ The Website does not execute FSQ, collect credentials or visitor input, replace 
 - `src/content.ts`: Typed copy, canonical destinations, and replaceable media metadata.
 - `src/styles.css`: Light visual system, responsive layout, focus, reduced-motion, and print-safe rules.
 - `src/WebsiteApp.test.tsx`: Focused content, hierarchy, navigation, copy-feedback, and no-tracking contract tests.
+- `public/benchmarks/`: Reviewed WebP case observations and their `cases.json` provenance, copied from the approved evaluation handoff; assets resolve under the configured `/FSQ/` base path.
 
 ## Frontend Architecture
 
@@ -77,12 +84,13 @@ The Website does not execute FSQ, collect credentials or visitor input, replace 
 - Browser network and storage inspection confirms no project-added tracking, remote font, external video request before activation, third-party player, project-owned cookie, visitor storage, or visitor-data submission. Player checks cover activation, native controls, loading, captions, playback rejection/error fallback, and external viewing links.
 - Link verification covers the canonical repository, both setup paths, English and Chinese getting started, prerequisites, support/stability, security, contribution, Star/feedback destinations, both media destinations, and license.
 - Published media follows `docs/media/media-acceptance.md`, has reviewed provenance and privacy, and remains understandable without audio.
+- Benchmark checks cover exact campaign metrics and versions, disclosure visibility, evidence destinations, six matching case goals/write counts/images, keyboard-accessible full-size image links, narrow-screen reflow, and complete production assets below `/FSQ/`. English and Chinese README benchmark summaries retain equivalent result scope and evidence destinations.
 
 ## Current Invariants
 
 - The page is an English-first static introduction site, not an online FSQ execution surface or documentation portal.
 - Public claims preserve alpha status, conditional Case generation, separate replay choice, platform prerequisites, local-evidence privacy risk, and configured-Provider input boundaries.
 - Coding Agent and FSQ UI remain equal alternative entry paths with consistent headings and actions; order never implies a required sequence.
-- No credential field, contact form, account workflow, analytics, personalization, testimonial, benchmark, pricing, or automatic third-party embed appears.
+- No credential field, contact form, account workflow, analytics, personalization, testimonial, pricing, or automatic third-party embed appears. Official benchmarks are permitted only with verified public evidence, frozen experiment identity, material limitations, and complete methodology/report links; benchmark presentation adds no tracking or visitor-data submission.
 - Generated Website output remains untracked, deployment-only, and isolated from Control Plane and Python package output.
 - Replacing demonstration media requires an approved asset and synchronized source, alternative text, caption, destination, and provenance metadata.

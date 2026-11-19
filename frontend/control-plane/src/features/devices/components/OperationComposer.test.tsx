@@ -60,6 +60,15 @@ it('keeps an unavailable Android visual obligation visible without claiming it i
   expect(screen.getByText('AI assertion').parentElement).not.toHaveTextContent('Not required');
 });
 
+it('keeps an unavailable macOS visual obligation visible without claiming it is absent', () => {
+  render(<OperationComposer macos mode="strict" goal="" casePath="canvas.fsq.yaml" cases={[{
+    path: 'canvas.fsq.yaml', id: 'canvas', name: 'Canvas appearance', platform: 'macos', commandCount: 1,
+    requiresAiAssertion: true, validationStatus: 'validated', selectable: true, diagnostics: [],
+  }]} casesState="ready" readiness={{...ready, platformId:'macos', prerequisites:[], commands:{caseCreate:{status:'unavailable',message:'Provider unavailable',action:''},caseTest:{status:'ready',message:'Ready',action:''}}, provider:{status:'unavailable',message:'Provider unavailable',action:''}}} discoveryLoading={false} canStart primaryInputRef={createRef()} onModeChange={vi.fn()} onGoalChange={vi.fn()} onCaseChange={vi.fn()} onStart={vi.fn()} />);
+  expect(screen.getByText('AI assertion').parentElement).toHaveTextContent(/unverified/);
+  expect(screen.getByText('AI assertion').parentElement).not.toHaveTextContent('Not required');
+});
+
 it('shows selectable strict cases in an expandable file tree', async () => {
   const onCaseChange = vi.fn();
   render(<OperationComposer mode="strict" goal="" casePath="recorded.codex2.yaml" cases={[

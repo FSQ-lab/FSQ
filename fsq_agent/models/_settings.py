@@ -210,9 +210,25 @@ class MacOSHarnessSettings(BaseModel):
     backend: Literal["appium_connect_agent"] = "appium_connect_agent"
     page_source_max_depth: int = Field(default=12, ge=1)
     action_timeout_seconds: int = Field(default=10, ge=1)
-    new_command_timeout_seconds: int = Field(default=300, ge=1)
+    new_command_timeout_seconds: float | None = Field(default=900.0, ge=0, le=86_400, allow_inf_nan=False)
     _bundle_id: str | None = PrivateAttr(default=None)
     _app_path: Path | None = PrivateAttr(default=None)
+    _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)
+
+    @property
+    def visual_assertion_policy(self) -> AndroidVisualAssertionPolicy:
+        return self._visual_assertion_policy
+
+    @visual_assertion_policy.setter
+    def visual_assertion_policy(self, value: AndroidVisualAssertionPolicy) -> None:
+        self._visual_assertion_policy = AndroidVisualAssertionPolicy.model_validate(value)
+
+    @field_validator("new_command_timeout_seconds", mode="before")
+    @classmethod
+    def validate_new_command_timeout(cls, value: Any) -> float | None:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise ValueError("new_command_timeout_seconds must be a finite nonnegative number or None")
+        return value
 
     @property
     def bundle_id(self) -> str | None:

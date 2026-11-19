@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 from xml.etree import ElementTree
@@ -238,25 +239,28 @@ def test_title_is_preserved_and_supported_by_locators() -> None:
     AppiumConnectMacOSDriver(session=target_session).assert_visible(MacOSAssertVisibleParams(target=title))
     assert f'title == "{title}"' in target_session.calls[0][1]
 
-    with pytest.raises(ConfigurationError) as error:
-        AppiumConnectMacOSDriver(session=SessionStub([ElementStub("a", title=title), ElementStub("b", title=title)], source=source)).assert_visible(MacOSAssertVisibleParams(target=title))
-    assert error.value.context["candidates"][0]["display"]["title"] == title[:50]
-    assert error.value.context["candidates"][0]["locator"]["title"] == title
+    amb_result = AppiumConnectMacOSDriver(session=SessionStub([ElementStub("a", title=title), ElementStub("b", title=title)], source=source)).assert_visible(MacOSAssertVisibleParams(target=title))
+    assert amb_result["status"] == "failed"
+    assert amb_result["failure_category"] == "target_resolution_error"
+    assert amb_result["metadata"]["resolution_reason"] == "ambiguous"
+    assert amb_result["metadata"]["candidates"][0]["display"]["title"] == title[:50]
+    assert amb_result["metadata"]["candidates"][0]["locator"]["title"] == title
 
 
 def test_ambiguous_locator_never_claims_visible() -> None:
     driver = AppiumConnectMacOSDriver(session=SessionStub([ElementStub("a"), ElementStub("b")]))
-    with pytest.raises(ConfigurationError) as error:
-        driver.assert_visible(MacOSAssertVisibleParams(target="same"))
-    assert error.value.context["resolution_reason"] == "ambiguous"
+    result = driver.assert_visible(MacOSAssertVisibleParams(target="same"))
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "target_resolution_error"
+    assert result["metadata"]["resolution_reason"] == "ambiguous"
 
 
 def test_backend_error_not_disguised_as_missing_target() -> None:
     driver = AppiumConnectMacOSDriver(session=SessionStub(error=RuntimeError("SECRET backend body")))
-    with pytest.raises(ConfigurationError) as error:
-        driver.assert_visible(MacOSAssertVisibleParams(target="shoe"))
-    assert error.value.context["resolution_reason"] == "backend_error"
-    assert "SECRET" not in str(error.value)
+    result = driver.assert_visible(MacOSAssertVisibleParams(target="shoe"))
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "action_error"
+    assert "SECRET" not in json.dumps(result)
 
 
 def test_tree_clipping_is_explicit() -> None:
@@ -268,19 +272,20 @@ def test_tree_clipping_is_explicit() -> None:
 
 
 @pytest.mark.parametrize(
-    ("exc", "reason"),
+    ("exc", "expected_category", "expected_key", "expected_val"),
     [
-        (ElementValidationError("invalid_argument", "private selector"), "invalid_locator"),
-        (InvalidSessionStateError("session_closed", "private session"), "session_unavailable"),
-        (CommandError("command_failed", "private response"), "backend_error"),
+        (ElementValidationError("invalid_argument", "private selector"), "configuration_error", "resolution_reason", "invalid_locator"),
+        (InvalidSessionStateError("session_closed", "private session"), "action_error", "reason", "session_unavailable"),
+        (CommandError("command_failed", "private response"), "action_error", "backend_code", "command_failed"),
     ],
 )
-def test_backend_failure_classification(exc: Exception, reason: str) -> None:
+def test_backend_failure_classification(exc: Exception, expected_category: str, expected_key: str, expected_val: str) -> None:
     session = SessionStub(error=exc)
-    with pytest.raises(ConfigurationError) as error:
-        AppiumConnectMacOSDriver(session=session).assert_visible(MacOSAssertVisibleParams(target="shoe"))
-    assert error.value.context == {"resolution_reason": reason}
-    assert "private" not in str(error.value)
+    result = AppiumConnectMacOSDriver(session=session).assert_visible(MacOSAssertVisibleParams(target="shoe"))
+    assert result["status"] == "failed"
+    assert result["failure_category"] == expected_category
+    assert result["metadata"][expected_key] == expected_val
+    assert "private" not in json.dumps(result)
 
 
 def test_no_session_is_distinct() -> None:
@@ -411,7 +416,8 @@ def test_live_element_failures_keep_session_reason(stage: str) -> None:
         "geometry": (driver.right_click_on, MacOSRightClickOnParams(target="one")),
         "click": (driver.click_on, MacOSClickOnParams(target="one")),
     }[stage]
-    with pytest.raises(ConfigurationError) as error:
-        method(params)
-    assert error.value.context == {"resolution_reason": "session_unavailable"}
-    assert "private" not in str(error.value)
+    result = method(params)
+    assert result["status"] == "failed"
+    assert result["failure_category"] == "action_error"
+    assert result["metadata"]["reason"] == "session_unavailable"
+    assert "private" not in json.dumps(result)

@@ -227,7 +227,7 @@ class AIAssertionEvaluator:
         self._evaluation_lock = threading.Lock()
 
     def evaluate(self, request: AIAssertionRequest, *, cancellation_check: Callable[[], None] | None = None) -> AIAssertionResult:
-        if request.platform in {"android", "ios"}:
+        if request.platform in {"android", "ios", "macos"}:
             return self._evaluate_android(request, cancellation_check=cancellation_check)
         started = time.perf_counter()
         failed = False
@@ -408,17 +408,19 @@ class AIAssertionEvaluator:
         token_usage: dict[str, int] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AIAssertionResult:
+        platform_label = "iOS" if request.platform == "ios" else "macOS" if request.platform == "macos" else "Android"
+        default_unverified = f"{platform_label} visual assertion is unverified."
         return AIAssertionResult(
             status=outcome,
             outcome=outcome,
-            explanation=explanation or "Android visual assertion is unverified.",
+            explanation=explanation or default_unverified,
             confidence=confidence,
             provider=self.session.provider,
             model=self.session.model,
             latency_ms=int((time.monotonic() - started) * 1000),
             token_usage=token_usage or {},
             artifact_refs=[request.screenshot_artifact_ref] if request.screenshot_artifact_ref else [],
-            error="Android visual assertion is unverified." if error_code else None,
+            error=default_unverified if error_code else None,
             error_code=error_code,
             deterministic_conflict=deterministic_conflict,
             capture=request.capture,
@@ -539,7 +541,7 @@ class AIAssertionEvaluator:
             raise _AndroidInputError("capture_failed") from None
 
     def _android_input(self, request: AIAssertionRequest, image: bytes) -> ModelRequest[_AndroidAssertionOutput]:
-        platform_label = "iOS" if request.platform == "ios" else "Android"
+        platform_label = "iOS" if request.platform == "ios" else "macOS" if request.platform == "macos" else "Android"
         text = (
             f"Evaluate only the supplied {platform_label} image-space visual assertion. Return JSON only with outcome "
             "(passed, failed, or inconclusive), explanation (nonblank), and confidence (0..1 or null). "

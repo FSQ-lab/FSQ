@@ -491,3 +491,54 @@ def test_provider_free_android_case_runs_real_assertion_path_to_inconclusive(tmp
     assert frozen["counts"]["failed"] == 0
     assert "provider_unavailable" in (run / "core-report.md").read_text()
     assert source.read_text().endswith("Logo fills the screen\n")
+
+
+def test_unready_provider_macos_case_runs_real_assertion_path_to_inconclusive(tmp_path, monkeypatch):
+    from fsq_agent.config import Settings
+    from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
+    from fsq_agent.harnesses._macos import MacOSHarness
+
+    source = tmp_path / "visual-macos.fsq.yaml"
+    source.write_text(
+        "schemaVersion: fsq.ai-test/v1\nname: VisualMacOS\nplatform: macos\n---\n- assertWithAI:\n    assertion: The window header is visible\n    surface: appearance\n    full_screen_reason: Header spans window\n"
+    )
+    settings = Settings(harness={"platform": "macos"})
+    settings.agent_runtime.provider = "openai"
+    settings.agent_runtime.model = "gpt-5"
+    settings.workspace.root_dir = tmp_path
+    settings.cases.dir = tmp_path
+    settings.output.runs_dir = tmp_path / ".fsq" / "runs" / "macos"
+    settings.harness.macos.bundle_id = "com.apple.TextEdit"
+    settings.execution.post_action_delay_seconds.platform = 0.0
+    settings.execution.post_action_delay_seconds.common = 0.0
+
+    class OfflineMacDriver(AppiumConnectMacOSDriver):
+        def context(self):
+            return {"session_id": "fixture"}
+
+        def ui_snapshot(self, params=None):
+            return {"xml": "<XCUIElementTypeApplication/>", "coverage": {"status": "complete"}}
+
+        def screenshot(self, params=None):
+            pytest.fail("Unready/unauthorized provider must refuse before screenshot capture")
+
+    monkeypatch.setattr(case_test_module, "require_initialized_workspace", lambda _request: SimpleNamespace(workspace=tmp_path))
+    monkeypatch.setattr(case_test_module, "load_workspace_platform_settings", lambda *_args: settings)
+    monkeypatch.setattr(case_test_module, "_registered_workspace_name", lambda _root: "offline")
+    monkeypatch.setattr(case_test_module, "build_ai_assertion_evaluator", lambda *_args: pytest.fail("Strict mobile/macOS must not construct evaluator eagerly"))
+    monkeypatch.setattr(
+        case_test_module.HarnessFactory,
+        "create_harness",
+        lambda _self, **kwargs: MacOSHarness(
+            driver=OfflineMacDriver(bundle_id="com.apple.TextEdit"),
+            artifact_store=kwargs["artifact_store"],
+            visual_assertion_provider_available=kwargs["harness_settings"].macos.visual_assertion_policy.provider_available,
+        ),
+    )
+    result = case_test_module.execute_case_test(CaseTestRequest(current_directory=tmp_path, platform="macos", case_path=source), suggestion_analyzer_factory=None)
+    assert result.status == "inconclusive"
+    run = settings.output.runs_dir / result.run_id
+    frozen = json.loads((run / "execution-result.json").read_text())
+    assert frozen["outcome"] == frozen["verification"]["status"] == "inconclusive"
+    assert frozen["counts"]["incomplete"] == 1
+    assert frozen["counts"]["failed"] == 0

@@ -7,15 +7,15 @@ const bootstrap: BootstrapResponse = {
   apiVersion: '1.0', platforms: [{ id: 'android', label: 'Android' }, { id: 'web', label: 'Web' }],
   busy: false, activeTask: null,
 };
-const readiness = (platform: 'android' | 'web'): ReadinessResponse => ({
-  ...(platform === 'android' ? {targetId:'android-target',prerequisites:[],commands:{caseCreate:{status:'ready' as const,message:'Ready',action:''},caseTest:{status:'ready' as const,message:'Ready',action:''}},checkedAt:'2026-09-08T00:00:00Z'} : {}),
+const readiness = (platform: 'android' | 'web' | 'macos'): ReadinessResponse => ({
+  ...(platform === 'android' || platform === 'macos' ? {...(platform === 'android' ? {targetId:'android-target'} : {}),prerequisites:[],commands:{caseCreate:{status:'ready' as const,message:'Ready',action:''},caseTest:{status:'ready' as const,message:'Ready',action:''}},checkedAt:'2026-09-08T00:00:00Z'} : {}),
   workspaceName: 'test', platformId: platform,
   platform: { status: 'ready', message: 'ready', action: '' },
   workspace: { status: 'ready', message: 'ready', action: '' }, provider: { status: 'ready', message: 'ready', action: '' },
   target: { status: 'ready', message: 'ready', action: '' }, strict: { status: 'ready', message: 'ready', action: '' },
 });
-const targets = (platform: 'android' | 'web'): TargetsResponse => ({ platform, targetLabel: platform === 'web' ? 'Browser' : 'Device', targets: [{ id: `${platform}-target`, label: `${platform} target`, description: 'ready', status: 'ready', selectable: true, isDefault: true, metadata: {} }] });
-const cases = (platform: 'android' | 'web'): CasesResponse => ({ platform, truncated: false, cases: [{ path: `${platform}.fsq.yaml`, id: platform, name: `${platform} case`, platform, commandCount: 1, requiresAiAssertion: false, validationStatus: 'validated', selectable: true, diagnostics: [] }] });
+const targets = (platform: 'android' | 'web' | 'macos'): TargetsResponse => ({ platform, targetLabel: platform === 'web' ? 'Browser' : platform === 'macos' ? 'Application' : 'Device', targets: [{ id: `${platform}-target`, label: `${platform} target`, description: 'ready', status: 'ready', selectable: true, isDefault: true, metadata: {} }] });
+const cases = (platform: 'android' | 'web' | 'macos'): CasesResponse => ({ platform, truncated: false, cases: [{ path: `${platform}.fsq.yaml`, id: platform, name: `${platform} case`, platform, commandCount: 1, requiresAiAssertion: false, validationStatus: 'validated', selectable: true, diagnostics: [] }] });
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
 const runSnapshot = (requestId = 'request-1', platform: 'android' | 'web' = 'android') => ({
@@ -457,6 +457,30 @@ it('allows Android Strict with an unverified visual obligation while Explore sti
 
   act(() => result.current.setCasePath('free.fsq.yaml'));
   expect(result.current.canStart).toBe(true);
+  act(() => result.current.setMode('explore'));
+  act(() => result.current.setGoal('Verify the canvas'));
+  expect(result.current.canStart).toBe(false);
+});
+
+it('allows macOS Strict with an unverified visual obligation while Explore still needs Provider', async () => {
+  const macosPlatforms = [{ id: 'macos' as const, label: 'macOS' }, ...bootstrap.platforms];
+  const unavailableProvider = { ...readiness('macos'), commands: { caseCreate: { status: 'unavailable' as const, message: 'setup', action: 'configure' }, caseTest: { status: 'ready' as const, message: 'Ready', action: '' } }, provider: { status: 'unavailable' as const, message: 'setup', action: 'configure' } };
+  const baseCase = cases('macos').cases[0];
+  const providerCases = { ...cases('macos'), cases: [{ ...baseCase, path: 'gated.fsq.yaml', requiresAiAssertion: true }, { ...baseCase, path: 'free.fsq.yaml' }] };
+  const client = {
+    bootstrap: vi.fn().mockResolvedValue({ ...bootstrap, platforms: macosPlatforms }), readiness: vi.fn().mockResolvedValue(unavailableProvider),
+    targets: vi.fn().mockResolvedValue(targets('macos')), cases: vi.fn().mockResolvedValue(providerCases),
+    startRun: vi.fn(), cancelRun: vi.fn(), runSnapshot: vi.fn(), streamUrl: vi.fn(), screenUrl: vi.fn(), screen: vi.fn(), uiSnapshot: vi.fn(),
+  } as unknown as ControlPlaneClient;
+  const { result } = renderHook(() => useDeviceWorkspace({ ...deviceContext, platforms: macosPlatforms }, client));
+  act(() => result.current.setPlatform('macos'));
+  await waitFor(() => expect(result.current.cases.state).toBe('ready'));
+  act(() => result.current.setMode('strict'));
+  act(() => result.current.setCasePath('gated.fsq.yaml'));
+  expect(result.current.selectedCase?.requiresAiAssertion).toBe(true);
+  expect(result.current.canStart).toBe(true);
+  expect(result.current.blockedReason).not.toContain('setup');
+
   act(() => result.current.setMode('explore'));
   act(() => result.current.setGoal('Verify the canvas'));
   expect(result.current.canStart).toBe(false);

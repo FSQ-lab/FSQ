@@ -61,7 +61,7 @@ For macOS, `/readiness` delegates to Application's registered-platform Doctor op
 
 macOS target discovery reflects shared host/target readiness instead of treating configuration alone as ready. An unavailable configured target is retained as an unselectable result with safe guidance. Valid macOS configuration with a missing application does not prevent readiness or Case inventory queries. Application owns the shared diagnostic logic; transport code does not implement Xcode/Appium probes or another command-readiness matrix.
 
-Before a macOS Explore or Strict attempt starts, execution preparation obtains a fresh shared diagnosis of the resolved settings for that attempt and enforces the relevant command verdict, including authored Strict AI-assertion Provider requirements. Failure returns a structured `macos_preflight_failed` error with safe diagnosis details, releases any preparation reservation, and creates no Run or execution side effects. Browser-supplied ready flags or prerequisite results are never accepted. No diagnosis installs software, accepts licenses, grants permissions, starts services, or performs live UI automation.
+Before a macOS Explore or Strict attempt starts, execution preparation obtains a fresh shared diagnosis of the resolved settings for that attempt and enforces `caseCreate` for Explore and target/runtime `caseTest` prerequisites for Strict. An authored macOS visual assertion without a ready Provider is not a preflight failure and executes as a recognized incomplete assertion (`provider_unavailable`), matching Android Strict. Genuine target/runtime failure returns a structured `macos_preflight_failed` error with safe diagnosis details, releases any preparation reservation, and creates no Run or execution side effects. Browser-supplied ready flags or prerequisite results are never accepted. No diagnosis installs software, accepts licenses, grants permissions, starts services, or performs live UI automation.
 
 ### Android Preflight
 
@@ -267,7 +267,7 @@ Static serving rejects path traversal and cross-entry fallback. Missing generate
 - Each Case Manager Devices run request names a registered workspace and explicit configured platform; Quick Test obtains its registered identity and selected platform from Application preparation. Exact platform settings and roots are reloaded and frozen per run. Later browser selection or platform configuration changes do not mutate active state.
 - Exactly one task may be active across preparation, execution, and finalization.
 - Run-start validation is authoritative even when discovery/readiness data was previously returned to a client.
-- Provider readiness blocks Explore and Strict cases containing `assertWithAI`, but not provider-free Strict cases.
+- Provider readiness blocks Explore on every platform and Web/Windows Strict cases containing `assertWithAI`, while Android and macOS Strict cases containing `assertWithAI` remain runnable without Provider readiness and record recognized incomplete `provider_unavailable` steps; provider-free Strict cases never require Provider readiness.
 - Automatic live evidence uses `screenshot` and normalized `ui_snapshot`; UI labels do not change artifact semantics.
 - Per-step comparison and replay use persisted artifact metadata without changing automatic capture policy or inventing evidence.
 - Control Plane stores browser-generated replay videos but does not generate or transcode media in Python.

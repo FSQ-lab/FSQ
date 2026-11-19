@@ -7,6 +7,7 @@ import json
 import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -1690,3 +1691,61 @@ def test_provider_free_android_strict_dispatches_unverified_assertion_and_freeze
     assert frozen["counts"]["incomplete"] == 1
     assert frozen["counts"]["failed"] == 0
     assert frozen["steps"][0]["failure_category"] is None
+
+
+def test_provider_free_macos_strict_skips_provider_checks_and_freezes_inconclusive_assertion(tmp_path, monkeypatch):
+    settings = _settings(tmp_path, platform="macos")
+    settings.harness.macos.bundle_id = "com.apple.TextEdit"
+    source = settings.cases.dir / "visual-macos.fsq.yaml"
+    _case(source, platform="macos", command="assertWithAI:\n    assertion: The canvas is blue\n    surface: appearance\n    full_screen_reason: Canvas fills the window")
+    seen_provider_checks = []
+    monkeypatch.setattr(
+        "fsq_agent.adapters.control_plane._readiness.diagnose_platform_settings",
+        lambda _s, **kwargs: (
+            seen_provider_checks.append(kwargs.get("provider_checks"))
+            or SimpleNamespace(
+                platform="macos",
+                commands=SimpleNamespace(case_test=SimpleNamespace(status="ready", message="Ready", action="")),
+                checks=SimpleNamespace(provider=SimpleNamespace(status="not_applicable", message="Not requested", action="")),
+            )
+        ),
+    )
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.build_ai_assertion_evaluator", lambda *_args: pytest.fail("Absent provider must not be constructed"))
+    dispatched = []
+
+    class Harness:
+        def get_context(self):
+            return HarnessContext(platform="macos")
+
+        def before_action(self, step, context):
+            pass
+
+        def after_action(self, step, context, result):
+            pass
+
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            return HarnessArtifactRef(artifact_id=f"{step_id}-{kind}", kind=kind, availability="not_applicable", unavailable_reason="provider_unavailable")
+
+        def invoke_action(self, step, context):
+            dispatched.append(step.action_name)
+            return HarnessActionResult(status="incomplete", action_name=step.action_name, metadata={"ai_assertion": {"outcome": "inconclusive", "passed": False, "error_code": "provider_unavailable"}})
+
+        def classify_error(self, *_args):
+            return "harness_error"
+
+    def create_harness(*_args, **kwargs):
+        assert kwargs["ai_assertion_evaluator"] is None
+        assert kwargs["harness_settings"].macos.visual_assertion_policy.provider_available is False
+        return Harness()
+
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.HarnessFactory.create_harness", create_harness)
+    state = ControlPlaneState()
+    request_id = state.reserve(workspace_name="checkout", platform="macos", target_id="macos-app", mode="strict", source={"casePath": "visual-macos.fsq.yaml"})
+    prepared = prepare_run(
+        request_id=request_id, settings=settings, body={"mode": "strict", "workspaceName": "checkout", "platform": "macos", "targetId": "macos-app", "casePath": "visual-macos.fsq.yaml"}
+    )
+    assert seen_provider_checks == [False]
+    _run_strict(prepared, state)
+    snapshot = state.snapshot(request_id)
+    assert dispatched == ["assert_with_ai"]
+    assert snapshot["status"] == "inconclusive"

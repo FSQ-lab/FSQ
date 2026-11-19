@@ -54,7 +54,12 @@ class _DriverFactoryProtocol(Protocol):
 
     def create_windows_driver(self, settings: WindowsHarnessSettings) -> WindowsDriverInterface: ...
 
-    def create_macos_driver(self, settings: MacOSHarnessSettings) -> MacOSDriverInterface: ...
+    def create_macos_driver(
+        self,
+        settings: MacOSHarnessSettings,
+        *,
+        bundle_id: str | None = None,
+    ) -> MacOSDriverInterface: ...
 
     def create_ios_driver(
         self,
@@ -112,7 +117,7 @@ class _HarnessFactoryImplementation:
                 driver = self.driver_factory.create_windows_driver(harness_settings.windows)
                 harness_type = WindowsHarness
             elif platform == "macos":
-                driver = self.driver_factory.create_macos_driver(harness_settings.macos)
+                driver = self.driver_factory.create_macos_driver(harness_settings.macos, bundle_id=bundle_id)
                 harness_type = MacOSHarness
             elif platform == "ios":
                 driver = self.driver_factory.create_ios_driver(harness_settings.ios, bundle_id=bundle_id, udid=udid)

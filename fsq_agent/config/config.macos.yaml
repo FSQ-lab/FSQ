@@ -30,3 +30,5 @@ agent_context:
           kind: markdown
           path: macos-harness.md
           required: true
+    pre_plan:
+      dir: .

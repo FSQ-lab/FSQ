@@ -64,10 +64,10 @@ class _DriverFactoryImplementation:
         _ensure_backend("windows", settings.backend)
         return PywinautoWindowsDriver(app_path=settings.app_path, backend_kind=settings.backend_kind, window_title_re=settings.window_title_re, launch_args=settings.launch_args)
 
-    def create_macos_driver(self, settings):
+    def create_macos_driver(self, settings, *, bundle_id=None):
         _ensure_backend("macos", settings.backend)
         return AppiumConnectMacOSDriver(
-            bundle_id=settings.bundle_id,
+            bundle_id=bundle_id if bundle_id is not None else settings.bundle_id,
             app_path=settings.app_path,
             page_source_max_depth=settings.page_source_max_depth,
             action_timeout_seconds=settings.action_timeout_seconds,

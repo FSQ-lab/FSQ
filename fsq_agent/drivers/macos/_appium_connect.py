@@ -329,7 +329,6 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if not self._terminal_disposal_diagnostic["terminal_disposal_completed"]:
                 self._terminal_disposal_diagnostic["terminal_disposal_completed"] = True
                 logging.getLogger(__name__).info("macOS terminal disposal settled an unconfirmed remote quit.", extra=self._terminal_disposal_diagnostic)
-            self._terminal_disposal_diagnostic = None
         elif primary_error is not None:
             raise primary_error
 
@@ -337,7 +336,6 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         self._cleanup_pending = True
         primary_error = self._cleanup_primary
         managed_settled = False
-        settled_quit_unknown = False
         try:
             session = self._session
             if session is not None and not self._session_settled:
@@ -360,7 +358,6 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                                     "remote_quit_confirmed": False,
                                     "terminal_disposal_completed": False,
                                 }
-                                settled_quit_unknown = True
                             if state not in {"uncertain", "disposing", "disposed"}:
                                 raise
                     else:
@@ -389,7 +386,6 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             elif self._runtime is not None and not managed_settled and bool(getattr(self._runtime, "managed_cleanup_pending", False)):
                 self._runtime.cleanup_managed(control=self._operation_control(DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS))
         except BaseException as cleanup_error:
-            self._terminal_disposal_diagnostic = None
             if primary_error is not None and cleanup_error is not primary_error:
                 if isinstance(primary_error, (CancelledError, KeyboardInterrupt, SystemExit)):
                     raise primary_error from cleanup_error
@@ -402,12 +398,21 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         self._runtime = None
         self._session_settled = False
         self._scope_exit_attempted = False
+
+    def _close_owned_resources_for_recreation(self) -> None:
+        self._close_owned_resources()
+        primary_error = self._cleanup_primary
+        self._cleanup_primary = None
         self._cleanup_pending = False
-        if settled_quit_unknown:
-            self._cleanup_primary = None
-            return
-        if primary_error is not None:
-            self._cleanup_primary = None
+        if self._terminal_disposal_diagnostic is not None:
+            if not self._terminal_disposal_diagnostic["terminal_disposal_completed"]:
+                self._terminal_disposal_diagnostic["terminal_disposal_completed"] = True
+                logging.getLogger(__name__).info(
+                    "macOS terminal disposal settled an unconfirmed remote quit before session transition.",
+                    extra=self._terminal_disposal_diagnostic,
+                )
+            self._terminal_disposal_diagnostic = None
+        elif primary_error is not None:
             raise primary_error
 
     def context(self) -> dict[str, object]:
@@ -427,7 +432,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
     def _context_impl(self) -> dict[str, object]:
         session = self._session
-        if session is None:
+        if session is None or self._closed:
             return {
                 "session_id": None,
                 "current_url": None,
@@ -444,7 +449,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         if callable(info_fn):
             info = info_fn()
             state = getattr(info, "state", "active")
-            if state in {"closed", "disposed"}:
+            if state != "active":
                 session_id = None
             else:
                 raw_id = getattr(info, "appium_session_id", None) or getattr(info, "id", None)
@@ -471,7 +476,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         description="Create or reuse a managed Appium Mac2 session for the configured macOS application.",
     )
     def launch_app(self, params: MacOSLaunchAppParams) -> dict[str, object]:
-        return self._run_tool(lambda: self._launch_app_impl(params))
+        return self._run_tool(lambda: self._launch_app_impl(params), allow_cleanup_pending=bool(params.new_session))
 
     def _launch_app_impl(self, params: MacOSLaunchAppParams) -> dict[str, object]:
         session = self._ensure_session(params)
@@ -505,7 +510,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     quit_fn()
                 self._session = None
             else:
-                self._close_owned_resources()
+                self._close_owned_resources_for_recreation()
             return self._passed({"bundle_id": bundle_id, "close_session": True})
         if not bundle_id:
             raise ConfigurationError("macOS application termination requires bundle_id or a configured bundle id.")
@@ -1203,11 +1208,11 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if self._borrowed_session:
                 self._session = None
             else:
-                self._close_owned_resources()
+                self._close_owned_resources_for_recreation()
 
         if self._session is None:
             if self._cleanup_pending:
-                self._close_owned_resources()
+                self._close_owned_resources_for_recreation()
             return self._create_session(params)
         if params.new_session:
             self._require_creation_identity(params)
@@ -1217,7 +1222,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     quit_fn()
                 self._session = None
             else:
-                self._close_owned_resources()
+                self._close_owned_resources_for_recreation()
             return self._create_session(params)
         if params.app_path is not None or params.arguments is not None:
             raise ConfigurationError("app_path and arguments require new_session=true when a Mac2 session already exists.")
@@ -2351,9 +2356,15 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             context={"stage": "element_lookup", "cause": error},
         ) from error
 
-    def _run_tool(self, func: Callable[[], dict[str, object]], *, failure_default: str = "action_error") -> dict[str, object]:
+    def _run_tool(
+        self,
+        func: Callable[[], dict[str, object]],
+        *,
+        failure_default: str = "action_error",
+        allow_cleanup_pending: bool = False,
+    ) -> dict[str, object]:
         try:
-            return self._run_on_worker(func)
+            return self._run_on_worker(func, allow_cleanup_pending=allow_cleanup_pending)
         except _AmbiguousResolutionError as amb:
             return self._target_ambiguous_result(amb)
         except ValidationError:
@@ -2496,8 +2507,9 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         *,
         cancellation_check: Callable[[], None] | None = None,
         cancellation_event: Event | None = None,
+        allow_cleanup_pending: bool = False,
     ) -> _T:
-        if self._closed:
+        if self._closed or (self._cleanup_pending and not allow_cleanup_pending):
             return func()
 
         def run_operation() -> _T:
@@ -2553,9 +2565,9 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
     def _shutdown_executor(self) -> None:
         executor = self._executor
-        self._executor = None
         if executor is not None:
             executor.shutdown(wait=True)
+            self._executor = None
 
     def _target_missing(self) -> dict[str, object]:
         return self._failed(

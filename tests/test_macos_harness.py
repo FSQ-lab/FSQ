@@ -1848,3 +1848,85 @@ def test_macos_assert_not_visible_handles_toctou_disappearance_during_displayed_
     res = driver.assert_not_visible(MacOSAssertNotVisibleParams(target="Spinner"))
     assert res["status"] == "passed"
     assert res["output"] == {"visible": False}
+
+
+def test_macos_take_screenshot_persists_artifact_ref_and_normalizes_tool_execution_error(tmp_path) -> None:
+    from fsq_agent.core.interfaces import DriverFactory, HarnessFactory
+    from fsq_agent.models import HarnessSettings, MacOSHarnessSettings, ToolExecutionError
+
+    png_bytes = _valid_png_bytes()
+
+    class ScreenshotAndFailureMacDriver(FakeMacOSDriver):
+        @_macos_driver_tool("takeScreenshot", description="Capture a macOS screenshot.")
+        def take_screenshot(self, params: MacOSTakeScreenshotParams) -> bytes:
+            del params
+            return png_bytes
+
+        @_macos_driver_tool("uiSnapshot", description="Return the macOS accessibility tree.")
+        def ui_snapshot(self, params: MacOSUiSnapshotParams) -> dict[str, object]:
+            del params
+            raise ToolExecutionError("Mac2 UI snapshot failed.", context={"stage": "ui_snapshot"})
+
+    store = ArtifactStore(tmp_path / "run-artifacts")
+    harness = MacOSHarness(driver=ScreenshotAndFailureMacDriver(), artifact_store=store)
+    shot_res = harness.invoke_action(ExecutableStep(step_id="shot-1", kind="action", action_name="takeScreenshot", params={}), harness.get_context())
+    assert shot_res.status == "passed"
+    assert shot_res.output == {"byte_length": len(png_bytes)}
+    assert len(shot_res.artifact_refs) == 1
+    ref = shot_res.artifact_refs[0]
+    assert ref.kind == "screenshot"
+    assert ref.size_bytes == len(png_bytes)
+    assert ref.path is not None
+    assert (tmp_path / "run-artifacts" / ref.path).read_bytes() == png_bytes
+
+    # ToolExecutionError raised directly from a driver capability method normalizes to failed action_error
+    err_res = harness.invoke_action(ExecutableStep(step_id="snap-1", kind="action", action_name="uiSnapshot", params={}), harness.get_context())
+    assert err_res.status == "failed"
+    assert err_res.failure_category == "action_error"
+    assert err_res.error_message == "Mac2 UI snapshot failed."
+    assert err_res.metadata == {"context": {"stage": "ui_snapshot"}}
+
+    # DriverFactory and HarnessFactory honor runtime bundle_id override for macOS
+    macos_settings = MacOSHarnessSettings()
+    macos_settings.bundle_id = "com.default.App"
+    override_driver = DriverFactory().create_macos_driver(
+        macos_settings,
+        bundle_id="com.override.App",
+    )
+    assert override_driver.bundle_id == "com.override.App"
+    override_harness = HarnessFactory().create_harness(
+        platform="macos",
+        harness_settings=HarnessSettings(platform="macos", macos=macos_settings),
+        bundle_id="com.override.HarnessApp",
+    )
+    try:
+        assert override_harness.driver.bundle_id == "com.override.HarnessApp"
+    finally:
+        override_harness.close()
+        override_driver.close()
+
+
+def test_macos_recording_metadata_and_preset_pre_plan_alignment(tmp_path) -> None:
+    from pathlib import Path
+
+    import yaml
+
+    from fsq_agent.config import Settings
+    from fsq_agent.execution.recording import _metadata_doc
+    from fsq_agent.models import HarnessSettings, Task
+
+    preset = yaml.safe_load((Path(__file__).resolve().parents[1] / "fsq_agent" / "config" / "config.macos.yaml").read_text(encoding="utf-8"))
+    assert preset["agent_context"]["knowledge"]["pre_plan"] == {"dir": "."}
+
+    settings = Settings(harness=HarnessSettings(platform="macos"))
+    settings.harness.macos.bundle_id = "com.apple.TextEdit"
+    doc = _metadata_doc(
+        task=Task(name="Edit note", description="Open note", planning_reference_kind="goal", planning_reference_text="Open note"),
+        result=SimpleNamespace(),
+        settings=settings,
+        required_secret_names=[],
+        warnings=[],
+        draft=False,
+    )
+    assert doc["platform"] == "macos"
+    assert doc["appId"] == "com.apple.TextEdit"

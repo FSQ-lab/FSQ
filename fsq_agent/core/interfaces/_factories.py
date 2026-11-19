@@ -27,8 +27,8 @@ class DriverFactory:
     def create_windows_driver(self, settings: Any) -> Any:
         return self._implementation().create_windows_driver(settings)
 
-    def create_macos_driver(self, settings: Any) -> Any:
-        return self._implementation().create_macos_driver(settings)
+    def create_macos_driver(self, settings: Any, *, bundle_id: str | None = None) -> Any:
+        return self._implementation().create_macos_driver(settings, bundle_id=bundle_id)
 
     def create_ios_driver(self, settings: Any, *, bundle_id: str | None = None, udid: str | None = None) -> Any:
         return self._implementation().create_ios_driver(settings, bundle_id=bundle_id, udid=udid)

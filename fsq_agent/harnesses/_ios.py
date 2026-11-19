@@ -183,7 +183,7 @@ class IOSHarness:
                 )
             finally:
                 self._clear_driver_ai_assertion_tool_invocation()
-            return self._result_from_driver_output(step.action_name, output)
+            return self._result_from_driver_output(step.action_name, output, step_id=step.step_id)
         return HarnessActionResult(
             status="failed",
             action_name=step.action_name,
@@ -422,9 +422,27 @@ class IOSHarness:
         except TypeError:
             return [{key: value for key, value in item.items() if key != "input"} for item in error.errors()]
 
-    def _result_from_driver_output(self, action_name: str, output: object) -> HarnessActionResult:
+    def _result_from_driver_output(self, action_name: str, output: object, *, step_id: str = "step") -> HarnessActionResult:
         if isinstance(output, (bytes, bytearray)):
-            return HarnessActionResult(status="passed", action_name=action_name, output={"byte_length": len(output)})
+            artifact_refs: list[HarnessArtifactRef] = []
+            if self.artifact_store is not None:
+                artifact_refs.append(
+                    self._to_harness_artifact_ref(
+                        self.artifact_store.write_bytes(
+                            kind="screenshot",
+                            step_id=step_id,
+                            phase="invoke",
+                            name="take-screenshot",
+                            data=bytes(output),
+                        )
+                    )
+                )
+            return HarnessActionResult(
+                status="passed",
+                action_name=action_name,
+                output={"byte_length": len(output)},
+                artifact_refs=artifact_refs,
+            )
         if not isinstance(output, dict) or "status" not in output:
             return HarnessActionResult(status="passed", action_name=action_name, output=output)
 

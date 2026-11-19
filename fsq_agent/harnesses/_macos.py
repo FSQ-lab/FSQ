@@ -160,9 +160,17 @@ class MacOSHarness:
                     error_message=str(exc),
                     metadata={"context": exc.context} if exc.context else {},
                 )
+            except ToolExecutionError as exc:
+                return HarnessActionResult(
+                    status="failed",
+                    action_name=step.action_name,
+                    failure_category="action_error",
+                    error_message=str(exc),
+                    metadata={"context": exc.context} if exc.context else {},
+                )
             finally:
                 self._clear_driver_ai_assertion_tool_invocation()
-            return self._result_from_driver_output(step.action_name, output)
+            return self._result_from_driver_output(step.action_name, output, step_id=step.step_id)
         return HarnessActionResult(
             status="failed",
             action_name=step.action_name,
@@ -378,6 +386,8 @@ class MacOSHarness:
             clear()
 
     def _session_not_started(self) -> bool:
+        if getattr(self.driver, "_session", "unknown") not in (None, "unknown"):
+            return False
         try:
             context = self.driver.context()
         # Optional Appium clients expose backend-specific exception classes outside the core contract.
@@ -406,9 +416,27 @@ class MacOSHarness:
         except TypeError:
             return [{key: value for key, value in item.items() if key != "input"} for item in error.errors()]
 
-    def _result_from_driver_output(self, action_name: str, output: object) -> HarnessActionResult:
+    def _result_from_driver_output(self, action_name: str, output: object, *, step_id: str = "step") -> HarnessActionResult:
         if isinstance(output, (bytes, bytearray)):
-            return HarnessActionResult(status="passed", action_name=action_name, output={"byte_length": len(output)})
+            artifact_refs: list[HarnessArtifactRef] = []
+            if self.artifact_store is not None:
+                artifact_refs.append(
+                    self._to_harness_artifact_ref(
+                        self.artifact_store.write_bytes(
+                            kind="screenshot",
+                            step_id=step_id,
+                            phase="invoke",
+                            name="take-screenshot",
+                            data=bytes(output),
+                        )
+                    )
+                )
+            return HarnessActionResult(
+                status="passed",
+                action_name=action_name,
+                output={"byte_length": len(output)},
+                artifact_refs=artifact_refs,
+            )
         if not isinstance(output, dict) or "status" not in output:
             return HarnessActionResult(status="passed", action_name=action_name, output=output)
         status_value = output.get("status")

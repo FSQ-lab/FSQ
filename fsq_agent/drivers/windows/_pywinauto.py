@@ -2,6 +2,8 @@
 # Licensed under the MIT License.
 
 import json
+import ntpath
+import os
 import subprocess
 import time
 from collections.abc import Callable
@@ -41,6 +43,15 @@ UI_SNAPSHOT_MAX_CHILDREN = 60
 UI_SNAPSHOT_MAX_BYTES = 800000
 MOUSE_DRAG_STEP_PIXELS = 15
 _T = TypeVar("_T")
+_HOST_FRAME_EXECUTABLE = "applicationframehost.exe"
+
+
+def _normalize_windows_executable_path(raw_path: str) -> str:
+    expanded = ntpath.expandvars(raw_path.strip().strip('"'))
+    if os.name == "nt":
+        with suppress(OSError):
+            expanded = os.path.realpath(expanded)
+    return ntpath.normpath(expanded.replace("/", "\\")).casefold()
 
 
 class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
@@ -54,11 +65,18 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         window_title_re: str | None = None,
         launch_args: list[str] | None = None,
     ) -> None:
-        self.app_path = str(Path(app_path)) if app_path else None
+        raw_app_path = str(app_path).strip() if app_path is not None else ""
+        self.app_path = raw_app_path or None
         self.backend_kind = backend_kind
         self.window_title_re = window_title_re.strip() if isinstance(window_title_re, str) and window_title_re.strip() else None
         self.launch_args = list(launch_args) if launch_args else []
         self._app: object | None = None
+        self._launched: bool = False
+        self._launched_pid: int | None = None
+        self._bound_handle: int | None = None
+        self._pre_existing_handles: set[int] = set()
+        self._pre_existing_pids: set[int] = set()
+        self._owns_process: bool = False
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fsq-pywinauto")
 
     def context(self) -> dict[str, object]:
@@ -88,11 +106,28 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         app_path = self.app_path
         if not app_path:
             return self._failed("configuration_error", "Windows app path is not configured.")
+        if self._launched:
+            self._cleanup_owned_target()
         application_cls = self._application_cls()
+        target_norm = _normalize_windows_executable_path(app_path)
+        pre_all_handles, pre_matching_pids = self._snapshot_pre_launch_state(target_norm)
         launch_args = [*self.launch_args, *(params.extra_args or [])]
         cmd = subprocess.list2cmdline([app_path, *launch_args])
-        self._app = application_cls(backend=self.backend_kind).start(cmd)
-        self._resolve_main_window(wait=True, wait_for=WINDOW_LAUNCH_WAIT_FOR)
+        started = application_cls(backend=self.backend_kind).start(cmd)
+        started_pid = getattr(started, "process", None)
+        self._app = started
+        self._launched = True
+        self._launched_pid = started_pid if isinstance(started_pid, int) else None
+        self._bound_handle = None
+        self._pre_existing_handles = pre_all_handles
+        self._pre_existing_pids = pre_matching_pids
+        self._owns_process = len(pre_matching_pids) == 0
+        try:
+            self._resolve_main_window(wait=True, wait_for=WINDOW_LAUNCH_WAIT_FOR)
+        except BaseException:
+            with suppress(Exception):
+                self._cleanup_owned_target()
+            raise
         return self._passed({"app_path": app_path, "launch_args": launch_args, "window_title_re": self.window_title_re})
 
     def _resolve_main_window(self, *, wait: bool = False, wait_for: str = "exists visible") -> object:
@@ -100,15 +135,9 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         deadline = time.monotonic() + WINDOW_READY_TIMEOUT_SECONDS if wait else None
         while True:
             try:
-                if self.window_title_re:
-                    connected = application_cls(backend=self.backend_kind).connect(title_re=self.window_title_re)
-                    window = connected.window(title_re=self.window_title_re, control_type="Window")
-                else:
-                    connected = application_cls(backend=self.backend_kind).connect(active_only=True)
-                    window = connected.top_window()
-                window.wait(wait_for, timeout=2 if wait else 0)
+                connected, window, handle, owns_process = self._select_target_window(application_cls, wait_for=wait_for, wait=wait)
             except Exception as exc:
-                details = f"title_re={self.window_title_re!r}, wait_for={wait_for!r}, backend={self.backend_kind!r}; last error: {exc}"
+                details = f"app_path={self.app_path!r}, title_re={self.window_title_re!r}, wait_for={wait_for!r}, backend={self.backend_kind!r}; last error: {exc}"
                 if deadline is None:
                     raise RuntimeError(f"Failed to resolve Windows main window ({details})") from exc
                 if time.monotonic() >= deadline:
@@ -116,19 +145,137 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 time.sleep(1.0)
             else:
                 self._app = connected
+                if handle is not None:
+                    self._bound_handle = handle
+                if owns_process is False:
+                    self._owns_process = False
                 return window
+
+    def _select_target_window(
+        self,
+        application_cls: Any,
+        *,
+        wait_for: str,
+        wait: bool,
+    ) -> tuple[object, object, int | None, bool | None]:
+        timeout = 2 if wait else 0
+        if self.app_path:
+            if not self._launched:
+                raise LookupError("Configured Windows application has not been launched.")
+            if self._bound_handle is not None:
+                rebound = self._try_connect_window_handle(application_cls, self._bound_handle, wait_for=wait_for, timeout=timeout)
+                if rebound is not None:
+                    return rebound[0], rebound[1], self._bound_handle, None
+                self._bound_handle = None
+            target_norm = _normalize_windows_executable_path(self.app_path)
+            direct_candidates: list[tuple[int, int, bool]] = []
+            host_frame_candidates: list[int] = []
+            top_query: dict[str, Any] = {"title_re": self.window_title_re, "visible_only": True}
+            if self.backend_kind == "uia":
+                top_query["control_type"] = "Window"
+            for elem in self._list_top_windows(**top_query):
+                hwnd = getattr(elem, "handle", None)
+                pid = getattr(elem, "process_id", None)
+                if not isinstance(hwnd, int) or not isinstance(pid, int):
+                    continue
+                is_started_pid = self._launched_pid is not None and pid == self._launched_pid
+                exe_norm = self._safe_normalized_process_path(pid)
+                if is_started_pid or exe_norm == target_norm:
+                    direct_candidates.append((hwnd, pid, hwnd not in self._pre_existing_handles))
+                elif self.window_title_re and exe_norm is not None and ntpath.basename(exe_norm) == _HOST_FRAME_EXECUTABLE and hwnd not in self._pre_existing_handles:
+                    host_frame_candidates.append(hwnd)
+
+            ordered_direct = [(hwnd, pid) for hwnd, pid, is_new in direct_candidates if is_new] + [(hwnd, pid) for hwnd, pid, is_new in direct_candidates if not is_new]
+            for hwnd, pid in ordered_direct:
+                resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for, timeout=timeout)
+                if resolved is not None:
+                    borrowed = hwnd in self._pre_existing_handles or pid in self._pre_existing_pids
+                    return resolved[0], resolved[1], hwnd, (False if borrowed else None)
+            for hwnd in host_frame_candidates:
+                resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for, timeout=timeout)
+                if resolved is not None:
+                    return resolved[0], resolved[1], hwnd, False
+
+            raise LookupError("No visible top-level window matched the configured Windows executable.")
+
+        if self.window_title_re:
+            connected = application_cls(backend=self.backend_kind).connect(title_re=self.window_title_re)
+            window_kwargs: dict[str, Any] = {"title_re": self.window_title_re}
+            if self.backend_kind == "uia":
+                window_kwargs["control_type"] = "Window"
+            window = connected.window(**window_kwargs)
+            window.wait(wait_for, timeout=timeout)
+            return connected, window, None, False
+        raise LookupError("Neither Windows app_path nor window_title_re is configured.")
+
+    def _try_connect_window_handle(self, application_cls: Any, handle: int, *, wait_for: str, timeout: int) -> tuple[object, object] | None:
+        try:
+            connected = application_cls(backend=self.backend_kind).connect(handle=handle)
+            window = connected.window(handle=handle)
+            window.wait(wait_for, timeout=timeout)
+        except Exception:  # noqa: BLE001 - candidate handle may have closed or become hidden mid-probe.
+            return None
+        return connected, window
+
+    def _snapshot_pre_launch_state(self, target_norm: str) -> tuple[set[int], set[int]]:
+        all_handles: set[int] = set()
+        matching_pids: set[int] = set()
+        snapshot_query: dict[str, Any] = {"visible_only": False}
+        if self.backend_kind == "uia":
+            snapshot_query["control_type"] = "Window"
+        for elem in self._list_top_windows(**snapshot_query):
+            hwnd = getattr(elem, "handle", None)
+            pid = getattr(elem, "process_id", None)
+            if isinstance(hwnd, int):
+                all_handles.add(hwnd)
+            if isinstance(pid, int) and self._safe_normalized_process_path(pid) == target_norm:
+                matching_pids.add(pid)
+        for pid in self._list_process_ids():
+            if pid not in matching_pids and self._safe_normalized_process_path(pid) == target_norm:
+                matching_pids.add(pid)
+        return all_handles, matching_pids
+
+    def _safe_normalized_process_path(self, pid: int) -> str | None:
+        try:
+            raw = self._process_executable_path(pid)
+        except Exception:  # noqa: BLE001 - ignore elevated/exited unrelated desktop processes.
+            return None
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        return _normalize_windows_executable_path(raw)
 
     @_windows_driver_tool("killApp", description="Stop the launched Windows desktop application.")
     def kill_app(self, params: WindowsKillAppParams) -> dict[str, object]:
         return self._run_sync(self._kill_app)
 
     def _kill_app(self) -> dict[str, object]:
-        if self._app is not None:
+        self._cleanup_owned_target()
+        return self._passed()
+
+    def _cleanup_owned_target(self) -> None:
+        if not self._launched:
+            return
+        if self._owns_process and self._app is not None:
             kill = getattr(self._app, "kill", None)
             if callable(kill):
                 kill()
+        elif self._bound_handle is not None and self._bound_handle not in self._pre_existing_handles and self._window_handle_exists(self._bound_handle):
+            application_cls = self._application_cls()
+            connected = application_cls(backend=self.backend_kind).connect(handle=self._bound_handle)
+            window = connected.window(handle=self._bound_handle)
+            close_fn = getattr(window, "close", None)
+            if callable(close_fn):
+                close_fn()
+        self._reset_launch_state()
+
+    def _reset_launch_state(self) -> None:
         self._app = None
-        return self._passed()
+        self._launched = False
+        self._launched_pid = None
+        self._bound_handle = None
+        self._pre_existing_handles = set()
+        self._pre_existing_pids = set()
+        self._owns_process = False
 
     @_windows_driver_tool("clickOn", description="Click a Windows control resolved from the UI snapshot.")
     def click_on(self, params: WindowsClickOnParams) -> dict[str, object]:
@@ -369,6 +516,45 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 context={"action": "Reinstall or repair fsq-agent."},
             ) from exc
         return Application
+
+    def _list_top_windows(self, **kwargs: Any) -> list[Any]:
+        try:
+            from pywinauto import findwindows
+        except ImportError as exc:
+            raise ConfigurationError(
+                "pywinauto is required for PywinautoWindowsDriver.",
+                context={"action": "Reinstall or repair fsq-agent."},
+            ) from exc
+        query = {"top_level_only": True, "backend": self.backend_kind, **kwargs}
+        try:
+            return list(findwindows.find_elements(**query))
+        except Exception:  # noqa: BLE001 - empty or transient desktop enumeration returns no matches.
+            return []
+
+    def _window_handle_exists(self, handle: int) -> bool:
+        return len(self._list_top_windows(handle=handle, visible_only=False)) > 0
+
+    def _list_process_ids(self) -> list[int]:
+        try:
+            import win32process
+
+            return [pid for pid in win32process.EnumProcesses() if isinstance(pid, int) and pid > 0]
+        except Exception:  # noqa: BLE001 - non-Windows test environments or unavailable process enumeration fall back to window PIDs.
+            return []
+
+    def _process_executable_path(self, pid: int) -> str | None:
+        import win32api
+        import win32con
+        import win32process
+
+        query_flag = getattr(win32con, "PROCESS_QUERY_LIMITED_INFORMATION", 0x1000)
+        handle = win32api.OpenProcess(query_flag, 0, pid)
+        if not handle:
+            return None
+        try:
+            return str(win32process.GetModuleFileNameEx(handle, 0))
+        finally:
+            win32api.CloseHandle(handle)
 
     def _mouse_module(self) -> Any:
         try:

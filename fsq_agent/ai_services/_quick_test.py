@@ -146,7 +146,8 @@ class QuickTestIntentAnalyzer:
                             "For Windows, app_config_id is one existing application_catalogue ID chosen semantically using its name and description, "
                             "or null when no entry matches. Do not use literal keyword rules or invent IDs. Ambiguous intent is not no-match. "
                             "A goal-provided explicit executable path takes priority. Otherwise, when choosing an ID, set inferred_hint to null; "
-                            "the host validates declared executable candidates locally.\n"
+                            "the host validates declared executable candidates locally. Never use an HTTP(S) or other navigation URI as "
+                            "explicit_reference for a Windows application; navigation addresses remain part of the goal's actions.\n"
                             if application_catalogue is not None
                             else ""
                         )
@@ -204,7 +205,13 @@ def _validated_intent(payload, platform, goal, addresses, url=None, application_
     selected_id = payload.app_config_id if isinstance(payload, _WindowsIntentOutput) else None
     if selected_id is not None and (application_catalogue is None or selected_id not in {entry.id for entry in application_catalogue}):
         raise EngineError("invalid_output", "Model selected an unknown application configuration.")
+    if platform == "windows" and selected_id is not None and reference is not None and _is_navigation_uri(reference):
+        reference = None
     return QuickTestIntent(payload.sufficient, reason, name, reference, ApplicationLookupHint(kind=hint.kind, value=hint.value) if hint and selected_id is None else None, selected_id)
+
+
+def _is_navigation_uri(value: str) -> bool:
+    return re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) is not None
 
 
 def _grounded(value: str, goal: str, *, explicit: bool = False) -> bool:

@@ -4,6 +4,18 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-11-20
+
+Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.6.md) for upgrade steps and validation limits.
+
+### Added
+
+- Windows Quick Test bundles a common application catalogue (`fsq_agent/config/applications.windows.yaml`) with stable presets for `edge`, `chrome`, `edge-beta`, `edge-canary`, `notepad`, and `calculator`, resolving concrete installed executable paths and optional `window_title_re` filters through existing intent analysis while preserving explicit-path precedence.
+
+### Fixed
+
+- `PywinautoWindowsDriver` binds main-window resolution and cleanup to the launched `app_path` identity instead of falling back to arbitrary active desktop windows or unconstrained global title regexes. Launch snapshots pre-existing top-level window handles (including minimized/offscreen windows) and running process IDs, prefers newly opened target windows across resident multi-PID single-instance handoff (plus `ApplicationFrameHost.exe` host frames when `window_title_re` is configured), keeps observations and actions anchored across OS focus changes, and restricts `killApp` / `close()` to terminating owned processes or closing only newly opened handoff windows while surfacing cleanup errors explicitly.
+
 ## [0.3.5] - 2026-11-19
 
 Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.5.md) for upgrade steps and validation limits.
@@ -156,7 +168,8 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/FSQ-lab/FSQ/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/FSQ-lab/FSQ/compare/v0.3.2...v0.3.5
 [0.3.2]: https://github.com/FSQ-lab/FSQ/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/FSQ-lab/FSQ/compare/v0.3.0...v0.3.1
@@ -164,4 +177,4 @@ Release preparation; this entry does not establish a published package, tag, or 
 [0.1.5]: https://github.com/FSQ-lab/FSQ/compare/v0.1.0...v0.1.5
 [0.1.0]: https://github.com/FSQ-lab/FSQ/releases/tag/v0.1.0
 
-The 0.3.5 comparison references anticipate release tags; they do not establish that a tag or publication exists.
+The 0.3.6 comparison references anticipate release tags; they do not establish that a tag or publication exists.

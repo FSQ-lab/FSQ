@@ -87,6 +87,8 @@ class _DriverFactoryImplementation:
             xcuitest_wait_for_idle_timeout_seconds=settings.xcuitest_wait_for_idle_timeout_seconds,
             xcuitest_snapshot_max_depth=settings.xcuitest_snapshot_max_depth,
             xcuitest_accessibility_deadline_seconds=settings.xcuitest_accessibility_deadline_seconds,
+            xcuitest_animation_cool_off_timeout_seconds=settings.xcuitest_animation_cool_off_timeout_seconds,
+            xcuitest_page_source_excluded_attributes=settings.xcuitest_page_source_excluded_attributes,
             xcode_org_id=settings.xcode_org_id,
             xcode_signing_id=settings.xcode_signing_id,
             updated_wda_bundle_id=settings.updated_wda_bundle_id,

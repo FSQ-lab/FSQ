@@ -61,7 +61,7 @@ DEFAULT_IOS_PAGE_SOURCE_MAX_DEPTH = 12
 DEFAULT_IOS_ACTION_TIMEOUT_SECONDS = 15
 DEFAULT_IOS_NEW_COMMAND_TIMEOUT_SECONDS = 900.0
 DEFAULT_IOS_SNAPSHOT_SOURCE_PREVIEW_CHARS = 2000
-DEFAULT_IOS_SNAPSHOT_TEXT_LIMIT_CHARS = 50
+DEFAULT_IOS_SNAPSHOT_TEXT_LIMIT_CHARS = 160
 DEFAULT_MANAGED_STARTUP_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS = 120.0
 DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS = 15.0
@@ -372,21 +372,33 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         xcuitest_wait_for_idle_timeout_seconds: float | None = None,
         xcuitest_snapshot_max_depth: int | None = None,
         xcuitest_accessibility_deadline_seconds: float | None = None,
+        xcuitest_animation_cool_off_timeout_seconds: float | None = None,
+        xcuitest_page_source_excluded_attributes: Sequence[str] | None = None,
         xcode_org_id: str | None = None,
         xcode_signing_id: str | None = None,
         updated_wda_bundle_id: str | None = None,
         session: object | None = None,
     ) -> None:
-        if session is not None and (xcuitest_wait_for_idle_timeout_seconds is not None or xcuitest_snapshot_max_depth is not None or xcuitest_accessibility_deadline_seconds is not None):
+        if session is not None and (
+            xcuitest_wait_for_idle_timeout_seconds is not None
+            or xcuitest_snapshot_max_depth is not None
+            or xcuitest_accessibility_deadline_seconds is not None
+            or xcuitest_animation_cool_off_timeout_seconds is not None
+            or xcuitest_page_source_excluded_attributes is not None
+        ):
             raise ConfigurationError("Initial XCUITest WDA session policies cannot be applied to a borrowed iOS Session.")
-        settings = IOSHarnessSettings(
-            page_source_max_depth=page_source_max_depth,
-            action_timeout_seconds=action_timeout_seconds,
-            new_command_timeout_seconds=new_command_timeout_seconds,
-            wda_launch_timeout_ms=wda_launch_timeout_ms,
-            xcuitest_wait_for_idle_timeout_seconds=xcuitest_wait_for_idle_timeout_seconds,
-            xcuitest_snapshot_max_depth=xcuitest_snapshot_max_depth,
-            xcuitest_accessibility_deadline_seconds=xcuitest_accessibility_deadline_seconds,
+        settings = IOSHarnessSettings.model_validate(
+            {
+                "page_source_max_depth": page_source_max_depth,
+                "action_timeout_seconds": action_timeout_seconds,
+                "new_command_timeout_seconds": new_command_timeout_seconds,
+                "wda_launch_timeout_ms": wda_launch_timeout_ms,
+                "xcuitest_wait_for_idle_timeout_seconds": xcuitest_wait_for_idle_timeout_seconds,
+                "xcuitest_snapshot_max_depth": xcuitest_snapshot_max_depth,
+                "xcuitest_accessibility_deadline_seconds": xcuitest_accessibility_deadline_seconds,
+                "xcuitest_animation_cool_off_timeout_seconds": xcuitest_animation_cool_off_timeout_seconds,
+                "xcuitest_page_source_excluded_attributes": xcuitest_page_source_excluded_attributes,
+            }
         )
         settings.udid = udid
         settings.bundle_id = bundle_id
@@ -405,6 +417,8 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         self.xcuitest_wait_for_idle_timeout_seconds = settings.xcuitest_wait_for_idle_timeout_seconds
         self.xcuitest_snapshot_max_depth = settings.xcuitest_snapshot_max_depth
         self.xcuitest_accessibility_deadline_seconds = settings.xcuitest_accessibility_deadline_seconds
+        self.xcuitest_animation_cool_off_timeout_seconds = settings.xcuitest_animation_cool_off_timeout_seconds
+        self.xcuitest_page_source_excluded_attributes = settings.xcuitest_page_source_excluded_attributes
         self.xcode_org_id = settings.xcode_org_id
         self.xcode_signing_id = settings.xcode_signing_id
         self.updated_wda_bundle_id = settings.updated_wda_bundle_id
@@ -1264,7 +1278,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         snapshot_timeout = self._snapshot_timeout_seconds()
         observation = session.observe_tree(control=self._operation_control(snapshot_timeout))
         max_depth = int(options.max_depth or self.page_source_max_depth)
-        compacted = self._simplify_tree_observation(observation, max_depth=max_depth)
+        compacted = self._simplify_tree_observation(observation, max_depth=max_depth, include_offscreen=options.include_offscreen)
         viewport = getattr(observation, "viewport", None)
         width_obs = getattr(viewport, "width", None)
         height_obs = getattr(viewport, "height", None)
@@ -1659,8 +1673,10 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 xcuitest_wait_for_idle_timeout_seconds=self.xcuitest_wait_for_idle_timeout_seconds,
                 xcuitest_snapshot_max_depth=self.xcuitest_snapshot_max_depth,
                 xcuitest_accessibility_deadline_seconds=self.xcuitest_accessibility_deadline_seconds,
+                xcuitest_animation_cool_off_timeout_seconds=self.xcuitest_animation_cool_off_timeout_seconds,
                 new_command_timeout_seconds=float(self.new_command_timeout_seconds),
                 control=OperationControl(timeout_seconds=create_timeout_seconds),
+                **({"xcuitest_page_source_excluded_attributes": self.xcuitest_page_source_excluded_attributes} if self.xcuitest_page_source_excluded_attributes is not None else {}),
             )
         except BaseException as exc:
             self._session = getattr(exc, "session", None)
@@ -2023,13 +2039,12 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
     def _inspection_dict(inspection: Any) -> dict[str, tuple[str, object]]:
         return {attr.name: (attr.state, attr.value) for attr in getattr(inspection, "attributes", ())}
 
-    def _simplify_tree_observation(self, observation: Any, *, max_depth: int) -> dict[str, object]:
+    def _simplify_tree_observation(self, observation: Any, *, max_depth: int, include_offscreen: bool) -> dict[str, object]:
         roots = getattr(observation, "roots", ())
         if not roots:
             return {
                 "xml": "<XCUIElementTypeApplication />",
                 "format": "xml",
-                "root": None,
                 "source_length": 0,
                 "node_count": 0,
                 "coverage": {
@@ -2045,6 +2060,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                     "max_depth": max_depth,
                     "layout_nodes_removed": 0,
                     "clipped_attributes": 0,
+                    "offscreen_nodes_omitted": 0,
                 },
             }
         if len(roots) == 1:
@@ -2056,21 +2072,21 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         serialized = ElementTree.tostring(xml_root, encoding="unicode")
         source_nodes = self._element_count(xml_root)
         try:
+            offscreen_omitted = 0 if include_offscreen else self._prune_offscreen_descendants(xml_root)
             compacted_root = self._element_snapshot(xml_root, depth=1, max_depth=max_depth)
             compact_xml_el = self._snapshot_dict_to_xml(compacted_root)
             compact_xml = ElementTree.tostring(compact_xml_el, encoding="unicode", short_empty_elements=True)
             retained_nodes = self._element_count(compact_xml_el)
-            layout_nodes_removed = max(0, source_nodes - retained_nodes)
+            layout_nodes_removed = source_nodes - offscreen_omitted - retained_nodes
             clipped_attributes = self._count_clipped_in_snapshot(compacted_root)
             complete_scope = bool(getattr(observation, "complete_for_requested_scope", True))
             upstream_coverage = str(getattr(observation, "coverage", "requested_scope"))
-            is_partial = (not complete_scope) or layout_nodes_removed > 0 or clipped_attributes > 0
+            is_partial = (not complete_scope) or layout_nodes_removed > 0 or clipped_attributes > 0 or offscreen_omitted > 0
             return {
                 "xml": compact_xml,
                 "format": "xml",
                 "source_length": len(serialized),
                 "node_count": source_nodes,
-                "root": compacted_root,
                 "coverage": {
                     "status": "partial" if is_partial else "unknown",
                     "reason": "semantic_compaction" if complete_scope else f"upstream_{upstream_coverage}",
@@ -2084,6 +2100,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                     "max_depth": max_depth,
                     "layout_nodes_removed": layout_nodes_removed,
                     "clipped_attributes": clipped_attributes,
+                    "offscreen_nodes_omitted": offscreen_omitted,
                 },
             }
         except Exception as exc:  # noqa: BLE001
@@ -2110,8 +2127,24 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                     "max_depth": max_depth,
                     "layout_nodes_removed": 0,
                     "clipped_attributes": 0,
+                    "offscreen_nodes_omitted": 0,
                 },
             }
+
+    def _prune_offscreen_descendants(self, element: ElementTree.Element) -> int:
+        retained: list[ElementTree.Element] | None = None
+        omitted = 0
+        for index, child in enumerate(element):
+            omitted += self._prune_offscreen_descendants(child)
+            if len(child) == 0 and child.get("visible") == "false":
+                if retained is None:
+                    retained = element[:index]
+                omitted += 1
+            elif retained is not None:
+                retained.append(child)
+        if retained is not None:
+            element[:] = retained
+        return omitted
 
     def _count_clipped_in_snapshot(self, snapshot: dict[str, object]) -> int:
         truncated = snapshot.get("truncated_attributes")

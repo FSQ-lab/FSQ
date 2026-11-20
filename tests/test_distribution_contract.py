@@ -84,7 +84,7 @@ def test_default_distribution_contract() -> None:
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
-    assert "appium-connect-agent==0.1.0" in dependencies
+    assert "appium-connect-agent==0.1.1" in dependencies
     for name in ("appium-connect-agent", "playwright", "pywinauto", "pillow"):
         assert any(dependency.startswith(f"{name}==") for dependency in dependencies)
     for retired in ("uiautomator2", "Appium-Python-Client", "selenium"):

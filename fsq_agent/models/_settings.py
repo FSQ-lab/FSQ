@@ -14,6 +14,31 @@ from fsq_agent.models._skills import SkillConfig
 
 _IOS_BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
 _IOS_XCODE_ORG_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_IOS_WDA_XML_ATTRIBUTES = frozenset(
+    {
+        "type",
+        "value",
+        "name",
+        "label",
+        "enabled",
+        "visible",
+        "accessible",
+        "nativeAccessibilityElement",
+        "focused",
+        "x",
+        "y",
+        "width",
+        "height",
+        "index",
+        "hittable",
+        "placeholderValue",
+        "traits",
+        "nativeFrame",
+        "minValue",
+        "maxValue",
+        "customActions",
+    }
+)
 
 
 class AgentSettings(BaseModel):
@@ -258,6 +283,8 @@ class IOSHarnessSettings(BaseModel):
     xcuitest_wait_for_idle_timeout_seconds: float | None = Field(default=None, ge=0.0, le=600.0, allow_inf_nan=False)
     xcuitest_snapshot_max_depth: int | None = Field(default=None, ge=1, le=500)
     xcuitest_accessibility_deadline_seconds: float | None = Field(default=None, ge=0.0, le=600.0, allow_inf_nan=False)
+    xcuitest_animation_cool_off_timeout_seconds: float | None = Field(default=None, ge=0.0, le=600.0, allow_inf_nan=False)
+    xcuitest_page_source_excluded_attributes: tuple[str, ...] | None = Field(default=None)
     _bundle_id: str | None = PrivateAttr(default=None)
     _app_path: Path | None = PrivateAttr(default=None)
     _xcode_org_id: str | None = PrivateAttr(default=None)
@@ -277,12 +304,26 @@ class IOSHarnessSettings(BaseModel):
         "new_command_timeout_seconds",
         "xcuitest_wait_for_idle_timeout_seconds",
         "xcuitest_accessibility_deadline_seconds",
+        "xcuitest_animation_cool_off_timeout_seconds",
         mode="before",
     )
     @classmethod
     def validate_finite_nonnegative_seconds(cls, value: Any) -> float | None:
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
             raise ValueError("Timeout policy must be a finite nonnegative number or None")
+        return value
+
+    @field_validator("xcuitest_page_source_excluded_attributes", mode="before")
+    @classmethod
+    def validate_page_source_excluded_attributes(cls, value: object) -> tuple[str, ...] | list[str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)) or not value:
+            raise ValueError("Page source exclusions must be a non-empty list or tuple of WDA XML attribute names")
+        if any(not isinstance(attribute, str) or attribute not in _IOS_WDA_XML_ATTRIBUTES for attribute in value):
+            raise ValueError("Page source exclusions must contain only known WDA XML attribute names")
+        if len(set(value)) != len(value):
+            raise ValueError("Page source exclusions must not contain duplicate attribute names")
         return value
 
     @property

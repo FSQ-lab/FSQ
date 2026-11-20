@@ -722,6 +722,7 @@ harness:
     page_source_max_depth: 8
     action_timeout_seconds: 15
     new_command_timeout_seconds: 420
+    skip_app_kill: false
 """,
         ),
         encoding="utf-8",
@@ -738,8 +739,31 @@ harness:
     assert settings.harness.macos.page_source_max_depth == 8
     assert settings.harness.macos.action_timeout_seconds == 15
     assert settings.harness.macos.new_command_timeout_seconds == 420
+    assert settings.harness.macos.skip_app_kill is False
     assert settings.harness.macos.bundle_id == "com.example.MacApp"
     assert settings.harness.macos.app_path == app_path
+    assert load_platform_settings("macos", user_config_root=tmp_path / "user").harness.macos.skip_app_kill is True
+
+
+@pytest.mark.parametrize("raw_value", ["'true'", "'false'", "1", "0", "null", "[]"])
+def test_load_settings_rejects_non_bool_macos_skip_app_kill(tmp_path: Path, raw_value: str) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        _base_config(
+            tmp_path,
+            f"""
+harness:
+  platform: macos
+  macos:
+    skip_app_kill: {raw_value}
+""",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError) as failure:
+        load_settings(config_path, user_config_root=tmp_path / "user")
+    assert any(error["loc"] == ("harness", "macos", "skip_app_kill") for error in failure.value.context["errors"])
 
 
 def test_load_settings_rejects_removed_macos_appium_server_url_key(tmp_path: Path) -> None:

@@ -1930,3 +1930,124 @@ def test_macos_recording_metadata_and_preset_pre_plan_alignment(tmp_path) -> Non
     )
     assert doc["platform"] == "macos"
     assert doc["appId"] == "com.apple.TextEdit"
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_appium_connect_macos_driver_forwards_skip_app_kill_on_initial_and_replacement_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fsq_agent.core.interfaces import DriverFactory
+    from fsq_agent.models import MacOSHarnessSettings, MacOSLaunchAppParams
+
+    assert MacOSHarnessSettings().skip_app_kill is True
+    assert MacOSHarnessSettings(skip_app_kill=False).skip_app_kill is False
+    for invalid in (None, 1, 0, "true", "false"):
+        with pytest.raises(ValidationError):
+            MacOSHarnessSettings(skip_app_kill=invalid)  # type: ignore[arg-type]
+
+    created_calls: list[dict[str, object]] = []
+    sessions: list[FakeMacSession] = []
+    managed_starts = 0
+
+    class FakeScope:
+        def __enter__(self) -> str:
+            return "fake-connection"
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+    class FakeRuntime:
+        managed_cleanup_pending = False
+
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def start_managed(self, **kwargs: object) -> FakeScope:
+            nonlocal managed_starts
+            managed_starts += 1
+            return FakeScope()
+
+    def fake_create_mac2_session(
+        connection: object,
+        *,
+        bundle_id: str | None = None,
+        app_path: object = None,
+        arguments: list[str] | None = None,
+        no_reset: bool = True,
+        skip_app_kill: bool = True,
+        new_command_timeout_seconds: float | None = 60.0,
+        control: object = None,
+    ) -> FakeMacSession:
+        assert connection == "fake-connection"
+        created_calls.append(
+            {
+                "bundle_id": bundle_id,
+                "no_reset": no_reset,
+                "skip_app_kill": skip_app_kill,
+                "new_command_timeout_seconds": new_command_timeout_seconds,
+            }
+        )
+        session = FakeMacSession({}, session_id=f"mac2:{len(sessions) + 1}")
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
+    monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", fake_create_mac2_session)
+
+    for configured_skip_app_kill in (True, False):
+        created_calls.clear()
+        sessions.clear()
+        settings = MacOSHarnessSettings(skip_app_kill=configured_skip_app_kill)
+        settings.bundle_id = "com.apple.Notes"
+        driver = DriverFactory().create_macos_driver(settings)
+        try:
+            first = driver.launch_app(MacOSLaunchAppParams(new_session=True))
+            assert first["status"] == "passed"
+            second = driver.launch_app(MacOSLaunchAppParams(bundle_id="com.apple.Preview", new_session=True))
+            assert second["status"] == "passed"
+            assert sessions[0].lifecycle_calls == [("quit", None)]
+            assert [call["bundle_id"] for call in created_calls] == ["com.apple.Notes", "com.apple.Preview"]
+            assert [call["skip_app_kill"] for call in created_calls] == [configured_skip_app_kill, configured_skip_app_kill]
+        finally:
+            driver.close()
+
+    # Legacy SDK signature lacking skip_app_kill: default True remains compatible, explicit False fails fast.
+    legacy_calls: list[dict[str, object]] = []
+
+    def legacy_create_mac2_session(
+        connection: object,
+        *,
+        bundle_id: str | None = None,
+        app_path: object = None,
+        arguments: list[str] | None = None,
+        no_reset: bool = True,
+        new_command_timeout_seconds: float | None = 60.0,
+        control: object = None,
+    ) -> FakeMacSession:
+        legacy_calls.append({"bundle_id": bundle_id, "no_reset": no_reset})
+        return FakeMacSession({}, session_id="mac2:legacy")
+
+    monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", legacy_create_mac2_session)
+
+    default_driver = AppiumConnectMacOSDriver(bundle_id="com.apple.Notes")
+    try:
+        assert default_driver.launch_app(MacOSLaunchAppParams(new_session=True))["status"] == "passed"
+        assert legacy_calls == [{"bundle_id": "com.apple.Notes", "no_reset": True}]
+    finally:
+        default_driver.close()
+
+    starts_before_reject = managed_starts
+    strict_kill_driver = AppiumConnectMacOSDriver(bundle_id="com.apple.Notes", skip_app_kill=False)
+    try:
+        with pytest.raises(ConfigurationError, match="skip_app_kill"):
+            strict_kill_driver.launch_app(MacOSLaunchAppParams(new_session=True))
+        assert managed_starts == starts_before_reject
+    finally:
+        strict_kill_driver.close()
+
+    with pytest.raises(ConfigurationError, match="skip_app_kill"):
+        AppiumConnectMacOSDriver(bundle_id="com.apple.Notes", skip_app_kill="yes")  # type: ignore[arg-type]
+
+    launch_schema = MacOSLaunchAppParams.model_json_schema()
+    assert "new_session" in launch_schema["description"]
+    assert "activate" in launch_schema["properties"]["new_session"]["description"].lower()

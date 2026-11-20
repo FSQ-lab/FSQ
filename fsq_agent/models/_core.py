@@ -1174,15 +1174,23 @@ class _MacOSStructuralTargetParams(BaseModel):
 class MacOSLaunchAppParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
-        json_schema_extra={"description": "Launch a macOS application. Reuse an existing Mac2 session by bundle id, or set new_session to replace it."},
+        json_schema_extra={
+            "description": (
+                "Launch or activate a macOS application. Prefer new_session=false with bundle_id to switch to or activate another desktop app in the active Mac2 session; "
+                "set new_session=true on initial session setup or explicit session replacement."
+            )
+        },
     )
 
     bundle_id: str | None = Field(default=None, description="macOS bundle id to create or activate. Omit to use the configured bundle id.")
-    app_path: str | None = Field(default=None, description="Local app path for session creation. Omit to use the configured app path.")
-    arguments: list[str] | None = Field(default=None, description="Application arguments used only during session creation.")
+    app_path: str | None = Field(default=None, description="Local app path used only during Mac2 session creation (new_session=true or no active session). Omit to use the configured app path.")
+    arguments: list[str] | None = Field(default=None, description="Application arguments used only during Mac2 session creation.")
     new_session: bool = Field(
         default=False,
-        description="When true, close any existing Mac2 session and create a new one. When false, activate the bundle id in the existing session.",
+        description=(
+            "When false (preferred for switching or activating another desktop app mid-task), activate bundle_id inside the existing Mac2 session without tearing it down. "
+            "When true, close any existing Mac2 session and create a new one (preserving running desktop apps when skip_app_kill is enabled)."
+        ),
     )
 
 

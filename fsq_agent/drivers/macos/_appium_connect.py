@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import re
@@ -61,6 +62,7 @@ _T = TypeVar("_T")
 DEFAULT_MACOS_PAGE_SOURCE_MAX_DEPTH = 12
 DEFAULT_MACOS_ACTION_TIMEOUT_SECONDS = 10
 DEFAULT_MACOS_NEW_COMMAND_TIMEOUT_SECONDS = 900.0
+DEFAULT_MACOS_SKIP_APP_KILL = True
 DEFAULT_MACOS_SNAPSHOT_SOURCE_PREVIEW_CHARS = 2000
 DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS = 50
 DEFAULT_MANAGED_STARTUP_TIMEOUT_SECONDS = 60.0
@@ -282,13 +284,17 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         page_source_max_depth: int = DEFAULT_MACOS_PAGE_SOURCE_MAX_DEPTH,
         action_timeout_seconds: int = DEFAULT_MACOS_ACTION_TIMEOUT_SECONDS,
         new_command_timeout_seconds: float | None = DEFAULT_MACOS_NEW_COMMAND_TIMEOUT_SECONDS,
+        skip_app_kill: bool = DEFAULT_MACOS_SKIP_APP_KILL,
         session: object | None = None,
     ) -> None:
+        if type(skip_app_kill) is not bool:
+            raise ConfigurationError("macOS skip_app_kill must be a boolean.")
         self.bundle_id = bundle_id.strip() if isinstance(bundle_id, str) and bundle_id.strip() else None
         self.app_path = str(Path(app_path)) if app_path else None
         self.page_source_max_depth = page_source_max_depth
         self.action_timeout_seconds = action_timeout_seconds
         self.new_command_timeout_seconds = new_command_timeout_seconds
+        self.skip_app_kill = skip_app_kill
         self._borrowed_session = session is not None
         self._session: Any | None = session
         self._runtime: Any | None = None
@@ -473,7 +479,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
     @_macos_driver_tool(
         "launchApp",
-        description="Create or reuse a managed Appium Mac2 session for the configured macOS application.",
+        description=("Create a managed Appium Mac2 session (new_session=true) or activate a macOS bundle_id in the active session (new_session=false, preferred for switching desktop apps)."),
     )
     def launch_app(self, params: MacOSLaunchAppParams) -> dict[str, object]:
         return self._run_tool(lambda: self._launch_app_impl(params), allow_cleanup_pending=bool(params.new_session))
@@ -1261,6 +1267,19 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 context={"action": "Reinstall or repair fsq-agent."},
             ) from exc
 
+        effective_new_command_timeout = 0.0 if self.new_command_timeout_seconds is None else float(self.new_command_timeout_seconds)
+        if isinstance(self.new_command_timeout_seconds, bool) or not (0.0 <= effective_new_command_timeout <= 86_400.0):
+            raise ConfigurationError("macOS new_command_timeout_seconds must be between 0 and 86400 seconds or None.")
+        if type(self.skip_app_kill) is not bool:
+            raise ConfigurationError("macOS skip_app_kill must be a boolean.")
+        session_kwargs: dict[str, Any] = {}
+        parameters = inspect.signature(create_mac2_session).parameters
+        supports_skip_app_kill = "skip_app_kill" in parameters or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+        if supports_skip_app_kill:
+            session_kwargs["skip_app_kill"] = self.skip_app_kill
+        elif self.skip_app_kill is False:
+            raise ConfigurationError("Installed appium-connect-agent does not support macOS skip_app_kill=False; upgrade appium-connect-agent.")
+
         local_settings = _resolve_managed_local_settings(LocalSettings)
         runtime = Runtime(local_settings)
         self._borrowed_session = False
@@ -1303,10 +1322,6 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if last_port_error is not None:
                 raise last_port_error
             raise ConfigurationError("Failed to bind a managed Appium loopback port.")
-
-        effective_new_command_timeout = 0.0 if self.new_command_timeout_seconds is None else float(self.new_command_timeout_seconds)
-        if isinstance(self.new_command_timeout_seconds, bool) or not (0.0 <= effective_new_command_timeout <= 86_400.0):
-            raise ConfigurationError("macOS new_command_timeout_seconds must be between 0 and 86400 seconds or None.")
         try:
             session = create_mac2_session(
                 connection,
@@ -1316,6 +1331,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 no_reset=True,
                 new_command_timeout_seconds=effective_new_command_timeout,
                 control=OperationControl(timeout_seconds=DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS, cancellation=self._operation_cancellation),
+                **session_kwargs,
             )
         except BaseException as exc:
             uncertain_session = getattr(exc, "session", None)

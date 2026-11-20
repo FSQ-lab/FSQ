@@ -1505,6 +1505,7 @@ def test_runtime_builds_configured_macos_harness(monkeypatch: pytest.MonkeyPatch
                 "page_source_max_depth": 7,
                 "action_timeout_seconds": 11,
                 "new_command_timeout_seconds": 420,
+                "skip_app_kill": False,
             },
         },
         output={"root_dir": tmp_path / "output"},
@@ -1524,6 +1525,7 @@ def test_runtime_builds_configured_macos_harness(monkeypatch: pytest.MonkeyPatch
         "page_source_max_depth": 7,
         "action_timeout_seconds": 11,
         "new_command_timeout_seconds": 420,
+        "skip_app_kill": False,
     }
     assert payload == {
         "platform": "macos",
@@ -1533,6 +1535,7 @@ def test_runtime_builds_configured_macos_harness(monkeypatch: pytest.MonkeyPatch
         "app_path_configured": False,
         "action_timeout_seconds": 11,
         "new_command_timeout_seconds": 420,
+        "skip_app_kill": False,
         "configured_skill_names": [],
     }
     assert completed_payload["harness_class"] == "MacOSHarness"

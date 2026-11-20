@@ -7,8 +7,8 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 - Start each macOS case with `launch_app` and set `new_session` to true so the case opens a fresh Mac2 session before the main business path.
 - Collect final required verification while preserving the user's requested business terminal state, including open windows, active views, running activities, explicitly requested unsaved drafts, and system or app settings.
 - Do not routinely call `kill_app` at the end of a task. Use `kill_app` only when the user goal or explicit lifecycle instructions require closing, terminating, or restarting the application.
-- Automation-session and managed Mac2 service cleanup is owned by the runtime through `harness.close()`; killing the business application is not session cleanup.
-- When the case temporarily switches to another application and must switch back, call `launch_app` with the desired `bundle_id` and keep `new_session` false. This activates the application in the current Mac2 session without replacing it.
+- Automation-session and managed Mac2 service cleanup is owned by the runtime through `harness.close()` (owned Mac2 sessions default `skip_app_kill` to true so closing or replacing a session leaves the desktop application running); killing the business application is not session cleanup.
+- When the case activates another desktop application or switches back, call `launch_app` with the desired `bundle_id` and keep `new_session` false. Prefer `new_session` false for cross-app desktop workflows so Mac2 activates the target bundle in the active session without tearing down and recreating the session.
 - Do not report `launch_app` or `kill_app` as satisfying a business key action unless the case explicitly tests app lifecycle.
 
 ## Form Completion, Pre-Act Ledger, and Write Budgets
@@ -52,8 +52,8 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 
 ## Argument Rules
 
-- Use `new_session=true` on the case-opening `launch_app`; this closes any stale active session and creates the case session from the provided or configured `bundle_id` or `app_path`.
-- During the case, omit `new_session` or set it to false when activating another application or switching back by `bundle_id`. Do not pass `app_path` or `arguments` when reusing the session.
+- Use `new_session=true` on the case-opening `launch_app`; this closes any stale active session and creates the case session from the provided or configured `bundle_id` or `app_path` (preserving running desktop apps when `skip_app_kill` is enabled).
+- During the case, omit `new_session` or set it to false when activating another desktop application or switching back by `bundle_id`. Do not pass `app_path` or `arguments` when reusing the session.
 - Reserve `kill_app` for cases that explicitly test terminating an app (`close_session=false` or omitted) or explicitly closing a session (`close_session=true`).
 
 ## Correct Key Examples

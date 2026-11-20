@@ -236,6 +236,7 @@ class MacOSHarnessSettings(BaseModel):
     page_source_max_depth: int = Field(default=12, ge=1)
     action_timeout_seconds: int = Field(default=10, ge=1)
     new_command_timeout_seconds: float | None = Field(default=900.0, ge=0, le=86_400, allow_inf_nan=False)
+    skip_app_kill: bool = Field(default=True, strict=True)
     _bundle_id: str | None = PrivateAttr(default=None)
     _app_path: Path | None = PrivateAttr(default=None)
     _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)

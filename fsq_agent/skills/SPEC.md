@@ -63,6 +63,10 @@ macOS runs should configure `macos-harness.md` alongside shared automation guida
 
 iOS runs should configure `ios-harness.md` alongside shared automation guidance. The iOS harness skill describes XCUITest mobile action aliases, form completion and observed-sequence progression, structured `XCUIElementType*` locators (`accessibilityId`, `name`, `label`, `value`, `elementType`, `predicate`, `classChain`, `xpath`), logical-point coordinate semantics, safe interior and element-inset swipe rules, `ui_snapshot` compact XML and `device_local_time` usage, `inspect_element` unclipped readback, input-uncertainty/ambiguity recovery without blind replay, file identity and destructive-scope verification, pre-act ledger, pre-submit readback, and `write_budget` reserve rules, dynamic media sampling, `inspect_with_ai` locate/extract usage, `handle_alert` system alert handling, deterministic `assert_state`/`assert_visible`/`assert_not_visible` assertions, visual assertions through `assert_with_ai` (including privacy/reason/inconclusive handling), and credential text entry through `textType: runtimeSecret`.
 
+The iOS harness skill instructs agents never to use `xpath` predicates on `@visible` or `@accessible`: WDA can perform slow per-element accessibility IPC across the tree to evaluate them. Agents prefer `accessibility_id`/`name`, exact `label`, `value` with `element_type`, or XCUITest predicate or class-chain locators. This guidance does not change the supported locator schema.
+
+The iOS harness skill describes `ui_snapshot` XML as the sole hierarchy, the 160-character text limit, and how to interpret `compaction.offscreen_nodes_omitted` as partial coverage rather than proof of absence. It distinguishes scrolling and observing again from an explicit `include_offscreen: true` inspection of the currently materialized tree.
+
 Additional platform skills must be separate platform-specific Markdown bundles instead of expanding existing platform skill files with unrelated platform rules.
 
 ## Current Invariants

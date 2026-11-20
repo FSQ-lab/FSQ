@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import io
+import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import Mock
 from xml.etree import ElementTree
 
 import pytest
@@ -402,6 +405,8 @@ appId: com.apple.Preferences
     reference_screen_size:
       width: 402
       height: 874
+- uiSnapshot:
+    include_offscreen: true
 - stopApp: {}
 """
     case = FsqCaseLoader().load_text(raw_yaml, path=tmp_path / "case.fsq.yaml")
@@ -416,6 +421,7 @@ def test_ios_snapshot_redacts_secure_text_field_and_includes_viewport_and_clock(
     driver = AppiumConnectIOSDriver(bundle_id="com.apple.Preferences", session=session)
 
     snap = driver.ui_snapshot(IOSUiSnapshotParams(max_depth=6))
+    assert "root" not in snap
     assert snap["viewport"] == {"width": 402, "height": 874}
     assert snap["device_local_time"] == {
         "status": "available",
@@ -430,6 +436,106 @@ def test_ios_snapshot_redacts_secure_text_field_and_includes_viewport_and_clock(
     assert len(secure_nodes) == 1
     assert "value" not in secure_nodes[0].attrib
     assert secure_nodes[0].attrib.get("placeholderValue") == "Enter PIN"
+
+
+def test_ios_snapshot_prunes_offscreen_subtrees_without_losing_visible_descendants() -> None:
+    def node(kind: str, name: str, visibility: str, *children: SimpleNamespace, label: str = "") -> SimpleNamespace:
+        return SimpleNamespace(type=_obs(f"XCUIElementType{kind}"), id=_obs(name), visibility=visibility, label=_obs(label), children=children)
+
+    transaction = "Transaction details " * 6
+    long_title = "Long item title " * 12
+    offscreen_rows = tuple(node("Cell", f"offscreen-{index}", "not_visible", label=transaction) for index in range(850))
+    hidden_branch = node("Other", "hidden-branch", "not_visible", node("Cell", "hidden-child", "not_visible"))
+    mixed_branch = node(
+        "Other",
+        "mixed-branch",
+        "not_visible",
+        node("Cell", "visible-transaction", "visible", label=transaction),
+        node("Cell", "partially-visible", "partially_visible", label=long_title),
+        node("Cell", "unknown-visibility", "unknown"),
+        hidden_branch,
+    )
+    scroll_view = node("ScrollView", "transactions", "visible", mixed_branch, *offscreen_rows)
+    session = FakeSession()
+    session.tree_roots = (node("Application", "app", "not_visible", scroll_view),)
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        default = driver.ui_snapshot(IOSUiSnapshotParams())
+        full = driver.ui_snapshot(IOSUiSnapshotParams(include_offscreen=True))
+    finally:
+        driver.close()
+
+    root = ElementTree.fromstring(str(default["xml"]))  # noqa: S314 - controlled test output
+    assert root.tag == "XCUIElementTypeApplication"
+    assert root.get("visible") == "false"
+    scroll = root.find("./XCUIElementTypeScrollView[@name='transactions']")
+    assert scroll is not None
+    mixed = scroll.find("./XCUIElementTypeOther[@name='mixed-branch']")
+    assert mixed is not None
+    assert mixed.get("visible") == "false"
+    assert [(child.get("name"), child.get("label")) for child in mixed] == [
+        ("visible-transaction", transaction.strip()),
+        ("partially-visible", long_title.strip()[:160]),
+        ("unknown-visibility", None),
+    ]
+    assert len(scroll) == 1
+    assert "root" not in default
+    assert "root" not in full
+    compaction = default["compaction"]
+    coverage = default["coverage"]
+    assert isinstance(compaction, dict)
+    assert isinstance(coverage, dict)
+    assert compaction["offscreen_nodes_omitted"] == 852
+    assert compaction["layout_nodes_removed"] == 0
+    assert compaction["clipped_attributes"] == 1
+    assert coverage["status"] == "partial"
+    assert coverage["source_nodes"] == 858
+    assert coverage["retained_nodes"] == 6
+    full_compaction = full["compaction"]
+    assert isinstance(full_compaction, dict)
+    assert full_compaction["offscreen_nodes_omitted"] == 0
+    full_root = ElementTree.fromstring(str(full["xml"]))  # noqa: S314 - controlled test output
+    assert full_root.find(".//XCUIElementTypeCell[@name='offscreen-849'][@visible='false']") is not None
+    assert full_root.find(".//XCUIElementTypeCell[@name='hidden-child'][@visible='false']") is not None
+    assert len(json.dumps(default)) < 30_000 < len(json.dumps(full))
+
+
+def test_ios_snapshot_reports_partial_when_offscreen_pruning_is_the_only_loss() -> None:
+    hidden = SimpleNamespace(type=_obs("XCUIElementTypeCell"), visibility="not_visible")
+    session = FakeSession()
+    session.tree_roots = (SimpleNamespace(type=_obs("XCUIElementTypeApplication"), children=(hidden,)),)
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        snapshot = driver.ui_snapshot(IOSUiSnapshotParams())
+    finally:
+        driver.close()
+
+    assert snapshot["xml"] == "<XCUIElementTypeApplication />"
+    compaction = snapshot["compaction"]
+    coverage = snapshot["coverage"]
+    assert isinstance(compaction, dict)
+    assert isinstance(coverage, dict)
+    assert compaction["offscreen_nodes_omitted"] == 1
+    assert coverage["status"] == "partial"
+
+
+def test_ios_snapshot_empty_tree_has_no_duplicate_root_or_offscreen_omissions() -> None:
+    session = FakeSession()
+    session.tree_roots = ()
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        snapshot = driver.ui_snapshot(IOSUiSnapshotParams())
+    finally:
+        driver.close()
+
+    assert "root" not in snapshot
+    assert snapshot["xml"] == "<XCUIElementTypeApplication />"
+    compaction = snapshot["compaction"]
+    coverage = snapshot["coverage"]
+    assert isinstance(compaction, dict)
+    assert isinstance(coverage, dict)
+    assert compaction["offscreen_nodes_omitted"] == 0
+    assert coverage["status"] == "unknown"
 
 
 def test_ios_inspect_element_withholds_secure_text_field_value_even_when_type_unrequested() -> None:
@@ -818,7 +924,7 @@ def test_ios_first_step_coordinate_safe_replay_params_and_ui_snapshot_compaction
     snap_res = driver.ui_snapshot(IOSUiSnapshotParams())
     compaction = snap_res["compaction"]
     assert compaction["applied"] is True
-    assert compaction["text_attribute_limit"] == 50
+    assert compaction["text_attribute_limit"] == 160
     assert "layout_nodes_removed" in compaction
     assert "clipped_attributes" in compaction
 
@@ -1218,6 +1324,14 @@ class _IntSubclass(int):
         {"xcuitest_accessibility_deadline_seconds": float("-inf")},
         {"xcuitest_accessibility_deadline_seconds": -0.001},
         {"xcuitest_accessibility_deadline_seconds": 600.001},
+        {"xcuitest_animation_cool_off_timeout_seconds": True},
+        {"xcuitest_animation_cool_off_timeout_seconds": False},
+        {"xcuitest_animation_cool_off_timeout_seconds": "2.0"},
+        {"xcuitest_animation_cool_off_timeout_seconds": float("nan")},
+        {"xcuitest_animation_cool_off_timeout_seconds": float("inf")},
+        {"xcuitest_animation_cool_off_timeout_seconds": float("-inf")},
+        {"xcuitest_animation_cool_off_timeout_seconds": -0.001},
+        {"xcuitest_animation_cool_off_timeout_seconds": 600.001},
     ],
 )
 def test_ios_harness_settings_rejects_invalid_initial_wda_policies(invalid_kwargs: dict[str, Any]) -> None:
@@ -1234,12 +1348,14 @@ def test_ios_harness_settings_and_driver_policy_forwarding_and_borrowed_rejectio
     assert defaults.xcuitest_wait_for_idle_timeout_seconds is None
     assert defaults.xcuitest_snapshot_max_depth is None
     assert defaults.xcuitest_accessibility_deadline_seconds is None
+    assert defaults.xcuitest_animation_cool_off_timeout_seconds is None
 
     tuned = IOSHarnessSettings(
         action_timeout_seconds=15,
         xcuitest_wait_for_idle_timeout_seconds=0,
         xcuitest_snapshot_max_depth=25,
         xcuitest_accessibility_deadline_seconds=30,
+        xcuitest_animation_cool_off_timeout_seconds=600,
     )
     assert tuned.xcuitest_wait_for_idle_timeout_seconds == 0.0
     assert type(tuned.xcuitest_wait_for_idle_timeout_seconds) is float
@@ -1247,6 +1363,8 @@ def test_ios_harness_settings_and_driver_policy_forwarding_and_borrowed_rejectio
     assert type(tuned.xcuitest_snapshot_max_depth) is int
     assert tuned.xcuitest_accessibility_deadline_seconds == 30.0
     assert type(tuned.xcuitest_accessibility_deadline_seconds) is float
+    assert tuned.xcuitest_animation_cool_off_timeout_seconds == 600.0
+    assert type(tuned.xcuitest_animation_cool_off_timeout_seconds) is float
 
     driver = DriverFactory().create_ios_driver(tuned, bundle_id="com.apple.Preferences", udid="SIM-UDID")
     assert driver.xcuitest_wait_for_idle_timeout_seconds == 0.0
@@ -1260,6 +1378,77 @@ def test_ios_harness_settings_and_driver_policy_forwarding_and_borrowed_rejectio
         {"xcuitest_wait_for_idle_timeout_seconds": 2.0},
         {"xcuitest_snapshot_max_depth": 25},
         {"xcuitest_accessibility_deadline_seconds": 10.0},
+        {"xcuitest_animation_cool_off_timeout_seconds": 0.0},
     ):
         with pytest.raises(ConfigurationError, match="borrowed iOS Session"):
             AppiumConnectIOSDriver(bundle_id="com.apple.Preferences", session=session, **policy_kwarg)
+
+
+@pytest.mark.parametrize(
+    ("cool_off_seconds", "excluded_attributes"),
+    [(None, None), (0.0, ("visible", "accessible")), (0.25, ("nativeAccessibilityElement",)), (600.0, None)],
+)
+def test_ios_policies_are_forwarded_to_initial_and_replacement_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cool_off_seconds: float | None,
+    excluded_attributes: tuple[str, ...] | None,
+) -> None:
+    from appium_connect_agent import automation, runtime
+
+    from fsq_agent.config import load_platform_settings
+    from fsq_agent.core.interfaces import DriverFactory
+    from fsq_agent.drivers.ios import _appium_connect
+
+    settings = load_platform_settings("ios", user_config_root=tmp_path).harness.ios
+    assert "xcuitest_animation_cool_off_timeout_seconds" not in settings.model_fields_set
+    assert settings.xcuitest_animation_cool_off_timeout_seconds is None
+    if cool_off_seconds is not None:
+        settings.xcuitest_animation_cool_off_timeout_seconds = cool_off_seconds
+    assert "xcuitest_page_source_excluded_attributes" not in settings.model_fields_set
+    assert settings.xcuitest_page_source_excluded_attributes is None
+    settings.xcuitest_page_source_excluded_attributes = excluded_attributes
+
+    connection = object()
+    initial = SimpleNamespace(quit=Mock())
+    replacement = SimpleNamespace(quit=Mock())
+    create_session = Mock(side_effect=(initial, replacement))
+    monkeypatch.setattr(automation, "create_xcuitest_session", create_session)
+    monkeypatch.setattr(automation, "list_ios_devices", lambda **kwargs: ())
+    monkeypatch.setattr(runtime, "Runtime", lambda settings: SimpleNamespace(start_managed=lambda **kwargs: nullcontext(connection)))
+    monkeypatch.setattr(_appium_connect, "_resolve_managed_local_settings", lambda settings_cls: settings_cls())
+    monkeypatch.setattr(_appium_connect, "_allocate_loopback_port", lambda: 4723)
+
+    driver = DriverFactory().create_ios_driver(settings, bundle_id="com.apple.Preferences", udid="SIM-UDID")
+    try:
+        assert driver.ensure_session() is initial
+        assert driver.launch_app(IOSLaunchAppParams(new_session=True))["status"] == "passed"
+        assert driver.ensure_session() is replacement
+        assert len(create_session.call_args_list) == 2
+        for call in create_session.call_args_list:
+            assert call.kwargs["xcuitest_animation_cool_off_timeout_seconds"] == cool_off_seconds
+            if excluded_attributes is None:
+                assert "xcuitest_page_source_excluded_attributes" not in call.kwargs
+            else:
+                assert call.kwargs["xcuitest_page_source_excluded_attributes"] == excluded_attributes
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("value", ["visible", b"visible", [], (), {"visible"}, ["visible", "visible"], ["visible", 1], [b"visible"], ["Visible"], ["visible "], ["bogus"]])
+def test_ios_page_source_exclusions_reject_invalid_values(value: object) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="xcuitest_page_source_excluded_attributes"):
+        IOSHarnessSettings.model_validate({"xcuitest_page_source_excluded_attributes": value})
+
+
+@pytest.mark.parametrize("value", [["accessible", "visible"], ("accessible", "visible")])
+def test_ios_page_source_exclusions_normalize_to_ordered_tuple(value: list[str] | tuple[str, ...]) -> None:
+    settings = IOSHarnessSettings.model_validate({"xcuitest_page_source_excluded_attributes": value})
+    assert settings.xcuitest_page_source_excluded_attributes == ("accessible", "visible")
+
+
+def test_ios_page_source_exclusions_reject_borrowed_session() -> None:
+    with pytest.raises(ConfigurationError, match="borrowed iOS Session"):
+        AppiumConnectIOSDriver(session=FakeSession(), xcuitest_page_source_excluded_attributes=["visible", "accessible"])

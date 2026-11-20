@@ -1721,6 +1721,10 @@ class IOSUiSnapshotParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Read the current compact iOS XCUITest UI hierarchy and device clock context."})
 
     max_depth: int | None = Field(default=None, ge=1, description="Optional maximum tree depth to include.")
+    include_offscreen: bool = Field(
+        default=False,
+        description="Include off-screen elements (visible=false) in the compact snapshot. Default false prunes off-screen-only branches and reports offscreen_nodes_omitted.",
+    )
 
 
 class IOSInspectElementParams(_IOSTargetParams):

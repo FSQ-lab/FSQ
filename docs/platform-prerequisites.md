@@ -14,6 +14,8 @@ ADB and Node.js (`^20.19.0 || ^22.12.0 || >=24.0.0`) must be on `PATH`, `JAVA_HO
 
 Run on Windows with an existing application path and an interactive desktop session that can expose the target UI. The package includes pywinauto; application installation, startup prerequisites, permissions, and desktop-session availability remain operator responsibilities.
 
+Windows Quick Test includes application presets for Edge, Chrome, Edge Beta, Edge Canary, Notepad, and Calculator. Applications must already be installed and accessible in the interactive desktop session.
+
 ## macOS
 
 Run on macOS with full Xcode, Node.js (`^20.19.0 || ^22.12.0 || >=24.0.0`) on `PATH`, the managed Appium 3.7.0 + Mac2 driver runtime root (`~/.appium-connect-agent/`), and an existing application identified by bundle id, application path, or both. Command Line Tools alone are insufficient.

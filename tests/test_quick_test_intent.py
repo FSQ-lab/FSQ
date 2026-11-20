@@ -8,7 +8,7 @@ import pytest
 
 from fsq_agent.agent_engine import EngineError, ModelResult
 from fsq_agent.ai_services import QuickTestIntentAnalyzer, build_quick_test_intent_analyzer
-from fsq_agent.config import load_platform_settings
+from fsq_agent.config import load_platform_settings, load_windows_application_catalogue
 
 
 class Session:
@@ -36,6 +36,63 @@ class Session:
 
 def output(**updates):
     return json.dumps({"sufficient": True, "reason": "sufficient", "application_name": "Calculator", "explicit_reference": None, "inferred_hint": None, **updates})
+
+
+@pytest.mark.parametrize("name", ["edge", "微软浏览器"])
+def test_windows_catalogue_selection_uses_one_semantic_request_without_paths(name):
+    session = Session(output(application_name=name, app_config_id="edge", inferred_hint={"kind": "app_path", "value": r"C:\Guessed\edge.exe"}))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal=f"打开{name}\uff0c访问www.google.com", application_catalogue=load_windows_application_catalogue())
+    assert result.app_config_id == "edge"
+    assert result.inferred_hint is None
+    assert len(session.requests) == 1
+    request = session.requests[0]
+    assert "Microsoft Edge" in request.input
+    assert "ProgramFiles" not in request.input
+    assert "path_candidates" not in request.input
+    assert "app_config_id" in request.output.schema["required"]
+    assert session.closed
+
+
+def test_windows_catalogue_null_retains_inferred_hint():
+    session = Session(output(app_config_id=None, inferred_hint={"kind": "app_path", "value": r"C:\Apps\calc.exe"}))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal="Calculator: verify 1+1=2", application_catalogue=load_windows_application_catalogue())
+    assert result.app_config_id is None
+    assert result.inferred_hint.value == r"C:\Apps\calc.exe"
+
+
+@pytest.mark.parametrize("selected", ["invented", "EDGE", "", 3])
+def test_windows_catalogue_unknown_or_invalid_selection_is_not_no_match(selected):
+    session = Session(output(app_config_id=selected))
+    with pytest.raises(EngineError):
+        QuickTestIntentAnalyzer(session).analyze(platform="windows", goal="Calculator: verify 1+1=2", application_catalogue=load_windows_application_catalogue())
+    assert session.closed
+
+
+def test_windows_catalogue_field_must_be_present_even_for_no_match():
+    with pytest.raises(EngineError):
+        QuickTestIntentAnalyzer(Session(output())).analyze(platform="windows", goal="Calculator: verify 1+1=2", application_catalogue=load_windows_application_catalogue())
+
+
+def test_windows_explicit_path_has_priority_over_valid_catalogue_selection():
+    path = r"C:\Custom\browser.exe"
+    session = Session(output(application_name=None, explicit_reference=path, app_config_id="edge"))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal=f"打开{path}\uff0c访问www.google.com", application_catalogue=load_windows_application_catalogue())
+    assert result.explicit_reference == path
+    assert result.inferred_hint is None
+
+
+@pytest.mark.parametrize("reason", ["insufficient", "ambiguous_application"])
+def test_windows_catalogue_does_not_turn_insufficient_or_ambiguous_intent_into_success(reason):
+    session = Session(output(sufficient=False, reason=reason, application_name=None, app_config_id=None))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal="浏览器", application_catalogue=load_windows_application_catalogue())
+    assert not result.sufficient
+    assert result.reason == reason
+
+
+def test_other_platform_schema_does_not_add_catalogue_selection():
+    session = Session(output())
+    QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: verify 1+1=2")
+    assert "app_config_id" not in session.requests[0].output.schema["properties"]
 
 
 @pytest.mark.parametrize(

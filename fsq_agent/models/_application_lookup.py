@@ -1,10 +1,41 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import re
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+
+_CatalogueText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
+
+
+class WindowsApplicationConfig(BaseModel):
+    """Bundled application policy, not a persisted Workspace identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    id: _CatalogueText
+    name: _CatalogueText
+    description: _CatalogueText
+    path_candidates: tuple[_CatalogueText, ...] = Field(min_length=1, max_length=8, strict=False)
+    window_title_re: _CatalogueText
+
+    @field_validator("window_title_re")
+    @classmethod
+    def valid_title_regex(cls, value: str) -> str:
+        try:
+            re.compile(value)
+        except re.error:
+            raise ValueError("Invalid application title regex.") from None
+        return value
+
+    @model_validator(mode="after")
+    def safe_text(self):
+        for value in (self.id, self.name, self.description, self.window_title_re, *self.path_candidates):
+            if any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise ValueError("Application configuration must not contain control characters.")
+        return self
 
 
 class ApplicationLookupHint(BaseModel):

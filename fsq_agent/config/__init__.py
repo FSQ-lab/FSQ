@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from fsq_agent.config._applications import load_windows_application_catalogue
 from fsq_agent.config._loader import (
     PLATFORM_CONFIG_PATHS,
     load_platform_settings,
@@ -74,6 +75,7 @@ __all__ = [
     "load_registered_workspace",
     "load_settings",
     "load_user_provider_config",
+    "load_windows_application_catalogue",
     "load_workspace_platform_settings",
     "refresh_provider_settings",
     "resolve_platform_config_path",

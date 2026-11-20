@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
@@ -18,6 +19,7 @@ from fsq_agent.config import (
     list_workspace_registry,
     load_platform_settings,
     load_registered_workspace,
+    load_windows_application_catalogue,
     load_workspace_platform_settings,
     update_workspace_platform,
     validate_runtime_settings,
@@ -141,7 +143,13 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     if request.platform == "web" and request.url is None:
         addresses = _web_addresses(request.goal)
     try:
+        catalogue = load_windows_application_catalogue() if request.platform == "windows" else None
+    except ConfigurationError:
+        raise _error("discovery_failed") from None
+    try:
         options = {"url": request.url} if request.url is not None else {}
+        if catalogue is not None:
+            options["application_catalogue"] = catalogue
         intent = build_quick_test_intent_analyzer(settings).analyze(platform=request.platform, goal=request.goal, **options)
     except Exception:  # noqa: BLE001 -- preserve failure, never return raw provider/model output.
         raise _error("inference_failed") from None
@@ -169,6 +177,8 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
             raise _error("prerequisites")
         target = WebWorkspaceTarget(browser_channel=request.target_id, browser_executable_path=paths[0])
         settings.harness.web.base_url = address
+    elif request.platform == "windows" and intent.explicit_reference is None and intent.app_config_id is not None:
+        target, application = _windows_catalogue_target(runtime, catalogue, intent.app_config_id)
     else:
         name = intent.application_name or intent.explicit_reference
         if not name:
@@ -217,6 +227,21 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
         settings=frozen.model_copy(deep=True),
         requires_web_search_evidence=requires_web_search_evidence,
     )
+
+
+def _windows_catalogue_target(runtime, catalogue, selected_id):
+    entry = next((entry for entry in catalogue if entry.id == selected_id), None)
+    if entry is None:
+        raise _error("discovery_failed")
+    for candidate_path in entry.path_candidates:
+        lookup = runtime.lookup_application(platform="windows", name=entry.name, explicit_reference=os.path.expandvars(candidate_path))
+        if lookup.status != "complete" or len(lookup.candidates) > 1:
+            raise _error("discovery_failed")
+        if lookup.candidates:
+            if lookup.candidates[0].app_path is None:
+                raise _error("discovery_failed")
+            return WindowsWorkspaceTarget(app_path=lookup.candidates[0].app_path, window_title_re=entry.window_title_re), entry.name
+    raise _error("discovery_failed")
 
 
 def _web_addresses(goal: str) -> tuple[str, ...]:

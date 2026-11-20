@@ -239,22 +239,24 @@ For SPEC-item verdicts, any verdict except `implemented` is blocking unless the 
 
 ## Required Output
 
-Use **Exception-Only Output** for all audit passes (do not generate full forward/reverse tables of passing items):
+Use **Compact Exception-Only Output** for all audit passes so the complete report fits initial `task` inline delivery without `<preview>` truncation (target `<= 4.5 KB`, no wide Markdown tables, no verbatim multi-line SPEC or code excerpts—cite `path:line` and symbol names only):
 
 1. **Audit Header & Concise Coverage Declaration**:
    - `audit_mode=full|repair-only`, `review_lane=combined|forward|reverse`, `spec_delta_mode=confirmed-update|no-delta`, `coverage_complete=true|false`.
    - Audited inputs: affected module `SPEC.md` paths, relevant root `SPEC.md` sections, base commit or scoped `git diff` target (plus any untracked files), and consumed local verification commands/status.
-   - Concise bidirectional scope summary: 1–3 bullets or lines stating which modules/files/behaviors were checked forward (`SPEC -> code`) and reverse (`code -> SPEC`) and confirming all passing items satisfied grounding and correctness.
-2. **Findings (`Blocking` then `Non-blocking`)** — omit table or write `None` when zero findings exist:
+   - Concise bidirectional scope summary: 1–2 short bullets naming checked modules/files and confirming passing items satisfied forward conformance and reverse grounding (do not enumerate every passing clause or helper).
+2. **Findings (`Blocking` then `Non-blocking`)** — write `None` when zero findings exist; otherwise use one compact block per finding (never a wide multi-column Markdown table):
    ```text
-   Finding ID | Severity | Verdict / Classification | SPEC ref (or absent) | File / Symbol Evidence | Root cause & Impact | Repair owner
+   - [F1] Blocking | <verdict / reverse classification> | owner: <implementation | SPEC/human decision | verification environment>
+     - Refs: <SPEC path:line or absent> -> <code path:line (`symbol`)>
+     - Gap: <1–2 sentences stating root cause, trigger condition, and concrete impact>
    ```
-3. **Repair-Only Delta Status** (only when `audit_mode=repair-only`):
+3. **Repair-Only Delta Status** (only when `audit_mode=repair-only`) — one compact bullet per prior finding (no wide tables):
    ```text
-   Previous Finding ID | Status (resolved / open) | Repair & Verification Evidence | Remaining gap (if open)
+   - [F1] resolved | open — <path:line (`symbol`) + test name; remaining gap if open>
    ```
 4. **Unverified Or Out-Of-Scope Items**:
-   - Explicitly list any unverified paths (for example CI-only platform matrix, real-device paths not run locally) or out-of-scope changes requiring human decision, or `None`.
+   - One concise bullet for any unverified external/CI boundary or out-of-scope item, or `None`.
 
 ## What Not To Accept
 

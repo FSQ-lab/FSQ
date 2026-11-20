@@ -280,7 +280,7 @@ Keep Reviewer inputs minimal and high-signal:
 1. Identify the snapshot by base commit / commit range or exact scoped `git diff` (for example `git diff <base> -- <allowed-paths>`) plus explicit paths of any in-scope untracked project files. Account for pre-existing user work without overwriting or silently absorbing unrelated changes.
 2. Pass only the affected module `SPEC.md` files and the relevant sections of root `SPEC.md` (such as touched architecture edges or applicable Development Rules), confirmed SPEC delta evidence (or recorded `no-SPEC-delta` basis), authorized task scope, and the already-green local verification commands/results.
 3. Do not force Reviewer to read the entire root `SPEC.md` end-to-end when only specific sections apply, and do not generate temporary diff files solely to manually cross-check byte sizes, `diff --git` entry counts, or pre/post double SHA-256 regeneration ceremonies.
-4. Do not edit in-scope files while Reviewer is running. Before claiming completion, confirm via `git status` / `git diff` that the worktree or commit HEAD still matches the reviewed state and passed local checks.
+4. Do not edit in-scope files while Reviewer is running. When no independent parallel work remains after dispatching Reviewer (or messaging an existing Reviewer for `repair-only`), end the turn and let the completion event resume execution—do not poll with `wait` or `proc://`. If a returned report exceeds inline preview limits, read it once via `:raw` rather than bare column-truncated `read`. Before claiming completion, confirm via `git status` / `git diff` that the worktree or commit HEAD still matches the reviewed state and passed local checks.
 
 After the audit result returns:
 

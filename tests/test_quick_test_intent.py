@@ -81,6 +81,15 @@ def test_windows_explicit_path_has_priority_over_valid_catalogue_selection():
     assert result.inferred_hint is None
 
 
+@pytest.mark.parametrize("reference", ["https://getsamplefiles.com/download/pdf/sample-1.pdf", "edge://downloads"])
+def test_windows_catalogue_ignores_navigation_uri_as_explicit_application_reference(reference):
+    goal = f"打开Edge\uff0c导航到 {reference}\uff0c然后检查结果"
+    session = Session(output(application_name="Edge", explicit_reference=reference, app_config_id="edge"))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal=goal, application_catalogue=load_windows_application_catalogue())
+    assert result.explicit_reference is None
+    assert result.app_config_id == "edge"
+
+
 @pytest.mark.parametrize("reason", ["insufficient", "ambiguous_application"])
 def test_windows_catalogue_does_not_turn_insufficient_or_ambiguous_intent_into_success(reason):
     session = Session(output(sufficient=False, reason=reason, application_name=None, app_config_id=None))

@@ -262,6 +262,8 @@ Web contracts:
 
 Windows contracts:
 
+- Models owns the shared Windows catalogue record boundary: stable ID, name, semantic description, executable path candidates, and existing `window_title_re`, consumed by Config and Quick Test preparation/intent analysis. Records contain no backend objects, process identity, model sessions, or executable code.
+- `WindowsWorkspaceTarget` and `WindowsHarnessSettings` retain their existing fields and semantics. Catalogue IDs are not persisted on Workspace targets, Cases, or runtime harness settings; resolved paths and title regexes use existing fields.
 - Windows parameter models include locator, lifecycle, desktop click variants, text input, key input, UI snapshot, deterministic visibility assertions, and Windows AI assertion models.
 - Windows settings are grouped under `WindowsHarnessSettings` and are selected by `HarnessSettings.platform == "windows"`.
 - Windows explicit observation command is represented as `ui_snapshot`/`uiSnapshot`; automatic runner evidence captures normalized `ui_snapshot` content through the same driver observation contract.

@@ -3,6 +3,7 @@
 
 import json
 import plistlib
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,8 @@ from fsq_agent.models import (
     PlatformRuntimeCheck,
     WorkspacePlatformCreateInput,
 )
+
+_APPLICATION_LOOKUP = PlatformRuntimeService.lookup_application
 
 
 @pytest.fixture
@@ -51,6 +54,181 @@ def ready(monkeypatch, tmp_path):
 
 def request(root, **updates):
     return QuickTestPrepareRequest(platform="android", target_id="serial-1", goal="Calculator: 1+1=2", user_config_root=root, **updates)
+
+
+@pytest.fixture
+def windows_catalogue(ready, monkeypatch):
+    from fsq_agent.models import WindowsApplicationConfig
+
+    executable = ready / "msedge.exe"
+    executable.write_bytes(b"filesystem fixture only")
+    missing = ready / "missing.exe"
+    entries = (WindowsApplicationConfig(id="edge", name="Microsoft Edge", description="Web browser", path_candidates=[str(missing), str(executable)], window_title_re=".*Microsoft Edge.*"),)
+    monkeypatch.setattr("fsq_agent.application._quick_test.load_windows_application_catalogue", lambda: entries)
+    return entries, executable
+
+
+def test_windows_selected_catalogue_resolves_in_order_without_registry_and_persists_title(ready, monkeypatch, windows_catalogue):
+    from fsq_agent.config import load_workspace_platform_settings
+
+    entries, executable = windows_catalogue
+    requests = []
+    payload = json.dumps({"sufficient": True, "reason": "sufficient", "application_name": "edge", "explicit_reference": None, "inferred_hint": None, "app_config_id": "edge"})
+
+    class Session:
+        def complete_sync(self, request):
+            requests.append(request)
+            return ModelResult(text=payload, parsed_output=request.output.parse(payload))
+
+        def close_sync(self):
+            pass
+
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: QuickTestIntentAnalyzer(Session()))
+    calls = []
+
+    def concrete_lookup(self, **kwargs):
+        calls.append(kwargs)
+        assert kwargs["explicit_reference"] in entries[0].path_candidates
+        assert kwargs.get("inferred_hint") is None
+        return _APPLICATION_LOOKUP(self, **kwargs)
+
+    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", concrete_lookup)
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(OpenKey=lambda *args, **kwargs: pytest.fail("Selected catalogue must not scan registry")))
+    monkeypatch.setattr("fsq_agent.core.HarnessFactory.create_harness", lambda *args, **kwargs: pytest.fail("No GUI/Driver construction"))
+    result = prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="打开edge\uff0c访问www.google.com", user_config_root=ready))
+    assert len(requests) == 1
+    assert [call["explicit_reference"] for call in calls] == list(entries[0].path_candidates)
+    assert result.target.app_path == executable
+    assert result.target.window_title_re == entries[0].window_title_re
+    assert result.application == "Microsoft Edge"
+    persisted = load_registered_workspace("quick-test", "windows", ready)
+    case_settings = load_workspace_platform_settings(result.root_path, "windows", ready)
+    assert persisted.target == result.target
+    assert case_settings.harness.windows.app_path == executable
+    assert case_settings.harness.windows.window_title_re == entries[0].window_title_re
+    assert "app_config_id" not in result.settings.workspace.config_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("first_candidate", ["available", "missing"])
+def test_windows_selected_candidates_use_existing_validator_and_stop_at_first_available(ready, monkeypatch, windows_catalogue, first_candidate):
+    entries, executable = windows_catalogue
+    first_path = str(executable if first_candidate == "available" else ready / "missing.exe")
+    entry = entries[0].model_copy(update={"path_candidates": (first_path, str(executable))})
+    monkeypatch.setattr("fsq_agent.application._quick_test.load_windows_application_catalogue", lambda: (entry,))
+    intent = QuickTestIntent(True, "sufficient", "edge", None, app_config_id="edge")
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    seen = []
+
+    def lookup(self, **kwargs):
+        seen.append(kwargs["explicit_reference"])
+        return _APPLICATION_LOOKUP(self, **kwargs)
+
+    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
+    req = QuickTestPrepareRequest(platform="windows", goal="打开edge\uff0c访问www.google.com", user_config_root=ready)
+    result = prepare_quick_test(req)
+    assert result.target.app_path == executable
+    assert seen == ([first_path] if first_candidate == "available" else [first_path, str(executable)])
+    before = result.settings.workspace.config_path.read_bytes()
+    executable.unlink()
+    with pytest.raises(ApplicationError) as error:
+        prepare_quick_test(req)
+    assert error.value.code.value == "quick_test.discovery_failed"
+    assert result.settings.workspace.config_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("first_candidate", ["relative.exe", "directory", "wrong_suffix"])
+def test_windows_candidate_validation_failure_is_terminal_even_with_later_available_path(ready, monkeypatch, windows_catalogue, first_candidate):
+    entries, executable = windows_catalogue
+    invalid = first_candidate if first_candidate == "relative.exe" else str(ready if first_candidate == "directory" else executable.with_suffix(".txt"))
+    entry = entries[0].model_copy(update={"path_candidates": (invalid, str(executable))})
+    monkeypatch.setattr("fsq_agent.application._quick_test.load_windows_application_catalogue", lambda: (entry,))
+    intent = QuickTestIntent(True, "sufficient", "edge", None, app_config_id="edge")
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    seen = []
+
+    def lookup(self, **kwargs):
+        seen.append(kwargs["explicit_reference"])
+        return _APPLICATION_LOOKUP(self, **kwargs)
+
+    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
+    with pytest.raises(ApplicationError) as error:
+        prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="edge: inspect page", user_config_root=ready))
+    assert error.value.code.value == "quick_test.discovery_failed"
+    assert seen == [invalid]
+    assert not (ready / "quick-test").exists()
+
+
+@pytest.mark.parametrize("selected", [None, "edge"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_windows_explicit_or_no_match_uses_existing_lookup(ready, monkeypatch, windows_catalogue, selected, explicit):
+    entries, executable = windows_catalogue
+    reference = str(executable) if explicit else None
+    intent = QuickTestIntent(True, "sufficient", "edge", reference, app_config_id=selected)
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
+    seen = []
+
+    def lookup(self, **kwargs):
+        seen.append(kwargs)
+        return ApplicationLookupResult(status="complete", candidates=(ApplicationCandidate(identity=str(executable), label="Existing lookup", app_path=executable),))
+
+    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
+    result = prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="edge: inspect page", user_config_root=ready))
+    assert seen[0]["explicit_reference"] == (reference if explicit or selected is None else entries[0].path_candidates[0])
+    assert result.target.window_title_re == (entries[0].window_title_re if selected and not explicit else None)
+
+
+@pytest.mark.parametrize("failure", ["unknown_id", "missing_candidates", "invalid_candidates", "invalid_catalogue", "invalid_explicit"])
+def test_windows_selection_errors_do_not_fallback_or_mutate_workspace(ready, monkeypatch, windows_catalogue, failure):
+    from fsq_agent.models import ConfigurationError
+
+    _, executable = windows_catalogue
+    prepare_quick_test(request(ready))
+    before = (ready / "quick-test/.fsq/config/config.android.yaml").read_bytes()
+    explicit = str(executable) if failure == "invalid_explicit" else None
+    intent = QuickTestIntent(True, "sufficient", "edge", explicit, app_config_id="unknown" if failure == "unknown_id" else "edge")
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
+    calls = []
+
+    def lookup(self, **kwargs):
+        calls.append(kwargs)
+        assert kwargs["explicit_reference"] is not None
+        return ApplicationLookupResult(status="failed" if failure == "invalid_candidates" else "complete", code="invalid_query" if failure == "invalid_candidates" else "complete")
+
+    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
+    if failure == "invalid_catalogue":
+
+        def invalid():
+            raise ConfigurationError("Invalid catalogue.")
+
+        monkeypatch.setattr("fsq_agent.application._quick_test.load_windows_application_catalogue", invalid)
+    with pytest.raises(ApplicationError):
+        prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="edge: inspect page", user_config_root=ready))
+    assert (ready / "quick-test/.fsq/config/config.android.yaml").read_bytes() == before
+    assert not (ready / "quick-test/.fsq/config/config.windows.yaml").exists()
+    if failure in {"unknown_id", "invalid_catalogue"}:
+        assert not calls
+    if failure == "invalid_explicit":
+        assert len(calls) == 1
+
+
+def test_windows_unknown_model_selection_is_inference_failure_not_no_match(ready, monkeypatch, windows_catalogue):
+    class Session:
+        def complete_sync(self, request):
+            payload = json.dumps({"sufficient": True, "reason": "sufficient", "application_name": "edge", "explicit_reference": None, "inferred_hint": None, "app_config_id": "invented"})
+            return ModelResult(text=payload, parsed_output=request.output.parse(payload))
+
+        def close_sync(self):
+            pass
+
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: QuickTestIntentAnalyzer(Session()))
+    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lambda *args, **kwargs: pytest.fail("Unknown model ID is not a no-match lookup"))
+    with pytest.raises(ApplicationError) as error:
+        prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="打开edge\uff0c访问www.google.com", user_config_root=ready))
+    assert error.value.code.value == "quick_test.inference_failed"
+    assert not (ready / "quick-test").exists()
 
 
 def test_context_needs_no_workspace_and_app_checks_do_not_deadlock(ready):

@@ -1,0 +1,43 @@
+- id: edge
+  name: Microsoft Edge
+  description: Microsoft's web browser for browsing websites and searching the web.
+  path_candidates:
+    - '%ProgramFiles%\Microsoft\Edge\Application\msedge.exe'
+    - '%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe'
+  window_title_re: '.*Edge'
+
+- id: notepad
+  name: Notepad
+  description: Windows text editor for viewing and editing plain text documents.
+  path_candidates:
+    - '%SystemRoot%\System32\notepad.exe'
+  window_title_re: '.*(?:Notepad|记事本).*'
+
+- id: chrome
+  name: Google Chrome
+  description: Google's stable Chrome web browser for browsing websites and searching the web.
+  path_candidates:
+    - '%ProgramFiles%\Google\Chrome\Application\chrome.exe'
+  window_title_re: '.*Chrome.*'
+
+- id: edge-beta
+  name: Microsoft Edge Beta
+  description: The Beta preview channel of Microsoft Edge, distinct from stable Edge and Edge Canary.
+  path_candidates:
+    - '%ProgramFiles(x86)%\Microsoft\Edge Beta\Application\msedge.exe'
+    - '%LOCALAPPDATA%\Microsoft\Edge Beta\Application\msedge.exe'
+  window_title_re: '.*Microsoft.*Edge Beta'
+
+- id: edge-canary
+  name: Microsoft Edge Canary
+  description: The Canary preview channel of Microsoft Edge, distinct from stable Edge and Edge Beta.
+  path_candidates:
+    - '%LOCALAPPDATA%\Microsoft\Edge SxS\Application\msedge.exe'
+  window_title_re: '.*Microsoft.*Edge Canary'
+
+- id: calculator
+  name: Calculator
+  description: Windows Calculator for arithmetic calculations, also known as 计算器.
+  path_candidates:
+    - '%SystemRoot%\System32\calc.exe'
+  window_title_re: '.*(?:Calculator|计算器).*'

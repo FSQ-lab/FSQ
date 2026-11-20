@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 
 from fsq_agent.agent_engine import EngineError, ModelRequest, OutputContract
 from fsq_agent.ai_services._web_addresses import QuickTestWebAddressParser
-from fsq_agent.models import ApplicationLookupHint
+from fsq_agent.models import ApplicationLookupHint, WindowsApplicationConfig
 
 if TYPE_CHECKING:
     from fsq_agent.agent_engine import ReasoningEffort
@@ -62,6 +62,10 @@ class _IntentOutput(BaseModel):
         return self
 
 
+class _WindowsIntentOutput(_IntentOutput):
+    app_config_id: str | None = Field(min_length=1, max_length=2048)
+
+
 @dataclass(frozen=True)
 class QuickTestIntent:
     sufficient: bool
@@ -69,6 +73,7 @@ class QuickTestIntent:
     application_name: str | None
     explicit_reference: str | None
     inferred_hint: ApplicationLookupHint | None = None
+    app_config_id: str | None = None
 
 
 class QuickTestIntentAnalyzer:
@@ -78,9 +83,13 @@ class QuickTestIntentAnalyzer:
         self._session = session
         self._reasoning_effort = reasoning_effort
 
-    def analyze(self, *, platform: str, goal: str, url: str | None = None) -> QuickTestIntent:
+    def analyze(self, *, platform: str, goal: str, url: str | None = None, application_catalogue: tuple[WindowsApplicationConfig, ...] | None = None) -> QuickTestIntent:
         failed = False
         try:
+            if application_catalogue is not None and platform != "windows":
+                raise EngineError("invalid_output", "Application catalogue selection requires Windows.")  # noqa: TRY301 -- preserve session cleanup.
+            output_type = _WindowsIntentOutput if application_catalogue is not None else _IntentOutput
+            catalogue_summary = [{"id": entry.id, "name": entry.name, "description": entry.description} for entry in application_catalogue] if application_catalogue is not None else None
             addresses = ()
             if url is not None:
                 if platform != "web":
@@ -133,15 +142,31 @@ class QuickTestIntentAnalyzer:
                             if url is not None
                             else ""
                         )
-                        + json.dumps({"platform": platform, "goal": goal, **({"url": url} if url is not None else {})}, ensure_ascii=False)
+                        + (
+                            "For Windows, app_config_id is one existing application_catalogue ID chosen semantically using its name and description, "
+                            "or null when no entry matches. Do not use literal keyword rules or invent IDs. Ambiguous intent is not no-match. "
+                            "A goal-provided explicit executable path takes priority. Otherwise, when choosing an ID, set inferred_hint to null; "
+                            "the host validates declared executable candidates locally.\n"
+                            if application_catalogue is not None
+                            else ""
+                        )
+                        + json.dumps(
+                            {
+                                "platform": platform,
+                                "goal": goal,
+                                **({"url": url} if url is not None else {}),
+                                **({"application_catalogue": catalogue_summary} if catalogue_summary is not None else {}),
+                            },
+                            ensure_ascii=False,
+                        )
                     ),
                     output=OutputContract(
-                        name="quick_test_intent", schema=_IntentOutput.model_json_schema(), parse=lambda text: _IntentOutput.model_validate_json(text, context={"platform": platform, "url": url})
+                        name="quick_test_intent", schema=output_type.model_json_schema(), parse=lambda text: output_type.model_validate_json(text, context={"platform": platform, "url": url})
                     ),
                     reasoning_effort=self._reasoning_effort,
                 )
             )
-            return _validated_intent(response.parsed_output, platform, goal, addresses, url)
+            return _validated_intent(response.parsed_output, platform, goal, addresses, url, application_catalogue)
         except BaseException:
             failed = True
             raise
@@ -153,8 +178,8 @@ class QuickTestIntentAnalyzer:
                     raise
 
 
-def _validated_intent(payload, platform, goal, addresses, url=None):
-    if not isinstance(payload, _IntentOutput):
+def _validated_intent(payload, platform, goal, addresses, url=None, application_catalogue=None):
+    if not isinstance(payload, _WindowsIntentOutput if application_catalogue is not None else _IntentOutput):
         raise EngineError("invalid_output", "Model returned invalid Quick Test intent output.")
     reference = url if url is not None else payload.explicit_reference
     if platform == "web" and url is None:
@@ -176,7 +201,10 @@ def _validated_intent(payload, platform, goal, addresses, url=None):
     if hint is not None and hint.kind not in allowed_hints.get(platform, set()):
         raise EngineError("invalid_output", "Model returned a lookup hint for the wrong platform.")
     reason = "sufficient" if url is not None and payload.sufficient else payload.reason
-    return QuickTestIntent(payload.sufficient, reason, name, reference, ApplicationLookupHint(kind=hint.kind, value=hint.value) if hint else None)
+    selected_id = payload.app_config_id if isinstance(payload, _WindowsIntentOutput) else None
+    if selected_id is not None and (application_catalogue is None or selected_id not in {entry.id for entry in application_catalogue}):
+        raise EngineError("invalid_output", "Model selected an unknown application configuration.")
+    return QuickTestIntent(payload.sufficient, reason, name, reference, ApplicationLookupHint(kind=hint.kind, value=hint.value) if hint and selected_id is None else None, selected_id)
 
 
 def _grounded(value: str, goal: str, *, explicit: bool = False) -> bool:

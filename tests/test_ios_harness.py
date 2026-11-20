@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 from contextlib import nullcontext
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 from xml.etree import ElementTree
@@ -1394,8 +1395,6 @@ def test_ios_policies_are_forwarded_to_initial_and_replacement_sessions(
     cool_off_seconds: float | None,
     excluded_attributes: tuple[str, ...] | None,
 ) -> None:
-    from appium_connect_agent import automation, runtime
-
     from fsq_agent.config import load_platform_settings
     from fsq_agent.core.interfaces import DriverFactory
     from fsq_agent.drivers.ios import _appium_connect
@@ -1413,9 +1412,21 @@ def test_ios_policies_are_forwarded_to_initial_and_replacement_sessions(
     initial = SimpleNamespace(quit=Mock())
     replacement = SimpleNamespace(quit=Mock())
     create_session = Mock(side_effect=(initial, replacement))
-    monkeypatch.setattr(automation, "create_xcuitest_session", create_session)
-    monkeypatch.setattr(automation, "list_ios_devices", lambda **kwargs: ())
-    monkeypatch.setattr(runtime, "Runtime", lambda settings: SimpleNamespace(start_managed=lambda **kwargs: nullcontext(connection)))
+    # Stub the lazy SDK imports before its POSIX-only runtime can load on Windows.
+    sdk_modules = {
+        "automation": {"create_xcuitest_session": create_session, "list_ios_devices": lambda **kwargs: ()},
+        "contracts": {"LocalSettings": SimpleNamespace},
+        "runtime": {
+            "OperationControl": SimpleNamespace,
+            "Runtime": lambda settings: SimpleNamespace(start_managed=lambda **kwargs: nullcontext(connection)),
+            "ServiceLifecycleError": RuntimeError,
+        },
+    }
+    for suffix, exports in sdk_modules.items():
+        name = f"appium_connect_agent.{suffix}"
+        module = ModuleType(name)
+        vars(module).update(exports)
+        monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(_appium_connect, "_resolve_managed_local_settings", lambda settings_cls: settings_cls())
     monkeypatch.setattr(_appium_connect, "_allocate_loopback_port", lambda: 4723)
 

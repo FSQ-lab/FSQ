@@ -479,60 +479,247 @@ def test_windows_harness_classifies_main_window_timeout() -> None:
     assert category == "timeout_error"
 
 
-def test_pywinauto_driver_launch_app_uses_launch_args_and_window_title_re(monkeypatch) -> None:
-    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
-    from fsq_agent.models import WindowsLaunchAppParams
+def _make_fake_windows_desktop():
+    import re
 
-    class FakeWindow:
-        def __init__(self) -> None:
+    class FakeRect:
+        def width(self) -> int:
+            return 1280
+
+        def height(self) -> int:
+            return 920
+
+    class FakeWindowEntry:
+        def __init__(
+            self,
+            desktop: "FakeDesktop",
+            *,
+            handle: int,
+            process_id: int,
+            title: str,
+            visible: bool = True,
+            control_type: str = "Window",
+        ) -> None:
+            self.desktop = desktop
+            self.handle = handle
+            self.process_id = process_id
+            self.rich_text = title
+            self.name = title
+            self.visible = visible
+            self.control_type = control_type
             self.waited: list[str] = []
+            self.typed_keys: list[str] = []
+            self.closed = False
+            self.close_error: Exception | None = None
 
-        def wait(self, state: str, timeout: float | None = None) -> "FakeWindow":
+        def wait(self, state: str, timeout: float | None = None) -> "FakeWindowEntry":
+            if self.closed or not self.visible or self.handle not in self.desktop.windows:
+                raise LookupError(f"window {self.handle} is not available")
             self.waited.append(state)
             return self
 
-    class FakeApp:
-        def __init__(self, backend: str) -> None:
-            self.backend = backend
-            self.started_cmd: str | None = None
-            self.connected_title_re: str | None = None
-            self.window_title_re: str | None = None
-            self.window_control_type: str | None = None
-            self.window_obj = FakeWindow()
+        def type_keys(self, key: str, **kwargs: object) -> None:
+            self.desktop.events.append(("type_keys", self.handle, self.process_id, key))
+            self.typed_keys.append(key)
 
-        def start(self, cmd: str) -> "FakeApp":
-            self.started_cmd = cmd
-            return self
+        def close(self) -> None:
+            if self.close_error is not None:
+                raise self.close_error
+            self.closed = True
+            self.visible = False
+            self.desktop.windows.pop(self.handle, None)
+            self.desktop.events.append(("close_window", self.handle, self.process_id))
 
-        def connect(self, title_re: str) -> "FakeApp":
-            self.connected_title_re = title_re
-            return self
+        def rectangle(self) -> FakeRect:
+            return FakeRect()
 
-        def window(self, title_re: str, control_type: str | None = None) -> FakeWindow:
-            self.window_title_re = title_re
-            self.window_control_type = control_type
-            return self.window_obj
+    class FakeDesktop:
+        def __init__(self) -> None:
+            self.processes: dict[int, dict[str, Any]] = {}
+            self.windows: dict[int, FakeWindowEntry] = {}
+            self.active_handle: int | None = None
+            self.events: list[tuple[Any, ...]] = []
+            self._next_pid = 1000
+            self._next_handle = 10000
+            self.on_start = None
+            self.kill_error: Exception | None = None
 
-        def top_window(self) -> FakeWindow:
-            return self.window_obj
+        def add_process(self, exe_path: str, *, pid: int | None = None, accessible: bool = True, alive: bool = True) -> int:
+            proc_id = pid if pid is not None else self._next_pid
+            self._next_pid = max(self._next_pid, proc_id + 1)
+            self.processes[proc_id] = {"path": exe_path, "accessible": accessible, "alive": alive}
+            return proc_id
 
-    fake_app = FakeApp(backend="uia")
+        def list_pids(self) -> list[int]:
+            return [pid for pid, info in self.processes.items() if info["alive"]]
 
+        def add_window(
+            self,
+            process_id: int,
+            title: str,
+            *,
+            handle: int | None = None,
+            visible: bool = True,
+            active: bool = False,
+            control_type: str = "Window",
+        ) -> FakeWindowEntry:
+            hwnd = handle if handle is not None else self._next_handle
+            self._next_handle = max(self._next_handle, hwnd + 1)
+            entry = FakeWindowEntry(self, handle=hwnd, process_id=process_id, title=title, visible=visible, control_type=control_type)
+            self.windows[hwnd] = entry
+            if active:
+                self.active_handle = hwnd
+            return entry
+
+        def find_top_windows(self, **kwargs: object) -> list[FakeWindowEntry]:
+            self.events.append(("find_top_windows", dict(kwargs)))
+            title_re = kwargs.get("title_re")
+            visible_only = kwargs.get("visible_only", True)
+            process = kwargs.get("process")
+            handle = kwargs.get("handle")
+            control_type = kwargs.get("control_type")
+            results = [w for w in self.windows.values() if not w.closed]
+            if handle is not None:
+                results = [w for w in results if w.handle == handle]
+            if process is not None:
+                results = [w for w in results if w.process_id == process]
+            if control_type is not None:
+                results = [w for w in results if w.control_type == control_type]
+            if visible_only:
+                results = [w for w in results if w.visible]
+            if isinstance(title_re, str):
+                pattern = re.compile(title_re)
+                results = [w for w in results if pattern.match(w.rich_text)]
+            return results
+
+        def process_executable(self, pid: int) -> str | None:
+            info = self.processes.get(pid)
+            if info is None or not info["alive"]:
+                raise LookupError(f"process {pid} not found")
+            if not info["accessible"]:
+                raise PermissionError(f"access denied for pid {pid}")
+            return info["path"]
+
+        def make_app_cls(self):
+            desktop = self
+
+            class FakeApplication:
+                def __init__(self, backend: str = "uia") -> None:
+                    self.backend = backend
+                    self.process: int | None = None
+                    self.started_cmd: str | None = None
+
+                def start(self, cmd: str) -> "FakeApplication":
+                    self.started_cmd = cmd
+                    desktop.events.append(("start", cmd))
+                    if desktop.on_start is not None:
+                        self.process = desktop.on_start(desktop, cmd)
+                    else:
+                        pid = desktop.add_process(cmd.split(maxsplit=1)[0].strip('"'))
+                        desktop.add_window(pid, "Launched Window", active=True)
+                        self.process = pid
+                    return self
+
+                def connect(self, **kwargs: object) -> "FakeApplication":
+                    desktop.events.append(("connect", dict(kwargs)))
+                    if kwargs.get("active_only"):
+                        if desktop.active_handle is None or desktop.active_handle not in desktop.windows:
+                            raise LookupError("no active window")
+                        self.process = desktop.windows[desktop.active_handle].process_id
+                        return self
+                    if "handle" in kwargs:
+                        hwnd = int(kwargs["handle"])  # type: ignore[arg-type]
+                        if hwnd not in desktop.windows:
+                            raise LookupError(f"invalid handle {hwnd}")
+                        self.process = desktop.windows[hwnd].process_id
+                        return self
+                    if "process" in kwargs:
+                        pid = int(kwargs["process"])  # type: ignore[arg-type]
+                        info = desktop.processes.get(pid)
+                        if info is None or not info["alive"]:
+                            raise LookupError(f"pid {pid} not running")
+                        self.process = pid
+                        return self
+                    if "title_re" in kwargs:
+                        matches = desktop.find_top_windows(title_re=kwargs["title_re"])
+                        if not matches:
+                            raise LookupError("window not found")
+                        if len(matches) > 1:
+                            raise RuntimeError(f"ambiguous title_re matches: {len(matches)}")
+                        self.process = matches[0].process_id
+                        return self
+                    raise RuntimeError(f"unsupported connect kwargs: {kwargs}")
+
+                def window(self, **kwargs: object) -> FakeWindowEntry:
+                    query = dict(kwargs)
+                    if "handle" not in query:
+                        query["process"] = self.process
+                    matches = desktop.find_top_windows(**query)
+                    if len(matches) != 1:
+                        raise LookupError(f"expected 1 window for {kwargs}, got {len(matches)}")
+                    return matches[0]
+
+                def top_window(self) -> FakeWindowEntry:
+                    matches = desktop.find_top_windows(process=self.process)
+                    if not matches:
+                        raise LookupError(f"no windows for pid {self.process}")
+                    return matches[0]
+
+                def kill(self) -> bool:
+                    if desktop.kill_error is not None:
+                        raise desktop.kill_error
+                    if self.process is not None and self.process in desktop.processes:
+                        desktop.processes[self.process]["alive"] = False
+                        for hwnd in [h for h, w in desktop.windows.items() if w.process_id == self.process]:
+                            desktop.windows.pop(hwnd, None)
+                    desktop.events.append(("kill_process", self.process))
+                    return True
+
+            return FakeApplication
+
+    return FakeDesktop()
+
+
+def test_pywinauto_driver_launch_app_uses_launch_args_and_window_title_re(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    beta_exe = r"C:\Program Files (x86)\Microsoft\Edge Beta\Application\msedge.exe"
+    stable_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    stable_pid = desktop.add_process(stable_exe, pid=1100)
+    desktop.add_window(stable_pid, "Docs - Microsoft Edge", active=True)
+
+    def on_start(d, cmd: str) -> int:
+        pid = d.add_process(beta_exe, pid=2200)
+        d.add_window(pid, "Helper Frame", active=False)
+        d.add_window(pid, "New Tab - Microsoft Edge Beta", active=True)
+        return pid
+
+    desktop.on_start = on_start
     driver = PywinautoWindowsDriver(
-        app_path="msedge.exe",
+        app_path=beta_exe,
         window_title_re=".*Microsoft.*Edge Beta",
         launch_args=["--no-first-run", "--window-size=1280,920"],
     )
-    monkeypatch.setattr(driver, "_application_cls", lambda: lambda backend: fake_app)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
 
-    result = driver.launch_app(WindowsLaunchAppParams(extra_args=["--incognito"]))
+    try:
+        result = driver.launch_app(WindowsLaunchAppParams(extra_args=["--incognito"]))
+        assert result["status"] == "passed"
+        start_events = [event for event in desktop.events if event[0] == "start"]
+        assert start_events == [("start", f'"{beta_exe}" --no-first-run --window-size=1280,920 --incognito')]
+        driver.press_key(WindowsPressKeyParams(key="^l"))
+        typed = [event for event in desktop.events if event[0] == "type_keys"]
+        assert len(typed) == 1
+        assert typed[0][2] == 2200
+    finally:
+        driver.close()
 
-    assert result["status"] == "passed"
-    assert fake_app.started_cmd == "msedge.exe --no-first-run --window-size=1280,920 --incognito"
-    assert fake_app.connected_title_re == ".*Microsoft.*Edge Beta"
-    assert fake_app.window_title_re == ".*Microsoft.*Edge Beta"
-    assert fake_app.window_control_type == "Window"
-    assert fake_app.window_obj.waited == ["exists visible enabled"]
+    killed = [event for event in desktop.events if event[0] == "kill_process"]
+    assert killed == [("kill_process", 2200)]
+    assert desktop.processes[stable_pid]["alive"] is True
 
 
 def test_pywinauto_driver_main_window_timeout_includes_resolution_context(monkeypatch) -> None:
@@ -574,6 +761,297 @@ def test_pywinauto_driver_main_window_immediate_failure_includes_resolution_cont
         driver._resolve_main_window()  # type: ignore[attr-defined]
 
     assert isinstance(error.value.__cause__, LookupError)
+
+
+def test_pywinauto_driver_issue_27_never_attaches_to_or_kills_edge_stable_without_title_re(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    stable_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    canary_exe = r"C:\Users\Example\AppData\Local\Microsoft\Edge SxS\Application\msedge.exe"
+    stable_pid = desktop.add_process(stable_exe, pid=101)
+    stable_win = desktop.add_window(stable_pid, "FSQ Control Plane - Microsoft Edge", handle=501, active=True)
+
+    def on_start(d, _cmd: str) -> int:
+        canary_pid = d.add_process(canary_exe, pid=202)
+        # Simulate Edge Stable retaining OS active focus while Canary opens its window!
+        d.add_window(canary_pid, "New tab - Microsoft Edge Canary", handle=602, active=False)
+        d.active_handle = stable_win.handle
+        return canary_pid
+
+    desktop.on_start = on_start
+    driver = PywinautoWindowsDriver(app_path=canary_exe)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    try:
+        # 1. Before launch_app, context() and _require_window() must NOT attach to Edge Stable.
+        pre_ctx = driver.context()
+        assert pre_ctx["screen_size"] is None
+        with pytest.raises(RuntimeError, match="Failed to resolve Windows main window"):
+            driver._require_window()  # type: ignore[attr-defined]
+
+        # 2. Launch Canary while Edge Stable still owns foreground focus.
+        launched = driver.launch_app(WindowsLaunchAppParams())
+        assert launched["status"] == "passed"
+
+        # 3. Focus stays on Edge Stable; press_key must still target Canary (handle 602, pid 202).
+        desktop.active_handle = stable_win.handle
+        pressed = driver.press_key(WindowsPressKeyParams(key="^l"))
+        assert pressed["status"] == "passed"
+        assert [e for e in desktop.events if e[0] == "type_keys"] == [("type_keys", 602, 202, "^l")]
+        assert not any(e[0] == "connect" and e[1].get("active_only") for e in desktop.events)
+    finally:
+        driver.close()
+
+    # 4. Cleanup kills owned Canary process (202), never Edge Stable (101).
+    assert desktop.processes[stable_pid]["alive"] is True
+    assert desktop.processes[202]["alive"] is False
+    assert [e for e in desktop.events if e[0] == "kill_process"] == [("kill_process", 202)]
+
+
+def test_pywinauto_driver_handles_multi_pid_resident_handoff_and_closes_only_new_window(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    canary_exe = r"C:\Users\Example\AppData\Local\Microsoft\Edge SxS\Application\msedge.exe"
+    # Resident Canary browser PID with an existing user window + 3 windowless child PIDs (GPU/renderer/utility)
+    browser_pid = desktop.add_process(canary_exe, pid=300)
+    existing_user_win = desktop.add_window(browser_pid, "Work Mail - Microsoft Edge Canary", handle=700, active=True)
+    for child_pid in (301, 302, 303):
+        desktop.add_process(canary_exe, pid=child_pid)
+    # Elevated unrelated process throwing PermissionError on module inspection
+    elevated_pid = desktop.add_process(r"C:\Windows\System32\Taskmgr.exe", pid=999, accessible=False)
+    desktop.add_window(elevated_pid, "Task Manager", handle=990, active=False)
+
+    def on_start(d, _cmd: str) -> int:
+        # Launcher stub process exits immediately after handing off a new window to resident browser_pid
+        stub_pid = d.add_process(canary_exe.lower().replace("\\", "/"), pid=350, alive=False)
+        d.add_window(browser_pid, "New tab - Microsoft Edge Canary", handle=701, active=True)
+        return stub_pid
+
+    desktop.on_start = on_start
+    driver = PywinautoWindowsDriver(app_path=canary_exe)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    try:
+        result = driver.launch_app(WindowsLaunchAppParams())
+        assert result["status"] == "passed"
+        driver.press_key(WindowsPressKeyParams(key="{F5}"))
+        assert [e for e in desktop.events if e[0] == "type_keys"] == [("type_keys", 701, 300, "{F5}")]
+    finally:
+        driver.close()
+
+    # Resident browser process and pre-existing user window (700) MUST remain open; only new window (701) closes!
+    assert desktop.processes[browser_pid]["alive"] is True
+    assert existing_user_win.closed is False
+    assert 700 in desktop.windows
+    assert 701 not in desktop.windows
+    assert [e for e in desktop.events if e[0] == "close_window"] == [("close_window", 701, 300)]
+    assert [e for e in desktop.events if e[0] == "kill_process"] == []
+
+
+def test_pywinauto_driver_title_re_is_scoped_to_configured_executable_and_rebinds_after_splash(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    stable_exe = r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+    canary_exe = r"C:\Users\Example\AppData\Local\Microsoft\Edge SxS\Application\msedge.exe"
+    # Canary already open with overlapping '.*Edge' title
+    canary_pid = desktop.add_process(canary_exe, pid=401)
+    desktop.add_window(canary_pid, "Preview - Microsoft Edge Canary", handle=801, active=True)
+
+    def on_start(d, _cmd: str) -> int:
+        pid = d.add_process(stable_exe, pid=402)
+        d.add_window(pid, "Splash - Microsoft Edge", handle=802, active=False)
+        return pid
+
+    desktop.on_start = on_start
+    # Broad '.*Edge' matches both Canary and Stable titles, as in applications.windows.yaml
+    driver = PywinautoWindowsDriver(app_path=stable_exe, window_title_re=".*Edge")
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        driver.press_key(WindowsPressKeyParams(key="a"))
+        # Splash window closes and main window opens under the same owned process
+        desktop.windows[802].close()
+        desktop.add_window(402, "Home - Microsoft Edge", handle=803, active=False)
+        driver.press_key(WindowsPressKeyParams(key="b"))
+        assert [e for e in desktop.events if e[0] == "type_keys"] == [
+            ("type_keys", 802, 402, "a"),
+            ("type_keys", 803, 402, "b"),
+        ]
+    finally:
+        driver.close()
+
+    assert desktop.processes[canary_pid]["alive"] is True
+    assert desktop.processes[402]["alive"] is False
+
+
+def test_pywinauto_driver_supports_application_frame_host_uwp_handoff_when_title_re_configured(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    calc_exe = r"C:\Windows\System32\calc.exe"
+    frame_host_exe = r"C:\Windows\System32\ApplicationFrameHost.exe"
+    host_pid = desktop.add_process(frame_host_exe, pid=500)
+    settings_win = desktop.add_window(host_pid, "Settings", handle=901, active=True)
+
+    def on_start(d, _cmd: str) -> int:
+        stub_pid = d.add_process(calc_exe, pid=501, alive=False)
+        d.add_window(host_pid, "Calculator", handle=902, active=True)
+        return stub_pid
+
+    desktop.on_start = on_start
+    driver = PywinautoWindowsDriver(app_path=calc_exe, window_title_re=r".*(?:Calculator|计算器).*")
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        driver.press_key(WindowsPressKeyParams(key="1"))
+        assert [e for e in desktop.events if e[0] == "type_keys"] == [("type_keys", 902, 500, "1")]
+    finally:
+        driver.close()
+
+    # Shared ApplicationFrameHost.exe must NEVER be killed; only Calculator frame window (902) closes!
+    assert desktop.processes[host_pid]["alive"] is True
+    assert settings_win.closed is False
+    assert 902 not in desktop.windows
+    assert [e for e in desktop.events if e[0] == "kill_process"] == []
+
+
+def test_pywinauto_driver_close_without_launch_performs_no_process_termination(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    pid = desktop.add_process(r"C:\Windows\System32\notepad.exe", pid=600)
+    desktop.add_window(pid, "Untitled - Notepad", handle=950, active=True)
+    driver = PywinautoWindowsDriver(app_path=r"C:\Windows\System32\notepad.exe")
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    assert driver.context()["screen_size"] is None
+    driver.close()
+
+    assert desktop.processes[pid]["alive"] is True
+    assert desktop.events == []
+
+
+def test_pywinauto_driver_win32_backend_omits_uia_control_type_and_preserves_windows_app_path(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    notepad_exe = r"C:\Windows\System32\notepad.exe"
+    driver = PywinautoWindowsDriver(app_path=notepad_exe, backend_kind="win32")
+    assert driver.app_path == notepad_exe
+
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    try:
+        result = driver.launch_app(WindowsLaunchAppParams())
+        assert result["status"] == "passed"
+        assert result["output"]["app_path"] == notepad_exe
+        queries = [kwargs for kind, kwargs in desktop.events if kind == "find_top_windows"]
+        assert queries
+        assert all("control_type" not in kwargs for kwargs in queries)
+    finally:
+        driver.close()
+
+
+def test_pywinauto_driver_windowless_resident_process_handoff_closes_new_window_without_killing_process(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    canary_exe = r"C:\Users\Tester\AppData\Local\Microsoft\Edge SxS\Application\msedge.exe"
+    resident_pid = desktop.add_process(canary_exe, pid=700)
+
+    def on_start(d, cmd: str) -> int:
+        launcher_pid = d.add_process(canary_exe, pid=701, alive=False)
+        d.add_window(resident_pid, "New tab - Microsoft Edge Canary", handle=1701, active=True)
+        return launcher_pid
+
+    desktop.on_start = on_start
+    driver = PywinautoWindowsDriver(app_path=canary_exe)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+    driver.close()
+
+    assert desktop.processes[resident_pid]["alive"] is True
+    assert 1701 not in desktop.windows
+    assert [e for e in desktop.events if e[0] == "kill_process"] == []
+    assert [e for e in desktop.events if e[0] == "close_window"] == [("close_window", 1701, resident_pid)]
+
+
+def test_pywinauto_driver_minimized_pre_existing_window_is_treated_as_borrowed_on_restore(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    resident_pid = desktop.add_process(edge_exe, pid=710)
+    minimized_win = desktop.add_window(resident_pid, "Existing Tab - Microsoft Edge", handle=1710, visible=False)
+
+    def on_start(d, cmd: str) -> int:
+        launcher_pid = d.add_process(edge_exe, pid=711, alive=False)
+        minimized_win.visible = True
+        d.active_handle = minimized_win.handle
+        return launcher_pid
+
+    desktop.on_start = on_start
+    driver = PywinautoWindowsDriver(app_path=edge_exe)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+    driver.close()
+
+    assert desktop.processes[resident_pid]["alive"] is True
+    assert minimized_win.closed is False
+    assert [e for e in desktop.events if e[0] in ("kill_process", "close_window")] == []
+
+
+def test_pywinauto_driver_cleanup_surfaces_disposal_failure_and_keeps_executor_clean(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+
+    desktop = _make_fake_windows_desktop()
+    notepad_exe = r"C:\Windows\System32\notepad.exe"
+    driver = PywinautoWindowsDriver(app_path=notepad_exe)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+    desktop.kill_error = RuntimeError("TerminateProcess access denied")
+
+    with pytest.raises(RuntimeError, match="TerminateProcess access denied"):
+        driver.close()
+
+    assert driver._executor is None
+
+
+def test_normalize_windows_executable_path_expands_percent_vars_and_normalizes_separators(monkeypatch) -> None:
+    from fsq_agent.drivers.windows._pywinauto import _normalize_windows_executable_path
+
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Tester\AppData\Local")
+    normalized = _normalize_windows_executable_path('"%LOCALAPPDATA%/Microsoft/Edge SxS/Application\\MSEDGE.EXE"')
+    assert normalized == r"c:\users\tester\appdata\local\microsoft\edge sxs\application\msedge.exe"
 
 
 def test_pywinauto_driver_resolves_window_on_every_use() -> None:

@@ -299,6 +299,9 @@ def _run_visual_inspection(driver: Any, params: Any) -> dict[str, object]:
                 error.fsq_provider_provenance = dict(provider.provenance)  # type: ignore[attr-defined]
             raise
         driver._propagate_if_cancelled(error)
+        note_timeout = getattr(driver, "_note_operation_timeout", None)
+        if callable(note_timeout):
+            note_timeout(error)
         code = getattr(error, "code", None)
         if isinstance(error, ToolExecutionError):
             code = code or error.context.get("reason")

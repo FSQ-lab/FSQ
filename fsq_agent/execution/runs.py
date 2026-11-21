@@ -240,7 +240,7 @@ class RunLifecycleService:
             "git_revision": None,
             "git_revision_unavailable_reason": "not_reported",
         }
-        for name in ("headless", "channel", "viewport_width", "viewport_height", "action_timeout_seconds", "new_command_timeout_seconds", "backend_kind"):
+        for name in ("headless", "channel", "viewport_width", "viewport_height", "action_timeout_seconds", "new_command_timeout_seconds", "skip_app_kill", "backend_kind"):
             if hasattr(block, name):
                 result[name] = getattr(block, name)
         return result
@@ -365,6 +365,7 @@ class RunLifecycleService:
             "git_revision_unavailable_reason",
             "action_timeout_seconds",
             "new_command_timeout_seconds",
+            "skip_app_kill",
             "backend_kind",
         }
         safe_config = {key: value for key, value in (configuration or {}).items() if key in allowed}

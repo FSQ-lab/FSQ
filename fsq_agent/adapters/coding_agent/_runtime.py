@@ -754,6 +754,7 @@ class DefaultCodingAgentRuntime:
                     "app_path_configured": macos.app_path is not None,
                     "action_timeout_seconds": macos.action_timeout_seconds,
                     "new_command_timeout_seconds": macos.new_command_timeout_seconds,
+                    "skip_app_kill": macos.skip_app_kill,
                     "configured_skill_names": [skill.name for skill in self.settings.skills],
                 }
             )

@@ -491,7 +491,7 @@ def _metadata_doc(
         if settings.harness.platform == "android"
         else settings.harness.ios.bundle_id
         if settings.harness.platform == "ios"
-        else settings.harness.macos.bundle_id
+        else (None if settings.harness.macos.bundle_id == "auto" else settings.harness.macos.bundle_id)
         if settings.harness.platform == "macos"
         else None
     )

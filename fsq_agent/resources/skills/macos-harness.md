@@ -4,11 +4,12 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 
 ## Case Lifecycle
 
-- Start each macOS case with `launch_app` and set `new_session` to true so the case opens a fresh Mac2 session before the main business path (when Workspace `bundle_id` is `"auto"` or omitted, omitting `bundle_id` / passing `"auto"` attaches non-intrusively to the current frontmost desktop GUI application).
+- Start each macOS case with `launch_app` and set `new_session` to true once so the case opens a Mac2 session before the main business path (when Workspace `bundle_id` is `"auto"` or omitted, omitting `bundle_id` / passing `"auto"` attaches non-intrusively to the current frontmost desktop GUI application).
+- If the target application or document is already open in the foreground or already bound to the active session, interact with it directly or call `launch_app` with `new_session=false` to foreground it; do not repeatedly call `launch_app` with `new_session=true` to restart the same application.
+- When a desktop workflow must inspect and drive a different application's accessibility tree (because Mac2 `ui_snapshot` and element lookup observe the session-bound `bundle_id`), call `launch_app` with `new_session=true` for the new `bundle_id` or `.app` `app_path` (owned Mac2 sessions default `skip_app_kill` to true so closing or switching sessions preserves previously open desktop apps and unsaved windows); use `new_session=false` when foregrounding an app without rebinding the Mac2 session.
 - Collect final required verification while preserving the user's requested business terminal state, including open windows, active views, running activities, explicitly requested unsaved drafts, and system or app settings.
 - Do not routinely call `kill_app` at the end of a task. Use `kill_app` only when the user goal or explicit lifecycle instructions require closing, terminating, or restarting the application.
-- Automation-session and managed Mac2 service cleanup is owned by the runtime through `harness.close()` (owned Mac2 sessions default `skip_app_kill` to true so closing or replacing a session leaves the desktop application running); killing the business application is not session cleanup.
-- When the case activates another desktop application or switches back, call `launch_app` with the desired `bundle_id`, application name, or `.app` `app_path` and keep `new_session` false. Prefer `new_session` false for cross-app desktop workflows so Mac2 activates the target bundle in the active session without tearing down and recreating the session.
+- Automation-session and managed Mac2 service cleanup is owned by the runtime through `harness.close()`; killing the business application is not session cleanup.
 - Do not report `launch_app` or `kill_app` as satisfying a business key action unless the case explicitly tests app lifecycle.
 ## Form Completion, Pre-Act Ledger, and Write Budgets
 
@@ -16,6 +17,9 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 - Otherwise, when a requested creation, setting, or challenge answer requires a clear Submit / Save / Done / OK control to take effect, complete that control and verify the resulting state while the Harness is still open.
 - When the goal asks you to write, draft, or prepare script/code/text inside an editor, terminal composer, or form field (even with "do not run", "do not execute", or "leave unsent"), actually enter the text into the target GUI control with `type_text` and verify its `value` via `inspect_element` or `assert`—never merely output the text in your final assistant summary without writing it to the UI.
 - In macOS Save / Open / Export sheets, press `Command+Shift+G` (`press_key` with `key: "g"`, `modifiers: ["COMMAND", "SHIFT"]`) to open the `Go to Folder` path bar and jump directly to a requested directory path rather than clicking blindly through sidebar folders. Where the `Save As` text field hides the file extension when "Hide Extension" is active, inspect the `Save As` field's current `value` with `inspect_element` before overwriting it so you preserve or supply the exact requested file extension, and after saving verify the complete saved filename including extension in the actual file-management view or directory listing rather than relying on a window title that hides extensions.
+- When the user specifies a bare document/script title or basename (for example, `"with file name 'Template'"`), keep the application's native format extension (such as `.pages`, `.numbers`, `.key`, or `.scpt`)—never go to Finder afterward to manually rename the saved file and strip its native extension unless the goal explicitly demands an extensionless filename.
+- In Obsidian notes, prefer standard extensionless WikiLinks (`[[NoteName]]`) when linking notes unless the goal explicitly asks for `.md` inside the link target.
+- When creating an Automator `.workflow` and the goal requires executing the archive, file processing, or automation output, run the saved workflow once so its target side effects actually materialize and verify the produced output before finishing.
 - Read complete source items (using `inspect_element` when `ui_snapshot` clips at 50 characters) and compute target selections in your ledger before writing.
 - Honor optional valid `write_budget` receipts when present (`click_on`, `double_click_on`, `right_click_on`, `scroll_on`, `drag_to`, `type_text`, `press_key`, and `launch_app` count as write actions; observations, assertions, and `wait_ms` are non-writes). Never invent synthetic limits when `write_budget` is absent.
 ## Snapshot-First, Structural Inspection, and Scrolling Rules
@@ -51,8 +55,8 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 
 ## Argument Rules
 
-- Use `new_session=true` on the case-opening `launch_app`; this closes any stale active session and creates the case session from the provided or configured `bundle_id`, `app_path`, or `"auto"` frontmost desktop app (preserving running desktop apps when `skip_app_kill` is enabled).
-- During the case, omit `new_session` or set it to false when activating another desktop application or switching back by `bundle_id` or `.app` `app_path`. Do not pass `arguments` when reusing the session (`arguments` require `new_session=true`).
+- Use `new_session=true` on the case-opening `launch_app` or when rebinding Mac2 accessibility observation to a different `bundle_id` / `.app` `app_path` (preserving running desktop apps when `skip_app_kill` is enabled); never pass `new_session=true` repeatedly on the same already-open application unless explicit startup `arguments` are required.
+- Omit `new_session` or set `new_session=false` when foregrounding the already-bound desktop application without tearing down the session. Do not pass non-empty `arguments` when reusing the session (`arguments` require `new_session=true`).
 - Reserve `kill_app` for cases that explicitly test terminating an app (`close_session=false` or omitted) or explicitly closing a session (`close_session=true`).
 ## Correct Key Examples
 

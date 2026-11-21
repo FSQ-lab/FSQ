@@ -2397,3 +2397,194 @@ def test_macos_inspect_with_ai_timeout_marks_uncertain_session_for_lossless_reco
         assert driver._last_operation_finished_at > stale_ts
     finally:
         harness.close()
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_launch_app_same_bundle_new_session_true_idempotent_short_circuit_and_argument_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_calls: list[dict[str, object]] = []
+    sessions: list[FakeMacSession] = []
+    ensure_alive_calls: list[str] = []
+
+    class FakeScope:
+        def __enter__(self) -> object:
+            return "fake-connection"
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class FakeRuntime:
+        managed_cleanup_pending = False
+
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def start_managed(self, **kwargs: object) -> FakeScope:
+            del kwargs
+            return FakeScope()
+
+    def fake_create_mac2_session(
+        connection: object,
+        *,
+        bundle_id: str | None = None,
+        app_path: object = None,
+        arguments: list[str] | None = None,
+        no_reset: bool = True,
+        skip_app_kill: bool = True,
+        **kwargs: object,
+    ) -> FakeMacSession:
+        del connection, kwargs
+        session = FakeMacSession({}, session_id=f"mac2:{len(sessions) + 1}")
+        sid = session.session_id
+        session.ensure_alive = lambda **_kw: ensure_alive_calls.append(sid)  # type: ignore[method-assign]
+        sessions.append(session)
+        created_calls.append(
+            {
+                "bundle_id": bundle_id,
+                "app_path": str(app_path) if app_path is not None else None,
+                "arguments": arguments,
+                "no_reset": no_reset,
+                "skip_app_kill": skip_app_kill,
+            }
+        )
+        return session
+
+    monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
+    monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", fake_create_mac2_session)
+    monkeypatch.setattr("appium_connect_agent.automation.frontmost_macos_app", lambda: "com.apple.iWork.Keynote", raising=False)
+    monkeypatch.setattr(
+        "fsq_agent.drivers.macos._appium_connect._is_macos_bundle_running",
+        lambda _bid, **_kw: False,
+        raising=False,
+    )
+
+    driver = AppiumConnectMacOSDriver(bundle_id="auto")
+    try:
+        # Step 1: initial auto-attachment binds to com.apple.iWork.Keynote.
+        first = driver.launch_app(MacOSLaunchAppParams(bundle_id="auto", new_session=True))
+        assert first["status"] == "passed"
+        assert first["output"] == {
+            "session_id": "mac2:1",
+            "bundle_id": "com.apple.iWork.Keynote",
+            "app_path": None,
+        }
+        assert len(created_calls) == 1
+        assert created_calls[0]["skip_app_kill"] is True
+
+        # Step 2: planner calls launch_app(bundle_id="com.apple.iWork.Keynote", new_session=True) without arguments -> idempotent reuse!
+        second = driver.launch_app(MacOSLaunchAppParams(bundle_id="com.apple.iWork.Keynote", new_session=True))
+        assert second["status"] == "passed"
+        assert second["output"]["session_id"] == "mac2:1"
+        assert second["output"]["bundle_id"] == "com.apple.iWork.Keynote"
+        assert len(created_calls) == 1
+        assert ensure_alive_calls == ["mac2:1"]
+        assert sessions[0].lifecycle_calls == [("activate_app", "com.apple.iWork.Keynote")]
+
+        # Step 3: calling launch_app(bundle_id="auto", new_session=True) or empty arguments=[] while Keynote is still frontmost also reuses!
+        third = driver.launch_app(MacOSLaunchAppParams(bundle_id="auto", arguments=[], new_session=True))
+        assert third["status"] == "passed"
+        assert third["output"]["session_id"] == "mac2:1"
+        assert len(created_calls) == 1
+        assert ensure_alive_calls == ["mac2:1", "mac2:1"]
+        assert sessions[0].lifecycle_calls == [
+            ("activate_app", "com.apple.iWork.Keynote"),
+            ("activate_app", "com.apple.iWork.Keynote"),
+        ]
+
+        # Step 4: non-empty arguments with new_session=True forces actual session replacement.
+        fourth = driver.launch_app(MacOSLaunchAppParams(bundle_id="com.apple.iWork.Keynote", arguments=["--reopen"], new_session=True))
+        assert fourth["status"] == "passed"
+        assert fourth["output"]["session_id"] == "mac2:2"
+        assert len(created_calls) == 2
+        assert created_calls[1]["arguments"] == ["--reopen"]
+        assert sessions[0].lifecycle_calls[-1] == ("quit", None)
+
+        # Step 5: if current owned session fails ensure_alive during same-bundle new_session=True, fall through to replacement.
+        sessions[1].ensure_alive = lambda **_kw: (_ for _ in ()).throw(RuntimeError("wda died"))  # type: ignore[method-assign]
+        fifth = driver.launch_app(MacOSLaunchAppParams(bundle_id="com.apple.iWork.Keynote", new_session=True))
+        assert fifth["status"] == "passed"
+        assert fifth["output"]["session_id"] == "mac2:3"
+        assert len(created_calls) == 3
+    finally:
+        driver.close()
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_launch_app_cross_bundle_preactivates_running_gui_app_with_skip_app_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    sessions: list[FakeMacSession] = []
+
+    class FakeScope:
+        def __enter__(self) -> object:
+            return "fake-connection"
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class FakeRuntime:
+        managed_cleanup_pending = False
+
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def start_managed(self, **kwargs: object) -> FakeScope:
+            del kwargs
+            return FakeScope()
+
+    def fake_subprocess_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        if len(cmd) >= 4 and cmd[1:4] == ["info", "-only", "pid"]:
+            target = cmd[4]
+            events.append(("lsappinfo_pid", target))
+            if target == "com.apple.iWork.Numbers":
+                return SimpleNamespace(returncode=0, stdout='"pid"=4321\n', stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if len(cmd) >= 3 and cmd[1] == "-b":
+            events.append(("open_b", cmd[2]))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"Unexpected subprocess command: {cmd}")
+
+    def fake_create_mac2_session(
+        connection: object,
+        *,
+        bundle_id: str | None = None,
+        no_reset: bool = True,
+        skip_app_kill: bool = True,
+        **kwargs: object,
+    ) -> FakeMacSession:
+        del connection, kwargs
+        events.append(("create_mac2_session", (bundle_id, no_reset, skip_app_kill)))
+        sess = FakeMacSession({}, session_id=f"mac2:{len(sessions) + 1}")
+        sessions.append(sess)
+        return sess
+
+    monkeypatch.setattr("sys.platform", "darwin")
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect.subprocess.run", fake_subprocess_run)
+    monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
+    monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", fake_create_mac2_session)
+
+    driver = AppiumConnectMacOSDriver(bundle_id="com.apple.finder")
+    try:
+        # Finder is reported not running -> no open -b pre-activation before create_mac2_session.
+        res1 = driver.launch_app(MacOSLaunchAppParams(new_session=True))
+        assert res1["status"] == "passed"
+        assert events == [
+            ("lsappinfo_pid", "com.apple.finder"),
+            ("create_mac2_session", ("com.apple.finder", True, True)),
+        ]
+
+        # Switching to already-running Numbers -> old session quits cleanly (skip_app_kill=True), open -b pre-activates Numbers, then create_mac2_session attaches with no_reset=True, skip_app_kill=True.
+        events.clear()
+        res2 = driver.launch_app(MacOSLaunchAppParams(bundle_id="com.apple.iWork.Numbers", new_session=True))
+        assert res2["status"] == "passed"
+        assert sessions[0].lifecycle_calls == [("quit", None)]
+        assert events == [
+            ("lsappinfo_pid", "com.apple.iWork.Numbers"),
+            ("open_b", "com.apple.iWork.Numbers"),
+            ("create_mac2_session", ("com.apple.iWork.Numbers", True, True)),
+        ]
+        assert driver.launch_app(MacOSLaunchAppParams(arguments=[], new_session=False))["status"] == "passed"
+    finally:
+        driver.close()

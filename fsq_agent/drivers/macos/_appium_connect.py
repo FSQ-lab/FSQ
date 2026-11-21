@@ -12,6 +12,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
@@ -483,6 +484,40 @@ def _detect_frontmost_macos_bundle_id(*, timeout_seconds: float = 5.0) -> str:
     return MACOS_FALLBACK_FRONTMOST_BUNDLE
 
 
+def _is_macos_bundle_running(bundle_id: str, *, timeout_seconds: float = 5.0) -> bool:
+    if sys.platform != "darwin" or not bundle_id or MACOS_BUNDLE_ID_SYNTAX.fullmatch(bundle_id) is None:
+        return False
+    lsappinfo = shutil.which("lsappinfo") or "/usr/bin/lsappinfo"
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed read-only LaunchServices PID lookup for validated bundle_id.
+            [lsappinfo, "info", "-only", "pid", bundle_id],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    match = re.search(r'"pid"\s*=\s*(\d+)', proc.stdout)
+    return bool(match and int(match.group(1)) > 0)
+
+
+def _preactivate_running_macos_bundle(bundle_id: str, *, timeout_seconds: float = 10.0) -> None:
+    if sys.platform != "darwin" or not bundle_id or MACOS_BUNDLE_ID_SYNTAX.fullmatch(bundle_id) is None:
+        return
+    open_cmd = shutil.which("open") or "/usr/bin/open"
+    with suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(  # noqa: S603 - explicit validated bundle_id foregrounded via open -b without shell.
+            [open_cmd, "-b", bundle_id],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+
+
 def _normalize_macos_key_token(raw_key: str) -> str:
     stripped = raw_key.strip()
     if stripped in MACOS_SDK_NAMED_KEY_LITERALS:
@@ -718,7 +753,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
     @_macos_driver_tool(
         "launchApp",
         description=(
-            "Create a managed Appium Mac2 session (new_session=true) or activate a macOS bundle_id or .app app_path in the active session (new_session=false, preferred for switching desktop apps)."
+            "Create or rebind a managed Appium Mac2 session (new_session=true; idempotently reuses an already-bound healthy session on the same bundle) or activate a macOS bundle_id or .app app_path in the active session (new_session=false)."
         ),
     )
     def launch_app(self, params: MacOSLaunchAppParams) -> dict[str, object]:
@@ -1495,8 +1530,20 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if self._cleanup_pending:
                 self._close_owned_resources_for_recreation()
             return self._create_session(params)
+        has_launch_arguments = bool(params.arguments)
         if params.new_session:
-            self._require_creation_identity(params, replacing_borrowed=self._borrowed_session)
+            target_bundle, target_app_path = self._require_creation_identity(params, replacing_borrowed=self._borrowed_session)
+            resolved_target_bundle = target_bundle or (_bundle_id_from_app_path(_resolve_app_bundle_path(target_app_path)) if target_app_path else None)
+            if (
+                not has_launch_arguments
+                and resolved_target_bundle is not None
+                and self._active_bundle_id == resolved_target_bundle
+                and self._probe_session_healthy_for_same_bundle_reuse(self._session)
+            ):
+                self._activate_bundle_in_session(resolved_target_bundle)
+                if target_app_path is not None:
+                    self._session_app_path = target_app_path
+                return self._session
             if self._borrowed_session:
                 quit_fn = getattr(self._session, "quit", None)
                 if callable(quit_fn):
@@ -1504,29 +1551,54 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 self._session = None
             else:
                 self._close_owned_resources_for_recreation()
-            return self._create_session(params)
-        if params.arguments is not None:
+            self._pending_creation_identity = (target_bundle, target_app_path)
+            try:
+                return self._create_session(params)
+            finally:
+                self._pending_creation_identity = None
+        if has_launch_arguments:
             raise ConfigurationError("arguments require new_session=true when a Mac2 session already exists.")
         bundle_id, unbundled_app_path = self._resolve_activation_identity(params)
         self._ensure_alive_if_idle(self._session)
         activate_timeout = max(DEFAULT_MACOS_ACTIVATE_TIMEOUT_SECONDS, float(self.action_timeout_seconds) + 5.0)
         if bundle_id is not None:
-            try:
-                self._session.device.activate_app(
-                    bundle_id,
-                    control=self._operation_control(activate_timeout, cancellation=self._operation_cancellation),
-                )
-            except Exception as exc:
-                self._propagate_if_cancelled(exc)
-                self._note_operation_timeout(exc)
-                raise ToolExecutionError(
-                    "macOS application activation failed.",
-                    context={"stage": "launch_app", "cause": exc},
-                ) from exc
-            self._active_bundle_id = bundle_id
+            self._activate_bundle_in_session(bundle_id, timeout_seconds=activate_timeout)
         elif unbundled_app_path is not None:
             self._activate_unbundled_app_path(unbundled_app_path, timeout_seconds=activate_timeout)
         return self._session
+
+    def _probe_session_healthy_for_same_bundle_reuse(self, session: Any) -> bool:
+        if session is None or self._cleanup_pending or not self._session_is_active(session):
+            return False
+        if self._borrowed_session:
+            return True
+        ensure_alive = getattr(session, "ensure_alive", None)
+        if not callable(ensure_alive):
+            return True
+        try:
+            ensure_alive(control=self._operation_control(DEFAULT_ENSURE_ALIVE_TIMEOUT_SECONDS, cancellation=self._operation_cancellation))
+            self._last_operation_finished_at = time.monotonic()
+        except Exception as exc:  # noqa: BLE001
+            self._propagate_if_cancelled(exc)
+            self._note_operation_timeout(exc)
+            return False
+        return self._session_is_active(session)
+
+    def _activate_bundle_in_session(self, bundle_id: str, *, timeout_seconds: float | None = None) -> None:
+        effective_timeout = timeout_seconds if timeout_seconds is not None else max(DEFAULT_MACOS_ACTIVATE_TIMEOUT_SECONDS, float(self.action_timeout_seconds) + 5.0)
+        try:
+            self._session.device.activate_app(
+                bundle_id,
+                control=self._operation_control(effective_timeout, cancellation=self._operation_cancellation),
+            )
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            self._note_operation_timeout(exc)
+            raise ToolExecutionError(
+                "macOS application activation failed.",
+                context={"stage": "launch_app", "cause": exc},
+            ) from exc
+        self._active_bundle_id = bundle_id
 
     def _activate_unbundled_app_path(self, app_path: str, *, timeout_seconds: float) -> None:
         open_cmd = shutil.which("open") or "/usr/bin/open"
@@ -1620,8 +1692,10 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         return False
 
     def _create_session(self, params: MacOSLaunchAppParams) -> Any:
-        bundle_id, app_path = self._require_creation_identity(params)
+        pending_identity = getattr(self, "_pending_creation_identity", None)
+        bundle_id, app_path = pending_identity if pending_identity is not None else self._require_creation_identity(params)
         resolved_app_path = _resolve_app_bundle_path(app_path) if app_path else None
+        inferred_target_bundle = bundle_id or (_bundle_id_from_app_path(resolved_app_path) if resolved_app_path is not None else None)
         try:
             from appium_connect_agent.automation import create_mac2_session
             from appium_connect_agent.contracts import LocalSettings
@@ -1687,12 +1761,15 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if last_port_error is not None:
                 raise last_port_error
             raise ConfigurationError("Failed to bind a managed Appium loopback port.")
+        effective_arguments = params.arguments if params.arguments else None
+        if effective_arguments is None and inferred_target_bundle is not None and _is_macos_bundle_running(inferred_target_bundle):
+            _preactivate_running_macos_bundle(inferred_target_bundle)
         try:
             session = create_mac2_session(
                 connection,
                 bundle_id=bundle_id,
                 app_path=resolved_app_path,
-                arguments=params.arguments,
+                arguments=effective_arguments,
                 no_reset=True,
                 new_command_timeout_seconds=effective_new_command_timeout,
                 control=OperationControl(timeout_seconds=DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS, cancellation=self._operation_cancellation),
@@ -1733,7 +1810,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             self._cleanup_pending = False
             raise
 
-        inferred_bundle = bundle_id or (_bundle_id_from_app_path(resolved_app_path) if resolved_app_path is not None else None)
+        inferred_bundle = inferred_target_bundle
         self._borrowed_session = False
         self._runtime = runtime
         self._managed_scope = scope

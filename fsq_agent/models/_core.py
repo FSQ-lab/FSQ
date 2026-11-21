@@ -1176,8 +1176,8 @@ class MacOSLaunchAppParams(BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Launch or activate a macOS application. Prefer new_session=false with bundle_id or app_path to switch to or activate another desktop app in the active Mac2 session; "
-                "set new_session=true on initial session setup or explicit session replacement."
+                "Launch or activate a macOS application. If the target app or document is already open in the bound session, reuse it directly or call launch_app with new_session=false; "
+                "set new_session=true on initial session setup, when rebinding the Mac2 accessibility tree to another desktop app, or when passing startup arguments."
             )
         },
     )
@@ -1194,8 +1194,8 @@ class MacOSLaunchAppParams(BaseModel):
     new_session: bool = Field(
         default=False,
         description=(
-            "When false (preferred for switching or activating another desktop app mid-task), activate bundle_id or app_path inside the existing Mac2 session without tearing it down. "
-            "When true, close any existing Mac2 session and create a new one (preserving running desktop apps when skip_app_kill is enabled)."
+            "When false, activate bundle_id or app_path inside the existing Mac2 session without tearing it down (preferred when foregrounding the already-bound app). "
+            "When true, create or rebind the Mac2 session to the target bundle (reusing the active session idempotently if already healthy on the same bundle without non-empty arguments, and preserving running desktop apps when skip_app_kill is enabled)."
         ),
     )
 

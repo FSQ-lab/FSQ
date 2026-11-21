@@ -4,6 +4,15 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-11-21
+
+Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.7.md) for upgrade steps and validation limits.
+
+### Fixed
+
+- `AppiumConnectMacOSDriver.launch_app` short-circuits idempotently when an active session is already bound to the resolved target `bundle_id` without non-empty `arguments` (regardless of `new_session=True` or `new_session=False`), probing liveness via `Session.ensure_alive` on owned sessions and foregrounding via `Session.device.activate_app` without tearing down or recreating WebDriverAgentMac. When creating or switching a Mac2 session for an already-running macOS GUI application (`lsappinfo info -only pid <bundle_id>`) without non-empty `arguments`, the driver pre-activates the running bundle via bounded `/usr/bin/open -b` before `create_mac2_session(..., no_reset=True, skip_app_kill=...)` while preserving `skip_app_kill=True` by default across session switches and disposal.
+- `macos-harness.md` and `MacOSLaunchAppParams` clarify single-initialization vs cross-bundle Mac2 rebinding vs `new_session=false` foregrounding, native document/script extension preservation (`.pages`, `.numbers`, `.key`, `.scpt`) without Finder extension stripping, standard extensionless Obsidian WikiLinks (`[[NoteName]]`), and running saved Automator `.workflow` workflows when execution output is required.
+
 ## [0.3.6] - 2026-11-20
 
 Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.6.md) for upgrade steps and validation limits.
@@ -168,7 +177,8 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/FSQ-lab/FSQ/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/FSQ-lab/FSQ/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/FSQ-lab/FSQ/compare/v0.3.2...v0.3.5
 [0.3.2]: https://github.com/FSQ-lab/FSQ/compare/v0.3.1...v0.3.2
@@ -177,4 +187,4 @@ Release preparation; this entry does not establish a published package, tag, or 
 [0.1.5]: https://github.com/FSQ-lab/FSQ/compare/v0.1.0...v0.1.5
 [0.1.0]: https://github.com/FSQ-lab/FSQ/releases/tag/v0.1.0
 
-The 0.3.6 comparison references anticipate release tags; they do not establish that a tag or publication exists.
+The 0.3.7 and 0.3.6 comparison references anticipate release tags; they do not establish that a tag or publication exists.

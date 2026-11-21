@@ -105,3 +105,10 @@ def test_package_macos_skill_preserves_element_only_guidance(tmp_path: Path) -> 
     assert "Hide Extension" in macos.instructions
     assert "Command+Shift+G" in macos.instructions
     assert "Go to Folder" in macos.instructions
+    assert "new_session=false" in macos.instructions
+    assert ".pages" in macos.instructions
+    assert ".numbers" in macos.instructions
+    assert ".key" in macos.instructions
+    assert ".scpt" in macos.instructions
+    assert "[[NoteName]]" in macos.instructions
+    assert ".workflow" in macos.instructions

@@ -12,6 +12,7 @@ from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime
+from decimal import Decimal
 from math import ceil, floor
 from pathlib import Path
 from threading import Event
@@ -196,6 +197,14 @@ IOS_INPUT_POST_ATTRIBUTES = (
     "placeholder_value",
     "bounds",
 )
+IOS_PASTE_MENU_PREDICATE = '(type == "XCUIElementTypeMenuItem" OR type == "XCUIElementTypeButton") AND (label == "Paste" OR name == "Paste")'
+IOS_TEXT_TRANSLATION = str.maketrans("\u2018\u2019\u201c\u201d\u2013\u2014\u00a0\u202f", "''\"\"--  ")
+IOS_PLAIN_AMOUNT_RE = re.compile(r"\$?[0-9]+(?:\.[0-9]+)?")
+IOS_FORMATTED_AMOUNT_RE = re.compile(r"\$?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?")
+IOS_PREDICATE_TOKEN_RE = re.compile(r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|\bdescendants\b""", re.IGNORECASE | re.DOTALL)
+IOS_CLASS_CHAIN_PREDICATE_RE = re.compile(r"""\[(`|\$)((?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|(?!\1\]|['"]).)*?)\1\]""", re.DOTALL)
+IOS_CLASS_CHAIN_POSITION_RE = re.compile(r"\[(?:-?\d+|\*)\]$")
+IOS_CLASS_CHAIN_TERMINAL_CLASS_RE = re.compile(r"(?:^|/)(XCUIElementType\w+)(?:\[[^\]]*\])*$")
 IOS_SAFE_BACKEND_CODES = frozenset(
     {
         "invalid_argument",
@@ -315,6 +324,40 @@ def _xpath_literal(value: str) -> str:
 def _predicate_literal(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
     return f'"{escaped}"'
+
+
+def _text_attribute(attrs: dict[str, tuple[str, object]], name: str) -> str | None:
+    entry = attrs.get(name)
+    return entry[1] if entry is not None and entry[0] == "value" and isinstance(entry[1], str) else None
+
+
+def _normalized_text(value: str) -> str:
+    return value.translate(IOS_TEXT_TRANSLATION).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _text_readback_matches(observed: str, expected_candidates: tuple[str, ...]) -> bool:
+    observed = _normalized_text(observed)
+    for candidate in expected_candidates:
+        expected = _normalized_text(candidate)
+        if observed == expected:
+            return True
+        if IOS_PLAIN_AMOUNT_RE.fullmatch(expected) and IOS_FORMATTED_AMOUNT_RE.fullmatch(observed):
+            if Decimal(observed.removeprefix("$").replace(",", "")) == Decimal(expected.removeprefix("$")):
+                return True
+    return False
+
+
+def _is_text_insertion(observed: str, previous: str, submitted: str) -> bool:
+    observed = _normalized_text(observed)
+    previous = _normalized_text(previous)
+    submitted = _normalized_text(submitted)
+    if len(observed) != len(previous) + len(submitted):
+        return False
+
+    # The unchanged prefix and suffix bound the possible insertion offsets.
+    prefix = next((i for i, (old, new) in enumerate(zip(previous, observed, strict=False)) if old != new), len(previous))
+    suffix = next((i for i, (old, new) in enumerate(zip(reversed(previous), reversed(observed), strict=False)) if old != new), len(previous))
+    return observed.find(submitted, len(previous) - suffix, prefix + len(submitted)) != -1
 
 
 def _allocate_loopback_port() -> int:
@@ -487,7 +530,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             session = self._ensure_session_impl()
             cur_w, cur_h = self._display_size(session)
             resolved_x, resolved_y = self._resolve_point_coordinates_with_size(cur_w, cur_h, params.point, params.reference_screen_size)
-            session.device.click_at(resolved_x, resolved_y, control=self._ActionControl(self))
+            session.device.tap_at(resolved_x, resolved_y, control=self._ActionControl(self))
             if data.get("reference_screen_size") is None:
                 data["reference_screen_size"] = {"width": cur_w, "height": cur_h}
             return {**self._passed({"x": resolved_x, "y": resolved_y}), "metadata": {"safe_replay_params": data}}
@@ -556,13 +599,12 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         clear_existing: bool,
         submitted_text: str | None,
     ) -> dict[str, object]:
-        session = self._ensure_session_impl()
         element = self._resolve_element_or_none(params)
         if element is None:
             return self._target_missing()
 
-        inspection = element.inspect(attributes=IOS_INPUT_PRE_ATTRIBUTES, control=self._ActionControl(self))
-        attrs = self._inspection_dict(inspection)
+        session = self._ensure_session_impl()
+        attrs = self._inspect_editable_attributes(element, IOS_INPUT_PRE_ATTRIBUTES)
         type_entry = attrs.get("type")
         raw_type = str(type_entry[1]) if type_entry and type_entry[0] == "value" and isinstance(type_entry[1], str) and type_entry[1] else ""
         short_type = raw_type.removeprefix("XCUIElementType") if raw_type else ""
@@ -578,58 +620,88 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             return self._failed("target_resolution_error", f"iOS {action_label} requires a visible editable element.")
 
         is_secure = short_type == "SecureTextField"
-        bound_element, bind_failure = self._bind_editable_target(session, element, params, attrs, raw_type=raw_type)
-        if bind_failure is not None or bound_element is None:
-            return bind_failure or self._failed("action_error", f"iOS {action_label} could not anchor a stable editable target.")
+        pre_value = None if is_secure else _text_attribute(attrs, "value")
+        pre_text = pre_value if pre_value and pre_value != _text_attribute(attrs, "placeholder_value") else ""
+        bound_element, uses_rect = self._bind_editable_target(session, element, params, attrs, raw_type=raw_type)
+        if bound_element is None:
+            return self._failed("action_error", f"iOS {action_label} could not uniquely anchor the original editable target.")
 
-        if clear_existing:
-            try:
+        stage = action_label
+        try:
+            if clear_existing:
                 bound_element.clear(wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
-            except Exception as exc:
-                self._propagate_if_cancelled(exc)
-                if getattr(exc, "request_state", None) == "response_unknown":
-                    return self._failed(
-                        "action_error",
-                        f"iOS {action_label} outcome is unknown; verify field content before retrying.",
-                        metadata=self.safe_diagnostics(exc, stage=action_label),
-                    )
+            if submitted_text:
+                stage = "input_text"
+                if short_type != "TextView" or not self._paste_text_into_ios_element(session, bound_element, submitted_text):
+                    self._send_editable_text(session, bound_element, submitted_text)
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            if getattr(exc, "request_state", None) != "response_unknown":
                 raise
-        if submitted_text is not None and submitted_text != "":
-            try:
-                bound_element.send_keys(
-                    submitted_text,
-                    wait_timeout_seconds=self._wait_timeout(),
-                    control=self._ActionControl(self),
-                )
-            except Exception as exc:
-                self._propagate_if_cancelled(exc)
-                req_state = getattr(exc, "request_state", None)
-                if req_state == "response_unknown":
-                    return self._failed(
-                        "action_error",
-                        f"iOS {action_label} outcome is unknown; verify field content before retrying.",
-                        metadata=self.safe_diagnostics(exc, stage="input_text"),
-                    )
-                if req_state not in ("not_sent", "response_received") or not self._session_is_active(session):
-                    raise
-                # Element.send_macos_keys is the public SDK per-keystroke input API for both Mac2 and XCUITest.
-                bound_element.send_macos_keys(
-                    list(submitted_text),
-                    wait_timeout_seconds=self._wait_timeout(),
-                    control=self._ActionControl(self),
-                )
+            return self._failed(
+                "action_error",
+                f"iOS {action_label} outcome is unknown; verify field content before retrying.",
+                metadata=self.safe_diagnostics(exc, stage=stage),
+            )
 
-        expected_text = "" if submitted_text is None else submitted_text
         verify_error = self._verify_post_text_mutation(
+            session,
             bound_element,
             pre_attrs=attrs,
             is_secure=is_secure,
-            expected_text=expected_text,
+            expected_text=submitted_text or "",
+            previous_text=pre_text if not clear_existing else "",
             action_label=action_label,
+            focused_type=(raw_type if raw_type.startswith("XCUIElementType") else f"XCUIElementType{raw_type}") if uses_rect else None,
         )
         if verify_error is not None:
             return verify_error
         return self._passed()
+
+    def _paste_text_into_ios_element(self, session: Any, element: Any, text: str) -> bool:
+        device = session.device
+        try:
+            prior_clipboard = device.get_clipboard_text(control=self._ActionControl(self))
+        except Exception as exc:  # noqa: BLE001 - clipboard backup is best effort
+            self._propagate_if_cancelled(exc)
+            prior_clipboard = None
+
+        try:
+            device.set_clipboard_text(text, control=self._ActionControl(self))
+            element.long_click(duration_ms=600, wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
+            paste = session.element("-ios predicate string", IOS_PASTE_MENU_PREDICATE)
+            paste.click(wait_timeout_seconds=3.0, control=self._ActionControl(self))
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            request_state = getattr(exc, "request_state", None)
+            missing_menu = type(exc).__name__ == "TargetError" and getattr(exc, "code", None) in {"target_not_found", "target_ambiguous"}
+            if self._session_is_active(session) and (request_state in {"not_sent", "response_received"} or (request_state is None and missing_menu)):
+                return False
+            raise
+        finally:
+            if prior_clipboard is not None:
+                with suppress(Exception):
+                    device.set_clipboard_text(prior_clipboard, control=self._ActionControl(self))
+        return True
+
+    def _send_editable_text(self, session: Any, element: Any, text: str) -> None:
+        try:
+            element.send_keys(text, wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            if getattr(exc, "request_state", None) not in {"not_sent", "response_received"} or not self._session_is_active(session):
+                raise
+            element.send_macos_keys(list(text), wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
+
+    def _inspect_editable_attributes(self, element: Any, attributes: tuple[str, ...]) -> dict[str, tuple[str, object]]:
+        try:
+            inspection = element.inspect(attributes=(*attributes, "uid"), control=self._ActionControl(self))
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            if type(exc).__name__ != "InvalidRequestError" or getattr(exc, "code", None) not in {"unsupported_operation", "invalid_argument"} or getattr(exc, "request_state", None) != "not_sent":
+                raise
+            inspection = element.inspect(attributes=attributes, control=self._ActionControl(self))
+        return self._inspection_dict(inspection)
 
     def _bind_editable_target(
         self,
@@ -639,47 +711,44 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         attrs: dict[str, tuple[str, object]],
         *,
         raw_type: str,
-    ) -> tuple[Any | None, dict[str, object] | None]:
-        id_entry = attrs.get("id")
-        elem_id = id_entry[1] if id_entry and id_entry[0] == "value" and isinstance(id_entry[1], str) and id_entry[1].strip() else None
-        if elem_id is not None:
-            try:
-                candidate = session.element("accessibility id", elem_id)
-                cand_attrs = self._inspection_dict(candidate.inspect(attributes=("type", "id", "bounds"), control=self._ActionControl(self)))
-                if cand_attrs.get("type") == attrs.get("type") and cand_attrs.get("id") == attrs.get("id") and self._bounds_tuple_from_attrs(cand_attrs) == self._bounds_tuple_from_attrs(attrs):
-                    return candidate, None
-            except Exception as exc:
-                self._propagate_if_cancelled(exc)
-                if type(exc).__name__ != "TargetError" or not self._target_error_is_definitive(exc):
-                    raise
-
-        if self._locator_is_text_independent(params):
-            return element, None
-
-        bounds_tuple = self._bounds_tuple_from_attrs(attrs)
+    ) -> tuple[Any | None, bool]:
+        elem_id = _text_attribute(attrs, "id")
+        elem_uid = _text_attribute(attrs, "uid")
         full_type = raw_type if raw_type.startswith("XCUIElementType") else f"XCUIElementType{raw_type}"
-        if bounds_tuple is None or not raw_type:
-            return None, self._failed("action_error", "Editable iOS target lacks a stable name or bounds anchor independent of mutable text.")
-        bx, by, bw, bh = bounds_tuple
-        rect_predicate = f"type == {_predicate_literal(full_type)} AND rect.x == {bx} AND rect.y == {by} AND rect.width == {bw} AND rect.height == {bh}"
+        bounds = None
+        has_id = bool(elem_id and elem_id.strip())
+        has_uid = bool(elem_uid and elem_uid.strip())
+        if elem_uid and has_uid:
+            query = f"type == {_predicate_literal(full_type)} AND UID == {_predicate_literal(elem_uid)}"
+        elif elem_id and has_id:
+            query = f"type == {_predicate_literal(full_type)} AND name == {_predicate_literal(elem_id)}"
+        elif self._locator_is_text_independent(params):
+            return element, False
+        else:
+            bounds = self._bounds_tuple_from_attrs(attrs)
+            if bounds is None:
+                return None, False
+            bx, by_coord, bw, bh = bounds
+            query = f"type == {_predicate_literal(full_type)} AND rect.x == {bx} AND rect.y == {by_coord} AND rect.width == {bw} AND rect.height == {bh}"
+
         try:
-            anchored = session.element("-ios predicate string", rect_predicate)
-            anc_attrs = self._inspection_dict(anchored.inspect(attributes=("type", "id", "bounds"), control=self._ActionControl(self)))
+            candidate = session.element("-ios predicate string", query)
+            anchor_fields = ("type", "id", "enabled", "displayed") if bounds is None else ("type", "id", "enabled", "displayed", "bounds")
+            candidate_attrs = self._inspect_editable_attributes(candidate, anchor_fields)
         except Exception as exc:
             self._propagate_if_cancelled(exc)
             if type(exc).__name__ == "TargetError" and self._target_error_is_definitive(exc):
-                return (
-                    None,
-                    self._failed(
-                        "action_error",
-                        "Editable iOS target could not be uniquely anchored by type and bounds.",
-                        metadata=self.safe_diagnostics(exc, stage="bind_editable_target"),
-                    ),
-                )
+                return None, False
             raise
-        if anc_attrs.get("type") != attrs.get("type") or self._bounds_tuple_from_attrs(anc_attrs) != bounds_tuple:
-            return None, self._failed("action_error", "Editable iOS target anchor did not preserve element identity.")
-        return anchored, None
+        if candidate_attrs.get("type") != attrs.get("type") or candidate_attrs.get("enabled") != ("value", True) or candidate_attrs.get("displayed") != ("value", True):
+            return None, False
+        if has_uid and candidate_attrs.get("uid") != attrs.get("uid"):
+            return None, False
+        if has_id and candidate_attrs.get("id") != attrs.get("id"):
+            return None, False
+        if bounds is not None and self._bounds_tuple_from_attrs(candidate_attrs) != bounds:
+            return None, False
+        return candidate, bounds is not None
 
     @classmethod
     def _locator_is_text_independent(cls, params: BaseModel) -> bool:
@@ -710,46 +779,54 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     def _verify_post_text_mutation(
         self,
+        session: Any,
         element: Any,
         *,
         pre_attrs: dict[str, tuple[str, object]],
         is_secure: bool,
-        expected_text: str | None,
+        expected_text: str,
+        previous_text: str,
         action_label: str,
+        focused_type: str | None,
     ) -> dict[str, object] | None:
-        post_attrs_to_read = ("type", "id", "enabled", "bounds") if is_secure else IOS_INPUT_POST_ATTRIBUTES
-        post_inspection = element.inspect(attributes=post_attrs_to_read, control=self._ActionControl(self))
-        post_attrs = self._inspection_dict(post_inspection)
+        fields = ("type", "id", "enabled") if is_secure else IOS_INPUT_POST_ATTRIBUTES
+        try:
+            post_attrs = self._inspect_editable_attributes(element, fields)
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            if focused_type is None or type(exc).__name__ != "TargetError" or getattr(exc, "code", None) != "target_not_found" or not self._target_error_is_definitive(exc):
+                raise
+            failure_message = f"iOS {action_label} could not confirm the focused target for readback."
+            try:
+                focused = session.element("-ios predicate string", f"type == {_predicate_literal(focused_type)} AND focused == true")
+                post_attrs = self._inspect_editable_attributes(focused, (*fields, "focused"))
+            except Exception as focus_error:
+                self._propagate_if_cancelled(focus_error)
+                if type(focus_error).__name__ == "TargetError" and getattr(focus_error, "code", None) in {"target_not_found", "target_ambiguous"} and self._target_error_is_definitive(focus_error):
+                    return self._failed("action_error", failure_message)
+                raise
+            if post_attrs.get("focused") != ("value", True):
+                return self._failed("action_error", failure_message)
         if post_attrs.get("type") != pre_attrs.get("type"):
             return self._failed("action_error", f"iOS {action_label} target type changed during text mutation.")
-        pre_id_entry = pre_attrs.get("id")
-        post_id_entry = post_attrs.get("id")
-        pre_id = pre_id_entry[1] if pre_id_entry and pre_id_entry[0] == "value" and isinstance(pre_id_entry[1], str) and pre_id_entry[1].strip() else None
-        post_id = post_id_entry[1] if post_id_entry and post_id_entry[0] == "value" and isinstance(post_id_entry[1], str) and post_id_entry[1].strip() else None
-        if pre_id is not None:
-            if post_id != pre_id:
-                return self._failed("action_error", f"iOS {action_label} target identity changed during text mutation.")
-        else:
-            if post_id is not None:
-                return self._failed("action_error", f"iOS {action_label} target identity changed during text mutation.")
-            pre_bounds = self._bounds_tuple_from_attrs(pre_attrs)
-            if pre_bounds is not None and self._bounds_tuple_from_attrs(post_attrs) != pre_bounds:
-                return self._failed("action_error", f"iOS {action_label} target bounds changed during text mutation.")
+        pre_id = _text_attribute(pre_attrs, "id")
+        post_id = _text_attribute(post_attrs, "id")
+        pre_uid = _text_attribute(pre_attrs, "uid")
+        post_uid = _text_attribute(post_attrs, "uid")
+        if (pre_id or None) != (post_id or None) or (pre_uid and post_uid and post_uid != pre_uid):
+            return self._failed("action_error", f"iOS {action_label} target identity changed during text mutation.")
         if post_attrs.get("enabled") != ("value", True):
             return self._failed("action_error", f"iOS {action_label} target is no longer enabled after text mutation.")
-        if is_secure or expected_text is None:
+        if is_secure:
             return None
 
-        val_entry = post_attrs.get("value")
-        ph_entry = post_attrs.get("placeholder_value")
-        observed_state = val_entry[0] if val_entry is not None else "missing"
-        observed_val = val_entry[1] if val_entry and val_entry[0] == "value" and isinstance(val_entry[1], str) else None
-        placeholder_val = ph_entry[1] if ph_entry and ph_entry[0] == "value" and isinstance(ph_entry[1], str) else None
+        observed = _text_attribute(post_attrs, "value")
         if expected_text == "":
-            if observed_state == "missing" or observed_val in ("", None) or (placeholder_val is not None and observed_val == placeholder_val):
+            if not observed or observed == _text_attribute(post_attrs, "placeholder_value"):
                 return None
             return self._failed("action_error", f"iOS {action_label} readback did not confirm an empty field.")
-        if observed_state == "value" and observed_val == expected_text:
+        candidates = (previous_text + expected_text, expected_text) if previous_text else (expected_text,)
+        if observed is not None and (_text_readback_matches(observed, candidates) or (previous_text and _is_text_insertion(observed, previous_text, expected_text))):
             return None
         return self._failed("action_error", f"iOS {action_label} readback did not match expected text.")
 
@@ -1766,11 +1843,10 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         return self._element_from_locator(IOSLocator(predicate=fallback_pred))
 
     def _element_from_locator(self, locator: IOSLocator) -> Any | None:
-        session = self._ensure_session_impl()
         if not locator.has_value():
             return None
-
         by, query_value, extra_predicate = self._build_session_locator_query(locator)
+        session = self._ensure_session_impl()
         try:
             element = session.element(by, query_value, predicate=extra_predicate)
         except Exception as exc:  # noqa: BLE001
@@ -1905,26 +1981,35 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         return (attrs.get("type"), attrs.get("id"), attrs.get("label"), attrs.get("value"), bounds_tuple)
 
     def _build_session_locator_query(self, locator: IOSLocator) -> tuple[str, str, str | None]:
+        predicates = [locator.predicate] if locator.predicate else []
+        chain = locator.class_chain
+        if chain:
+            predicates.extend(match[2] for match in IOS_CLASS_CHAIN_PREDICATE_RE.finditer(chain))
+        if any(token[0].casefold() == "descendants" for predicate in predicates for token in IOS_PREDICATE_TOKEN_RE.finditer(predicate)):
+            raise ConfigurationError(
+                "WDA predicate/class_chain does not support `descendants`; use hierarchical class-chain segments or XPath instead.",
+                context={"resolution_reason": "invalid_locator"},
+            )
         if locator.xpath:
             constraints = self._xpath_constraints(locator)
             selector = f"({locator.xpath})" if constraints else locator.xpath
             if constraints:
                 selector += "[" + " and ".join(constraints) + "]"
             return "xpath", selector, None
-        if locator.class_chain:
-            clauses = self._locator_predicate_clauses(locator)
-            if not clauses:
-                return "-ios class chain", locator.class_chain, None
-            predicate = " AND ".join(f"({clause})" for clause in clauses) if len(clauses) > 1 else clauses[0]
-            if "`" in predicate:
-                non_pred_clauses = self._locator_predicate_clauses(locator, skip_predicate=True)
-                chain = locator.class_chain.rstrip()
-                if non_pred_clauses:
-                    non_pred = " AND ".join(f"({c})" for c in non_pred_clauses) if len(non_pred_clauses) > 1 else non_pred_clauses[0]
-                    if "`" not in non_pred:
-                        chain = f"{chain}[`{non_pred}`]"
-                return "-ios class chain", chain, None
-            return "-ios class chain", f"{locator.class_chain.rstrip()}[`{predicate}`]", None
+        if chain:
+            chain = chain.rstrip()
+            structural_chain = IOS_CLASS_CHAIN_PREDICATE_RE.sub("", chain)
+            terminal_class = IOS_CLASS_CHAIN_TERMINAL_CLASS_RE.search(structural_chain)
+            element_type = locator.element_type
+            skip_type = bool(element_type and terminal_class and terminal_class[1] == f"XCUIElementType{element_type.removeprefix('XCUIElementType')}")
+            separate_predicate = bool(locator.predicate and "`" in locator.predicate)
+            clauses = self._locator_predicate_clauses(locator, skip_predicate=separate_predicate, skip_element_type=skip_type)
+            if clauses:
+                predicate = " AND ".join(f"({clause})" for clause in clauses) if len(clauses) > 1 else clauses[0]
+                position = IOS_CLASS_CHAIN_POSITION_RE.search(chain)
+                offset = position.start() if position else len(chain)
+                chain = f"{chain[:offset]}[`{predicate.replace('`', '``')}`]{chain[offset:]}"
+            return "-ios class chain", chain, None
 
         populated = [
             bool(val)
@@ -1978,6 +2063,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         *,
         skip_accessibility_id: bool = False,
         skip_predicate: bool = False,
+        skip_element_type: bool = False,
     ) -> list[str]:
         clauses: list[str] = []
         if locator.accessibility_id and not skip_accessibility_id:
@@ -1990,7 +2076,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             clauses.append(f"label == {_predicate_literal(locator.label)}")
         if locator.value:
             clauses.append(f"value == {_predicate_literal(locator.value)}")
-        if locator.element_type:
+        if locator.element_type and not skip_element_type:
             cls = locator.element_type
             prefixed = cls if cls.startswith("XCUIElementType") else f"XCUIElementType{cls}"
             clauses.append(f"type == {_predicate_literal(prefixed)}")

@@ -423,7 +423,9 @@ def test_macos_real_action_timeout_replaces_uncertain_session_losslessly(managed
         driver.screenshot({"timeout_seconds": 0.25})
     assert owner.session.session_info().state == "uncertain"
 
-    # The pinned SDK rejects ensure_alive on uncertain sessions before probing the remote peer.
+    # SDK builds that can recover an uncertain session must fail the probe here.
+    # This test exercises replacement, not successful in-place recovery.
+    managed_driver.mode("probe-dead")
     replaced = driver.launch_app(MacOSLaunchAppParams(new_session=False))
     assert replaced["status"] == "passed"
     assert replaced["output"]["bundle_id"] == "com.example.isolated.macos"

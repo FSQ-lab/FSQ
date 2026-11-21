@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -1522,7 +1523,7 @@ def test_macos_workspace_and_settings_accept_bundle_id_auto_and_omit_recording_a
     )
     assert "appId" not in doc
 
-    if os.uname().sysname == "Darwin":
+    if sys.platform == "darwin":
         monkeypatch.setattr("fsq_agent.environments.providers._macos._macos_bundle_matches_target", lambda *_a: pytest.fail("must not probe mdfind for auto"))
         checks = {item.identifier: item for item in _macos_prerequisites(settings.harness.macos)}
         assert checks["bundle_identifier"].status == "ready"

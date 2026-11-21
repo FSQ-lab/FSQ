@@ -529,7 +529,10 @@ def _android_app_id(settings: Settings, case: FsqCase | None) -> str:
 
 
 def _macos_bundle_id(settings: Settings, case: FsqCase | None) -> str | None:
-    return settings.harness.macos.bundle_id or (case.config.app_id if case else None)
+    configured = settings.harness.macos.bundle_id
+    if configured in {None, "auto"} and case and case.config.app_id:
+        return case.config.app_id
+    return configured
 
 
 def _validate_android_app_id(settings: Settings, *, root_case: FsqCase, case: FsqCase) -> None:

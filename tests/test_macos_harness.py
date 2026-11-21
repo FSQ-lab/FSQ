@@ -6,8 +6,12 @@ from __future__ import annotations
 import io
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
 
 import pytest
 from PIL import Image
@@ -716,6 +720,11 @@ class FakeMacSession:
         del control
         self.state = "closed"
         self.lifecycle_calls.append(("quit", None))
+
+    def dispose(self, *, control: Any = None) -> None:
+        del control
+        self.state = "disposed"
+        self.lifecycle_calls.append(("dispose", None))
 
 
 @pytest.mark.usefixtures("android_sdk")
@@ -2051,3 +2060,340 @@ def test_appium_connect_macos_driver_forwards_skip_app_kill_on_initial_and_repla
     launch_schema = MacOSLaunchAppParams.model_json_schema()
     assert "new_session" in launch_schema["description"]
     assert "activate" in launch_schema["properties"]["new_session"]["description"].lower()
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_frontmost_attachment_auto_and_omitted_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_bundles: list[str | None] = []
+
+    class FakeScope:
+        def __enter__(self) -> object:
+            return "fake-connection"
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class FakeRuntime:
+        managed_cleanup_pending = False
+
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def start_managed(self, **kwargs: object) -> FakeScope:
+            del kwargs
+            return FakeScope()
+
+    def fake_create_mac2_session(connection: object, *, bundle_id: str | None = None, **kwargs: object) -> FakeMacSession:
+        del connection, kwargs
+        captured_bundles.append(bundle_id)
+        return FakeMacSession({}, session_id=f"mac2:{len(captured_bundles)}")
+
+    monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
+    monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", fake_create_mac2_session)
+    monkeypatch.setattr("appium_connect_agent.automation.frontmost_macos_app", lambda: "com.mitchellh.ghostty", raising=False)
+
+    for configured_bundle in ("Auto", None):
+        captured_bundles.clear()
+        driver = AppiumConnectMacOSDriver(bundle_id=configured_bundle)
+        try:
+            first = driver.launch_app(MacOSLaunchAppParams(new_session=True))
+            assert first["status"] == "passed"
+            assert first["output"]["bundle_id"] == "com.mitchellh.ghostty"
+            assert captured_bundles == ["com.mitchellh.ghostty"]
+
+            # Reuse without explicit bundle_id activates the cached initial frontmost bundle.
+            reused = driver.launch_app(MacOSLaunchAppParams(new_session=False))
+            assert reused["status"] == "passed"
+            assert reused["output"]["bundle_id"] == "com.mitchellh.ghostty"
+            assert driver._session.lifecycle_calls == [("activate_app", "com.mitchellh.ghostty")]
+        finally:
+            driver.close()
+
+    # Excluded security/login bundles fall back through lsappinfo / Finder without attaching to loginwindow.
+    monkeypatch.setattr("appium_connect_agent.automation.frontmost_macos_app", lambda: "com.apple.loginwindow", raising=False)
+    monkeypatch.setattr(
+        "fsq_agent.drivers.macos._appium_connect.subprocess.run",
+        lambda cmd, **_kw: SimpleNamespace(
+            returncode=0,
+            stdout="ASN:0x0-0x123:" if "front" in cmd else '"CFBundleIdentifier"="com.apple.SecurityAgent"',
+        ),
+    )
+    captured_bundles.clear()
+    fallback_driver = AppiumConnectMacOSDriver(bundle_id="auto")
+    try:
+        res = fallback_driver.launch_app(MacOSLaunchAppParams(new_session=True))
+        assert res["status"] == "passed"
+        assert res["output"]["bundle_id"] == "com.apple.finder"
+        assert captured_bundles == ["com.apple.finder"]
+    finally:
+        fallback_driver.close()
+
+
+def test_macos_press_key_normalizes_desktop_aliases_and_rejects_unknown_multichar() -> None:
+    session = FakeMacSession({})
+    driver = AppiumConnectMacOSDriver(bundle_id="com.example.App", session=session)
+
+    alias_expectations = [
+        ("ArrowDown", ["COMMAND"], {"key": "XCUIKeyboardKeyDownArrow", "modifierFlags": 16}),
+        ("arrow-up", None, "XCUIKeyboardKeyUpArrow"),
+        ("Left Arrow", None, "XCUIKeyboardKeyLeftArrow"),
+        ("RightArrow", None, "XCUIKeyboardKeyRightArrow"),
+        ("ForwardDelete", None, "XCUIKeyboardKeyForwardDelete"),
+        ("Del", None, "XCUIKeyboardKeyForwardDelete"),
+        ("Bksp", None, "XCUIKeyboardKeyDelete"),
+        ("PgDn", None, "XCUIKeyboardKeyPageDown"),
+        ("PgUp", None, "XCUIKeyboardKeyPageUp"),
+        ("CapsLock", None, "XCUIKeyboardKeyCapsLock"),
+        ("NumpadEnter", None, "XCUIKeyboardKeyEnter"),
+        ("Spacebar", None, " "),
+        ("Insert", None, "XCUIKeyboardKeyHelp"),
+        ("xcuikeyboardkeyescape", None, "XCUIKeyboardKeyEscape"),
+    ]
+    for raw_key, modifiers, expected in alias_expectations:
+        res = driver.press_key(MacOSPressKeyParams(key=raw_key, modifiers=modifiers))
+        assert res["status"] == "passed", raw_key
+        assert session.device_keys[-1] == [expected], raw_key
+
+    with pytest.raises(ConfigurationError, match="Unsupported macOS key"):
+        driver.press_key(MacOSPressKeyParams(key="UnknownMultiCharKey"))
+
+
+def test_macos_launch_app_reuse_resolves_app_path_and_installed_app_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import plistlib
+
+    apps_dir = tmp_path / "Applications"
+    safari_bundle = apps_dir / "Custom Browser.app"
+    (safari_bundle / "Contents").mkdir(parents=True)
+    with (safari_bundle / "Contents" / "Info.plist").open("wb") as stream:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "com.example.CustomBrowser",
+                "CFBundleDisplayName": "Custom Browser",
+                "CFBundleName": "CustomBrowser",
+            },
+            stream,
+        )
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._iter_local_application_bundles", lambda: [safari_bundle])
+
+    session = FakeMacSession({})
+    driver = AppiumConnectMacOSDriver(bundle_id="com.example.Initial", session=session)
+
+    by_path = driver.launch_app(MacOSLaunchAppParams(app_path=str(safari_bundle), new_session=False))
+    assert by_path["status"] == "passed"
+    assert by_path["output"]["bundle_id"] == "com.example.CustomBrowser"
+    assert by_path["output"]["app_path"] == str(safari_bundle)
+
+    by_name = driver.launch_app(MacOSLaunchAppParams(bundle_id="Custom Browser", new_session=False))
+    assert by_name["status"] == "passed"
+    assert by_name["output"]["bundle_id"] == "com.example.CustomBrowser"
+
+    by_case_id = driver.launch_app(MacOSLaunchAppParams(bundle_id="com.example.custombrowser", new_session=False))
+    assert by_case_id["status"] == "passed"
+    assert by_case_id["output"]["bundle_id"] == "com.example.CustomBrowser"
+
+    assert session.lifecycle_calls == [
+        ("activate_app", "com.example.CustomBrowser"),
+        ("activate_app", "com.example.CustomBrowser"),
+        ("activate_app", "com.example.CustomBrowser"),
+    ]
+
+    with pytest.raises(ConfigurationError, match="CFBundleIdentifier"):
+        driver.launch_app(MacOSLaunchAppParams(bundle_id="NonexistentAppName", new_session=False))
+
+    # Unbundled existing executable falls back to `open -a <app_path>` when no CFBundleIdentifier exists.
+    unbundled_bin = tmp_path / "custom-cli-gui"
+    unbundled_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    open_calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kw: object) -> SimpleNamespace:
+        open_calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect.subprocess.run", fake_run)
+    by_unbundled = driver.launch_app(MacOSLaunchAppParams(app_path=str(unbundled_bin), new_session=False))
+    assert by_unbundled["status"] == "passed"
+    assert by_unbundled["output"]["app_path"] == str(unbundled_bin)
+    assert len(open_calls) == 1
+    assert open_calls[0][1:] == ["-a", str(unbundled_bin)]
+
+    with pytest.raises(ConfigurationError, match="existing application path"):
+        driver.launch_app(MacOSLaunchAppParams(app_path=str(tmp_path / "missing-app"), new_session=False))
+
+
+def test_macos_type_text_permits_displayed_textarea_with_enabled_false_and_rejects_disabled_button() -> None:
+    editor = FakeMacElement(
+        elem_id="notes_body",
+        elem_type="XCUIElementTypeTextArea",
+        value="",
+        enabled=False,
+        displayed=True,
+        x=20,
+        y=40,
+        width=400,
+        height=300,
+    )
+    disabled_button = FakeMacElement(
+        elem_id="submit_btn",
+        elem_type="XCUIElementTypeButton",
+        value="",
+        enabled=False,
+        displayed=True,
+        x=20,
+        y=360,
+        width=100,
+        height=32,
+    )
+    session = FakeMacSession({"notes_body": editor, "submit_btn": disabled_button})
+    driver = AppiumConnectMacOSDriver(bundle_id="com.apple.Notes", session=session)
+
+    ok = driver.type_text(MacOSTypeTextParams(locator={"accessibilityId": "notes_body"}, text="echo hello", clear=True))
+    assert ok["status"] == "passed"
+    assert editor.clicks == 1
+    assert editor.value == "echo hello"
+
+    rejected = driver.type_text(MacOSTypeTextParams(locator={"accessibilityId": "submit_btn"}, text="nope"))
+    assert rejected["status"] == "failed"
+    assert rejected["failure_category"] == "target_resolution_error"
+    assert rejected["metadata"]["reason"] == "invalid_input_target"
+    assert disabled_button.clicks == 0
+
+
+def test_macos_ui_snapshot_falls_back_to_frontmost_window_and_adaptively_compacts_wide_trees() -> None:
+    class OversizedFullTreeSession(FakeMacSession):
+        def __init__(self, window_xml: str) -> None:
+            super().__init__({}, page_source=window_xml)
+            self.observe_parents: list[Any] = []
+
+        def element(self, by: str, value: str, *, parent: Any = None, predicate: str | None = None) -> Any:
+            if by == "class name" and value == "XCUIElementTypeWindow":
+                return SimpleNamespace(by=by, value=value)
+            return super().element(by, value, parent=parent, predicate=predicate)
+
+        def observe_tree(self, *, parent: Any = None, control: Any = None) -> Any:
+            self.observe_parents.append(parent)
+            if parent is None:
+                err = RuntimeError("tree exceeded budget")
+                err.code = "observation_too_large"  # type: ignore[attr-defined]
+                raise err
+            return super().observe_tree(control=control)
+
+    buttons_xml = "".join(
+        f'<XCUIElementTypeButton identifier="item_{idx}" label="Item Label Number {idx:03d} With Extra Context" enabled="true" visible="true" x="10" y="{idx * 20}" width="240" height="20"/>'
+        for idx in range(220)
+    )
+    window_xml = f'<XCUIElementTypeWindow title="Main Window">{buttons_xml}</XCUIElementTypeWindow>'
+    session = OversizedFullTreeSession(window_xml)
+    driver = AppiumConnectMacOSDriver(bundle_id="com.example.WideApp", session=session)
+
+    snap = driver.ui_snapshot(MacOSUiSnapshotParams())
+    assert snap["snapshot_type"] == "macos_accessibility_tree"
+    assert len(session.observe_parents) == 2
+    assert session.observe_parents[0] is None
+    assert session.observe_parents[1].value == "XCUIElementTypeWindow"
+    assert snap["diagnostics"]["window_scoped_fallback"] is True
+    assert snap["diagnostics"]["coverage"] == "frontmost_window_fallback"
+    assert snap["diagnostics"]["complete_for_requested_scope"] is False
+    assert snap["diagnostics"]["adaptive_compaction"] is True
+    root = snap["page_source"]["root"]
+    assert root["children_truncated"] > 0
+    assert len(json.dumps(root)) <= 28_000
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_inspect_with_ai_timeout_marks_uncertain_session_for_lossless_recovery_and_idle_replacement_refreshes_timestamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    created_sessions: list[FakeMacSession] = []
+
+    class FakeScope:
+        def __enter__(self) -> object:
+            return "fake-connection"
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class FakeRuntime:
+        managed_cleanup_pending = False
+
+        def __init__(self, settings: object) -> None:
+            self.settings = settings
+
+        def start_managed(self, **kwargs: object) -> FakeScope:
+            del kwargs
+            return FakeScope()
+
+    class TimeoutInspectDevice(FakeMacDevice):
+        def inspect_with_ai(self, *args: object, **kwargs: object) -> dict[str, object]:
+            del args, kwargs
+            self.session.state = "uncertain"
+            err = RuntimeError("inspect_with_ai timed out")
+            err.code = "operation_timeout"  # type: ignore[attr-defined]
+            err.request_state = "response_unknown"  # type: ignore[attr-defined]
+            raise err
+
+    def fake_create_mac2_session(connection: object, *, bundle_id: str | None = None, **kwargs: object) -> FakeMacSession:
+        del connection, bundle_id, kwargs
+        sess = FakeMacSession({"ok_btn": FakeMacElement(elem_id="ok_btn", label="OK")}, session_id=f"mac2:{len(created_sessions) + 1}")
+        if not created_sessions:
+            sess.device = TimeoutInspectDevice(sess)
+            sess.ensure_alive = lambda **_kw: (_ for _ in ()).throw(RuntimeError("still dead"))  # type: ignore[method-assign]
+        created_sessions.append(sess)
+        return sess
+
+    monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
+    monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", fake_create_mac2_session)
+
+    store = ArtifactStore(tmp_path / "artifacts")
+
+    def policy_fn(_ctx: object, _seq: int) -> AndroidVisualAssertionPolicy:
+        return AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        )
+
+    class FakeEvaluator:
+        def inspect(self, _req: AIVisualInspectionRequest) -> AIVisualInspectionResult:
+            return AIVisualInspectionResult(summary="ok", observations=["ok"])
+
+        def close(self) -> None:
+            return None
+
+    driver = AppiumConnectMacOSDriver(bundle_id="com.apple.Notes", skip_app_kill=True)
+    harness = MacOSHarness(
+        driver=driver,
+        artifact_store=store,
+        ai_assertion_evaluator=FakeEvaluator(),  # type: ignore[arg-type]
+        visual_assertion_policy_resolver=policy_fn,
+    )
+    try:
+        assert driver.launch_app(MacOSLaunchAppParams(new_session=True))["status"] == "passed"
+        first_session = created_sessions[0]
+        res = harness.invoke_action(
+            _step("inspectWithAI", {"prompt": "Read chart", "mode": "extract"}),
+            harness.get_context(),
+        )
+        assert res.status == "failed", res.output
+        assert first_session.state == "uncertain"
+        assert driver._uncertain_from_timeout is True
+
+        # Next tool call recovers losslessly by replacing the dead uncertain session because skip_app_kill=True.
+        vis = driver.assert_visible(MacOSAssertVisibleParams(locator={"accessibilityId": "ok_btn"}))
+        assert vis["status"] == "passed"
+        assert len(created_sessions) == 2
+        assert driver._session is created_sessions[1]
+
+        # Simulate >=45s idle where ensure_alive fails: replacement session is created and _last_operation_finished_at refreshes.
+        stale_ts = time.monotonic() - 120.0
+        driver._last_operation_finished_at = stale_ts
+        created_sessions[1].ensure_alive = lambda **_kw: (_ for _ in ()).throw(RuntimeError("idle session died"))  # type: ignore[method-assign]
+        vis_after_idle = driver.assert_visible(MacOSAssertVisibleParams(locator={"accessibilityId": "ok_btn"}))
+        assert vis_after_idle["status"] == "passed"
+        assert len(created_sessions) == 3
+        assert driver._last_operation_finished_at is not None
+        assert driver._last_operation_finished_at > stale_ts
+    finally:
+        harness.close()

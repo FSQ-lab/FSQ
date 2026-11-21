@@ -1176,19 +1176,25 @@ class MacOSLaunchAppParams(BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Launch or activate a macOS application. Prefer new_session=false with bundle_id to switch to or activate another desktop app in the active Mac2 session; "
+                "Launch or activate a macOS application. Prefer new_session=false with bundle_id or app_path to switch to or activate another desktop app in the active Mac2 session; "
                 "set new_session=true on initial session setup or explicit session replacement."
             )
         },
     )
 
-    bundle_id: str | None = Field(default=None, description="macOS bundle id to create or activate. Omit to use the configured bundle id.")
-    app_path: str | None = Field(default=None, description="Local app path used only during Mac2 session creation (new_session=true or no active session). Omit to use the configured app path.")
+    bundle_id: str | None = Field(
+        default=None,
+        description="macOS bundle id (or 'auto' for initial frontmost attachment, or installed application name) to create or activate. Omit to use the configured bundle id or frontmost attachment.",
+    )
+    app_path: str | None = Field(
+        default=None,
+        description="Local .app path used during Mac2 session creation or resolved via Info.plist to activate the bundle in an existing session (new_session=false). Omit to use the configured app path.",
+    )
     arguments: list[str] | None = Field(default=None, description="Application arguments used only during Mac2 session creation.")
     new_session: bool = Field(
         default=False,
         description=(
-            "When false (preferred for switching or activating another desktop app mid-task), activate bundle_id inside the existing Mac2 session without tearing it down. "
+            "When false (preferred for switching or activating another desktop app mid-task), activate bundle_id or app_path inside the existing Mac2 session without tearing it down. "
             "When true, close any existing Mac2 session and create a new one (preserving running desktop apps when skip_app_kill is enabled)."
         ),
     )
@@ -1279,7 +1285,12 @@ class MacOSTypeTextParams(BaseModel):
 class MacOSPressKeyParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Press one character or named key in macOS, optionally with modifiers."})
 
-    key: str = Field(description="Character or named key to press. Named keys include Enter, Return, Escape, Tab, Space, Delete, Backspace, and arrow/navigation keys.")
+    key: str = Field(
+        description=(
+            "Character or named key to press. Named keys include Enter, Return, Escape/Esc, Tab, Space, Backspace, Delete, ForwardDelete/Del, "
+            "ArrowUp/Up, ArrowDown/Down, ArrowLeft/Left, ArrowRight/Right, Home, End, PageUp/PgUp, PageDown/PgDn, CapsLock, Insert/Help, Clear, and F1-F19."
+        )
+    )
     modifiers: list[str] | None = Field(
         default=None,
         description="Modifiers applied only to this key. Supported values: COMMAND, CONTROL, OPTION or ALT, SHIFT, CAPS_LOCK, and FUNCTION.",

@@ -4,21 +4,20 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 
 ## Case Lifecycle
 
-- Start each macOS case with `launch_app` and set `new_session` to true so the case opens a fresh Mac2 session before the main business path.
+- Start each macOS case with `launch_app` and set `new_session` to true so the case opens a fresh Mac2 session before the main business path (when Workspace `bundle_id` is `"auto"` or omitted, omitting `bundle_id` / passing `"auto"` attaches non-intrusively to the current frontmost desktop GUI application).
 - Collect final required verification while preserving the user's requested business terminal state, including open windows, active views, running activities, explicitly requested unsaved drafts, and system or app settings.
 - Do not routinely call `kill_app` at the end of a task. Use `kill_app` only when the user goal or explicit lifecycle instructions require closing, terminating, or restarting the application.
 - Automation-session and managed Mac2 service cleanup is owned by the runtime through `harness.close()` (owned Mac2 sessions default `skip_app_kill` to true so closing or replacing a session leaves the desktop application running); killing the business application is not session cleanup.
-- When the case activates another desktop application or switches back, call `launch_app` with the desired `bundle_id` and keep `new_session` false. Prefer `new_session` false for cross-app desktop workflows so Mac2 activates the target bundle in the active session without tearing down and recreating the session.
+- When the case activates another desktop application or switches back, call `launch_app` with the desired `bundle_id`, application name, or `.app` `app_path` and keep `new_session` false. Prefer `new_session` false for cross-app desktop workflows so Mac2 activates the target bundle in the active session without tearing down and recreating the session.
 - Do not report `launch_app` or `kill_app` as satisfying a business key action unless the case explicitly tests app lifecycle.
-
 ## Form Completion, Pre-Act Ledger, and Write Budgets
 
 - Stop with an unsaved, unsubmitted, or unsent form only when the goal explicitly asks to leave it unsaved, unsubmitted, or as a draft.
 - Otherwise, when a requested creation, setting, or challenge answer requires a clear Submit / Save / Done / OK control to take effect, complete that control and verify the resulting state while the Harness is still open.
+- When the goal asks you to write, draft, or prepare script/code/text inside an editor, terminal composer, or form field (even with "do not run", "do not execute", or "leave unsent"), actually enter the text into the target GUI control with `type_text` and verify its `value` via `inspect_element` or `assert`—never merely output the text in your final assistant summary without writing it to the UI.
+- In macOS Save / Open / Export sheets, press `Command+Shift+G` (`press_key` with `key: "g"`, `modifiers: ["COMMAND", "SHIFT"]`) to open the `Go to Folder` path bar and jump directly to a requested directory path rather than clicking blindly through sidebar folders. Where the `Save As` text field hides the file extension when "Hide Extension" is active, inspect the `Save As` field's current `value` with `inspect_element` before overwriting it so you preserve or supply the exact requested file extension, and after saving verify the complete saved filename including extension in the actual file-management view or directory listing rather than relying on a window title that hides extensions.
 - Read complete source items (using `inspect_element` when `ui_snapshot` clips at 50 characters) and compute target selections in your ledger before writing.
-- Read back saved state and complete filenames/extensions in actual file-management views while the Harness is still open, rather than relying on window titles that may hide extensions.
 - Honor optional valid `write_budget` receipts when present (`click_on`, `double_click_on`, `right_click_on`, `scroll_on`, `drag_to`, `type_text`, `press_key`, and `launch_app` count as write actions; observations, assertions, and `wait_ms` are non-writes). Never invent synthetic limits when `write_budget` is absent.
-
 ## Snapshot-First, Structural Inspection, and Scrolling Rules
 
 - Start app-owned workflows with `launch_app`; do not assume a Mac2 session exists before lifecycle setup.
@@ -52,10 +51,9 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 
 ## Argument Rules
 
-- Use `new_session=true` on the case-opening `launch_app`; this closes any stale active session and creates the case session from the provided or configured `bundle_id` or `app_path` (preserving running desktop apps when `skip_app_kill` is enabled).
-- During the case, omit `new_session` or set it to false when activating another desktop application or switching back by `bundle_id`. Do not pass `app_path` or `arguments` when reusing the session.
+- Use `new_session=true` on the case-opening `launch_app`; this closes any stale active session and creates the case session from the provided or configured `bundle_id`, `app_path`, or `"auto"` frontmost desktop app (preserving running desktop apps when `skip_app_kill` is enabled).
+- During the case, omit `new_session` or set it to false when activating another desktop application or switching back by `bundle_id` or `.app` `app_path`. Do not pass `arguments` when reusing the session (`arguments` require `new_session=true`).
 - Reserve `kill_app` for cases that explicitly test terminating an app (`close_session=false` or omitted) or explicitly closing a session (`close_session=true`).
-
 ## Correct Key Examples
 
 ### Case-opening `launchApp` with a fresh session

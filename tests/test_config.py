@@ -1488,3 +1488,42 @@ def test_validate_runtime_settings_rejects_placeholder_api_key(tmp_path: Path, m
             api_key="replace-with-your-azure-openai-api-key",
             user_config_root=Path.home() / ".fsq",
         )
+
+
+def test_macos_workspace_and_settings_accept_bundle_id_auto_and_omit_recording_app_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fsq_agent.config import create_workspace, load_registered_workspace, load_workspace_platform_settings
+    from fsq_agent.environments.providers._macos import _macos_prerequisites
+    from fsq_agent.execution.recording import _metadata_doc
+    from fsq_agent.models import Task, WorkspacePlatformCreateInput
+
+    user_root = tmp_path / "user"
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    create_workspace(
+        selected_path=ws_dir,
+        name="mac-auto",
+        platforms=[WorkspacePlatformCreateInput(platform="macos", target={"bundle_id": "Auto"}, env={})],
+        user_config_root=user_root,
+    )
+    loaded_ws = load_registered_workspace("mac-auto", "macos", user_root)
+    assert loaded_ws.target.bundle_id == "auto"
+
+    settings = load_workspace_platform_settings(ws_dir, "macos", user_config_root=user_root)
+    assert settings.harness.macos.bundle_id == "auto"
+    assert settings.harness.macos.skip_app_kill is True
+
+    doc = _metadata_doc(
+        Task(name="Auto Task", description="Verify desktop flow", planning_reference_kind="goal", planning_reference_text="Verify desktop flow"),
+        None,  # type: ignore[arg-type]
+        settings,
+        [],
+        [],
+        False,
+    )
+    assert "appId" not in doc
+
+    if os.uname().sysname == "Darwin":
+        monkeypatch.setattr("fsq_agent.environments.providers._macos._macos_bundle_matches_target", lambda *_a: pytest.fail("must not probe mdfind for auto"))
+        checks = {item.identifier: item for item in _macos_prerequisites(settings.harness.macos)}
+        assert checks["bundle_identifier"].status == "ready"
+        assert "bundle_id='auto'" in checks["bundle_identifier"].message

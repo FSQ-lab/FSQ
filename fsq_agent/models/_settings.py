@@ -262,7 +262,11 @@ class MacOSHarnessSettings(BaseModel):
 
     @bundle_id.setter
     def bundle_id(self, value: str | None) -> None:
-        self._bundle_id = value.strip() if isinstance(value, str) and value.strip() else None
+        if isinstance(value, str) and value.strip():
+            stripped = value.strip()
+            self._bundle_id = "auto" if stripped.casefold() == "auto" else stripped
+        else:
+            self._bundle_id = None
 
     @property
     def app_path(self) -> Path | None:
@@ -579,7 +583,9 @@ class MacOSWorkspaceTarget(BaseModel):
         if value is None:
             return None
         normalized = value.strip()
-        return normalized or None
+        if not normalized:
+            return None
+        return "auto" if normalized.casefold() == "auto" else normalized
 
     @model_validator(mode="after")
     def validate_identity(self) -> "MacOSWorkspaceTarget":

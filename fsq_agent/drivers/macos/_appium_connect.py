@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
+import plistlib
 import re
+import shutil
 import socket
+import subprocess
 import time
 from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
@@ -65,6 +69,8 @@ DEFAULT_MACOS_NEW_COMMAND_TIMEOUT_SECONDS = 900.0
 DEFAULT_MACOS_SKIP_APP_KILL = True
 DEFAULT_MACOS_SNAPSHOT_SOURCE_PREVIEW_CHARS = 2000
 DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS = 50
+DEFAULT_MACOS_SNAPSHOT_MAX_JSON_CHARS = 28_000
+DEFAULT_MACOS_ACTIVATE_TIMEOUT_SECONDS = 30.0
 DEFAULT_MANAGED_STARTUP_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_QUIT_TIMEOUT_SECONDS = 15.0
@@ -72,7 +78,10 @@ DEFAULT_ELEMENT_WAIT_TIMEOUT_SECONDS = 10.0
 DEFAULT_IDLE_ENSURE_ALIVE_SECONDS = 45.0
 DEFAULT_ENSURE_ALIVE_TIMEOUT_SECONDS = 25.0
 MAX_PORT_BIND_ATTEMPTS = 3
-
+MACOS_COMPACT_SIBLING_STEPDOWNS = (None, 80, 40, 20, 12)
+MACOS_EXCLUDED_FRONTMOST_BUNDLES = frozenset({"com.apple.loginwindow", "com.apple.SecurityAgent"})
+MACOS_FALLBACK_FRONTMOST_BUNDLE = "com.apple.finder"
+MACOS_EDITABLE_DISABLED_TOLERANT_TYPES = frozenset({"TextArea", "TextView", "WebArea"})
 MACOS_STATE_ASSERTION_FIELDS = ("enabled", "focused", "selected", "hittable", "displayed")
 MACOS_MASK_GLYPHS = frozenset({"*", "•", "●"})
 MACOS_MUTABLE_TEXT_SELECTOR_TOKEN = re.compile(r"\b(?:value|label|title|name)\b")
@@ -151,30 +160,95 @@ MACOS_KEY_MODIFIER_FLAGS = {
 }
 MACOS_KEY_NAMES = {
     "BACKSPACE": "XCUIKeyboardKeyDelete",
+    "BKSP": "XCUIKeyboardKeyDelete",
     "DELETE": "XCUIKeyboardKeyDelete",
     "FORWARD_DELETE": "XCUIKeyboardKeyForwardDelete",
+    "FORWARDDELETE": "XCUIKeyboardKeyForwardDelete",
+    "DEL": "XCUIKeyboardKeyForwardDelete",
     "DOWN": "XCUIKeyboardKeyDownArrow",
+    "ARROWDOWN": "XCUIKeyboardKeyDownArrow",
+    "ARROW_DOWN": "XCUIKeyboardKeyDownArrow",
+    "DOWNARROW": "XCUIKeyboardKeyDownArrow",
+    "DOWN_ARROW": "XCUIKeyboardKeyDownArrow",
     "END": "XCUIKeyboardKeyEnd",
     "ENTER": "XCUIKeyboardKeyReturn",
+    "RETURN": "XCUIKeyboardKeyReturn",
+    "NUMPADENTER": "XCUIKeyboardKeyEnter",
+    "NUMPAD_ENTER": "XCUIKeyboardKeyEnter",
+    "KPENTER": "XCUIKeyboardKeyEnter",
+    "KP_ENTER": "XCUIKeyboardKeyEnter",
     "ESC": "XCUIKeyboardKeyEscape",
     "ESCAPE": "XCUIKeyboardKeyEscape",
     "HOME": "XCUIKeyboardKeyHome",
     "LEFT": "XCUIKeyboardKeyLeftArrow",
+    "ARROWLEFT": "XCUIKeyboardKeyLeftArrow",
+    "ARROW_LEFT": "XCUIKeyboardKeyLeftArrow",
+    "LEFTARROW": "XCUIKeyboardKeyLeftArrow",
+    "LEFT_ARROW": "XCUIKeyboardKeyLeftArrow",
     "PAGEDOWN": "XCUIKeyboardKeyPageDown",
     "PAGE_DOWN": "XCUIKeyboardKeyPageDown",
+    "PGDN": "XCUIKeyboardKeyPageDown",
+    "PG_DN": "XCUIKeyboardKeyPageDown",
     "PAGEUP": "XCUIKeyboardKeyPageUp",
     "PAGE_UP": "XCUIKeyboardKeyPageUp",
-    "RETURN": "XCUIKeyboardKeyReturn",
+    "PGUP": "XCUIKeyboardKeyPageUp",
+    "PG_UP": "XCUIKeyboardKeyPageUp",
     "RIGHT": "XCUIKeyboardKeyRightArrow",
+    "ARROWRIGHT": "XCUIKeyboardKeyRightArrow",
+    "ARROW_RIGHT": "XCUIKeyboardKeyRightArrow",
+    "RIGHTARROW": "XCUIKeyboardKeyRightArrow",
+    "RIGHT_ARROW": "XCUIKeyboardKeyRightArrow",
     "SPACE": " ",
+    "SPACEBAR": " ",
+    "SPACE_BAR": " ",
     "TAB": "XCUIKeyboardKeyTab",
     "UP": "XCUIKeyboardKeyUpArrow",
+    "ARROWUP": "XCUIKeyboardKeyUpArrow",
+    "ARROW_UP": "XCUIKeyboardKeyUpArrow",
+    "UPARROW": "XCUIKeyboardKeyUpArrow",
+    "UP_ARROW": "XCUIKeyboardKeyUpArrow",
     "CLEAR": "XCUIKeyboardKeyClear",
     "HELP": "XCUIKeyboardKeyHelp",
+    "INS": "XCUIKeyboardKeyHelp",
+    "INSERT": "XCUIKeyboardKeyHelp",
     "CAPS_LOCK": "XCUIKeyboardKeyCapsLock",
+    "CAPSLOCK": "XCUIKeyboardKeyCapsLock",
     **{f"F{index}": f"XCUIKeyboardKeyF{index}" for index in range(1, 20)},
 }
-
+MACOS_SDK_NAMED_KEY_LITERALS = frozenset(
+    {
+        "XCUIKeyboardKeyDelete",
+        "XCUIKeyboardKeyReturn",
+        "XCUIKeyboardKeyEnter",
+        "XCUIKeyboardKeyTab",
+        "XCUIKeyboardKeySpace",
+        "XCUIKeyboardKeyEscape",
+        "XCUIKeyboardKeyUpArrow",
+        "XCUIKeyboardKeyDownArrow",
+        "XCUIKeyboardKeyLeftArrow",
+        "XCUIKeyboardKeyRightArrow",
+        *(f"XCUIKeyboardKeyF{index}" for index in range(1, 20)),
+        "XCUIKeyboardKeyForwardDelete",
+        "XCUIKeyboardKeyHome",
+        "XCUIKeyboardKeyEnd",
+        "XCUIKeyboardKeyPageUp",
+        "XCUIKeyboardKeyPageDown",
+        "XCUIKeyboardKeyClear",
+        "XCUIKeyboardKeyHelp",
+        "XCUIKeyboardKeyCapsLock",
+        "XCUIKeyboardKeyShift",
+        "XCUIKeyboardKeyControl",
+        "XCUIKeyboardKeyOption",
+        "XCUIKeyboardKeyCommand",
+        "XCUIKeyboardKeyRightShift",
+        "XCUIKeyboardKeyRightControl",
+        "XCUIKeyboardKeyRightOption",
+        "XCUIKeyboardKeyRightCommand",
+        "XCUIKeyboardKeySecondaryFn",
+    }
+)
+MACOS_SDK_NAMED_KEYS_BY_UPPER = {name.upper(): name for name in MACOS_SDK_NAMED_KEY_LITERALS}
+MACOS_BUNDLE_ID_SYNTAX = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,254}\Z")
 DEFAULT_MACOS_SNAPSHOT_ATTRIBUTE_KEYS = frozenset(
     {
         "identifier",
@@ -264,13 +338,169 @@ def _resolve_managed_local_settings(local_settings_cls: type[Any]) -> Any:
 
 
 def _resolve_app_bundle_path(app_path: str) -> Path:
-    path = Path(app_path)
+    path = Path(app_path).expanduser()
     if path.suffix.casefold() == ".app":
         return path
     for parent in path.parents:
         if parent.suffix.casefold() == ".app":
             return parent
     return path
+
+
+def _read_app_bundle_plist(bundle_dir: Path) -> dict[str, Any] | None:
+    plist_path = bundle_dir / "Contents" / "Info.plist"
+    try:
+        with plist_path.open("rb") as stream:
+            payload = plistlib.load(stream)
+    except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _bundle_id_from_app_path(app_path: str | Path) -> str | None:
+    with suppress(ImportError):
+        from appium_connect_agent import automation as aca_automation
+
+        sdk_resolver = getattr(aca_automation, "resolve_macos_app_bundle", None)
+        if callable(sdk_resolver):
+            with suppress(Exception):
+                resolved = sdk_resolver(app_path)
+                if isinstance(resolved, str) and resolved.strip():
+                    return resolved.strip()
+                if isinstance(resolved, tuple) and len(resolved) == 2 and isinstance(resolved[1], str) and resolved[1].strip():
+                    return resolved[1].strip()
+                resolved_id = getattr(resolved, "bundle_id", None)
+                if isinstance(resolved_id, str) and resolved_id.strip():
+                    return resolved_id.strip()
+    bundle_dir = _resolve_app_bundle_path(str(app_path))
+    if bundle_dir.suffix.casefold() != ".app" or not bundle_dir.is_dir():
+        return None
+    payload = _read_app_bundle_plist(bundle_dir)
+    if payload is None:
+        return None
+    raw_id = payload.get("CFBundleIdentifier")
+    return raw_id.strip() if isinstance(raw_id, str) and raw_id.strip() else None
+
+
+def _iter_local_application_bundles() -> list[Path]:
+    roots = (
+        Path("/Applications"),
+        Path("/System/Applications"),
+        Path("/System/Applications/Utilities"),
+        Path("/System/Library/CoreServices"),
+        Path.home() / "Applications",
+    )
+    bundles: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries[:512]:
+            try:
+                if entry.suffix.casefold() == ".app" and entry.is_dir():
+                    if entry not in seen:
+                        seen.add(entry)
+                        bundles.append(entry)
+                elif entry.is_dir() and not entry.is_symlink() and root in {Path("/Applications"), Path.home() / "Applications"}:
+                    for child in sorted(entry.iterdir())[:64]:
+                        if child.suffix.casefold() == ".app" and child.is_dir() and child not in seen:
+                            seen.add(child)
+                            bundles.append(child)
+            except OSError:
+                continue
+    return bundles
+
+
+def _resolve_installed_bundle_identifier(candidate_text: str) -> str | None:
+    cleaned = candidate_text.strip()
+    if not cleaned:
+        return None
+    query_cf = cleaned.casefold()
+    stem_cf = cleaned[:-4].strip().casefold() if query_cf.endswith(".app") else query_cf
+    name_match: str | None = None
+    for bundle_dir in _iter_local_application_bundles():
+        payload = _read_app_bundle_plist(bundle_dir)
+        if payload is None:
+            continue
+        raw_id = payload.get("CFBundleIdentifier")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            continue
+        bundle_id = raw_id.strip()
+        if bundle_id == cleaned:
+            return bundle_id
+        if bundle_id.casefold() == query_cf:
+            return bundle_id
+        if name_match is None:
+            candidates = [bundle_dir.stem]
+            for key in ("CFBundleDisplayName", "CFBundleName"):
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip():
+                    candidates.append(val.strip())
+            if any(item.casefold() in {query_cf, stem_cf} for item in candidates):
+                name_match = bundle_id
+    return name_match
+
+
+def _detect_frontmost_macos_bundle_id(*, timeout_seconds: float = 5.0) -> str:
+    with suppress(ImportError):
+        from appium_connect_agent import automation as aca_automation
+
+        sdk_frontmost = getattr(aca_automation, "frontmost_macos_app", None)
+        if callable(sdk_frontmost):
+            with suppress(Exception):
+                result = sdk_frontmost()
+                candidate_id = result if isinstance(result, str) else getattr(result, "bundle_id", None)
+                if isinstance(candidate_id, str) and candidate_id.strip() and candidate_id.strip() not in MACOS_EXCLUDED_FRONTMOST_BUNDLES:
+                    return candidate_id.strip()
+    lsappinfo = shutil.which("lsappinfo") or "/usr/bin/lsappinfo"
+    try:
+        front_proc = subprocess.run(  # noqa: S603 - fixed read-only macOS LaunchServices query.
+            [lsappinfo, "front"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        asn = front_proc.stdout.strip()
+        if front_proc.returncode == 0 and asn and asn != "ASN:0x0-0x0:":
+            info_proc = subprocess.run(  # noqa: S603 - fixed read-only macOS LaunchServices bundle-id query.
+                [lsappinfo, "info", "-only", "bundleid", asn],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            if info_proc.returncode == 0:
+                match = re.search(r'"CFBundleIdentifier"\s*=\s*"([^"]+)"', info_proc.stdout)
+                if match:
+                    bundle_id = match.group(1).strip()
+                    if bundle_id and bundle_id not in MACOS_EXCLUDED_FRONTMOST_BUNDLES:
+                        return bundle_id
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return MACOS_FALLBACK_FRONTMOST_BUNDLE
+
+
+def _normalize_macos_key_token(raw_key: str) -> str:
+    stripped = raw_key.strip()
+    if stripped in MACOS_SDK_NAMED_KEY_LITERALS:
+        return stripped
+    sdk_ci = MACOS_SDK_NAMED_KEYS_BY_UPPER.get(stripped.upper())
+    if sdk_ci is not None:
+        return sdk_ci
+    normalized_upper = re.sub(r"[\s\-]+", "_", stripped).upper()
+    compact_upper = normalized_upper.replace("_", "")
+    if normalized_upper in MACOS_KEY_NAMES:
+        return MACOS_KEY_NAMES[normalized_upper]
+    if compact_upper in MACOS_KEY_NAMES:
+        return MACOS_KEY_NAMES[compact_upper]
+    if len(stripped) == 1:
+        return stripped
+    if len(raw_key) == 1 and raw_key == " ":
+        return " "
+    raise ConfigurationError(f"Unsupported macOS key: {raw_key}.")
 
 
 class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
@@ -289,7 +519,11 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
     ) -> None:
         if type(skip_app_kill) is not bool:
             raise ConfigurationError("macOS skip_app_kill must be a boolean.")
-        self.bundle_id = bundle_id.strip() if isinstance(bundle_id, str) and bundle_id.strip() else None
+        if isinstance(bundle_id, str) and bundle_id.strip():
+            stripped_bundle = bundle_id.strip()
+            self.bundle_id: str | None = "auto" if stripped_bundle.casefold() == "auto" else stripped_bundle
+        else:
+            self.bundle_id = None
         self.app_path = str(Path(app_path)) if app_path else None
         self.page_source_max_depth = page_source_max_depth
         self.action_timeout_seconds = action_timeout_seconds
@@ -297,6 +531,9 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         self.skip_app_kill = skip_app_kill
         self._borrowed_session = session is not None
         self._session: Any | None = session
+        self._active_bundle_id: str | None = None if self.bundle_id in {None, "auto"} else self.bundle_id
+        self._session_app_path: str | None = self.app_path
+        self._uncertain_from_timeout = False
         self._runtime: Any | None = None
         self._managed_scope: AbstractContextManager[Any] | None = None
         self._connection: Any | None = None
@@ -404,6 +641,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         self._runtime = None
         self._session_settled = False
         self._scope_exit_attempted = False
+        self._uncertain_from_timeout = False
 
     def _close_owned_resources_for_recreation(self) -> None:
         self._close_owned_resources()
@@ -479,7 +717,9 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
     @_macos_driver_tool(
         "launchApp",
-        description=("Create a managed Appium Mac2 session (new_session=true) or activate a macOS bundle_id in the active session (new_session=false, preferred for switching desktop apps)."),
+        description=(
+            "Create a managed Appium Mac2 session (new_session=true) or activate a macOS bundle_id or .app app_path in the active session (new_session=false, preferred for switching desktop apps)."
+        ),
     )
     def launch_app(self, params: MacOSLaunchAppParams) -> dict[str, object]:
         return self._run_tool(lambda: self._launch_app_impl(params), allow_cleanup_pending=bool(params.new_session))
@@ -508,7 +748,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         session = self._session
         if session is None:
             return self._passed()
-        bundle_id = self._effective_bundle_id(params.bundle_id)
+        bundle_id = self._concrete_kill_bundle_id(params.bundle_id)
         if params.close_session:
             if self._borrowed_session:
                 quit_fn = getattr(session, "quit", None)
@@ -520,6 +760,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             return self._passed({"bundle_id": bundle_id, "close_session": True})
         if not bundle_id:
             raise ConfigurationError("macOS application termination requires bundle_id or a configured bundle id.")
+        session = self._require_session()
         try:
             session.device.terminate_app(bundle_id, control=self._ActionControl(self))
         except Exception as exc:  # noqa: BLE001
@@ -637,21 +878,25 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         pre_obs = self._inspect_obs_map(element, ("type", "id", "enabled", "displayed", "bounds"), stage="pre_entry_inspect")
         enabled_obs = pre_obs.get("enabled")
         displayed_obs = pre_obs.get("displayed")
-        if getattr(enabled_obs, "state", None) != "value" or enabled_obs.value is not True or getattr(displayed_obs, "state", None) != "value" or displayed_obs.value is not True:
+        type_obs = pre_obs.get("type")
+        elem_type = type_obs.value if getattr(type_obs, "state", None) == "value" and isinstance(type_obs.value, str) else None
+        short_type = elem_type.removeprefix("XCUIElementType") if isinstance(elem_type, str) else ""
+        bounds_tuple = self._bounds_int_tuple(pre_obs.get("bounds"))
+        is_displayed = getattr(displayed_obs, "state", None) == "value" and displayed_obs.value is True
+        is_enabled = getattr(enabled_obs, "state", None) == "value" and enabled_obs.value is True
+        tolerates_disabled_editor = (
+            is_displayed and getattr(enabled_obs, "state", None) == "value" and enabled_obs.value is False and short_type in MACOS_EDITABLE_DISABLED_TOLERANT_TYPES and bounds_tuple is not None
+        )
+        if not is_displayed or (not is_enabled and not tolerates_disabled_editor):
             return self._failed(
                 "target_resolution_error",
                 "Input target is not enabled and visible.",
                 metadata={"reason": "invalid_input_target", "resolution_reason": "invalid_input_target"},
             )
 
-        type_obs = pre_obs.get("type")
-        elem_type = type_obs.value if getattr(type_obs, "state", None) == "value" and isinstance(type_obs.value, str) else None
         is_secure = self._is_secure_text_type(elem_type)
-
         id_obs = pre_obs.get("id")
         elem_id = id_obs.value if getattr(id_obs, "state", None) == "value" and isinstance(id_obs.value, str) and id_obs.value.strip() else None
-        bounds_tuple = self._bounds_int_tuple(pre_obs.get("bounds"))
-
         initial_value: str | None = None
         if not is_secure:
             val_obs = self._inspect_obs_map(element, ("value",), stage="pre_entry_inspect").get("value")
@@ -785,8 +1030,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
     def _press_key_impl(self, params: MacOSPressKeyParams) -> dict[str, object]:
         session = self._require_session()
         modifier_flags = self._modifier_flags(params.modifiers) or 0
-        raw_key = params.key.strip()
-        mapped_key = MACOS_KEY_NAMES.get(raw_key.upper(), raw_key)
+        mapped_key = _normalize_macos_key_token(params.key)
         key_item = self._build_key_item(mapped_key, modifier_flags)
         try:
             session.device.send_keys([key_item], control=self._ActionControl(self))
@@ -898,30 +1142,57 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
     def _ui_snapshot_impl(self, params: MacOSUiSnapshotParams) -> dict[str, object]:
         session = self._require_session()
+        window_scoped_fallback = False
         try:
             observation = session.observe_tree(control=self._ActionControl(self))
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
-            self._raise_resolution_error(exc)
+            if getattr(exc, "code", None) == "observation_too_large":
+                fallback_obs = self._observe_frontmost_window_tree(session)
+                if fallback_obs is not None:
+                    observation = fallback_obs
+                    window_scoped_fallback = True
+                else:
+                    self._raise_resolution_error(exc)
+            else:
+                self._raise_resolution_error(exc)
         max_depth = params.max_depth or self.page_source_max_depth
         include_attributes = bool(params.include_attributes)
+        page_source, compaction_meta = self._simplify_tree_observation_with_budget(
+            observation,
+            max_depth=max_depth,
+            include_attributes=include_attributes,
+        )
+        diagnostics: dict[str, object] = {
+            "source": "appium_connect_agent_tree_observation",
+            "coverage": "frontmost_window_fallback" if window_scoped_fallback else getattr(observation, "coverage", "requested_scope"),
+            "complete_for_requested_scope": False if window_scoped_fallback else bool(getattr(observation, "complete_for_requested_scope", True)),
+            "atomic_with_screenshot": False,
+            "absence_proves_invisibility": False,
+        }
+        if window_scoped_fallback:
+            diagnostics["window_scoped_fallback"] = True
+        if compaction_meta:
+            diagnostics.update(compaction_meta)
         return {
             "snapshot_type": "macos_accessibility_tree",
-            "page_source": self._simplify_tree_observation(
-                observation,
-                max_depth=max_depth,
-                include_attributes=include_attributes,
-            ),
+            "page_source": page_source,
             "max_depth": max_depth,
             "include_attributes": include_attributes,
-            "diagnostics": {
-                "source": "appium_connect_agent_tree_observation",
-                "coverage": getattr(observation, "coverage", "requested_scope"),
-                "complete_for_requested_scope": bool(getattr(observation, "complete_for_requested_scope", True)),
-                "atomic_with_screenshot": False,
-                "absence_proves_invisibility": False,
-            },
+            "diagnostics": diagnostics,
         }
+
+    def _observe_frontmost_window_tree(self, session: Any) -> Any | None:
+        element_fn = getattr(session, "element", None)
+        observe_fn = getattr(session, "observe_tree", None)
+        if not callable(element_fn) or not callable(observe_fn):
+            return None
+        try:
+            window_el = element_fn("class name", "XCUIElementTypeWindow")
+            return observe_fn(parent=window_el, control=self._ActionControl(self))
+        except Exception as exc:  # noqa: BLE001
+            self._propagate_if_cancelled(exc)
+            return None
 
     @_macos_driver_tool(
         "inspectElement",
@@ -1164,6 +1435,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if isinstance(error, ConfigurationError):
                 raise
             diag_source = backend_errors[0] if backend_errors and isinstance(backend_errors[0], Exception) else (error if isinstance(error, Exception) else None)
+            self._note_operation_timeout(diag_source)
             diagnostics = {key: value for key, value in self._safe_diagnostics(diag_source, stage="screenshot").items() if key in {"backend_code", "request_state", "session_state", "stage", "reason"}}
             if failures:
                 interrupted = failures[0]
@@ -1205,23 +1477,26 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             )
         if self._session is not None and not self._session_is_active(self._session):
             if not params.new_session:
-                if not self._borrowed_session:
-                    self._cleanup_pending = True
-                raise ToolExecutionError(
-                    "Appium Mac2 session is no longer active.",
-                    context={"reason": "session_unavailable", **self._safe_diagnostics(stage="ensure_session")},
-                )
-            if self._borrowed_session:
-                self._session = None
+                if not self._try_recover_uncertain_owned_session():
+                    if not self._borrowed_session:
+                        self._cleanup_pending = True
+                    raise ToolExecutionError(
+                        "Appium Mac2 session is no longer active.",
+                        context={"reason": "session_unavailable", **self._safe_diagnostics(stage="ensure_session")},
+                    )
             else:
-                self._close_owned_resources_for_recreation()
+                self._require_creation_identity(params, replacing_borrowed=self._borrowed_session)
+                if self._borrowed_session:
+                    self._session = None
+                else:
+                    self._close_owned_resources_for_recreation()
 
         if self._session is None:
             if self._cleanup_pending:
                 self._close_owned_resources_for_recreation()
             return self._create_session(params)
         if params.new_session:
-            self._require_creation_identity(params)
+            self._require_creation_identity(params, replacing_borrowed=self._borrowed_session)
             if self._borrowed_session:
                 quit_fn = getattr(self._session, "quit", None)
                 if callable(quit_fn):
@@ -1230,29 +1505,119 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             else:
                 self._close_owned_resources_for_recreation()
             return self._create_session(params)
-        if params.app_path is not None or params.arguments is not None:
-            raise ConfigurationError("app_path and arguments require new_session=true when a Mac2 session already exists.")
-        bundle_id = self._effective_bundle_id(params.bundle_id)
-        if bundle_id is None:
-            raise ConfigurationError("macOS application activation requires bundle_id or a configured bundle id.")
+        if params.arguments is not None:
+            raise ConfigurationError("arguments require new_session=true when a Mac2 session already exists.")
+        bundle_id, unbundled_app_path = self._resolve_activation_identity(params)
         self._ensure_alive_if_idle(self._session)
-        try:
-            self._session.device.activate_app(bundle_id, control=self._ActionControl(self))
-        except Exception as exc:
-            self._propagate_if_cancelled(exc)
-            raise ToolExecutionError(
-                "macOS application activation failed.",
-                context={"stage": "launch_app", "cause": exc},
-            ) from exc
+        activate_timeout = max(DEFAULT_MACOS_ACTIVATE_TIMEOUT_SECONDS, float(self.action_timeout_seconds) + 5.0)
+        if bundle_id is not None:
+            try:
+                self._session.device.activate_app(
+                    bundle_id,
+                    control=self._operation_control(activate_timeout, cancellation=self._operation_cancellation),
+                )
+            except Exception as exc:
+                self._propagate_if_cancelled(exc)
+                self._note_operation_timeout(exc)
+                raise ToolExecutionError(
+                    "macOS application activation failed.",
+                    context={"stage": "launch_app", "cause": exc},
+                ) from exc
+            self._active_bundle_id = bundle_id
+        elif unbundled_app_path is not None:
+            self._activate_unbundled_app_path(unbundled_app_path, timeout_seconds=activate_timeout)
         return self._session
 
+    def _activate_unbundled_app_path(self, app_path: str, *, timeout_seconds: float) -> None:
+        open_cmd = shutil.which("open") or "/usr/bin/open"
+        try:
+            proc = subprocess.run(  # noqa: S603 - explicit validated existing app_path passed without shell.
+                [open_cmd, "-a", str(Path(app_path).expanduser())],
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ToolExecutionError(
+                "macOS unbundled app_path activation timed out.",
+                context={"stage": "launch_app", "reason": "operation_timeout"},
+            ) from exc
+        except OSError as exc:
+            raise ToolExecutionError(
+                "macOS unbundled app_path activation failed.",
+                context={"stage": "launch_app", "cause": exc},
+            ) from exc
+        if proc.returncode != 0:
+            raise ToolExecutionError(
+                "macOS unbundled app_path activation failed via open -a.",
+                context={"stage": "launch_app", "returncode": proc.returncode},
+            )
+        self._session_app_path = app_path
+
     @staticmethod
-    def _session_is_active(session: Any) -> bool:
+    def _session_state(session: Any) -> str:
         info_fn = getattr(session, "session_info", None)
         if not callable(info_fn):
-            return True
+            return "active"
         state = getattr(info_fn(), "state", "active")
-        return state == "active"
+        return state if isinstance(state, str) else "active"
+
+    @classmethod
+    def _session_is_active(cls, session: Any) -> bool:
+        return cls._session_state(session) == "active"
+
+    def _sdk_supports_skip_app_kill(self) -> bool:
+        try:
+            from appium_connect_agent.automation import create_mac2_session
+        except ImportError:
+            return False
+        parameters = inspect.signature(create_mac2_session).parameters
+        return "skip_app_kill" in parameters or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+
+    def _note_operation_timeout(self, exc: BaseException | None) -> None:
+        if self._borrowed_session or self._session is None or exc is None:
+            return
+        code = getattr(exc, "code", None)
+        cause = exc.context.get("cause") if isinstance(exc, ToolExecutionError) else None
+        if code is None and isinstance(cause, BaseException):
+            code = getattr(cause, "code", None)
+        if code == "operation_timeout" and self._session_state(self._session) == "uncertain":
+            self._uncertain_from_timeout = True
+
+    def _try_recover_uncertain_owned_session(self) -> bool:
+        session = self._session
+        if self._borrowed_session or self._cleanup_pending or session is None or not self._uncertain_from_timeout or self._session_state(session) != "uncertain":
+            return False
+        ensure_alive = getattr(session, "ensure_alive", None)
+        if callable(ensure_alive):
+            try:
+                ensure_alive(control=self._operation_control(DEFAULT_ENSURE_ALIVE_TIMEOUT_SECONDS, cancellation=self._operation_cancellation))
+            except Exception as exc:  # noqa: BLE001
+                self._propagate_if_cancelled(exc)
+            else:
+                if self._session_is_active(session):
+                    self._uncertain_from_timeout = False
+                    return True
+        if not self.skip_app_kill or not self._sdk_supports_skip_app_kill():
+            return False
+        if self._runtime is None and self._managed_scope is None and self._connection is None:
+            return False
+        recovery_bundle = self._active_bundle_id or (None if self.bundle_id in {None, "auto"} else self.bundle_id)
+        recovery_app_path = self._session_app_path or self.app_path
+        if recovery_bundle is None and recovery_app_path is None:
+            return False
+        try:
+            self._close_owned_resources_for_recreation()
+            self._create_session(MacOSLaunchAppParams(bundle_id=recovery_bundle, app_path=recovery_app_path, new_session=True))
+        except Exception as exc:  # noqa: BLE001
+            self._propagate_if_cancelled(exc)
+            self._cleanup_pending = True
+            return False
+        if self._session is not None and self._session_is_active(self._session):
+            self._last_operation_finished_at = time.monotonic()
+            return True
+        return False
 
     def _create_session(self, params: MacOSLaunchAppParams) -> Any:
         bundle_id, app_path = self._require_creation_identity(params)
@@ -1341,6 +1706,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 self._managed_scope = scope
                 self._connection = connection
                 self._session = uncertain_session
+                self._uncertain_from_timeout = False
                 self._cleanup_pending = True
                 raise
             try:
@@ -1367,28 +1733,117 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             self._cleanup_pending = False
             raise
 
+        inferred_bundle = bundle_id or (_bundle_id_from_app_path(resolved_app_path) if resolved_app_path is not None else None)
         self._borrowed_session = False
         self._runtime = runtime
         self._managed_scope = scope
         self._connection = connection
         self._session = session
+        self._active_bundle_id = inferred_bundle
+        self._session_app_path = app_path
+        self._uncertain_from_timeout = False
         self._session_settled = False
         self._scope_exit_attempted = False
         self._cleanup_primary = None
         self._cleanup_pending = False
         return session
 
-    def _require_creation_identity(self, params: MacOSLaunchAppParams) -> tuple[str | None, str | None]:
-        bundle_id = self._effective_bundle_id(params.bundle_id)
+    def _require_creation_identity(
+        self,
+        params: MacOSLaunchAppParams,
+        *,
+        replacing_borrowed: bool = False,
+    ) -> tuple[str | None, str | None]:
+        raw_param_bundle = params.bundle_id.strip() if isinstance(params.bundle_id, str) and params.bundle_id.strip() else None
         app_path = self._effective_app_path(params.app_path)
-        if bundle_id is None and app_path is None:
-            raise ConfigurationError("macOS Appium Mac2 session requires bundle_id or app_path.")
-        return bundle_id, app_path
+        if raw_param_bundle is not None:
+            if raw_param_bundle.casefold() == "auto":
+                return _detect_frontmost_macos_bundle_id(), app_path
+            resolved_named = _resolve_installed_bundle_identifier(raw_param_bundle)
+            if resolved_named is not None:
+                return resolved_named, app_path
+            if MACOS_BUNDLE_ID_SYNTAX.fullmatch(raw_param_bundle) and "." in raw_param_bundle:
+                return raw_param_bundle, app_path
+            if MACOS_BUNDLE_ID_SYNTAX.fullmatch(raw_param_bundle) and app_path is None:
+                return raw_param_bundle, None
+            raise ConfigurationError(f"Could not resolve macOS application identity '{raw_param_bundle}' to a valid bundle_id.")
+
+        if app_path is not None:
+            configured_bundle = None if self.bundle_id in {None, "auto"} else self.bundle_id
+            return configured_bundle, app_path
+
+        if self.bundle_id == "auto":
+            return _detect_frontmost_macos_bundle_id(), None
+        if self.bundle_id is not None:
+            return self.bundle_id, None
+        if self._active_bundle_id is not None and not replacing_borrowed:
+            return self._active_bundle_id, self._session_app_path
+        if replacing_borrowed:
+            raise ConfigurationError("macOS Appium Mac2 session replacement requires bundle_id or app_path.")
+        return _detect_frontmost_macos_bundle_id(), None
+
+    def _resolve_activation_identity(self, params: MacOSLaunchAppParams) -> tuple[str | None, str | None]:
+        param_app_path = params.app_path.strip() if isinstance(params.app_path, str) and params.app_path.strip() else None
+        param_bundle = params.bundle_id.strip() if isinstance(params.bundle_id, str) and params.bundle_id.strip() else None
+        if param_app_path is not None:
+            resolved_from_path = _bundle_id_from_app_path(param_app_path)
+            if resolved_from_path is not None:
+                return resolved_from_path, param_app_path
+            candidate_path = Path(param_app_path).expanduser()
+            if candidate_path.exists():
+                return None, param_app_path
+            raise ConfigurationError(
+                "Could not resolve CFBundleIdentifier or existing application path from macOS app_path for in-session activation.",
+                context={"app_path": param_app_path},
+            )
+        if param_bundle is not None:
+            if param_bundle.casefold() == "auto":
+                return _detect_frontmost_macos_bundle_id(), self._effective_app_path(None)
+            resolved_installed = _resolve_installed_bundle_identifier(param_bundle)
+            if resolved_installed is not None:
+                return resolved_installed, self._effective_app_path(None)
+            if MACOS_BUNDLE_ID_SYNTAX.fullmatch(param_bundle) and "." in param_bundle:
+                return param_bundle, self._effective_app_path(None)
+            raise ConfigurationError(
+                f"Could not resolve macOS application '{param_bundle}' to an installed CFBundleIdentifier.",
+            )
+        fallback_bundle = self._active_bundle_id or (None if self.bundle_id in {None, "auto"} else self.bundle_id)
+        if fallback_bundle is not None:
+            return fallback_bundle, self._effective_app_path(None)
+        if self.app_path is not None:
+            from_cfg_path = _bundle_id_from_app_path(self.app_path)
+            if from_cfg_path is not None:
+                return from_cfg_path, self.app_path
+            if Path(self.app_path).expanduser().exists():
+                return None, self.app_path
+        if self.bundle_id == "auto":
+            return _detect_frontmost_macos_bundle_id(), None
+        raise ConfigurationError("macOS application activation requires bundle_id, app_path, or a configured bundle id.")
+
+    def _concrete_kill_bundle_id(self, bundle_id: str | None) -> str | None:
+        if isinstance(bundle_id, str) and bundle_id.strip():
+            cleaned = bundle_id.strip()
+            if cleaned.casefold() == "auto":
+                return self._active_bundle_id
+            resolved = _resolve_installed_bundle_identifier(cleaned)
+            if resolved is not None:
+                return resolved
+            return cleaned
+        if self.bundle_id not in {None, "auto"}:
+            return self.bundle_id
+        return self._active_bundle_id
 
     def _effective_bundle_id(self, bundle_id: str | None) -> str | None:
+        if self._active_bundle_id is not None and (bundle_id is None or not bundle_id.strip() or bundle_id.strip().casefold() == "auto"):
+            return self._active_bundle_id
         if isinstance(bundle_id, str) and bundle_id.strip():
-            return bundle_id.strip()
-        return self.bundle_id
+            stripped = bundle_id.strip()
+            if self._active_bundle_id is not None and self._active_bundle_id != stripped:
+                resolved = _resolve_installed_bundle_identifier(stripped)
+                if resolved is not None:
+                    return resolved
+            return stripped
+        return None if self.bundle_id == "auto" else self.bundle_id
 
     def _effective_app_path(self, app_path: str | None) -> str | None:
         if isinstance(app_path, str) and app_path.strip():
@@ -1409,12 +1864,13 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 context={"resolution_reason": "session_unavailable"},
             )
         if not self._session_is_active(self._session):
-            if not self._borrowed_session:
-                self._cleanup_pending = True
-            raise ToolExecutionError(
-                "Appium Mac2 session is no longer active.",
-                context={"reason": "session_unavailable", **self._safe_diagnostics(stage="require_session")},
-            )
+            if not self._try_recover_uncertain_owned_session():
+                if not self._borrowed_session:
+                    self._cleanup_pending = True
+                raise ToolExecutionError(
+                    "Appium Mac2 session is no longer active.",
+                    context={"reason": "session_unavailable", **self._safe_diagnostics(stage="require_session")},
+                )
         self._ensure_alive_if_idle(self._session)
         return self._session
 
@@ -1428,13 +1884,36 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             return
         try:
             ensure_alive(control=self._operation_control(DEFAULT_ENSURE_ALIVE_TIMEOUT_SECONDS, cancellation=self._operation_cancellation))
+            self._last_operation_finished_at = time.monotonic()
         except Exception as exc:
             self._propagate_if_cancelled(exc)
+            self._note_operation_timeout(exc)
+            if self.skip_app_kill and self._sdk_supports_skip_app_kill() and self._try_replace_failed_idle_session():
+                self._last_operation_finished_at = time.monotonic()
+                return
             self._cleanup_pending = True
             raise ToolExecutionError(
                 "Appium Mac2 session liveness probe failed; session requires cleanup or replacement.",
                 context={"reason": "session_unavailable", "stage": "ensure_alive", "cause": exc},
             ) from exc
+
+    def _try_replace_failed_idle_session(self) -> bool:
+        if self._runtime is None and self._managed_scope is None and self._connection is None:
+            return False
+        recovery_bundle = self._active_bundle_id or (None if self.bundle_id in {None, "auto"} else self.bundle_id)
+        recovery_app_path = self._session_app_path or self.app_path
+        if recovery_bundle is None and recovery_app_path is None:
+            return False
+        try:
+            self._close_owned_resources_for_recreation()
+            self._create_session(MacOSLaunchAppParams(bundle_id=recovery_bundle, app_path=recovery_app_path, new_session=True))
+        except Exception as exc:  # noqa: BLE001
+            self._propagate_if_cancelled(exc)
+            return False
+        if self._session is not None and self._session_is_active(self._session):
+            self._last_operation_finished_at = time.monotonic()
+            return True
+        return False
 
     @staticmethod
     def _has_semantic_target(params: BaseModel) -> bool:
@@ -1874,33 +2353,85 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         max_depth: int,
         include_attributes: bool,
     ) -> dict[str, object]:
+        page_source, _ = self._simplify_tree_observation_with_budget(
+            observation,
+            max_depth=max_depth,
+            include_attributes=include_attributes,
+        )
+        return page_source
+
+    def _simplify_tree_observation_with_budget(
+        self,
+        observation: Any,
+        *,
+        max_depth: int,
+        include_attributes: bool,
+    ) -> tuple[dict[str, object], dict[str, object]]:
         roots = getattr(observation, "roots", ())
         if not roots:
-            return {"format": "xml", "root": None, "source_length": 0}
+            return {"format": "xml", "root": None, "source_length": 0}, {}
         xml_root = self._tree_node_to_xml_element(roots[0])
         serialized = ElementTree.tostring(xml_root, encoding="unicode")
         try:
-            return {
-                "format": "xml",
-                "source_length": len(serialized),
-                "node_count": self._element_count(xml_root),
-                "root": self._element_snapshot(
-                    xml_root,
-                    depth=1,
-                    max_depth=max_depth,
-                    include_attributes=include_attributes,
-                ),
-            }
+            node_count = self._element_count(xml_root)
+            depth_candidates = [max_depth, *(step_depth for step_depth in (8, 6, 4) if step_depth < max_depth)]
+            chosen_root: dict[str, object] | None = None
+            compaction_meta: dict[str, object] = {}
+            for candidate_depth in depth_candidates:
+                for sibling_limit in MACOS_COMPACT_SIBLING_STEPDOWNS:
+                    built_root = self._element_snapshot(
+                        xml_root,
+                        depth=1,
+                        max_depth=candidate_depth,
+                        include_attributes=include_attributes,
+                        max_siblings=sibling_limit,
+                    )
+                    chosen_root = built_root
+                    encoded_len = len(json.dumps(built_root, ensure_ascii=False, separators=(",", ":")))
+                    if encoded_len <= DEFAULT_MACOS_SNAPSHOT_MAX_JSON_CHARS:
+                        if candidate_depth < max_depth or sibling_limit is not None:
+                            compaction_meta = {
+                                "adaptive_compaction": True,
+                                "effective_max_depth": candidate_depth,
+                                **({"max_siblings_per_parent": sibling_limit} if sibling_limit is not None else {}),
+                            }
+                        return (
+                            {
+                                "format": "xml",
+                                "source_length": len(serialized),
+                                "node_count": node_count,
+                                "root": built_root,
+                            },
+                            compaction_meta,
+                        )
+            if chosen_root is not None:
+                compaction_meta = {
+                    "adaptive_compaction": True,
+                    "effective_max_depth": depth_candidates[-1],
+                    "max_siblings_per_parent": MACOS_COMPACT_SIBLING_STEPDOWNS[-1],
+                }
+            return (
+                {
+                    "format": "xml",
+                    "source_length": len(serialized),
+                    "node_count": node_count,
+                    "root": chosen_root,
+                },
+                compaction_meta,
+            )
         except Exception as exc:  # noqa: BLE001 - preserve observation availability on unexpected local compaction failure.
             self._propagate_if_cancelled(exc)
             preview = serialized[:DEFAULT_MACOS_SNAPSHOT_SOURCE_PREVIEW_CHARS]
-            return {
-                "format": "unparsed_xml",
-                "source_preview": preview,
-                "source_length": len(serialized),
-                "truncated": len(serialized) > len(preview),
-                "parse_error": type(exc).__name__,
-            }
+            return (
+                {
+                    "format": "unparsed_xml",
+                    "source_preview": preview,
+                    "source_length": len(serialized),
+                    "truncated": len(serialized) > len(preview),
+                    "parse_error": type(exc).__name__,
+                },
+                {},
+            )
 
     def _tree_node_to_xml_element(self, node: Any) -> ElementTree.Element:
         type_obs = getattr(node, "type", None)
@@ -1961,9 +2492,10 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         depth: int,
         max_depth: int,
         include_attributes: bool,
+        max_siblings: int | None = None,
     ) -> dict[str, object]:
         snapshot = self._compact_element_snapshots(element, include_attributes=include_attributes, preserve_node=True)[0]
-        self._bound_snapshot_depth(snapshot, depth=depth, max_depth=max_depth)
+        self._bound_snapshot_depth(snapshot, depth=depth, max_depth=max_depth, max_siblings=max_siblings)
         return snapshot
 
     def _compact_element_snapshots(
@@ -2000,7 +2532,14 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             snapshot["children"] = children
         return [snapshot]
 
-    def _bound_snapshot_depth(self, snapshot: dict[str, object], *, depth: int, max_depth: int) -> None:
+    def _bound_snapshot_depth(
+        self,
+        snapshot: dict[str, object],
+        *,
+        depth: int,
+        max_depth: int,
+        max_siblings: int | None = None,
+    ) -> None:
         children = snapshot.get("children")
         if not isinstance(children, list) or not children:
             return
@@ -2008,9 +2547,15 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             snapshot.pop("children")
             snapshot["children_truncated"] = len(children)
             return
+        if max_siblings is not None and len(children) > max_siblings:
+            omitted = len(children) - max_siblings
+            kept = children[:max_siblings]
+            snapshot["children"] = kept
+            snapshot["children_truncated"] = int(snapshot.get("children_truncated", 0)) + omitted
+            children = kept
         for child in children:
             if isinstance(child, dict):
-                self._bound_snapshot_depth(child, depth=depth + 1, max_depth=max_depth)
+                self._bound_snapshot_depth(child, depth=depth + 1, max_depth=max_depth, max_siblings=max_siblings)
 
     def _snapshot_attributes(self, attributes: dict[str, str], *, include_attributes: bool) -> dict[str, object]:
         selected: dict[str, object] = {}
@@ -2390,6 +2935,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 return self._failed("configuration_error", str(exc), metadata={"resolution_reason": "invalid_locator", **self._safe_diagnostics()})
             raise
         except ToolExecutionError as exc:
+            self._note_operation_timeout(exc)
             cause = exc.context.get("cause")
             if isinstance(cause, Exception):
                 self._propagate_if_cancelled(cause)
@@ -2397,6 +2943,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             return self._failed(failure_default, str(exc), metadata=self._safe_diagnostics(exc))
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
+            self._note_operation_timeout(exc)
             return self._normalize_backend_exception(exc, failure_default=failure_default)
 
     def _normalize_backend_exception(

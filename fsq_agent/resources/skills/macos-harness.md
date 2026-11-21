@@ -30,6 +30,7 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 - Use `scroll_on` (`scrollOn`) on a resolved scroll container/view or explicit `point` with finite `delta_y` and/or `delta_x` (under macOS CGEvent wheel semantics, negative `delta_y` scrolls content down toward lower items; positive `delta_y` scrolls content up) for long lists, tables, settings panes, and documents instead of misusing `drag_to`.
 - Use `inspect_with_ai` (`inspectWithAI`) with `mode: "extract"` only to read genuinely pixel-only Canvas, chart, map, image, or video-frame content. It is a read-only observation, never a pass/fail assertion. Note that `mode: "locate"` is currently unavailable on macOS (`pointer_mapping_unavailable`).
 - Prefer stable macOS accessibility identifiers and names over coordinates. Use coordinate `point` values only as an explicit fallback when the target cannot be represented by accessibility metadata.
+- In Keynote, Pages, Numbers, and LibreOffice document or slide canvases, use accessibility locators for exposed controls. If interior text boxes, shapes, or cells are not exposed and the task is not element-only, use a fresh screenshot to place `click_on` or `double_click_on` on the intended canvas region, then edit with `type_text` or `press_key`. Verify the resulting content or state before continuing.
 - Do not infer that the window changed from a screenshot path alone. Use a fresh `ui_snapshot`, `inspect_element`, or assertion after the action.
 
 ## Locator Rules

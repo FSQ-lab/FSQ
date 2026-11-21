@@ -4,6 +4,12 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-21
+
+- macOS automation defaults to direct Appium Mac2. Finder-anchored native fallback is limited to eligible applications on the explicit XCTest quiescence blacklist.
+- Added a local screenshot fallback and allowed subsequent actions to recover after a clean teardown followed by a failed session recreation.
+- Added rich-canvas editing guidance. The release pins `appium-connect-agent==0.1.2` and `lxml==6.1.0`; see the [release notes](docs/releases/v0.3.8.md).
+
 ## [0.3.7] - 2026-11-21
 
 Release preparation; this entry does not establish a published package, tag, or GitHub release. See the [release notes](docs/releases/v0.3.7.md) for upgrade steps and validation limits.
@@ -177,7 +183,8 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.8...HEAD
+[0.3.8]: https://github.com/FSQ-lab/FSQ/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/FSQ-lab/FSQ/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/FSQ-lab/FSQ/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/FSQ-lab/FSQ/compare/v0.3.2...v0.3.5

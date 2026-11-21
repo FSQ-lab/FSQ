@@ -13,21 +13,26 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+import unicodedata
 from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from itertools import pairwise
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TypeVar
 from xml.etree import ElementTree
 
+from lxml import etree
 from pydantic import ValidationError
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _macos_driver_tool
 from fsq_agent.drivers.macos._elements import candidate
+from fsq_agent.drivers.macos._native_fallback import _activate_macos_app_native, _macos_ax_process_trusted, _observe_macos_ax_tree, _verify_ax_focus, _verify_ax_point_hit
 from fsq_agent.drivers.macos._visual_inspection import _run_visual_inspection
 from fsq_agent.models import (
     ConfigurationError,
@@ -85,7 +90,7 @@ MACOS_FALLBACK_FRONTMOST_BUNDLE = "com.apple.finder"
 MACOS_EDITABLE_DISABLED_TOLERANT_TYPES = frozenset({"TextArea", "TextView", "WebArea"})
 MACOS_STATE_ASSERTION_FIELDS = ("enabled", "focused", "selected", "hittable", "displayed")
 MACOS_MASK_GLYPHS = frozenset({"*", "•", "●"})
-MACOS_MUTABLE_TEXT_SELECTOR_TOKEN = re.compile(r"\b(?:value|label|title|name)\b")
+MACOS_MUTABLE_TEXT_SELECTOR_TOKEN = re.compile(r"\b(?:value|label|title|name|text)\b")
 MACOS_SESSION_STATES = frozenset({"creating", "active", "uncertain", "disposing", "disposed", "closing", "closed"})
 MACOS_SAFE_BACKEND_CODES = frozenset(
     {
@@ -124,6 +129,10 @@ MACOS_SAFE_BACKEND_CODES = frozenset(
         "invalid_visual_response",
         "frame_not_single",
         "observation_too_large",
+        "ax_not_trusted",
+        "app_not_running",
+        "app_activation_timeout",
+        "unsupported_host",
     }
 )
 MACOS_SAFE_COMPLETED_STEPS = frozenset(
@@ -141,6 +150,331 @@ MACOS_SAFE_COMPLETED_STEPS = frozenset(
         "source_parsed",
     }
 )
+
+MACOS_PREDICATE_CLAUSE_RE = re.compile(
+    r"^(?P<field>identifier|name|label|value|title|placeholderValue|amType|type|role|enabled|visible|displayed|selected|focused|hittable|amRect\.x|amRect\.y|amRect\.width|amRect\.height)\s*"
+    r"(?P<op>==|!=|CONTAINS(?:\[cd\])?|BEGINSWITH(?:\[cd\])?|ENDSWITH(?:\[cd\])?)\s*"
+    r'(?P<rhs>"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|true|false|TRUE|FALSE|-?\d+)$',
+    re.IGNORECASE,
+)
+
+
+XCTEST_QUIESCENCE_BLACKLIST_BUNDLES = frozenset({"com.apple.iWork.Keynote", "com.apple.iWork.Pages", "com.apple.iWork.Numbers", "org.libreoffice.script"})
+
+
+def _unquote_predicate_rhs(raw: str) -> str:
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        inner = raw[1:-1]
+        return inner.replace('\\"', '"').replace("\\'", "'").replace("\\\\", "\\")
+    return raw
+
+
+def _split_top_level_predicate_boolean(expr: str, keyword: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    in_quote: str | None = None
+    escape = False
+    token_len = len(keyword)
+    start = 0
+    idx = 0
+    while idx < len(expr):
+        ch = expr[idx]
+        if escape:
+            escape = False
+            idx += 1
+            continue
+        if ch == "\\" and in_quote is not None:
+            escape = True
+            idx += 1
+            continue
+        if in_quote is not None:
+            if ch == in_quote:
+                in_quote = None
+            idx += 1
+            continue
+        if ch in {'"', "'"}:
+            in_quote = ch
+            idx += 1
+            continue
+        if ch == "(":
+            depth += 1
+            idx += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            idx += 1
+            continue
+        if depth == 0 and expr[idx : idx + token_len].upper() == keyword:
+            before_ok = idx == 0 or expr[idx - 1].isspace() or expr[idx - 1] == ")"
+            after_idx = idx + token_len
+            after_ok = after_idx == len(expr) or expr[after_idx].isspace() or expr[after_idx] == "("
+            if before_ok and after_ok:
+                parts.append(expr[start:idx].strip())
+                idx = after_idx
+                start = idx
+                continue
+        idx += 1
+    parts.append(expr[start:].strip())
+    return parts
+
+
+def _strip_outer_parens(expr: str) -> str:
+    cleaned = expr.strip()
+    while len(cleaned) >= 2 and cleaned[0] == "(" and cleaned[-1] == ")":
+        depth = 0
+        in_quote: str | None = None
+        escape = False
+        wraps_all = True
+        for idx, ch in enumerate(cleaned):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\" and in_quote is not None:
+                escape = True
+                continue
+            if in_quote is not None:
+                if ch == in_quote:
+                    in_quote = None
+                continue
+            if ch in {'"', "'"}:
+                in_quote = ch
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and idx < len(cleaned) - 1:
+                    wraps_all = False
+                    break
+        if wraps_all and depth == 0:
+            cleaned = cleaned[1:-1].strip()
+        else:
+            break
+    return cleaned
+
+
+def _eval_macos_predicate_on_xml_node(expr: str, xml_node: ElementTree.Element) -> bool | None:
+    cleaned = _strip_outer_parens(expr)
+    if not cleaned:
+        return None
+    or_parts = _split_top_level_predicate_boolean(cleaned, "OR")
+    if len(or_parts) > 1:
+        outcomes = [_eval_macos_predicate_on_xml_node(part, xml_node) for part in or_parts]
+        if any(item is None for item in outcomes):
+            return None
+        return any(bool(item) for item in outcomes)
+    and_parts = _split_top_level_predicate_boolean(cleaned, "AND")
+    if len(and_parts) > 1:
+        outcomes = [_eval_macos_predicate_on_xml_node(part, xml_node) for part in and_parts]
+        if any(item is None for item in outcomes):
+            return None
+        return all(bool(item) for item in outcomes)
+    if cleaned.upper().startswith("NOT ") or cleaned.upper().startswith("NOT("):
+        inner = cleaned[3:].strip()
+        sub = _eval_macos_predicate_on_xml_node(inner, xml_node)
+        return None if sub is None else (not sub)
+    match = MACOS_PREDICATE_CLAUSE_RE.match(cleaned)
+    if match is None:
+        return None
+    field = match.group("field")
+    op = match.group("op").upper()
+    rhs_raw = match.group("rhs")
+    attrs = xml_node.attrib
+    field_lower = field.lower()
+    actual: object
+    if field_lower in {"amtype", "type"}:
+        actual = xml_node.tag
+    elif field_lower == "name":
+        actual = attrs.get("name") or attrs.get("identifier") or attrs.get("label") or attrs.get("title") or attrs.get("value") or ""
+    elif field_lower in {"visible", "displayed", "enabled", "selected", "focused", "hittable"}:
+        raw_state = attrs.get("visible" if field_lower == "displayed" else field_lower)
+        if raw_state not in {"true", "false"}:
+            return None
+        actual = raw_state == "true"
+    elif field_lower.startswith("amrect."):
+        coord_key = field_lower.split(".", 1)[1]
+        raw_coord = attrs.get(coord_key)
+        if raw_coord is None:
+            return False
+        try:
+            actual = int(raw_coord)
+        except ValueError:
+            return False
+    else:
+        actual_key = "placeholderValue" if field_lower == "placeholdervalue" else field
+        actual = attrs.get(actual_key, "")
+
+    if rhs_raw.lower() in {"true", "false"}:
+        expected_bool = rhs_raw.lower() == "true"
+        actual_bool = actual if isinstance(actual, bool) else str(actual).lower() == "true"
+        return (actual_bool == expected_bool) if op == "==" else (actual_bool != expected_bool if op == "!=" else None)
+    if isinstance(actual, int) and re.fullmatch(r"-?\d+", rhs_raw):
+        expected_int = int(rhs_raw)
+        return (actual == expected_int) if op == "==" else (actual != expected_int if op == "!=" else None)
+
+    rhs_str = _unquote_predicate_rhs(rhs_raw)
+    actual_str = str(actual)
+    case_insensitive = "[CD]" in op or "[C]" in op
+    lhs_cmp = actual_str.casefold() if case_insensitive else actual_str
+    rhs_cmp = rhs_str.casefold() if case_insensitive else rhs_str
+    if "[CD]" in op:
+        lhs_cmp, rhs_cmp = ("".join(char for char in unicodedata.normalize("NFD", text) if not unicodedata.combining(char)) for text in (lhs_cmp, rhs_cmp))
+    base_op = op.split("[", 1)[0]
+    if base_op == "==":
+        if field_lower in {"amtype", "type"}:
+            prefixed = rhs_str if rhs_str.startswith("XCUIElementType") else f"XCUIElementType{rhs_str}"
+            return actual_str in {rhs_str, prefixed}
+        return lhs_cmp == rhs_cmp
+    if base_op == "!=":
+        if field_lower in {"amtype", "type"}:
+            prefixed = rhs_str if rhs_str.startswith("XCUIElementType") else f"XCUIElementType{rhs_str}"
+            return actual_str not in {rhs_str, prefixed}
+        return lhs_cmp != rhs_cmp
+    if base_op == "CONTAINS":
+        return rhs_cmp in lhs_cmp
+    if base_op == "BEGINSWITH":
+        return lhs_cmp.startswith(rhs_cmp)
+    if base_op == "ENDSWITH":
+        return lhs_cmp.endswith(rhs_cmp)
+    return None
+
+
+class _NativeAXElement:
+    """Element adapter backed by live macOS Accessibility ``TreeNode`` inspection and Finder-anchored ``Device`` synthesis."""
+
+    def __init__(
+        self,
+        driver: AppiumConnectMacOSDriver,
+        node: Any,
+        *,
+        bundle_id: str | None,
+        reanchor_locator: MacOSLocator | None = None,
+    ) -> None:
+        self._driver = driver
+        self._node = node
+        self._bundle_id = bundle_id
+        self._reanchor_locator = reanchor_locator
+        self._mutated = False
+
+    def _refresh_node(self) -> Any:
+        if self._reanchor_locator is None:
+            return self._node
+        refreshed = self._driver._resolve_native_ax_node_once(self._reanchor_locator, preferred_bundle_id=self._bundle_id)
+        if refreshed is None:
+            raise ToolExecutionError("Native AX element identity could not be re-established.")
+        original_handle = getattr(self._node, "handle", None)
+        refreshed_handle = getattr(refreshed, "handle", None)
+        if original_handle is not None and (refreshed_handle is None or not original_handle.backend.equal(original_handle.element, refreshed_handle.element)):
+            raise ToolExecutionError("Native AX element identity changed before dispatch.")
+        return refreshed
+
+    def _current_bounds_center(self) -> tuple[int, int]:
+        node = self._refresh_node()
+        if getattr(node, "visibility", None) not in {"visible", "partially_visible"}:
+            raise ToolExecutionError("Native AX pointer target is not visibly actionable.")
+        bounds_obs = getattr(node, "bounds", None)
+        bounds = getattr(bounds_obs, "value", None) if getattr(bounds_obs, "state", None) == "value" else None
+        if bounds is None or not all(hasattr(bounds, k) for k in ("x", "y", "width", "height")):
+            raise ToolExecutionError("Native AX element has no actionable screen bounds.", context={"stage": "native_ax_element"})
+        bw, bh = int(bounds.width), int(bounds.height)
+        if bw <= 0 or bh <= 0:
+            raise ToolExecutionError("Native AX element has zero-area bounds.", context={"stage": "native_ax_element"})
+        x, y = int(bounds.x + bw / 2.0), int(bounds.y + bh / 2.0)
+        if not _verify_ax_point_hit(getattr(node, "handle", None), x, y):
+            raise ToolExecutionError("Native AX pointer target did not pass hit testing.")
+        return x, y
+
+    def inspect(self, *, attributes: tuple[str, ...], control: Any = None) -> Any:
+        del control
+        node = self._refresh_node() if self._mutated else self._node
+        results: list[Any] = []
+        visibility = getattr(node, "visibility", "unknown")
+        is_displayed = visibility in {"visible", "partially_visible"}
+
+        for name in attributes:
+            if name == "displayed":
+                results.append(SimpleNamespace(name="displayed", state="unknown" if visibility == "unknown" else "value", value=None if visibility == "unknown" else is_displayed))
+            elif name == "hittable":
+                results.append(SimpleNamespace(name="hittable", state="unknown", value=None))
+            elif name == "focused":
+                f_obs = getattr(node, "focused", None)
+                if getattr(f_obs, "state", None) == "value" and type(f_obs.value) is bool:
+                    results.append(SimpleNamespace(name="focused", state="value", value=f_obs.value))
+                else:
+                    results.append(SimpleNamespace(name="focused", state="unknown", value=None))
+            elif name == "text":
+                t_obs = getattr(node, "text", None)
+                if getattr(t_obs, "state", None) == "value" and isinstance(t_obs.value, str):
+                    results.append(SimpleNamespace(name="text", state="value", value=t_obs.value))
+                else:
+                    raw_text = getattr(node, "raw_text", None)
+                    if isinstance(raw_text, str) and raw_text:
+                        results.append(SimpleNamespace(name="text", state="value", value=raw_text))
+                    else:
+                        for fallback_attr in ("value", "label", "title"):
+                            fb = getattr(node, fallback_attr, None)
+                            if getattr(fb, "state", None) == "value" and isinstance(fb.value, str):
+                                results.append(SimpleNamespace(name="text", state="value", value=fb.value))
+                                break
+                        else:
+                            results.append(SimpleNamespace(name="text", state="missing", value=None))
+            else:
+                obs = getattr(node, name, None)
+                state = getattr(obs, "state", "missing") if obs is not None else "missing"
+                val = getattr(obs, "value", None) if state == "value" else None
+                results.append(SimpleNamespace(name=name, state=state, value=val))
+        return SimpleNamespace(attributes=tuple(results))
+
+    def click(self, *, key_modifier_flags: int | None = None, wait_timeout_seconds: float = 10.0, control: Any = None) -> None:
+        del wait_timeout_seconds
+        cx, cy = self._current_bounds_center()
+        session = self._driver._require_session()
+        session.device.click_at(cx, cy, button="left", double=False, key_modifier_flags=key_modifier_flags, control=control)
+
+    def double_click(self, *, key_modifier_flags: int | None = None, wait_timeout_seconds: float = 10.0, control: Any = None) -> None:
+        del wait_timeout_seconds
+        cx, cy = self._current_bounds_center()
+        session = self._driver._require_session()
+        session.device.click_at(cx, cy, button="left", double=True, key_modifier_flags=key_modifier_flags, control=control)
+
+    def right_click(self, *, key_modifier_flags: int | None = None, wait_timeout_seconds: float = 10.0, control: Any = None) -> None:
+        del wait_timeout_seconds
+        cx, cy = self._current_bounds_center()
+        session = self._driver._require_session()
+        session.device.click_at(cx, cy, button="right", double=False, key_modifier_flags=key_modifier_flags, control=control)
+
+    def hover(self, *, key_modifier_flags: int | None = None, wait_timeout_seconds: float = 10.0, control: Any = None) -> None:
+        del key_modifier_flags, wait_timeout_seconds
+        cx, cy = self._current_bounds_center()
+        session = self._driver._require_session()
+        session.device.hover_at(cx, cy, control=control)
+
+    def _require_focus(self) -> None:
+        self._driver._verify_keyboard_foreground()
+        if not _verify_ax_focus(getattr(self._refresh_node(), "handle", None)):
+            raise ToolExecutionError("Native AX keyboard target does not have focus.")
+
+    def clear(self, *, wait_timeout_seconds: float = 10.0, control: Any = None) -> None:
+        del wait_timeout_seconds
+        session = self._driver._require_session()
+        select_all = self._driver._build_key_item("a", MACOS_KEY_MODIFIER_FLAGS["COMMAND"])
+        self._require_focus()
+        session.device.send_keys([select_all], control=control)
+        self._require_focus()
+        session.device.send_keys([MACOS_KEY_NAMES["DELETE"]], control=control)
+        self._mutated = True
+
+    def send_keys(self, text: str, *, wait_timeout_seconds: float = 10.0, control: Any = None) -> None:
+        del wait_timeout_seconds, control
+        self._driver._send_macos_text(text, element=self)
+        self._mutated = True
+
+    def send_macos_keys(self, keys: list[Any], *, wait_timeout_seconds: float = 10.0, control: Any = None) -> None:
+        del wait_timeout_seconds
+        session = self._driver._require_session()
+        self._require_focus()
+        session.device.send_keys(keys, control=control)
+        self._mutated = True
 
 
 class _AmbiguousResolutionError(Exception):
@@ -359,20 +693,6 @@ def _read_app_bundle_plist(bundle_dir: Path) -> dict[str, Any] | None:
 
 
 def _bundle_id_from_app_path(app_path: str | Path) -> str | None:
-    with suppress(ImportError):
-        from appium_connect_agent import automation as aca_automation
-
-        sdk_resolver = getattr(aca_automation, "resolve_macos_app_bundle", None)
-        if callable(sdk_resolver):
-            with suppress(Exception):
-                resolved = sdk_resolver(app_path)
-                if isinstance(resolved, str) and resolved.strip():
-                    return resolved.strip()
-                if isinstance(resolved, tuple) and len(resolved) == 2 and isinstance(resolved[1], str) and resolved[1].strip():
-                    return resolved[1].strip()
-                resolved_id = getattr(resolved, "bundle_id", None)
-                if isinstance(resolved_id, str) and resolved_id.strip():
-                    return resolved_id.strip()
     bundle_dir = _resolve_app_bundle_path(str(app_path))
     if bundle_dir.suffix.casefold() != ".app" or not bundle_dir.is_dir():
         return None
@@ -445,17 +765,7 @@ def _resolve_installed_bundle_identifier(candidate_text: str) -> str | None:
 
 
 def _detect_frontmost_macos_bundle_id(*, timeout_seconds: float = 5.0) -> str:
-    with suppress(ImportError):
-        from appium_connect_agent import automation as aca_automation
-
-        sdk_frontmost = getattr(aca_automation, "frontmost_macos_app", None)
-        if callable(sdk_frontmost):
-            with suppress(Exception):
-                result = sdk_frontmost()
-                candidate_id = result if isinstance(result, str) else getattr(result, "bundle_id", None)
-                if isinstance(candidate_id, str) and candidate_id.strip() and candidate_id.strip() not in MACOS_EXCLUDED_FRONTMOST_BUNDLES:
-                    return candidate_id.strip()
-    lsappinfo = shutil.which("lsappinfo") or "/usr/bin/lsappinfo"
+    lsappinfo = "/usr/bin/lsappinfo"
     try:
         front_proc = subprocess.run(  # noqa: S603 - fixed read-only macOS LaunchServices query.
             [lsappinfo, "front"],
@@ -551,6 +861,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         new_command_timeout_seconds: float | None = DEFAULT_MACOS_NEW_COMMAND_TIMEOUT_SECONDS,
         skip_app_kill: bool = DEFAULT_MACOS_SKIP_APP_KILL,
         session: object | None = None,
+        native_ax_fallback_bundles: Sequence[str] | None = None,
     ) -> None:
         if type(skip_app_kill) is not bool:
             raise ConfigurationError("macOS skip_app_kill must be a boolean.")
@@ -560,6 +871,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         else:
             self.bundle_id = None
         self.app_path = str(Path(app_path)) if app_path else None
+        self._native_ax_fallback_bundles = XCTEST_QUIESCENCE_BLACKLIST_BUNDLES if native_ax_fallback_bundles is None else frozenset(native_ax_fallback_bundles)
         self.page_source_max_depth = page_source_max_depth
         self.action_timeout_seconds = action_timeout_seconds
         self.new_command_timeout_seconds = new_command_timeout_seconds
@@ -567,8 +879,11 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         self._borrowed_session = session is not None
         self._session: Any | None = session
         self._active_bundle_id: str | None = None if self.bundle_id in {None, "auto"} else self.bundle_id
+        self._wda_host_bundle_id: str | None = None
+        self._native_ax_mode = False
         self._session_app_path: str | None = self.app_path
         self._uncertain_from_timeout = False
+        self._recoverable_session_loss = False
         self._runtime: Any | None = None
         self._managed_scope: AbstractContextManager[Any] | None = None
         self._connection: Any | None = None
@@ -671,6 +986,8 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             raise
 
         self._session = None
+        self._wda_host_bundle_id = None
+        self._native_ax_mode = False
         self._managed_scope = None
         self._connection = None
         self._runtime = None
@@ -780,8 +1097,12 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._kill_app_impl(params))
 
     def _kill_app_impl(self, params: MacOSKillAppParams) -> dict[str, object]:
+        if params.close_session:
+            self._recoverable_session_loss = False
         session = self._session
         if session is None:
+            if self._recoverable_session_loss:
+                return self._failed("action_error", "Cannot terminate the macOS application without a live session.", metadata={"reason": "session_unavailable"})
             return self._passed()
         bundle_id = self._concrete_kill_bundle_id(params.bundle_id)
         if params.close_session:
@@ -947,7 +1268,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
         bound_element = element
         bound_by_geometry_only = False
-        text_dependent = self._target_depends_on_mutable_text(params)
+        text_dependent = isinstance(element, _NativeAXElement) or self._target_depends_on_mutable_text(params)
         if elem_id is not None:
             bound_candidate = self._bind_element_by_id_or_geometry(session, elem_id=elem_id, elem_type=elem_type, bounds_tuple=bounds_tuple)
             if bound_candidate is not None:
@@ -974,6 +1295,14 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 )
             bound_element = bound_candidate
             bound_by_geometry_only = True
+
+        if isinstance(element, _NativeAXElement) and not isinstance(bound_element, _NativeAXElement):
+            return self._failed("action_error", "Native AX text target changed session modes.", metadata={"reason": "verification_unavailable"})
+        if isinstance(element, _NativeAXElement) and isinstance(bound_element, _NativeAXElement):
+            original = getattr(element._node, "handle", None)
+            rebound = getattr(bound_element._node, "handle", None)
+            if original is not None and (rebound is None or not original.backend.equal(original.element, rebound.element)):
+                return self._failed("action_error", "Native AX text target changed during identity binding.", metadata={"reason": "verification_unavailable"})
 
         try:
             bound_element.click(
@@ -1025,6 +1354,8 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             )
         if self._value_matches(post_check, params.text, clear=bool(params.clear), initial_value=initial_value):
             return self._passed()
+        if isinstance(bound_element, _NativeAXElement):
+            return self._failed("action_error", "Native AX text readback did not match; inspect UI state before retrying.", metadata={"reason": "postcondition_failed"})
 
         try:
             if params.clear:
@@ -1062,12 +1393,17 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
     def press_key(self, params: MacOSPressKeyParams) -> dict[str, object]:
         return self._run_tool(lambda: self._press_key_impl(params))
 
+    def _verify_keyboard_foreground(self) -> None:
+        if self._native_ax_mode and _detect_frontmost_macos_bundle_id() != self._active_bundle_id:
+            raise ToolExecutionError("The logical macOS keyboard target is not foreground.")
+
     def _press_key_impl(self, params: MacOSPressKeyParams) -> dict[str, object]:
         session = self._require_session()
         modifier_flags = self._modifier_flags(params.modifiers) or 0
         mapped_key = _normalize_macos_key_token(params.key)
         key_item = self._build_key_item(mapped_key, modifier_flags)
         try:
+            self._verify_keyboard_foreground()
             session.device.send_keys([key_item], control=self._ActionControl(self))
         except Exception as exc:  # noqa: BLE001
             self._propagate_if_cancelled(exc)
@@ -1109,7 +1445,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._scroll_on_impl(params))
 
     def _scroll_on_impl(self, params: MacOSScrollOnParams) -> dict[str, object]:
-        session = self._require_session()
+        original_session = self._require_session()
         modifier_flags = self._modifier_flags(params.modifiers)
         if self._has_semantic_target(params):
             element = self._resolve_element_or_none(params)
@@ -1123,6 +1459,9 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if center is None:
                 return self._target_missing()
         try:
+            session = self._require_session()
+            if session is not original_session and self._has_semantic_target(params):
+                return self._failed("action_error", "The macOS session changed during scroll target resolution.", metadata={"reason": "session_unavailable"})
             session.device.scroll_at(
                 center.x,
                 center.y,
@@ -1148,14 +1487,21 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         return self._run_tool(lambda: self._drag_to_impl(params))
 
     def _drag_to_impl(self, params: MacOSDragToParams) -> dict[str, object]:
-        source = self._point_from_endpoint(params.source)
-        destination = self._point_from_endpoint(params.destination)
+        source_element = self._resolve_element_or_none(params.source)
+        destination_element = self._resolve_element_or_none(params.destination)
+        if isinstance(source_element, _NativeAXElement) and isinstance(destination_element, _NativeAXElement) and source_element._bundle_id != destination_element._bundle_id:
+            raise ToolExecutionError("Foreground application changed between native AX drag endpoints.")
+        source = self._point_from_endpoint(params.source, source_element)
+        destination = self._point_from_endpoint(params.destination, destination_element)
         if source is None or destination is None:
             return self._failed(
                 "target_resolution_error",
                 "Drag source or destination was not found.",
                 metadata={"resolution_reason": "not_found", **self._safe_diagnostics(stage="drag_to")},
             )
+        for element, point in ((source_element, source), (destination_element, destination)):
+            if isinstance(element, _NativeAXElement) and not _verify_ax_point_hit(getattr(element._node, "handle", None), point.x, point.y):
+                raise ToolExecutionError("Native AX drag endpoint no longer passes hit testing.")
         self._perform_pointer_drag(source, destination, duration_ms=params.duration_ms)
         return self._passed({"source": source.model_dump(mode="json"), "destination": destination.model_dump(mode="json")})
 
@@ -1178,19 +1524,27 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
     def _ui_snapshot_impl(self, params: MacOSUiSnapshotParams) -> dict[str, object]:
         session = self._require_session()
         window_scoped_fallback = False
-        try:
-            observation = session.observe_tree(control=self._ActionControl(self))
-        except Exception as exc:  # noqa: BLE001
-            self._propagate_if_cancelled(exc)
-            if getattr(exc, "code", None) == "observation_too_large":
-                fallback_obs = self._observe_frontmost_window_tree(session)
-                if fallback_obs is not None:
-                    observation = fallback_obs
-                    window_scoped_fallback = True
+        observation_source = "appium_connect_agent_tree_observation"
+        observation: Any | None = None
+        if self._native_ax_mode:
+            observation = self._observe_native_ax_tree_or_none(max_depth=max(20, (params.max_depth or self.page_source_max_depth) + 4))
+            if observation is not None:
+                observation_source = "macos_native_ax"
+        if observation is None:
+            session = self._require_session()
+            try:
+                observation = session.observe_tree(control=self._ActionControl(self))
+            except Exception as exc:  # noqa: BLE001
+                self._propagate_if_cancelled(exc)
+                if getattr(exc, "code", None) == "observation_too_large":
+                    fallback_obs = self._observe_frontmost_window_tree(session)
+                    if fallback_obs is not None:
+                        observation = fallback_obs
+                        window_scoped_fallback = True
+                    else:
+                        self._raise_resolution_error(exc)
                 else:
                     self._raise_resolution_error(exc)
-            else:
-                self._raise_resolution_error(exc)
         max_depth = params.max_depth or self.page_source_max_depth
         include_attributes = bool(params.include_attributes)
         page_source, compaction_meta = self._simplify_tree_observation_with_budget(
@@ -1199,7 +1553,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             include_attributes=include_attributes,
         )
         diagnostics: dict[str, object] = {
-            "source": "appium_connect_agent_tree_observation",
+            "source": observation_source,
             "coverage": "frontmost_window_fallback" if window_scoped_fallback else getattr(observation, "coverage", "requested_scope"),
             "complete_for_requested_scope": False if window_scoped_fallback else bool(getattr(observation, "complete_for_requested_scope", True)),
             "atomic_with_screenshot": False,
@@ -1329,6 +1683,8 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if getattr(displayed_obs, "state", None) == "value" and displayed_obs.value is False:
                 return self._passed({"visible": False})
             if time.monotonic() >= deadline:
+                if getattr(displayed_obs, "state", None) != "value":
+                    return self._failed("observation_error", "Target visibility could not be established.")
                 return self._failed("assertion_error", "Target is visible.", output={"visible": True})
             time.sleep(0.25)
         if last_ambiguous is not None:
@@ -1492,14 +1848,62 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
     def _screenshot_impl(self, *, timeout_seconds: float | None = None) -> bytes:
         session = self._require_session()
-        control = self._operation_control(timeout_seconds, cancellation=self._operation_cancellation) if timeout_seconds is not None else self._ActionControl(self)
-        data = session.device.take_screenshot(control=control)
-        if isinstance(data, bytes) and data:
-            return data
+        budget = timeout_seconds if timeout_seconds is not None else max(5.0, float(self.action_timeout_seconds) + 5.0)
+        fallback_allowed = self._can_use_native_screencapture_fallback(timeout_seconds=timeout_seconds)
+        deadline = time.monotonic() + budget
+        control = self._operation_control(budget / 2 if fallback_allowed else budget, cancellation=self._operation_cancellation)
+        try:
+            data = session.device.take_screenshot(control=control)
+            if isinstance(data, bytes) and data:
+                return data
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            if fallback_allowed:
+                fallback_png = self._capture_native_macos_screenshot(timeout_seconds=deadline - time.monotonic())
+                if fallback_png is not None:
+                    if self._session_state(session) == "uncertain" and getattr(exc, "code", None) == "operation_timeout":
+                        self._uncertain_from_timeout = True
+                    return fallback_png
+            raise
+        if fallback_allowed:
+            fallback_png = self._capture_native_macos_screenshot(timeout_seconds=deadline - time.monotonic())
+            if fallback_png is not None:
+                return fallback_png
         raise ToolExecutionError(
             "Appium Mac2 screenshot capture returned no image.",
             context={"capture_diagnostics": self._safe_diagnostics(stage="screenshot")},
         )
+
+    def _can_use_native_screencapture_fallback(self, *, timeout_seconds: float | None) -> bool:
+        if not self._native_ax_mode or self._borrowed_session or sys.platform != "darwin":
+            return False
+        return timeout_seconds is None or timeout_seconds >= 1.0
+
+    def _capture_native_macos_screenshot(self, *, timeout_seconds: float) -> bytes | None:
+        screencapture_exe = "/usr/sbin/screencapture"
+        if timeout_seconds <= 0 or (self._operation_cancellation is not None and self._operation_cancellation.is_set()):
+            return None
+        effective_timeout = min(timeout_seconds, 15.0)
+        fd, tmp_name = tempfile.mkstemp(prefix="fsq-macos-shot-", suffix=".png")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed system executable without shell.
+                [str(screencapture_exe), "-x", "-t", "png", str(tmp_path)],
+                capture_output=True,
+                timeout=effective_timeout,
+                check=False,
+            )
+            if proc.returncode != 0 or not tmp_path.is_file():
+                return None
+            payload = tmp_path.read_bytes()
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        else:
+            return payload if len(payload) > 8 and payload.startswith(b"\x89PNG\r\n\x1a\n") else None
+        finally:
+            with suppress(OSError):
+                tmp_path.unlink()
 
     def _ensure_session(self, params: MacOSLaunchAppParams | None = None) -> Any:
         if self._closed:
@@ -1513,7 +1917,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         if self._session is not None and not self._session_is_active(self._session):
             if not params.new_session:
                 if not self._try_recover_uncertain_owned_session():
-                    if not self._borrowed_session:
+                    if not self._borrowed_session and not self._recoverable_session_loss:
                         self._cleanup_pending = True
                     raise ToolExecutionError(
                         "Appium Mac2 session is no longer active.",
@@ -1531,13 +1935,37 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 self._close_owned_resources_for_recreation()
             return self._create_session(params)
         has_launch_arguments = bool(params.arguments)
+        if not params.new_session and not has_launch_arguments and not self._borrowed_session:
+            requested_bundle, requested_path = self._resolve_activation_identity(params)
+            if requested_bundle != self._active_bundle_id or self._native_ax_mode:
+                wants_fallback = not params.app_path and self._can_use_finder_anchored_native_ax(effective_arguments=None, inferred_target_bundle=requested_bundle)
+                if wants_fallback != self._native_ax_mode:
+                    params = params.model_copy(update={"new_session": True, "bundle_id": requested_bundle, "app_path": requested_path})
         if params.new_session:
             target_bundle, target_app_path = self._require_creation_identity(params, replacing_borrowed=self._borrowed_session)
             resolved_target_bundle = target_bundle or (_bundle_id_from_app_path(_resolve_app_bundle_path(target_app_path)) if target_app_path else None)
             if (
+                self._native_ax_mode
+                and not self._borrowed_session
+                and not has_launch_arguments
+                and target_app_path is None
+                and self._can_use_finder_anchored_native_ax(effective_arguments=None, inferred_target_bundle=resolved_target_bundle)
+                and self._probe_session_healthy_for_same_bundle_reuse(self._session)
+            ):
+                activate_timeout = max(DEFAULT_MACOS_ACTIVATE_TIMEOUT_SECONDS, float(self.action_timeout_seconds) + 5.0)
+                if resolved_target_bundle is not None:
+                    self._activate_bundle_in_session(resolved_target_bundle, timeout_seconds=activate_timeout)
+                elif target_app_path is not None:
+                    self._activate_unbundled_app_path(target_app_path, timeout_seconds=activate_timeout)
+                if target_app_path is not None:
+                    self._session_app_path = target_app_path
+                return self._session
+            if (
                 not has_launch_arguments
                 and resolved_target_bundle is not None
                 and self._active_bundle_id == resolved_target_bundle
+                and not self._native_ax_mode
+                and (target_app_path is None or target_app_path == self._session_app_path)
                 and self._probe_session_healthy_for_same_bundle_reuse(self._session)
             ):
                 self._activate_bundle_in_session(resolved_target_bundle)
@@ -1586,6 +2014,13 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
     def _activate_bundle_in_session(self, bundle_id: str, *, timeout_seconds: float | None = None) -> None:
         effective_timeout = timeout_seconds if timeout_seconds is not None else max(DEFAULT_MACOS_ACTIVATE_TIMEOUT_SECONDS, float(self.action_timeout_seconds) + 5.0)
+        if self._native_ax_mode and not self._borrowed_session:
+            try:
+                _activate_macos_app_native(bundle_id, timeout_seconds=effective_timeout, cancellation=self._operation_cancellation)
+            except Exception as exc:
+                raise ToolExecutionError("macOS native application activation failed.", context={"stage": "launch_app", "cause": exc}) from exc
+            self._active_bundle_id = bundle_id
+            return
         try:
             self._session.device.activate_app(
                 bundle_id,
@@ -1647,6 +2082,11 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         parameters = inspect.signature(create_mac2_session).parameters
         return "skip_app_kill" in parameters or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
 
+    def _can_use_finder_anchored_native_ax(self, *, effective_arguments: list[str] | None, inferred_target_bundle: str | None) -> bool:
+        if not self.skip_app_kill or self._borrowed_session or sys.platform != "darwin" or effective_arguments is not None or inferred_target_bundle not in self._native_ax_fallback_bundles:
+            return False
+        return _macos_ax_process_trusted()
+
     def _note_operation_timeout(self, exc: BaseException | None) -> None:
         if self._borrowed_session or self._session is None or exc is None:
             return
@@ -1656,6 +2096,39 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             code = getattr(cause, "code", None)
         if code == "operation_timeout" and self._session_state(self._session) == "uncertain":
             self._uncertain_from_timeout = True
+
+    def _owned_resources_cleanly_released(self) -> bool:
+        return self._session is None and self._managed_scope is None and self._runtime is None and self._connection is None and not self._cleanup_pending
+
+    def _try_recover_session_from_saved_identity(self) -> bool:
+        recovery_bundle = self._active_bundle_id or (None if self.bundle_id in {None, "auto"} else self.bundle_id)
+        recovery_app_path = self._session_app_path
+        if recovery_bundle is None and recovery_app_path is None:
+            return False
+        try:
+            if self._session is not None or self._managed_scope is not None or self._runtime is not None or self._connection is not None:
+                self._close_owned_resources_for_recreation()
+        except Exception as exc:  # noqa: BLE001
+            self._propagate_if_cancelled(exc)
+            self._cleanup_pending = True
+            self._recoverable_session_loss = False
+            return False
+        try:
+            self._create_session(MacOSLaunchAppParams(bundle_id=recovery_bundle, app_path=recovery_app_path, new_session=True))
+        except Exception as exc:  # noqa: BLE001
+            if self.skip_app_kill and self._owned_resources_cleanly_released():
+                self._recoverable_session_loss = True
+                self._cleanup_pending = False
+            else:
+                self._cleanup_pending = True
+                self._recoverable_session_loss = False
+            self._propagate_if_cancelled(exc)
+            return False
+        if self._session is not None and self._session_is_active(self._session):
+            self._recoverable_session_loss = False
+            self._last_operation_finished_at = time.monotonic()
+            return True
+        return False
 
     def _try_recover_uncertain_owned_session(self) -> bool:
         session = self._session
@@ -1675,21 +2148,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             return False
         if self._runtime is None and self._managed_scope is None and self._connection is None:
             return False
-        recovery_bundle = self._active_bundle_id or (None if self.bundle_id in {None, "auto"} else self.bundle_id)
-        recovery_app_path = self._session_app_path or self.app_path
-        if recovery_bundle is None and recovery_app_path is None:
-            return False
-        try:
-            self._close_owned_resources_for_recreation()
-            self._create_session(MacOSLaunchAppParams(bundle_id=recovery_bundle, app_path=recovery_app_path, new_session=True))
-        except Exception as exc:  # noqa: BLE001
-            self._propagate_if_cancelled(exc)
-            self._cleanup_pending = True
-            return False
-        if self._session is not None and self._session_is_active(self._session):
-            self._last_operation_finished_at = time.monotonic()
-            return True
-        return False
+        return self._try_recover_session_from_saved_identity()
 
     def _create_session(self, params: MacOSLaunchAppParams) -> Any:
         pending_identity = getattr(self, "_pending_creation_identity", None)
@@ -1711,9 +2170,16 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             raise ConfigurationError("macOS new_command_timeout_seconds must be between 0 and 86400 seconds or None.")
         if type(self.skip_app_kill) is not bool:
             raise ConfigurationError("macOS skip_app_kill must be a boolean.")
+        effective_arguments = params.arguments if params.arguments else None
+        use_finder_anchored_ax = resolved_app_path is None and self._can_use_finder_anchored_native_ax(
+            effective_arguments=effective_arguments,
+            inferred_target_bundle=inferred_target_bundle,
+        )
+
         session_kwargs: dict[str, Any] = {}
         parameters = inspect.signature(create_mac2_session).parameters
-        supports_skip_app_kill = "skip_app_kill" in parameters or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+        has_var_kw = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+        supports_skip_app_kill = "skip_app_kill" in parameters or has_var_kw
         if supports_skip_app_kill:
             session_kwargs["skip_app_kill"] = self.skip_app_kill
         elif self.skip_app_kill is False:
@@ -1754,6 +2220,11 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     self._cleanup_pending = False
                     last_port_error = exc
                     continue
+                if not runtime.managed_cleanup_pending:
+                    self._managed_scope = None
+                    self._runtime = None
+                    self._scope_exit_attempted = False
+                    self._cleanup_pending = False
                 raise
 
         if scope is None or connection is None:
@@ -1761,14 +2232,16 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if last_port_error is not None:
                 raise last_port_error
             raise ConfigurationError("Failed to bind a managed Appium loopback port.")
-        effective_arguments = params.arguments if params.arguments else None
-        if effective_arguments is None and inferred_target_bundle is not None and _is_macos_bundle_running(inferred_target_bundle):
+
+        wda_bundle_id = MACOS_FALLBACK_FRONTMOST_BUNDLE if use_finder_anchored_ax else bundle_id
+        wda_app_path = None if use_finder_anchored_ax else resolved_app_path
+        if not use_finder_anchored_ax and effective_arguments is None and inferred_target_bundle is not None and _is_macos_bundle_running(inferred_target_bundle):
             _preactivate_running_macos_bundle(inferred_target_bundle)
         try:
             session = create_mac2_session(
                 connection,
-                bundle_id=bundle_id,
-                app_path=resolved_app_path,
+                bundle_id=wda_bundle_id,
+                app_path=wda_app_path,
                 arguments=effective_arguments,
                 no_reset=True,
                 new_command_timeout_seconds=effective_new_command_timeout,
@@ -1784,6 +2257,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 self._connection = connection
                 self._session = uncertain_session
                 self._uncertain_from_timeout = False
+                self._recoverable_session_loss = False
                 self._cleanup_pending = True
                 raise
             try:
@@ -1810,19 +2284,31 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             self._cleanup_pending = False
             raise
 
-        inferred_bundle = inferred_target_bundle
         self._borrowed_session = False
         self._runtime = runtime
         self._managed_scope = scope
         self._connection = connection
         self._session = session
-        self._active_bundle_id = inferred_bundle
+        self._wda_host_bundle_id = MACOS_FALLBACK_FRONTMOST_BUNDLE if use_finder_anchored_ax else inferred_target_bundle
+        self._native_ax_mode = use_finder_anchored_ax
+        self._active_bundle_id = inferred_target_bundle
         self._session_app_path = app_path
         self._uncertain_from_timeout = False
+        self._recoverable_session_loss = False
         self._session_settled = False
         self._scope_exit_attempted = False
         self._cleanup_primary = None
         self._cleanup_pending = False
+
+        if use_finder_anchored_ax and inferred_target_bundle is not None:
+            # Foreground the logical target app AFTER Finder WDA initialization so Finder never steals focus!
+            activate_timeout = max(DEFAULT_MACOS_ACTIVATE_TIMEOUT_SECONDS, float(self.action_timeout_seconds) + 5.0)
+            try:
+                self._activate_bundle_in_session(inferred_target_bundle, timeout_seconds=activate_timeout)
+            except BaseException:
+                with suppress(BaseException):
+                    self._close_owned_resources_for_recreation()
+                raise
         return session
 
     def _require_creation_identity(
@@ -1832,7 +2318,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         replacing_borrowed: bool = False,
     ) -> tuple[str | None, str | None]:
         raw_param_bundle = params.bundle_id.strip() if isinstance(params.bundle_id, str) and params.bundle_id.strip() else None
-        app_path = self._effective_app_path(params.app_path)
+        app_path = params.app_path if raw_param_bundle is not None else self._effective_app_path(params.app_path)
         if raw_param_bundle is not None:
             if raw_param_bundle.casefold() == "auto":
                 return _detect_frontmost_macos_bundle_id(), app_path
@@ -1875,12 +2361,12 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             )
         if param_bundle is not None:
             if param_bundle.casefold() == "auto":
-                return _detect_frontmost_macos_bundle_id(), self._effective_app_path(None)
+                return _detect_frontmost_macos_bundle_id(), None
             resolved_installed = _resolve_installed_bundle_identifier(param_bundle)
             if resolved_installed is not None:
-                return resolved_installed, self._effective_app_path(None)
+                return resolved_installed, None
             if MACOS_BUNDLE_ID_SYNTAX.fullmatch(param_bundle) and "." in param_bundle:
-                return param_bundle, self._effective_app_path(None)
+                return param_bundle, None
             raise ConfigurationError(
                 f"Could not resolve macOS application '{param_bundle}' to an installed CFBundleIdentifier.",
             )
@@ -1936,13 +2422,20 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 context={"reason": "cleanup_pending", **self._safe_diagnostics(stage="require_session")},
             )
         if self._session is None:
+            if self._recoverable_session_loss and not self._borrowed_session and self.skip_app_kill and self._sdk_supports_skip_app_kill():
+                if self._try_recover_session_from_saved_identity() and self._session is not None:
+                    return self._session
+                raise ToolExecutionError(
+                    "Appium Mac2 session is unavailable after failed recovery.",
+                    context={"reason": "session_unavailable", **self._safe_diagnostics(stage="require_session")},
+                )
             raise ConfigurationError(
                 "Appium Mac2 session is not available. Call launchApp before macOS Appium actions.",
                 context={"resolution_reason": "session_unavailable"},
             )
         if not self._session_is_active(self._session):
             if not self._try_recover_uncertain_owned_session():
-                if not self._borrowed_session:
+                if not self._borrowed_session and not self._recoverable_session_loss:
                     self._cleanup_pending = True
                 raise ToolExecutionError(
                     "Appium Mac2 session is no longer active.",
@@ -1968,7 +2461,8 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             if self.skip_app_kill and self._sdk_supports_skip_app_kill() and self._try_replace_failed_idle_session():
                 self._last_operation_finished_at = time.monotonic()
                 return
-            self._cleanup_pending = True
+            if not self._recoverable_session_loss:
+                self._cleanup_pending = True
             raise ToolExecutionError(
                 "Appium Mac2 session liveness probe failed; session requires cleanup or replacement.",
                 context={"reason": "session_unavailable", "stage": "ensure_alive", "cause": exc},
@@ -1977,20 +2471,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
     def _try_replace_failed_idle_session(self) -> bool:
         if self._runtime is None and self._managed_scope is None and self._connection is None:
             return False
-        recovery_bundle = self._active_bundle_id or (None if self.bundle_id in {None, "auto"} else self.bundle_id)
-        recovery_app_path = self._session_app_path or self.app_path
-        if recovery_bundle is None and recovery_app_path is None:
-            return False
-        try:
-            self._close_owned_resources_for_recreation()
-            self._create_session(MacOSLaunchAppParams(bundle_id=recovery_bundle, app_path=recovery_app_path, new_session=True))
-        except Exception as exc:  # noqa: BLE001
-            self._propagate_if_cancelled(exc)
-            return False
-        if self._session is not None and self._session_is_active(self._session):
-            self._last_operation_finished_at = time.monotonic()
-            return True
-        return False
+        return self._try_recover_session_from_saved_identity()
 
     @staticmethod
     def _has_semantic_target(params: BaseModel) -> bool:
@@ -2043,6 +2524,9 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         ):
             return None
 
+        if self._native_ax_mode:
+            return self._resolve_native_ax_element(locator)
+
         by, query_value, extra_predicate = self._build_session_locator_query(locator)
         try:
             element = session.element(by, query_value, predicate=extra_predicate)
@@ -2067,6 +2551,163 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     raise _AmbiguousResolutionError(candidates, cause=exc) from None
             self._raise_resolution_error(exc)
         return element
+
+    def _native_ax_candidate_bundles(self, *, preferred_bundle_id: str | None = None) -> tuple[str, ...]:
+        frontmost = _detect_frontmost_macos_bundle_id(timeout_seconds=2.5)
+        # Device input goes to the foreground desktop, not to the observed PID.
+        if frontmost != self._active_bundle_id:
+            raise ToolExecutionError("The logical macOS application is not foreground.")
+        return (frontmost,) if preferred_bundle_id in {None, frontmost} else ()
+
+    def _observe_native_ax_tree_for_bundle(self, bundle_id: str, *, max_depth: int = 24, max_nodes: int = 1200) -> Any | None:
+        try:
+            return _observe_macos_ax_tree(
+                bundle_id=bundle_id,
+                max_nodes=max_nodes,
+                max_depth=max_depth,
+                control=self._ActionControl(self),
+            )
+        except Exception as exc:
+            self._propagate_if_cancelled(exc)
+            code = getattr(exc, "code", None)
+            if isinstance(exc, PermissionError):
+                raise ToolExecutionError("Accessibility trust was lost; explicitly relaunch the macOS session.") from exc
+            if code == "target_not_found":
+                return None
+            self._raise_resolution_error(exc)
+        return None
+
+    def _observe_native_ax_tree_or_none(self, *, max_depth: int = 24, max_nodes: int = 1200, preferred_bundle_id: str | None = None) -> Any | None:
+        for bundle_id in self._native_ax_candidate_bundles(preferred_bundle_id=preferred_bundle_id):
+            obs = self._observe_native_ax_tree_for_bundle(bundle_id, max_depth=max_depth, max_nodes=max_nodes)
+            if obs is not None and getattr(obs, "roots", ()):
+                return obs
+        return None
+
+    def _match_native_ax_nodes_in_observation(self, observation: Any, locator: MacOSLocator) -> list[tuple[Any, ElementTree.Element]]:
+        roots = getattr(observation, "roots", ())
+        if not roots:
+            return []
+        node_by_xml: dict[int, Any] = {}
+
+        def build_mapped_xml(t_node: Any) -> ElementTree.Element:
+            type_obs = getattr(t_node, "type", None)
+            tag = type_obs.value if getattr(type_obs, "state", None) == "value" and isinstance(type_obs.value, str) and type_obs.value else "XCUIElementTypeAny"
+            attribs: dict[str, str] = {}
+            for attr_field, xml_name in (
+                ("id", "identifier"),
+                ("label", "label"),
+                ("title", "title"),
+                ("value", "value"),
+                ("placeholder_value", "placeholderValue"),
+            ):
+                obs = getattr(t_node, attr_field, None)
+                if getattr(obs, "state", None) == "value" and isinstance(obs.value, str) and obs.value:
+                    attribs[xml_name] = obs.value
+            element_type_obs = getattr(t_node, "element_type", None)
+            if getattr(element_type_obs, "state", None) == "value" and _is_strict_int(element_type_obs.value):
+                attribs["elementType"] = str(element_type_obs.value)
+            for bool_field in ("enabled", "selected", "focused"):
+                obs = getattr(t_node, bool_field, None)
+                if getattr(obs, "state", None) == "value" and type(obs.value) is bool:
+                    attribs[bool_field] = "true" if obs.value else "false"
+            visibility = getattr(t_node, "visibility", None)
+            if visibility == "not_visible":
+                attribs["visible"] = "false"
+            elif visibility in {"visible", "partially_visible"}:
+                attribs["visible"] = "true"
+            bounds_obs = getattr(t_node, "bounds", None)
+            bounds_val = getattr(bounds_obs, "value", None) if getattr(bounds_obs, "state", None) == "value" else None
+            if bounds_val is not None and all(hasattr(bounds_val, key) for key in ("x", "y", "width", "height")):
+                attribs["x"] = str(int(bounds_val.x))
+                attribs["y"] = str(int(bounds_val.y))
+                attribs["width"] = str(int(bounds_val.width))
+                attribs["height"] = str(int(bounds_val.height))
+            extra_attrs = getattr(t_node, "extra_attributes", None)
+            if isinstance(extra_attrs, dict):
+                for key, raw_val in extra_attrs.items():
+                    if isinstance(key, str) and key not in attribs and raw_val is not None:
+                        attribs[key] = str(raw_val)
+            xml_el = ElementTree.Element(tag, attribs)
+            raw_text = getattr(t_node, "raw_text", None)
+            text_obs = getattr(t_node, "text", None)
+            if getattr(text_obs, "state", None) == "value" and not self._is_secure_text_type(tag):
+                raw_text = text_obs.value
+            if isinstance(raw_text, str) and raw_text:
+                xml_el.text = raw_text
+            node_by_xml[id(xml_el)] = t_node
+            for child in getattr(t_node, "children", ()):
+                xml_el.append(build_mapped_xml(child))
+            return xml_el
+
+        xml_root = build_mapped_xml(roots[0])
+        xpath_allowed_ids: set[int] | None = None
+        if locator.xpath:
+            source_by_xpath_node: dict[Any, ElementTree.Element] = {}
+
+            def xpath_tree(source: ElementTree.Element) -> Any:
+                node = etree.Element(source.tag, attrib=source.attrib)
+                node.text = source.text
+                source_by_xpath_node[node] = source
+                node.extend(xpath_tree(child) for child in source)
+                return node
+
+            try:
+                results = xpath_tree(xml_root).xpath(locator.xpath, smart_strings=False)
+            except (etree.XPathError, ValueError) as exc:
+                raise ConfigurationError("macOS element lookup failed: invalid_locator.", context={"resolution_reason": "invalid_locator"}) from exc
+            if not isinstance(results, list) or any(not isinstance(node, etree._Element) or node not in source_by_xpath_node for node in results):
+                raise ConfigurationError("macOS XPath must select elements.", context={"resolution_reason": "invalid_locator"})
+            xpath_allowed_ids = {id(source_by_xpath_node[node]) for node in results}
+
+        matched: list[tuple[Any, ElementTree.Element]] = []
+        for xml_el in xml_root.iter():
+            if xpath_allowed_ids is not None and id(xml_el) not in xpath_allowed_ids:
+                continue
+            if not self._xml_node_matches_locator(xml_el, locator):
+                continue
+            if locator.predicate:
+                pred_ok = _eval_macos_predicate_on_xml_node(locator.predicate, xml_el)
+                if pred_ok is None:
+                    raise ConfigurationError("macOS element lookup failed: invalid_locator.", context={"resolution_reason": "invalid_locator"})
+                if not pred_ok:
+                    continue
+            t_node = node_by_xml.get(id(xml_el))
+            if t_node is not None:
+                matched.append((t_node, xml_el))
+        return matched
+
+    def _resolve_native_ax_node_once(self, locator: MacOSLocator, *, preferred_bundle_id: str | None = None) -> Any | None:
+        for bundle_id in self._native_ax_candidate_bundles(preferred_bundle_id=preferred_bundle_id):
+            obs = self._observe_native_ax_tree_for_bundle(bundle_id)
+            if obs is None:
+                continue
+            matches = self._match_native_ax_nodes_in_observation(obs, locator)
+            if not obs.complete_for_requested_scope:
+                return None
+            if len(matches) == 1:
+                return matches[0][0]
+            if len(matches) > 1:
+                return None
+        return None
+
+    def _resolve_native_ax_element(self, locator: MacOSLocator) -> _NativeAXElement | None:
+        for bundle_id in self._native_ax_candidate_bundles():
+            obs = self._observe_native_ax_tree_for_bundle(bundle_id)
+            if obs is None:
+                if not self._native_ax_mode:
+                    return self._element_from_locator(locator)
+                continue
+            matches = self._match_native_ax_nodes_in_observation(obs, locator)
+            if len(matches) < 2 and not obs.complete_for_requested_scope:
+                raise ToolExecutionError("Native AX capture was incomplete; target resolution is inconclusive.")
+            if len(matches) == 1:
+                t_node, _ = matches[0]
+                return _NativeAXElement(self, t_node, bundle_id=bundle_id, reanchor_locator=locator)
+            if len(matches) > 1:
+                candidates = [candidate(xml_el) for _, xml_el in matches[:5]]
+                raise _AmbiguousResolutionError(candidates)
+        return None
 
     def _intersect_xpath_and_predicate(self, session: Any, xpath_element: Any, locator: MacOSLocator) -> Any | None:
         if locator.predicate is None:
@@ -2275,8 +2916,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     return False
         return True
 
-    def _point_from_endpoint(self, endpoint: MacOSDragEndpoint) -> MacOSPoint | None:
-        element = self._resolve_element_or_none(endpoint)
+    def _point_from_endpoint(self, endpoint: MacOSDragEndpoint, element: Any | None) -> MacOSPoint | None:
         if element is not None:
             return self._element_center(element)
         if self._has_semantic_target(endpoint):
@@ -2346,6 +2986,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                         control=self._ActionControl(self),
                     )
                 else:
+                    self._verify_keyboard_foreground()
                     session.device.send_keys(chunk, control=self._ActionControl(self))
             except Exception as exc:  # noqa: BLE001
                 self._propagate_if_cancelled(exc)
@@ -2380,6 +3021,9 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         raise ToolExecutionError("Mac2 element cannot report visibility.", context={"stage": "assert_visible"})
 
     def _element_center(self, element: Any | None) -> MacOSPoint | None:
+        if isinstance(element, _NativeAXElement):
+            x, y = element._current_bounds_center()
+            return MacOSPoint(x=x, y=y)
         rect = self._element_rect(element)
         if rect is None:
             return None
@@ -2677,13 +3321,18 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         return value.rsplit("}", 1)[-1] if "}" in value else value
 
     def _viewport_size(self, session: Any) -> tuple[int, int] | None:
-        observe_fn = getattr(session, "observe_tree", None)
-        if not callable(observe_fn):
-            return None
-        try:
-            observation = observe_fn(control=self._ActionControl(self))
-        except Exception:  # noqa: BLE001
-            return None
+        observation: Any | None = None
+        if self._native_ax_mode:
+            with suppress(Exception):
+                observation = self._observe_native_ax_tree_or_none(max_depth=2, max_nodes=4)
+        if observation is None:
+            observe_fn = getattr(session, "observe_tree", None)
+            if not callable(observe_fn):
+                return None
+            try:
+                observation = observe_fn(control=self._ActionControl(self))
+            except Exception:  # noqa: BLE001
+                return None
         viewport = getattr(observation, "viewport", None)
         width_obs = getattr(viewport, "width", None)
         height_obs = getattr(viewport, "height", None)
@@ -2867,6 +3516,25 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         elem_type: str | None,
         bounds_tuple: tuple[int, int, int, int] | None,
     ) -> Any | None:
+        if self._native_ax_mode:
+            by_id_loc = MacOSLocator(accessibilityId=elem_id, controlType=elem_type)
+            try:
+                bound_native = self._resolve_native_ax_element(by_id_loc)
+                if bound_native is not None:
+                    return bound_native
+            except _AmbiguousResolutionError:
+                pass
+            if elem_type and bounds_tuple is not None:
+                bx, by, bw, bh = bounds_tuple
+                pred = (
+                    f"identifier == {_predicate_literal(elem_id)} AND amType == {_predicate_literal(elem_type)} "
+                    f"AND amRect.x == {bx} AND amRect.y == {by} AND amRect.width == {bw} AND amRect.height == {bh}"
+                )
+                try:
+                    return self._resolve_native_ax_element(MacOSLocator(predicate=pred))
+                except _AmbiguousResolutionError:
+                    return None
+            return None
         try:
             candidate_el = session.element("accessibility id", elem_id)
             obs_map = self._inspect_obs_map(candidate_el, ("type", "id", "bounds"), stage="identity_binding")
@@ -2895,6 +3563,11 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
     ) -> Any | None:
         bx, by, bw, bh = bounds_tuple
         predicate = f"amType == {_predicate_literal(elem_type)} AND amRect.x == {bx} AND amRect.y == {by} AND amRect.width == {bw} AND amRect.height == {bh}"
+        if self._native_ax_mode:
+            try:
+                return self._resolve_native_ax_element(MacOSLocator(predicate=predicate))
+            except _AmbiguousResolutionError:
+                return None
         return self._probe_bound_predicate_element(session, predicate, expected_id=None, expected_type=elem_type, expected_bounds=bounds_tuple)
 
     def _probe_bound_predicate_element(
@@ -3061,7 +3734,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             }
             or stage == "ensure_alive"
         ):
-            if not self._borrowed_session:
+            if not self._borrowed_session and not self._recoverable_session_loss:
                 self._cleanup_pending = True
             metadata["reason"] = "session_unavailable"
         return self._failed(failure_default, "macOS backend operation failed.", metadata=metadata)

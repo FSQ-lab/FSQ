@@ -1,0 +1,391 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+import ctypes
+import json
+import re
+import subprocess
+import sys
+import time
+from asyncio import CancelledError
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, fields
+from datetime import UTC, datetime
+from threading import Event
+from uuid import uuid4
+from xml.etree import ElementTree
+
+
+def _macos_ax_process_trusted() -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        framework = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        probe = framework.AXIsProcessTrusted
+    except (OSError, AttributeError):
+        return False
+    probe.argtypes = []
+    probe.restype = ctypes.c_bool
+    return bool(probe())
+
+
+# Only controls with known non-secret value semantics may trigger AXValue IPC.
+_READABLE_VALUE_TYPES = frozenset({("AXTextField", ""), ("AXTextArea", ""), ("AXStaticText", ""), ("AXTextField", "AXSearchField")})
+
+
+def _read_ax_identity_and_value(read: Callable[[str], str | None]) -> tuple[str | None, str | None, str | None]:
+    role = read("AXRole")
+    subrole = read("AXSubrole")
+    if role is None or subrole is None or (role, subrole) not in _READABLE_VALUE_TYPES:
+        return role, subrole, None
+    return role, subrole, read("AXValue")
+
+
+def _activate_macos_app_native(bundle_id: str, *, timeout_seconds: float, cancellation: Event | None) -> None:
+    deadline = time.monotonic() + timeout_seconds
+
+    def run(command: list[str]) -> str:
+        if cancellation is not None and cancellation.is_set():
+            raise CancelledError
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("macOS foreground activation timed out.")
+        return subprocess.run(command, capture_output=True, text=True, timeout=remaining, check=True).stdout.strip()  # noqa: S603
+
+    run(["/usr/bin/open", "-b", bundle_id])
+    while True:
+        front = run(["/usr/bin/lsappinfo", "front"])
+        if front.startswith("ASN:"):
+            identity = run(["/usr/bin/lsappinfo", "info", "-only", "bundleid", front])
+            if identity == f'"CFBundleIdentifier"="{bundle_id}"':
+                return
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+
+class _AXPair(ctypes.Structure):
+    _fields_ = [("first", ctypes.c_double), ("second", ctypes.c_double)]
+
+
+class _AX:
+    def __init__(self) -> None:
+        ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        ptr = ctypes.c_void_p
+        integer = ctypes.c_int
+        self.application = self._bind(ax, "AXUIElementCreateApplication", ptr, integer)
+        self.system = self._bind(ax, "AXUIElementCreateSystemWide", ptr)
+        self.timeout = self._bind(ax, "AXUIElementSetMessagingTimeout", integer, ptr, ctypes.c_float)
+        self.copy = self._bind(ax, "AXUIElementCopyAttributeValue", integer, ptr, ptr, ctypes.POINTER(ptr))
+        self.hit = self._bind(ax, "AXUIElementCopyElementAtPosition", integer, ptr, ctypes.c_float, ctypes.c_float, ctypes.POINTER(ptr))
+        self.pair = self._bind(ax, "AXValueGetValue", ctypes.c_bool, ptr, integer, ctypes.POINTER(_AXPair))
+        self.string = self._bind(cf, "CFStringCreateWithCString", ptr, ptr, ctypes.c_char_p, ctypes.c_uint32)
+        self.string_type = self._bind(cf, "CFStringGetTypeID", ctypes.c_ulong)()
+        self.array_type = self._bind(cf, "CFArrayGetTypeID", ctypes.c_ulong)()
+        self.type = self._bind(cf, "CFGetTypeID", ctypes.c_ulong, ptr)
+        self.decode = self._bind(cf, "CFStringGetCString", ctypes.c_bool, ptr, ptr, ctypes.c_long, ctypes.c_uint32)
+        self.count = self._bind(cf, "CFArrayGetCount", ctypes.c_long, ptr)
+        self.item = self._bind(cf, "CFArrayGetValueAtIndex", ptr, ptr, ctypes.c_long)
+        self.release = self._bind(cf, "CFRelease", None, ptr)
+        self.retain = self._bind(cf, "CFRetain", ptr, ptr)
+        self.equal = self._bind(cf, "CFEqual", ctypes.c_bool, ptr, ptr)
+        self.true = ptr.in_dll(cf, "kCFBooleanTrue")
+
+    @staticmethod
+    def _bind(library, name, result, *args):
+        function = getattr(library, name)
+        function.restype = result
+        function.argtypes = args
+        return function
+
+    def attribute(self, element: int, name: str) -> tuple[int, int | None]:
+        key = self.string(None, name.encode(), 0x08000100)
+        if not key:
+            raise MemoryError
+        try:
+            value = ctypes.c_void_p()
+            status = self.copy(element, key, ctypes.byref(value))
+            return status, value.value
+        finally:
+            self.release(key)
+
+    def text(self, element: int, name: str) -> str | None:
+        status, value = self.attribute(element, name)
+        if not value:
+            return "" if name == "AXSubrole" and status in {-25205, -25212} else None
+        try:
+            if self.type(value) != self.string_type:
+                return None
+            data = ctypes.create_string_buffer(65_536)
+            return data.value.decode("utf-8") if self.decode(value, data, len(data), 0x08000100) else None
+        finally:
+            self.release(value)
+
+    def bounds(self, element: int) -> tuple[int, int, int, int] | None:
+        geometry = []
+        for attribute, kind in (("AXPosition", 1), ("AXSize", 2)):
+            _, value = self.attribute(element, attribute)
+            if not value:
+                return None
+            try:
+                pair = _AXPair()
+                if not self.pair(value, kind, ctypes.byref(pair)):
+                    return None
+                geometry.extend((round(pair.first), round(pair.second)))
+            finally:
+                self.release(value)
+        return tuple(geometry)
+
+
+class _AXHandle:
+    def __init__(self, backend: _AX, element: int) -> None:
+        self.backend = backend
+        self.element = backend.retain(element)
+
+    def __del__(self) -> None:
+        self.backend.release(self.element)
+
+
+def _frontmost_pid(bundle_id: str) -> int:
+    front = subprocess.run(["/usr/bin/lsappinfo", "front"], capture_output=True, text=True, timeout=1, check=True).stdout.strip()
+    info = subprocess.run(  # noqa: S603
+        ["/usr/bin/lsappinfo", "info", "-only", "bundleid", "-only", "pid", front], capture_output=True, text=True, timeout=1, check=True
+    ).stdout
+    pid = re.search(r'"pid"\s*=\s*(\d+)', info)
+    identity = re.search(r'"CFBundleIdentifier"\s*=\s*"([^"]+)"', info)
+    if pid is None or identity is None or identity.group(1) != bundle_id or int(pid.group(1)) <= 0:
+        raise RuntimeError("The requested AX application is not foreground.")
+    return int(pid.group(1))
+
+
+def _verify_ax_focus(handle: _AXHandle | None) -> bool:
+    if handle is None:
+        return False
+    ax = handle.backend
+    system = ax.system()
+    if not system:
+        return False
+    try:
+        ax.timeout(system, 0.25)
+        _, focused = ax.attribute(system, "AXFocusedUIElement")
+        if not focused:
+            return False
+        try:
+            return bool(ax.equal(focused, handle.element))
+        finally:
+            ax.release(focused)
+    finally:
+        ax.release(system)
+
+
+def _verify_ax_point_hit(handle: _AXHandle | None, x: int, y: int) -> bool:
+    if handle is None:
+        return False
+    ax = handle.backend
+    system = ax.system()
+    if not system:
+        return False
+    hit = ctypes.c_void_p()
+    try:
+        ax.timeout(system, 0.25)
+        if ax.hit(system, x, y, ctypes.byref(hit)) != 0:
+            return False
+    finally:
+        ax.release(system)
+    current = hit.value
+    try:
+        for _ in range(32):
+            if not current:
+                break
+            if ax.equal(current, handle.element):
+                return True
+            _, parent = ax.attribute(current, "AXParent")
+            ax.release(current)
+            current = parent
+        return False
+    finally:
+        if current:
+            ax.release(current)
+
+
+_AX_TO_XCUI = {
+    "AXApplication": "Application",
+    "AXWindow": "Window",
+    "AXSheet": "Sheet",
+    "AXButton": "Button",
+    "AXTextField": "TextField",
+    "AXTextArea": "TextArea",
+    "AXStaticText": "StaticText",
+    "AXGroup": "Group",
+    "AXScrollArea": "ScrollView",
+    "AXMenuBar": "MenuBar",
+    "AXMenuBarItem": "MenuBarItem",
+    "AXMenu": "Menu",
+    "AXMenuItem": "MenuItem",
+    "AXCheckBox": "CheckBox",
+    "AXRadioButton": "RadioButton",
+    "AXPopUpButton": "PopUpButton",
+    "AXTabGroup": "TabGroup",
+    "AXTable": "Table",
+    "AXRow": "Row",
+    "AXCell": "Cell",
+    "AXOutline": "Outline",
+    "AXToolbar": "Toolbar",
+    "AXWebArea": "WebArea",
+}
+
+
+def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, control=None):
+    from appium_connect_agent.automation import Bounds, ObservationScope, ObservedValue, SourceMetadata, TreeNode, TreeObservation, Viewport
+
+    @dataclass(frozen=True, slots=True)
+    class NativeNode(TreeNode):
+        extra_attributes: dict[str, str] | None = None
+        handle: _AXHandle | None = None
+
+    @dataclass(frozen=True, slots=True)
+    class NativeObservation(TreeObservation):
+        raw_xml: bytes = b""
+
+    unknown = ObservedValue("unknown")
+    na = ObservedValue("not_applicable")
+
+    def project(node: NativeNode):
+        xml = ElementTree.Element(node.type.value or "XCUIElementTypeAny", node.extra_attributes or {})
+        payload = {}
+        for field in fields(TreeNode):
+            name = field.name
+            data = getattr(node, name)
+            if name == "children":
+                payload[name] = []
+                for child in data:
+                    child_data, child_xml = project(child)
+                    payload[name].append(child_data)
+                    xml.append(child_xml)
+            elif isinstance(data, ObservedValue):
+                payload[name] = asdict(data)
+                if data.state == "value" and name != "type":
+                    if isinstance(data.value, Bounds):
+                        xml.attrib.update({key: str(value) for key, value in asdict(data.value).items()})
+                    elif name == "text":
+                        xml.text = str(data.value)
+                    else:
+                        xml.set({"id": "identifier", "placeholder_value": "placeholderValue"}.get(name, name), str(data.value))
+            else:
+                payload[name] = data
+        return payload, xml
+
+    if not _macos_ax_process_trusted():
+        raise PermissionError("macOS Accessibility trust is required.")
+    deadline = time.monotonic() + (control.timeout_seconds if control is not None else 10)
+    pid = _frontmost_pid(bundle_id)
+    ax = _AX()
+    app = ax.application(pid)
+    if not app:
+        raise RuntimeError("Cannot bind foreground accessibility application.")
+    count = 0
+    complete = True
+
+    def observed(value):
+        return ObservedValue("missing") if value is None else ObservedValue("value", value)
+
+    def visit(element: int, depth: int, ancestors: tuple[int, ...]):
+        nonlocal count, complete
+        if control is not None and control.cancellation is not None and control.cancellation.is_set():
+            raise CancelledError
+        if depth > max_depth or count >= max_nodes or time.monotonic() >= deadline:
+            complete = False
+            return None
+        if any(ax.equal(element, parent) for parent in ancestors):
+            complete = False
+            return None
+        count += 1
+        role, subrole, value = _read_ax_identity_and_value(lambda name: ax.text(element, name))
+        kind = "SecureTextField" if subrole == "AXSecureTextField" else _AX_TO_XCUI.get(role, "Any")
+        geometry = ax.bounds(element)
+        visible = geometry is not None and geometry[2] > 0 and geometry[3] > 0
+        children = []
+        status, collection = ax.attribute(element, "AXChildren")
+        if status not in {0, -25205, -25212}:
+            complete = False
+        if collection:
+            try:
+                if ax.type(collection) != ax.array_type:
+                    complete = False
+                else:
+                    for index in range(ax.count(collection)):
+                        child = ax.item(collection, index)
+                        result = visit(child, depth + 1, (*ancestors, element)) if child else None
+                        if result is None:
+                            complete = False
+                            break
+                        children.append(result)
+            finally:
+                ax.release(collection)
+        _, enabled = ax.attribute(element, "AXEnabled")
+        try:
+            enabled_value = None if enabled is None else ax.equal(enabled, ax.true)
+        finally:
+            if enabled:
+                ax.release(enabled)
+        return NativeNode(
+            type=observed("XCUIElementType" + kind) if kind != "Any" and subrole is not None else unknown,
+            id=observed(ax.text(element, "AXIdentifier")),
+            label=observed(ax.text(element, "AXDescription")),
+            title=observed(ax.text(element, "AXTitle")),
+            placeholder_value=observed(ax.text(element, "AXPlaceholderValue")),
+            value=observed(value),
+            text=observed(value),
+            enabled=observed(enabled_value),
+            bounds=observed(Bounds(*geometry) if geometry is not None else None),
+            visibility="visible" if visible else "unknown",
+            children=tuple(children),
+            desc=na,
+            package=na,
+            focused=unknown,
+            checked=na,
+            selected=unknown,
+            viewport_relation="unknown",
+            window_id=na,
+            extra_attributes={"role": role} if role else {},
+            handle=_AXHandle(ax, element),
+        )
+
+    try:
+        ax.timeout(app, 0.25)
+        root = visit(app, 1, ())
+        if _frontmost_pid(bundle_id) != pid:
+            raise RuntimeError("macOS foreground application changed during AX capture.")
+    finally:
+        ax.release(app)
+    observed_at = datetime.now(UTC)
+    operation_id = uuid4().hex
+    scope = ObservationScope("root", None, None)
+    source = SourceMetadata(False, True, max_depth)
+    viewport = Viewport(unknown, unknown, unknown)
+    coverage = "requested_scope" if complete else "visible_with_ancestors"
+    payload, xml = project(root) if root is not None else (None, None)
+    document = {
+        "schema": 1,
+        "kind": "tree",
+        "operation_id": operation_id,
+        "observed_at": observed_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "scope": asdict(scope),
+        "source": asdict(source),
+        "coverage": coverage,
+        "complete_for_requested_scope": complete,
+        "upstream_completeness": "unknown",
+        "payload": {"roots": [payload] if root is not None else [], "viewport": asdict(viewport)},
+    }
+    return NativeObservation(
+        operation_id,
+        observed_at,
+        scope,
+        coverage,
+        complete,
+        "unknown",
+        source,
+        viewport,
+        (root,) if root is not None else (),
+        json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode(),
+        ElementTree.tostring(xml, encoding="utf-8") if xml is not None else b"",
+    )

@@ -165,6 +165,8 @@ def managed_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pyt
 
     from fsq_agent.drivers.macos import _appium_connect
 
+    monkeypatch.setattr(_appium_connect, "_macos_ax_process_trusted", lambda: False)
+
     home = tmp_path.resolve() / "account"
     home.mkdir(mode=0o700)
     monkeypatch.setattr(_coordination, "_account_home", lambda: home)
@@ -411,7 +413,7 @@ def test_macos_real_action_timeout_quarantines_when_skip_app_kill_false_and_prob
     assert driver._executor is None
 
 
-def test_macos_real_action_timeout_self_heals_via_ensure_alive_and_replaces_losslessly_when_probe_dead(managed_driver: _IsolatedManagedMacDriver) -> None:
+def test_macos_real_action_timeout_replaces_uncertain_session_losslessly(managed_driver: _IsolatedManagedMacDriver) -> None:
     managed_driver.mode("serve")
     driver = managed_driver.driver
     assert driver.skip_app_kill is True
@@ -421,17 +423,7 @@ def test_macos_real_action_timeout_self_heals_via_ensure_alive_and_replaces_loss
         driver.screenshot({"timeout_seconds": 0.25})
     assert owner.session.session_info().state == "uncertain"
 
-    # 1. SDK 0.1.1 native ensure_alive() self-heals the live uncertain session in place without disposing the peer.
-    healed = driver.launch_app(MacOSLaunchAppParams(new_session=False))
-    assert healed["status"] == "passed"
-    assert driver._session is owner.session
-    assert owner.session.session_info().state == "active"
-
-    # 2. Timeout again, then remote session dies (`probe-dead`): ensure_alive fails, so skip_app_kill=True disposes peer and creates a fresh replacement session.
-    with pytest.raises(ToolExecutionError):
-        driver.screenshot({"timeout_seconds": 0.25})
-    assert owner.session.session_info().state == "uncertain"
-    managed_driver.mode("probe-dead")
+    # The pinned SDK rejects ensure_alive on uncertain sessions before probing the remote peer.
     replaced = driver.launch_app(MacOSLaunchAppParams(new_session=False))
     assert replaced["status"] == "passed"
     assert replaced["output"]["bundle_id"] == "com.example.isolated.macos"

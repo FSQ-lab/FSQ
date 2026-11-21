@@ -72,6 +72,7 @@ class _DriverFactoryImplementation:
             page_source_max_depth=settings.page_source_max_depth,
             action_timeout_seconds=settings.action_timeout_seconds,
             new_command_timeout_seconds=settings.new_command_timeout_seconds,
+            skip_app_kill=settings.skip_app_kill,
         )
 
     def create_ios_driver(self, settings, *, bundle_id=None, udid=None):

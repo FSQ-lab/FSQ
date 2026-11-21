@@ -97,7 +97,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path == base + '/session/isolated-mac2-session/execute/sync':
             script = payload.get('script') if isinstance(payload, dict) else None
             if script == 'macos: listDisplays':
-                self.respond([{'id': 1, 'frame': {'x': 0, 'y': 0, 'width': 1440, 'height': 900}}])
+                if mode == 'probe-dead':
+                    err = json.dumps({'value': {'error': 'unknown error', 'message': 'Mac2 helper unresponsive', 'stacktrace': ''}}).encode()
+                    self.send_response(500)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(err)))
+                    self.end_headers()
+                    self.wfile.write(err)
+                else:
+                    self.respond([{'id': 1, 'frame': {'x': 0, 'y': 0, 'width': 1440, 'height': 900}}])
             else:
                 self.respond(None)
         else:
@@ -156,6 +164,8 @@ def managed_driver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pyt
     from appium_connect_agent.runtime import _coordination
 
     from fsq_agent.drivers.macos import _appium_connect
+
+    monkeypatch.setattr(_appium_connect, "_macos_ax_process_trusted", lambda: False)
 
     home = tmp_path.resolve() / "account"
     home.mkdir(mode=0o700)
@@ -362,9 +372,11 @@ def test_macos_create_unknown_retains_real_owner_until_explicit_terminal_close(m
     assert managed_driver.events() == events
 
 
-def test_macos_real_action_timeout_quarantines_and_explicit_new_session_recovers_on_owner_thread(managed_driver: _IsolatedManagedMacDriver) -> None:
+@pytest.mark.parametrize("managed_driver", [{"skip_app_kill": False}], indirect=True)
+def test_macos_real_action_timeout_quarantines_when_skip_app_kill_false_and_probe_dead(managed_driver: _IsolatedManagedMacDriver) -> None:
     managed_driver.mode("serve")
     driver = managed_driver.driver
+    assert driver.skip_app_kill is False
     assert driver.launch_app(MacOSLaunchAppParams(new_session=True))["status"] == "passed"
     owner = _observe_owner(managed_driver)
     with pytest.raises(ToolExecutionError) as timed_out:
@@ -378,9 +390,16 @@ def test_macos_real_action_timeout_quarantines_and_explicit_new_session_recovers
     }
     assert owner.session.session_info().state == "uncertain"
     _assert_account_lock(managed_driver, held=True)
+
+    # Remote session is gone (`probe-dead`) and skip_app_kill=False: first reuse probes ensure_alive (`listDisplays`), fails, and sets `_cleanup_pending=True`; thereafter the session is strictly quarantined with zero further HTTP traffic.
+    managed_driver.mode("probe-dead")
+    first_reuse = driver.launch_app(MacOSLaunchAppParams(new_session=False))
+    assert first_reuse["status"] == "failed"
+    assert driver._cleanup_pending is True
     _assert_quarantined(managed_driver, owner)
 
     # Explicit launch_app(new_session=True) runs on the owner worker thread, disposes the uncertain session/runtime, and opens a fresh session.
+    managed_driver.mode("serve")
     recreated = driver.launch_app(MacOSLaunchAppParams(new_session=True))
     assert recreated["status"] == "passed"
     assert owner.session.session_info().state == "disposed"
@@ -388,6 +407,34 @@ def test_macos_real_action_timeout_quarantines_and_explicit_new_session_recovers
     assert driver._session is not None
     assert driver._session is not owner.session
     assert driver._session.session_info().state == "active"
+
+    driver.close()
+    assert driver._session is None
+    assert driver._executor is None
+
+
+def test_macos_real_action_timeout_replaces_uncertain_session_losslessly(managed_driver: _IsolatedManagedMacDriver) -> None:
+    managed_driver.mode("serve")
+    driver = managed_driver.driver
+    assert driver.skip_app_kill is True
+    assert driver.launch_app(MacOSLaunchAppParams(new_session=True))["status"] == "passed"
+    owner = _observe_owner(managed_driver)
+    with pytest.raises(ToolExecutionError):
+        driver.screenshot({"timeout_seconds": 0.25})
+    assert owner.session.session_info().state == "uncertain"
+
+    # SDK builds that can recover an uncertain session must fail the probe here.
+    # This test exercises replacement, not successful in-place recovery.
+    managed_driver.mode("probe-dead")
+    replaced = driver.launch_app(MacOSLaunchAppParams(new_session=False))
+    assert replaced["status"] == "passed"
+    assert replaced["output"]["bundle_id"] == "com.example.isolated.macos"
+    assert owner.session.session_info().state == "disposed"
+    _assert_peer_exited(owner)
+    assert driver._session is not None
+    assert driver._session is not owner.session
+    assert driver._session.session_info().state == "active"
+    assert driver._executor is owner.executor
 
     driver.close()
     assert driver._session is None

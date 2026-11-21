@@ -334,9 +334,9 @@ def _macos_prerequisites(settings: Any, *, application_pending: bool = False) ->
     runtime_check = probe("appium_connect_runtime", _check_macos_appium_connect_runtime)
     app_path = Path(settings.app_path) if settings.app_path is not None and not application_pending else None
     bundle_id = (settings.bundle_id or "").strip() if not application_pending else ""
+    is_auto_bundle = bundle_id.casefold() == "auto"
     app_ready = bool(app_path and probe("application_path", lambda: _macos_application_path_available(app_path)))
-    bundle_ready = bool(bundle_id and probe("bundle_identifier", lambda: _macos_bundle_matches_target(bundle_id, app_path)))
-
+    bundle_ready = True if (is_auto_bundle and app_path is None) else bool(bundle_id and not is_auto_bundle and probe("bundle_identifier", lambda: _macos_bundle_matches_target(bundle_id, app_path)))
     checks: list[PlatformPrerequisiteCheck] = [
         _prerequisite(
             "xcode_installation",
@@ -370,7 +370,13 @@ def _macos_prerequisites(settings: Any, *, application_pending: bool = False) ->
             status="not_applicable",
             message="No macOS application path is configured; bundle identifier discovery is used.",
         ),
-        _prerequisite(
+        PlatformPrerequisiteCheck(
+            identifier="bundle_identifier",
+            status="ready",
+            message="Dynamic frontmost GUI application attachment (bundle_id='auto') is configured.",
+        )
+        if is_auto_bundle and app_path is None
+        else _prerequisite(
             "bundle_identifier",
             bundle_ready,
             "The configured bundle identifier resolves to the configured application."

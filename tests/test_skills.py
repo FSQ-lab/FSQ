@@ -98,3 +98,20 @@ def test_package_macos_skill_preserves_element_only_guidance(tmp_path: Path) -> 
     assert "`inspect_element`" in macos.instructions
     assert "`inspect_with_ai`" in macos.instructions
     assert "`assert_not_visible`" in macos.instructions
+    assert "bundle_id" in macos.instructions
+    assert '"auto"' in macos.instructions
+    assert "actually enter the text into the target GUI control with `type_text`" in macos.instructions
+    assert "Save As" in macos.instructions
+    assert "Hide Extension" in macos.instructions
+    assert "Command+Shift+G" in macos.instructions
+    assert "Go to Folder" in macos.instructions
+    assert "new_session=false" in macos.instructions
+    assert ".pages" in macos.instructions
+    assert ".numbers" in macos.instructions
+    assert ".key" in macos.instructions
+    assert ".scpt" in macos.instructions
+    assert "[[NoteName]]" in macos.instructions
+    assert ".workflow" in macos.instructions
+    assert "Keynote" in macos.instructions
+    assert "LibreOffice" in macos.instructions
+    assert "double_click_on" in macos.instructions

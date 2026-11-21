@@ -10,6 +10,7 @@ harness:
     page_source_max_depth: 12
     action_timeout_seconds: 10
     new_command_timeout_seconds: 900.0
+    skip_app_kill: true
 
 execution:
   post_action_delay_seconds:

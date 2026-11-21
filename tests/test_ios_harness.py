@@ -193,8 +193,8 @@ class FakeDevice:
         self.calls.append(("terminate_app", {"bundle_id": bundle_id}))
         return True
 
-    def click_at(self, x: int, y: int, *, control: object = None) -> None:
-        self.calls.append(("click_at", {"x": x, "y": y}))
+    def tap_at(self, x: int, y: int, *, control: object = None) -> None:
+        self.calls.append(("tap_at", {"x": x, "y": y}))
 
     def press_button(self, name: str, *, control: object = None) -> None:
         self.calls.append(("press_button", {"name": name}))
@@ -348,6 +348,12 @@ class FakeSession:
         key = (by, value, predicate)
         if key in self.elements:
             return self.elements[key]
+        if by == "-ios predicate string":
+            for (strategy, name, extra), candidate in self.elements.items():
+                if strategy == "accessibility id" and extra is None:
+                    _, element_type = candidate.attrs["type"]
+                    if value == f"type == {json.dumps(element_type)} AND name == {json.dumps(name)}":
+                        return candidate
         if by == "class name" and value == "XCUIElementTypeKeyboard":
             return FakeElement(by=by, value=value, inspect_error=TargetError("target_not_found"))
         return self.default_element
@@ -592,7 +598,7 @@ def test_ios_actions_touch_scroll_swipe_keyboard_alert_and_coordinate_scaling() 
     assert tap_at_res["status"] == "passed"
     assert tap_at_res["output"] == {"x": 200, "y": 400}
     assert tap_at_res["metadata"]["safe_replay_params"]["reference_screen_size"] == {"width": 201, "height": 437}
-    assert ("click_at", {"x": 200, "y": 400}) in session.device.calls
+    assert ("tap_at", {"x": 200, "y": 400}) in session.device.calls
 
     # Orientation mismatch raises explicit ConfigurationError
     with pytest.raises(ConfigurationError, match="orientation"):
@@ -796,6 +802,7 @@ def test_ios_input_text_replaces_placeholder_equal_to_value_by_clearing() -> Non
         value="email_field",
         attrs={
             "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("value", "email_field"),
             "value": ("value", "Email"),
             "placeholder_value": ("value", "Email"),
         },
@@ -818,6 +825,7 @@ def test_ios_input_text_replaces_placeholder_equal_to_value_by_clearing() -> Non
         value="filled_field",
         attrs={
             "type": ("value", "XCUIElementTypeTextField"),
+            "id": ("value", "filled_field"),
             "value": ("value", "old@example.com"),
             "placeholder_value": ("value", "Email"),
         },
@@ -1254,7 +1262,7 @@ def test_ios_safe_diagnostics_and_non_definitive_target_error_redaction() -> Non
         driver.press_key(IOSPressKeyParams(key="SUPER_SECRET_KEY_VALUE_999"))
     assert "SUPER_SECRET_KEY_VALUE_999" not in str(bad_key_err.value)
 
-    # inputText(text="", clear=False) still verifies post-write empty readback, and no-id bounds shift fails identity check
+    # Empty input still verifies empty readback; a geometry change alone does not invalidate identity.
     non_empty_no_id = FakeElement(
         by="predicate",
         value='placeholderValue == "Code"',
@@ -1293,9 +1301,256 @@ def test_ios_safe_diagnostics_and_non_definitive_target_error_redaction() -> Non
     )
     session.elements[("-ios predicate string", 'placeholderValue == "Shifting"', None)] = shifting_el
     shift_res = driver.input_text(IOSInputTextParams(locator=IOSLocator(predicate='placeholderValue == "Shifting"'), text="abc", clear=False))
-    assert shift_res["status"] == "failed"
-    assert shift_res["failure_category"] == "action_error"
-    assert "bounds changed" in str(shift_res["error_message"])
+    assert shift_res["status"] == "passed"
+
+
+@pytest.mark.parametrize("paste_outcome", ["success", "missing", "unknown"])
+def test_ios_text_view_paste_restores_clipboard_without_replaying_unknown_write(monkeypatch: pytest.MonkeyPatch, paste_outcome: str) -> None:
+    session = FakeSession()
+    text = "Long SwiftUI message\n" * 10
+    editor = FakeElement(
+        by="accessibility id",
+        value="composer",
+        attrs={"id": ("value", "composer"), "type": ("value", "XCUIElementTypeTextView"), "value": ("value", "Draft\n")},
+    )
+    session.elements[("accessibility id", "composer", None)] = editor
+    clipboard_writes = []
+    monkeypatch.setattr(session.device, "get_clipboard_text", lambda **kwargs: "", raising=False)
+    monkeypatch.setattr(session.device, "set_clipboard_text", lambda value, **kwargs: clipboard_writes.append(value), raising=False)
+
+    def paste(**kwargs: object) -> None:
+        assert clipboard_writes == [text]
+        assert ("long_click", {"duration_ms": 600, "wait_timeout_seconds": 15.0}) in editor.calls
+        if paste_outcome == "missing":
+            raise TargetError("target_not_found")
+        if paste_outcome == "unknown":
+            error = TargetError("execution_unknown")
+            error.request_state = "response_unknown"
+            raise error
+        editor.attrs["value"] = ("value", "Draft\n" + text)
+
+    menu_query = '(type == "XCUIElementTypeMenuItem" OR type == "XCUIElementTypeButton") AND (label == "Paste" OR name == "Paste")'
+    menu = FakeElement(by="-ios predicate string", value=menu_query)
+    paste_click = Mock(side_effect=paste)
+    monkeypatch.setattr(menu, "click", paste_click)
+    session.elements[("-ios predicate string", menu_query, None)] = menu
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        result = driver.input_text(IOSInputTextParams(locator=IOSLocator(accessibility_id="composer"), text=text, clear=False))
+    finally:
+        driver.close()
+
+    assert clipboard_writes == [text, ""]
+    assert paste_click.call_count == 1
+    assert paste_click.call_args.kwargs["wait_timeout_seconds"] == 3.0
+    writes = [name for name, _ in editor.calls if name in {"send_keys", "send_macos_keys"}]
+    assert writes == (["send_keys"] if paste_outcome == "missing" else [])
+    if paste_outcome == "unknown":
+        assert result["status"] == "failed"
+        assert result["failure_category"] == "action_error"
+        assert "verify field content" in str(result["error_message"])
+        assert "Long SwiftUI message" not in str(result)
+    else:
+        assert result["status"] == "passed"
+
+
+@pytest.mark.parametrize(("uid", "changed_id"), [(None, False), ("editor-uid", False), ("editor-uid", True)])
+def test_ios_input_binds_text_view_when_swiftui_container_shares_id(monkeypatch: pytest.MonkeyPatch, uid: str | None, changed_id: bool) -> None:
+    session = FakeSession()
+    shared_id = "composer_text_field"
+    editor_type = "XCUIElementTypeTextView"
+    attrs = {"type": ("value", editor_type), "id": ("value", shared_id), "value": ("value", "")}
+    if uid is not None:
+        attrs["uid"] = ("value", uid)
+    initial = FakeElement(by="accessibility id", value=shared_id, attrs=attrs)
+    editor = FakeElement(by="-ios predicate string", value=shared_id, attrs=attrs)
+    if changed_id:
+        editor.attrs["id"] = ("value", "different_composer")
+    session.elements[("accessibility id", shared_id, None)] = FakeElement(
+        by="accessibility id", value=shared_id, attrs={"type": ("value", "XCUIElementTypeOther"), "id": ("value", shared_id)}, inspect_error=TargetError("target_ambiguous")
+    )
+    session.elements[("accessibility id", shared_id, f'type == "{editor_type}"')] = initial
+    binding = f'type == "{editor_type}" AND ' + (f'UID == "{uid}"' if uid else f'name == "{shared_id}"')
+    session.elements[("-ios predicate string", binding, None)] = editor
+    unavailable_clipboard = RuntimeError("Clipboard not available")
+    unavailable_clipboard.request_state = "not_sent"  # type: ignore[attr-defined]
+    monkeypatch.setattr(session.device, "set_clipboard_text", Mock(side_effect=unavailable_clipboard), raising=False)
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        result = driver.input_text(IOSInputTextParams(locator=IOSLocator(accessibility_id=shared_id, element_type=editor_type), text="Hello", clear=False))
+    finally:
+        driver.close()
+
+    assert result["status"] == ("failed" if changed_id else "passed")
+    assert editor.attrs["value"] == ("value", "" if changed_id else "Hello")
+
+
+@pytest.mark.parametrize("post_uid", ["stable-uid", "replacement-uid"])
+def test_ios_input_binds_by_uid_across_geometry_changes(monkeypatch: pytest.MonkeyPatch, post_uid: str) -> None:
+    session = FakeSession()
+    initial = FakeElement(
+        by="name",
+        value="search",
+        attrs={
+            "type": ("value", "XCUIElementTypeSearchField"),
+            "id": ("missing", None),
+            "uid": ("value", "stable-uid"),
+            "value": ("value", "old"),
+            "bounds": ("value", _bounds(8, 169, 330, 40)),
+        },
+    )
+    query = 'type == "XCUIElementTypeSearchField" AND UID == "stable-uid"'
+    anchor = FakeElement(by="-ios predicate string", value=query, attrs={**initial.attrs, "bounds": ("value", _bounds(8, 70, 380, 40))})
+    session.elements[("-ios predicate string", 'value == "old"', None)] = initial
+    session.elements[("-ios predicate string", query, None)] = anchor
+
+    def write(text: str, **kwargs: object) -> None:
+        anchor.attrs["value"] = ("value", f"o{text}ld")
+        anchor.attrs["bounds"] = ("value", _bounds(8, 72, 370, 45))
+        anchor.attrs["uid"] = ("value", post_uid)
+
+    send = Mock(side_effect=write)
+    monkeypatch.setattr(anchor, "send_keys", send)
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        result = driver.input_text(IOSInputTextParams(locator=IOSLocator(value="old"), text="new", clear=False))
+    finally:
+        driver.close()
+    assert send.call_count == 1
+    assert [name for name, _ in initial.calls if name != "inspect"] == []
+    assert result["status"] == ("passed" if post_uid == "stable-uid" else "failed")
+
+
+@pytest.mark.parametrize(
+    ("field_type", "write_completed", "focus_error", "expected_status"),
+    [
+        ("TextField", True, None, "passed"),
+        ("TextField", False, None, "failed"),
+        ("TextField", True, "target_not_found", "failed"),
+        ("TextField", True, "target_ambiguous", "failed"),
+        ("SecureTextField", True, None, "passed"),
+    ],
+)
+def test_ios_stale_rect_uses_focus_only_for_post_write_readback(monkeypatch: pytest.MonkeyPatch, field_type: str, write_completed: bool, focus_error: str | None, expected_status: str) -> None:
+    session = FakeSession()
+    xcui_type = f"XCUIElementType{field_type}"
+    attrs = {"id": ("missing", None), "type": ("value", xcui_type), "value": ("value", "Old"), "bounds": ("value", _bounds(10, 40, 100, 25))}
+    original = FakeElement(by="predicate", value="original", attrs=attrs)
+    focused = FakeElement(
+        by="predicate",
+        value="focused",
+        attrs={**attrs, "focused": ("value", True), "value": ("value", "New")},
+        inspect_error=TargetError(focus_error) if focus_error else None,
+    )
+    rect = f'type == "{xcui_type}" AND rect.x == 10 AND rect.y == 40 AND rect.width == 100 AND rect.height == 25'
+    session.elements[("-ios predicate string", 'value == "Old"', None)] = original
+    session.elements[("-ios predicate string", rect, None)] = original
+    session.elements[("-ios predicate string", f'type == "{xcui_type}" AND focused == true', None)] = focused
+
+    def write(text: str, **kwargs: object) -> None:
+        if not write_completed:
+            raise TargetError("target_not_found")
+        original.inspect_error = TargetError("target_not_found")
+
+    monkeypatch.setattr(original, "send_keys", write)
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        result = driver.input_text(IOSInputTextParams(locator=IOSLocator(value="Old"), text="New"))
+    finally:
+        driver.close()
+
+    assert result["status"] == expected_status
+    if focus_error:
+        assert result["failure_category"] == "action_error"
+    assert [name for name, _ in focused.calls] == (["inspect"] if write_completed else [])
+    if field_type == "SecureTextField":
+        assert "value" not in focused.calls[0][1]["attributes"]
+
+
+@pytest.mark.parametrize(
+    ("text", "readback", "status"),
+    [
+        ("25", "$25.00", "passed"),
+        ("25.5", "25.50", "passed"),
+        ("1200", "1,200", "passed"),
+        ("25", "$250.00", "failed"),
+        ("25", "$2,5.00", "failed"),
+        ("25", "Total: $25.00", "failed"),
+        ('It\'s "ok" - yes\nNow', "It\u2019s \u201cok\u201d \u2014 yes\r\nNow", "passed"),
+    ],
+)
+def test_ios_replacement_readback_accepts_only_equivalent_formatting(monkeypatch: pytest.MonkeyPatch, text: str, readback: str, status: str) -> None:
+    session = FakeSession()
+    target = FakeElement(by="accessibility id", value="entry", attrs={"id": ("value", "entry"), "type": ("value", "XCUIElementTypeTextField")})
+    session.elements[("accessibility id", "entry", None)] = target
+    original_inspect = target.inspect
+
+    class InvalidRequestError(RuntimeError):
+        code = "invalid_argument"
+        request_state = "not_sent"
+
+    def inspect(*, attributes: tuple[str, ...], control: object = None) -> Any:
+        if "uid" in attributes:
+            raise InvalidRequestError
+        return original_inspect(attributes=attributes, control=control)
+
+    monkeypatch.setattr(target, "inspect", inspect)
+    monkeypatch.setattr(target, "send_keys", lambda value, **kwargs: target.attrs.update(value=("value", readback)))
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        assert driver.input_text(IOSInputTextParams(locator=IOSLocator(accessibility_id="entry"), text=text, clear=True))["status"] == status
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize(("readback", "status"), [("headNEWtail", "passed"), ("otherNEWtext", "failed"), ("headNEWjunk", "failed")])
+def test_ios_append_readback_preserves_existing_text(monkeypatch: pytest.MonkeyPatch, readback: str, status: str) -> None:
+    session = FakeSession()
+    target = FakeElement(
+        by="accessibility id",
+        value="entry",
+        attrs={"id": ("value", "entry"), "type": ("value", "XCUIElementTypeTextField"), "value": ("value", "headtail")},
+    )
+    session.elements[("accessibility id", "entry", None)] = target
+    monkeypatch.setattr(target, "send_keys", lambda value, **kwargs: target.attrs.update(value=("value", readback)))
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        assert driver.input_text(IOSInputTextParams(locator=IOSLocator(accessibility_id="entry"), text="NEW", clear=False))["status"] == status
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("position", ["[1]", "[-1]", "[*]"])
+def test_ios_class_chain_inserts_predicate_before_position_and_deduplicates_class(position: str) -> None:
+    session = FakeSession()
+    chain = "**/XCUIElementTypeButton[`name == 'Pay'`]"
+    expected = f'{chain}[`label == "descendants"`]{position}'
+    target = FakeElement(by="-ios class chain", value=expected)
+    session.elements[("-ios class chain", expected, None)] = target
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        assert driver.tap_on(IOSTapOnParams(locator=IOSLocator(class_chain=chain + position, element_type="Button", label="descendants")))["status"] == "passed"
+    finally:
+        driver.close()
+    assert ("click", {"wait_timeout_seconds": 15.0}) in target.calls
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        IOSLocator(predicate="ANY descendants.label == 'Pay'"),
+        IOSLocator(class_chain="**/XCUIElementTypeCell[`ANY descendants.label == 'Pay'`][1]"),
+        IOSLocator(class_chain="**/XCUIElementTypeCell[$ANY descendants.label == 'Pay'$]"),
+    ],
+)
+def test_ios_locator_rejects_descendants_without_starting_session(locator: IOSLocator) -> None:
+    driver = AppiumConnectIOSDriver()
+    try:
+        with pytest.raises(ConfigurationError, match="does not support `descendants`") as raised:
+            driver.tap_on(IOSTapOnParams(locator=locator))
+        assert raised.value.context == {"resolution_reason": "invalid_locator"}
+    finally:
+        driver.close()
 
 
 class _IntSubclass(int):

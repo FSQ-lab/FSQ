@@ -5,10 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from fsq_agent.drivers.macos import _appium_connect as appium
 from fsq_agent.drivers.macos import _native_fallback as native
 from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
 from fsq_agent.drivers.macos._native_fallback import _read_ax_identity_and_value
-from fsq_agent.models import MacOSAssertNotVisibleParams
+from fsq_agent.models import MacOSAssertNotVisibleParams, MacOSClickOnParams
 
 
 @pytest.mark.parametrize(
@@ -23,8 +24,8 @@ def test_native_ax_value_read_requires_known_safe_type(role: str, subrole: str |
         calls.append(attribute)
         return values[attribute]
 
-    assert _read_ax_identity_and_value(read) == (role, subrole, "editable value" if reads_value else None)
-    assert calls == ["AXRole", "AXSubrole", *(["AXValue"] if reads_value else [])]
+    assert _read_ax_identity_and_value(read) == (role, None if role == "AXUnknown" else subrole, "editable value" if reads_value else None)
+    assert calls == (["AXRole"] if role == "AXUnknown" else ["AXRole", "AXSubrole", *(["AXValue"] if reads_value else [])])
 
 
 @pytest.fixture
@@ -189,3 +190,100 @@ def test_native_absence_distinguishes_pruned_target_from_incomplete_capture(capt
     result = driver.assert_not_visible(params)
     assert result["status"] == "failed", result
     assert "inconclusive" in result["error_message"]
+
+
+@pytest.mark.parametrize(
+    "canvas_locator",
+    [
+        {"role": "AXScrollArea"},
+        {"role": "AXScrollArea", "label": "Canvas"},
+        {"controlType": "ScrollView"},
+        {"controlType": "ScrollView", "label": "Canvas"},
+        {"xpath": "//XCUIElementTypeScrollView"},
+        {"xpath": "//XCUIElementTypeScrollView[1]"},
+        {"xpath": "//XCUIElementTypeScrollView", "label": "Canvas"},
+        {"predicate": "role == 'AXScrollArea'", "label": "Canvas"},
+        {"predicate": "role == 'AXScrollArea' AND label == 'Canvas'"},
+    ],
+)
+def test_keynote_toolbar_metadata_failure_does_not_hide_canvas(capture, monkeypatch, canvas_locator):
+    run, attributes, calls, _ = capture
+    attributes.update(
+        {
+            (2, "AXChildren"): [4, 5, 6, 7],
+            (4, "AXRole"): "AXMenuButton",
+            (4, "AXSubrole"): -25200,
+            (5, "AXRole"): "AXCheckBox",
+            (5, "AXSubrole"): -25200,
+            (5, "AXDescription"): -25200,
+            (5, "AXEnabled"): -25200,
+            (6, "AXRole"): "AXTextField",
+            (6, "AXSubrole"): -25200,
+            (7, "AXRole"): "AXScrollArea",
+            (7, "AXDescription"): "Canvas",
+            (7, "AXPosition"): (0, 0, 640, 480),
+        }
+    )
+    observation = run()
+    assert observation.complete_for_requested_scope
+    assert observation.roots[0].children[0].children[1].label.state == "unknown"
+    assert not {(4, "AXSubrole"), (5, "AXSubrole")}.intersection(calls)
+    assert (6, "AXSubrole") in calls
+    assert all(name != "AXValue" for _, name, *_ in calls)
+    clicks = []
+    session = SimpleNamespace(device=SimpleNamespace(click_at=lambda *args, **kwargs: clicks.append((args, kwargs))))
+    driver = AppiumConnectMacOSDriver(session=session, action_timeout_seconds=1)
+    monkeypatch.setattr(driver, "_native_ax_mode", True)
+    monkeypatch.setattr(driver, "_active_bundle_id", "example.app")
+    monkeypatch.setattr(driver, "_native_ax_candidate_bundles", lambda **_: ("example.app",))
+    monkeypatch.setattr(driver, "_observe_native_ax_tree_for_bundle", lambda _: run())
+    monkeypatch.setattr(appium, "_verify_ax_point_hit", lambda handle, x, y: (handle.element, x, y) == (7, 320, 240))
+    result = driver.click_on(MacOSClickOnParams(locator=canvas_locator))
+    assert result["status"] == "passed", result
+    assert len(clicks) == 1
+    for locator in (
+        {"label": "Unknown label"},
+        {"xpath": "//*[not(@label)]"},
+        {"xpath": "//XCUIElementTypeScrollView[@label='Canvas']"},
+        {"xpath": "//XCUIElementTypeAny/XCUIElementTypeScrollView"},
+        {"xpath": "//XCUIElementTypeTextField[1]"},
+        {"role": "AXCheckBox", "predicate": "enabled == true"},
+    ):
+        result = driver.assert_not_visible(MacOSAssertNotVisibleParams(locator=locator))
+        assert "inconclusive" in result["error_message"]
+    assert len(clicks) == 1
+    result = driver.assert_not_visible(MacOSAssertNotVisibleParams(locator={"role": "AXCheckBox", "predicate": "enabled ?? true"}))
+    assert result["failure_category"] == "configuration_error"
+    attributes[7, "AXIdentifier"] = "Canvas"
+    attributes[7, "AXDescription"] = -25200
+    for predicate in ("name == 'Canvas'", "displayed == true", "visible == true", "amRect.x == 0"):
+        result = driver.click_on(MacOSClickOnParams(locator={"role": "AXScrollArea", "predicate": predicate}))
+        assert result["status"] == "passed", result
+    attributes[7, "AXDescription"] = "Canvas"
+    attributes.update({(1, "AXWindows"): [2, 3, 8], (8, "AXRole"): "AXWindow", (8, "AXDescription"): -25200})
+    attributes[2, "AXDescription"] = attributes[3, "AXDescription"] = "Duplicate"
+    for locator in ({"label": "Duplicate"}, {"xpath": "//XCUIElementTypeWindow", "label": "Duplicate"}, {"predicate": "role == 'AXWindow' AND label == 'Duplicate'"}):
+        result = driver.click_on(MacOSClickOnParams(locator=locator))
+        assert result["failure_category"] == "target_resolution_error"
+        assert result["metadata"]["resolution_reason"] == "ambiguous"
+
+    # Full XPath remains available when the capture has no failed metadata reads.
+    for key in [key for key, value in attributes.items() if value == -25200]:
+        del attributes[key]
+    result = driver.click_on(MacOSClickOnParams(locator={"xpath": "//XCUIElementTypeScrollView[@label='Canvas'][@role='AXScrollArea']"}))
+    assert result["status"] == "passed", result
+
+
+@pytest.mark.parametrize("attribute", ["AXRole", "AXChildren"])
+def test_native_structural_failure_is_incomplete(capture, attribute):
+    run, attributes, _, _ = capture
+    attributes[2, attribute] = -25200
+    assert not run().complete_for_requested_scope
+
+
+def test_unknown_menu_selection_makes_menu_topology_incomplete(capture):
+    run, attributes, _, _ = capture
+    attributes.update({(1, "AXMenuBar"): 4, (4, "AXRole"): "AXMenuBar", (4, "AXChildren"): [5], (5, "AXRole"): "AXMenuBarItem", (5, "AXSelected"): -25200})
+    assert not run().complete_for_requested_scope
+    attributes[5, "AXExpanded"] = True
+    assert run().complete_for_requested_scope

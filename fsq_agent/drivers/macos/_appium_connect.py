@@ -253,26 +253,26 @@ def _strip_outer_parens(expr: str) -> str:
     return cleaned
 
 
-def _eval_macos_predicate_on_xml_node(expr: str, xml_node: ElementTree.Element) -> bool | None:
+def _eval_macos_predicate_on_xml_node(expr: str, xml_node: ElementTree.Element, *, failed: frozenset[str] | None = None) -> bool | str | None:
     cleaned = _strip_outer_parens(expr)
     if not cleaned:
         return None
     or_parts = _split_top_level_predicate_boolean(cleaned, "OR")
     if len(or_parts) > 1:
-        outcomes = [_eval_macos_predicate_on_xml_node(part, xml_node) for part in or_parts]
+        outcomes = [_eval_macos_predicate_on_xml_node(part, xml_node, failed=failed) for part in or_parts]
         if any(item is None for item in outcomes):
             return None
-        return any(bool(item) for item in outcomes)
+        return True if True in outcomes else ("unknown" if "unknown" in outcomes else False)
     and_parts = _split_top_level_predicate_boolean(cleaned, "AND")
     if len(and_parts) > 1:
-        outcomes = [_eval_macos_predicate_on_xml_node(part, xml_node) for part in and_parts]
+        outcomes = [_eval_macos_predicate_on_xml_node(part, xml_node, failed=failed) for part in and_parts]
         if any(item is None for item in outcomes):
             return None
-        return all(bool(item) for item in outcomes)
+        return False if False in outcomes else ("unknown" if "unknown" in outcomes else True)
     if cleaned.upper().startswith("NOT ") or cleaned.upper().startswith("NOT("):
         inner = cleaned[3:].strip()
-        sub = _eval_macos_predicate_on_xml_node(inner, xml_node)
-        return None if sub is None else (not sub)
+        sub = _eval_macos_predicate_on_xml_node(inner, xml_node, failed=failed)
+        return not sub if isinstance(sub, bool) else sub
     match = MACOS_PREDICATE_CLAUSE_RE.match(cleaned)
     if match is None:
         return None
@@ -281,6 +281,42 @@ def _eval_macos_predicate_on_xml_node(expr: str, xml_node: ElementTree.Element) 
     rhs_raw = match.group("rhs")
     attrs = xml_node.attrib
     field_lower = field.lower()
+    if failed:
+        dependencies = {
+            "role": (),
+            "label": ("AXDescription",),
+            "title": ("AXTitle",),
+            "identifier": ("AXIdentifier",),
+            "enabled": ("AXEnabled",),
+            "selected": ("AXSelected",),
+            "focused": ("AXFocused",),
+            "visible": ("AXPosition", "AXSize"),
+            "displayed": ("AXPosition", "AXSize"),
+            "placeholdervalue": ("AXPlaceholderValue",),
+            "x": ("AXPosition", "AXSize"),
+            "y": ("AXPosition", "AXSize"),
+            "width": ("AXPosition", "AXSize"),
+            "height": ("AXPosition", "AXSize"),
+            "value": ("AXSubrole",),
+            "type": ("AXSubrole",),
+            "amtype": ("AXSubrole",),
+            "amrect.x": ("AXPosition", "AXSize"),
+            "amrect.y": ("AXPosition", "AXSize"),
+            "amrect.width": ("AXPosition", "AXSize"),
+            "amrect.height": ("AXPosition", "AXSize"),
+        }
+        relevant = dependencies.get(field_lower, failed)
+        if field_lower == "name":
+            relevant = ()
+            if not attrs.get("name"):
+                for key, ax_name in (("identifier", "AXIdentifier"), ("label", "AXDescription"), ("title", "AXTitle"), ("value", "AXSubrole")):
+                    if ax_name in failed:
+                        relevant = (ax_name,)
+                        break
+                    if attrs.get(key):
+                        break
+        if failed.intersection(relevant):
+            return None if rhs_raw.lower() in {"true", "false"} and op not in {"==", "!="} else "unknown"
     actual: object
     if field_lower in {"amtype", "type"}:
         actual = xml_node.tag
@@ -2584,10 +2620,10 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 return obs
         return None
 
-    def _match_native_ax_nodes_in_observation(self, observation: Any, locator: MacOSLocator) -> list[tuple[Any, ElementTree.Element]]:
+    def _match_native_ax_nodes_in_observation(self, observation: Any, locator: MacOSLocator) -> tuple[list[tuple[Any, ElementTree.Element]], bool, set[int] | None]:
         roots = getattr(observation, "roots", ())
         if not roots:
-            return []
+            return [], False, None
         node_by_xml: dict[int, Any] = {}
 
         def build_mapped_xml(t_node: Any) -> ElementTree.Element:
@@ -2642,6 +2678,8 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
         xml_root = build_mapped_xml(roots[0])
         xpath_allowed_ids: set[int] | None = None
+        xpath_possible_nodes = None
+        predicate_uncertain = False
         if locator.xpath:
             source_by_xpath_node: dict[Any, ElementTree.Element] = {}
 
@@ -2653,37 +2691,106 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 return node
 
             try:
-                results = xpath_tree(xml_root).xpath(locator.xpath, smart_strings=False)
+                tree = xpath_tree(xml_root)
+                results = tree.xpath(locator.xpath, smart_strings=False)
             except (etree.XPathError, ValueError) as exc:
                 raise ConfigurationError("macOS element lookup failed: invalid_locator.", context={"resolution_reason": "invalid_locator"}) from exc
             if not isinstance(results, list) or any(not isinstance(node, etree._Element) or node not in source_by_xpath_node for node in results):
                 raise ConfigurationError("macOS XPath must select elements.", context={"resolution_reason": "invalid_locator"})
             xpath_allowed_ids = {id(source_by_xpath_node[node]) for node in results}
+            xpath_possible_nodes = {id(node_by_xml[source_id]) for source_id in xpath_allowed_ids}
 
         matched: list[tuple[Any, ElementTree.Element]] = []
         for xml_el in xml_root.iter():
             if xpath_allowed_ids is not None and id(xml_el) not in xpath_allowed_ids:
                 continue
+            t_node = node_by_xml[id(xml_el)]
+            failed = getattr(t_node, "unknown_metadata", ())
+            if locator.predicate and failed and _eval_macos_predicate_on_xml_node(locator.predicate, xml_el, failed=failed) is False:
+                if xpath_possible_nodes is None:
+                    xpath_possible_nodes = {id(node) for node in node_by_xml.values()}
+                xpath_possible_nodes.discard(id(t_node))
             if not self._xml_node_matches_locator(xml_el, locator):
                 continue
             if locator.predicate:
-                pred_ok = _eval_macos_predicate_on_xml_node(locator.predicate, xml_el)
+                t_node = node_by_xml[id(xml_el)]
+                failed = getattr(t_node, "unknown_metadata", ())
+                pred_ok = _eval_macos_predicate_on_xml_node(locator.predicate, xml_el, failed=failed)
                 if pred_ok is None:
                     raise ConfigurationError("macOS element lookup failed: invalid_locator.", context={"resolution_reason": "invalid_locator"})
-                if not pred_ok:
+                if pred_ok == "unknown":
+                    predicate_uncertain = True
+                if pred_ok is not True:
                     continue
             t_node = node_by_xml.get(id(xml_el))
             if t_node is not None:
                 matched.append((t_node, xml_el))
-        return matched
+        return matched, predicate_uncertain, xpath_possible_nodes
+
+    @staticmethod
+    def _native_ax_role_may_have_type(role: str | None, tag: str) -> bool:
+        return tag == "Any" or tag == "SecureTextField" or (role is not None and tag == role.removeprefix("AX"))
+
+    @staticmethod
+    def _native_ax_xpath_is_safe(xpath: str, unknown: frozenset[str]) -> bool:
+        if not re.fullmatch(r"(?:/{1,2}XCUIElementType[A-Za-z]+(?:\[[1-9][0-9]*\])?)+", xpath):
+            return False
+        return "AXSubrole" not in unknown or not re.search(r"XCUIElementType(?:TextField|SecureTextField|TextArea|StaticText|Any)\b", xpath)
+
+    @staticmethod
+    def _native_ax_selector_is_uncertain(observation: Any, locator: MacOSLocator, xpath_possible_nodes: set[int] | None) -> bool:
+        unknown = getattr(observation, "unknown_metadata", ())
+        if not unknown:
+            return False
+        # Under partial metadata, only basic paths independent of failed reads are evidence.
+        if locator.xpath and not AppiumConnectMacOSDriver._native_ax_xpath_is_safe(locator.xpath, unknown):
+            return True
+        pending = list(observation.roots)
+        while pending:
+            node = pending.pop()
+            pending.extend(node.children)
+            failed = getattr(node, "unknown_metadata", ())
+            if not failed:
+                continue
+            role = (getattr(node, "extra_attributes", None) or {}).get("role")
+            requested_types = [value.removeprefix("XCUIElementType") for value in (locator.controlType, locator.className) if value]
+            if "AXSubrole" in failed and any(not AppiumConnectMacOSDriver._native_ax_role_may_have_type(role, tag) for tag in requested_types):
+                continue
+            type_uncertain = "AXSubrole" in failed and bool(requested_types)
+            if xpath_possible_nodes is not None and id(node) not in xpath_possible_nodes:
+                continue
+            if locator.role and (getattr(node, "extra_attributes", None) or {}).get("role") != locator.role:
+                continue
+            if "AXSubrole" not in failed:
+                tag = getattr(node.type, "value", None) or "XCUIElementTypeAny"
+                if any(value and tag != (value if value.startswith("XCUIElementType") else f"XCUIElementType{value}") for value in (locator.controlType, locator.className)):
+                    continue
+            uncertain = False
+            for requested, field, ax_name in (
+                (locator.accessibilityId, "id", "AXIdentifier"),
+                (locator.label, "label", "AXDescription"),
+                (locator.title, "title", "AXTitle"),
+                (locator.value, "value", "AXSubrole"),
+            ):
+                if requested:
+                    if ax_name in failed:
+                        uncertain = True
+                    elif getattr(getattr(node, field), "value", None) != requested:
+                        break
+            else:
+                name_fields = (("id", "AXIdentifier"), ("label", "AXDescription"), ("title", "AXTitle"), ("value", "AXSubrole"))
+                name_uncertain = locator.name and not any(getattr(getattr(node, field), "value", None) == locator.name for field, _ in name_fields)
+                if type_uncertain or uncertain or (name_uncertain and any(ax_name in failed for _, ax_name in name_fields)):
+                    return True
+        return False
 
     def _resolve_native_ax_node_once(self, locator: MacOSLocator, *, preferred_bundle_id: str | None = None) -> Any | None:
         for bundle_id in self._native_ax_candidate_bundles(preferred_bundle_id=preferred_bundle_id):
             obs = self._observe_native_ax_tree_for_bundle(bundle_id)
             if obs is None:
                 continue
-            matches = self._match_native_ax_nodes_in_observation(obs, locator)
-            if not obs.complete_for_requested_scope:
+            matches, predicate_uncertain, xpath_possible_nodes = self._match_native_ax_nodes_in_observation(obs, locator)
+            if not obs.complete_for_requested_scope or predicate_uncertain or self._native_ax_selector_is_uncertain(obs, locator, xpath_possible_nodes):
                 return None
             if len(matches) == 1:
                 return matches[0][0]
@@ -2698,9 +2805,15 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 if not self._native_ax_mode:
                     return self._element_from_locator(locator)
                 continue
-            matches = self._match_native_ax_nodes_in_observation(obs, locator)
-            if len(matches) < 2 and not obs.complete_for_requested_scope:
+            matches, predicate_uncertain, xpath_possible_nodes = self._match_native_ax_nodes_in_observation(obs, locator)
+            if len(matches) > 1 and (not locator.xpath or (obs.complete_for_requested_scope and self._native_ax_xpath_is_safe(locator.xpath, getattr(obs, "unknown_metadata", frozenset())))):
+                confirmed = [xml for node, xml in matches if not (locator.controlType or locator.className) or "AXSubrole" not in getattr(node, "unknown_metadata", ())]
+                if len(confirmed) > 1:
+                    raise _AmbiguousResolutionError([candidate(xml) for xml in confirmed[:5]])
+            if not obs.complete_for_requested_scope and (len(matches) < 2 or locator.xpath):
                 raise ToolExecutionError("Native AX capture was incomplete; target resolution is inconclusive.")
+            if predicate_uncertain or self._native_ax_selector_is_uncertain(obs, locator, xpath_possible_nodes):
+                raise ToolExecutionError("Native AX selector metadata was unavailable; target resolution is inconclusive.")
             if len(matches) == 1:
                 t_node, _ = matches[0]
                 return _NativeAXElement(self, t_node, bundle_id=bundle_id, reanchor_locator=locator)

@@ -31,12 +31,16 @@ def _macos_ax_process_trusted() -> bool:
 
 # Only controls with known non-secret value semantics may trigger AXValue IPC.
 _READABLE_VALUE_TYPES = frozenset({("AXTextField", ""), ("AXTextArea", ""), ("AXStaticText", ""), ("AXTextField", "AXSearchField")})
+_READABLE_VALUE_ROLES = frozenset(role for role, _ in _READABLE_VALUE_TYPES)
+_OPTIONAL_METADATA = frozenset({"AXSubrole", "AXTitle", "AXDescription", "AXIdentifier", "AXPlaceholderValue", "AXEnabled", "AXFocused", "AXSelected", "AXPosition", "AXSize"})
 
 
 def _read_ax_identity_and_value(read: Callable[[str], str | None]) -> tuple[str | None, str | None, str | None]:
     role = read("AXRole")
+    if role not in _READABLE_VALUE_ROLES:
+        return role, None, None
     subrole = read("AXSubrole")
-    if role is None or subrole is None or (role, subrole) not in _READABLE_VALUE_TYPES:
+    if (role, subrole) not in _READABLE_VALUE_TYPES:
         return role, subrole, None
     return role, subrole, read("AXValue")
 
@@ -241,10 +245,12 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
     class NativeNode(TreeNode):
         extra_attributes: dict[str, str] | None = None
         handle: _AXHandle | None = None
+        unknown_metadata: frozenset[str] = frozenset()
 
     @dataclass(frozen=True, slots=True)
     class NativeObservation(TreeObservation):
         raw_xml: bytes = b""
+        unknown_metadata: frozenset[str] = frozenset()
 
     unknown = ObservedValue("unknown")
     na = ObservedValue("not_applicable")
@@ -283,6 +289,7 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
     if not app:
         raise RuntimeError("Cannot bind foreground accessibility application.")
     count = 0
+    unknown_metadata: set[str] = set()
     complete = True
 
     def observed(value):
@@ -300,6 +307,7 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
             return None
         count += 1
         messaging_timeout = None
+        failed_metadata: set[str] = set()
 
         def read(name):
             nonlocal messaging_timeout, complete
@@ -323,6 +331,10 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
                 ax.release(value)
             if status in {-25204, -25202, -25211}:
                 raise _AXReadError(status)
+            if status == -25200 and name in _OPTIONAL_METADATA:
+                unknown_metadata.add(name)
+                failed_metadata.add(name)
+                return status, None
             if status not in {-25205, -25212}:
                 complete = False
             return status, None
@@ -387,6 +399,8 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
             placeholder = text("AXPlaceholderValue")
             selected = boolean("AXSelected") if role == "AXMenuBarItem" else None
             expanded = role == "AXMenuBarItem" and (selected or boolean("AXExpanded"))
+            if role == "AXMenuBarItem" and not expanded and "AXSelected" in failed_metadata:
+                complete = False
         except _AXReadError:
             complete = False
             return None
@@ -413,15 +427,15 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
                 return None
         visible = geometry is not None and geometry[2] > 0 and geometry[3] > 0
         return NativeNode(
-            type=observed("XCUIElementType" + kind) if kind != "Any" and subrole is not None else unknown,
-            id=observed(identity),
-            label=observed(label),
-            title=observed(title),
-            placeholder_value=observed(placeholder),
-            value=observed(value),
-            text=observed(value),
-            enabled=observed(enabled),
-            bounds=observed(Bounds(*geometry) if geometry is not None else None),
+            type=observed("XCUIElementType" + kind) if kind != "Any" and (role not in _READABLE_VALUE_ROLES or subrole is not None) else unknown,
+            id=unknown if "AXIdentifier" in failed_metadata else observed(identity),
+            label=unknown if "AXDescription" in failed_metadata else observed(label),
+            title=unknown if "AXTitle" in failed_metadata else observed(title),
+            placeholder_value=unknown if "AXPlaceholderValue" in failed_metadata else observed(placeholder),
+            value=unknown if "AXSubrole" in failed_metadata else observed(value),
+            text=unknown if "AXSubrole" in failed_metadata else observed(value),
+            enabled=unknown if "AXEnabled" in failed_metadata else observed(enabled),
+            bounds=unknown if failed_metadata.intersection(("AXPosition", "AXSize")) else observed(Bounds(*geometry) if geometry is not None else None),
             visibility="visible" if visible else "unknown",
             children=tuple(children),
             desc=na,
@@ -433,6 +447,7 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
             window_id=na,
             extra_attributes={"role": role} if role else {},
             handle=_AXHandle(ax, element),
+            unknown_metadata=frozenset(failed_metadata),
         )
 
     try:
@@ -472,4 +487,5 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
         (root,) if root is not None else (),
         json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode(),
         ElementTree.tostring(xml, encoding="utf-8") if xml is not None else b"",
+        frozenset(unknown_metadata),
     )

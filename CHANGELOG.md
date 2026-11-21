@@ -7,6 +7,7 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 ## [0.3.8] - 2026-11-21
 
 - macOS automation defaults to direct Appium Mac2. Finder-anchored native fallback is limited to eligible applications on the explicit XCTest quiescence blacklist.
+- Finder-anchored native AX capture prioritizes windows and the active menu, with per-reference timeouts and a shared capture budget. Native locators and absence assertions use the same pruned projection; direct Mac2 behavior is unchanged.
 - Added a local screenshot fallback and allowed subsequent actions to recover after a clean teardown followed by a failed session recreation.
 - Added rich-canvas editing guidance. The release pins `appium-connect-agent==0.1.2` and `lxml==6.1.0`; see the [release notes](docs/releases/v0.3.8.md).
 

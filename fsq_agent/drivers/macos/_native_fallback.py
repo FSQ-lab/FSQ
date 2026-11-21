@@ -66,6 +66,12 @@ class _AXPair(ctypes.Structure):
     _fields_ = [("first", ctypes.c_double), ("second", ctypes.c_double)]
 
 
+class _AXReadError(Exception):
+    def __init__(self, status: int | None = None):
+        super().__init__(status)
+        self.status = status
+
+
 class _AX:
     def __init__(self) -> None:
         ax = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
@@ -108,22 +114,16 @@ class _AX:
         finally:
             self.release(key)
 
-    def text(self, element: int, name: str) -> str | None:
-        status, value = self.attribute(element, name)
-        if not value:
-            return "" if name == "AXSubrole" and status in {-25205, -25212} else None
-        try:
-            if self.type(value) != self.string_type:
-                return None
-            data = ctypes.create_string_buffer(65_536)
-            return data.value.decode("utf-8") if self.decode(value, data, len(data), 0x08000100) else None
-        finally:
-            self.release(value)
+    def decode_text(self, value: int) -> str | None:
+        if self.type(value) != self.string_type:
+            return None
+        data = ctypes.create_string_buffer(65_536)
+        return data.value.decode("utf-8") if self.decode(value, data, len(data), 0x08000100) else None
 
-    def bounds(self, element: int) -> tuple[int, int, int, int] | None:
+    def decode_bounds(self, read: Callable[[str], tuple[int, int | None]]) -> tuple[int, int, int, int] | None:
         geometry = []
         for attribute, kind in (("AXPosition", 1), ("AXSize", 2)):
-            _, value = self.attribute(element, attribute)
+            _, value = read(attribute)
             if not value:
                 return None
             try:
@@ -288,7 +288,7 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
     def observed(value):
         return ObservedValue("missing") if value is None else ObservedValue("value", value)
 
-    def visit(element: int, depth: int, ancestors: tuple[int, ...]):
+    def visit(element: int, depth: int, ancestors: tuple[int, ...], *, parent_role: str | None = None):
         nonlocal count, complete
         if control is not None and control.cancellation is not None and control.cancellation.is_set():
             raise CancelledError
@@ -299,43 +299,128 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
             complete = False
             return None
         count += 1
-        role, subrole, value = _read_ax_identity_and_value(lambda name: ax.text(element, name))
-        kind = "SecureTextField" if subrole == "AXSecureTextField" else _AX_TO_XCUI.get(role, "Any")
-        geometry = ax.bounds(element)
-        visible = geometry is not None and geometry[2] > 0 and geometry[3] > 0
+        messaging_timeout = None
+
+        def read(name):
+            nonlocal messaging_timeout, complete
+            if control is not None and control.cancellation is not None and control.cancellation.is_set():
+                raise CancelledError
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _AXReadError
+            seconds = min(0.25, remaining)
+            if seconds != messaging_timeout:
+                status = ax.timeout(element, seconds)
+                if status != 0:
+                    raise _AXReadError(status)
+                messaging_timeout = seconds
+                if time.monotonic() >= deadline:
+                    raise _AXReadError
+            status, value = ax.attribute(element, name)
+            if status == 0:
+                return status, value
+            if value is not None:
+                ax.release(value)
+            if status in {-25204, -25202, -25211}:
+                raise _AXReadError(status)
+            if status not in {-25205, -25212}:
+                complete = False
+            return status, None
+
+        def text(name):
+            status, value = read(name)
+            if value is None:
+                return "" if name == "AXSubrole" and status in {-25205, -25212} else None
+            try:
+                return ax.decode_text(value)
+            finally:
+                ax.release(value)
+
+        def boolean(name):
+            _, value = read(name)
+            if value is None:
+                return None
+            try:
+                return bool(ax.equal(value, ax.true))
+            finally:
+                ax.release(value)
+
         children = []
-        status, collection = ax.attribute(element, "AXChildren")
-        if status not in {0, -25205, -25212}:
-            complete = False
-        if collection:
+
+        def collect(name, *, exclude=None):
+            nonlocal complete
+            status, collection = read(name)
+            if collection is None:
+                return status not in {0, -25205, -25212}
             try:
                 if ax.type(collection) != ax.array_type:
                     complete = False
-                else:
-                    for index in range(ax.count(collection)):
-                        child = ax.item(collection, index)
-                        result = visit(child, depth + 1, (*ancestors, element)) if child else None
-                        if result is None:
-                            complete = False
-                            break
-                        children.append(result)
+                    return True
+                size = ax.count(collection)
+                for index in range(size):
+                    if depth >= max_depth or count >= max_nodes or time.monotonic() >= deadline:
+                        complete = False
+                        break
+                    child = ax.item(collection, index)
+                    if not child:
+                        complete = False
+                    elif exclude is None or not ax.equal(child, exclude):
+                        result = visit(child, depth + 1, (*ancestors, element), parent_role=role)
+                        if result is not None:
+                            children.append(result)
+                return size != 0
             finally:
                 ax.release(collection)
-        _, enabled = ax.attribute(element, "AXEnabled")
+
         try:
-            enabled_value = None if enabled is None else ax.equal(enabled, ax.true)
-        finally:
-            if enabled:
-                ax.release(enabled)
+            role, subrole, value = _read_ax_identity_and_value(text)
+            if (parent_role == "AXMenuBar" and role != "AXMenuBarItem") or (parent_role == "AXMenuBarItem" and role != "AXMenu"):
+                if role is None:
+                    complete = False
+                return None
+            kind = "SecureTextField" if subrole == "AXSecureTextField" else _AX_TO_XCUI.get(role, "Any")
+            identity = text("AXIdentifier")
+            label = text("AXDescription")
+            title = text("AXTitle")
+            geometry = ax.decode_bounds(read)
+            enabled = boolean("AXEnabled")
+            placeholder = text("AXPlaceholderValue")
+            selected = boolean("AXSelected") if role == "AXMenuBarItem" else None
+            expanded = role == "AXMenuBarItem" and (selected or boolean("AXExpanded"))
+        except _AXReadError:
+            complete = False
+            return None
+
+        try:
+            if depth == 1:
+                use_child_fallback = not collect("AXWindows")
+                _, menu = read("AXMenuBar")
+                try:
+                    if use_child_fallback:
+                        collect("AXChildren", exclude=menu)
+                    if menu is not None:
+                        result = visit(menu, depth + 1, (element,), parent_role="AXApplication")
+                        if result is not None:
+                            children.append(result)
+                finally:
+                    if menu is not None:
+                        ax.release(menu)
+            elif parent_role != "AXMenu" and (role not in {"AXMenu", "AXMenuItem", "AXMenuBarItem"} or expanded or (role == "AXMenu" and parent_role == "AXMenuBarItem")):
+                collect("AXChildren")
+        except _AXReadError as exc:
+            complete = False
+            if exc.status is not None and depth != 1:
+                return None
+        visible = geometry is not None and geometry[2] > 0 and geometry[3] > 0
         return NativeNode(
             type=observed("XCUIElementType" + kind) if kind != "Any" and subrole is not None else unknown,
-            id=observed(ax.text(element, "AXIdentifier")),
-            label=observed(ax.text(element, "AXDescription")),
-            title=observed(ax.text(element, "AXTitle")),
-            placeholder_value=observed(ax.text(element, "AXPlaceholderValue")),
+            id=observed(identity),
+            label=observed(label),
+            title=observed(title),
+            placeholder_value=observed(placeholder),
             value=observed(value),
             text=observed(value),
-            enabled=observed(enabled_value),
+            enabled=observed(enabled),
             bounds=observed(Bounds(*geometry) if geometry is not None else None),
             visibility="visible" if visible else "unknown",
             children=tuple(children),
@@ -343,7 +428,7 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
             package=na,
             focused=unknown,
             checked=na,
-            selected=unknown,
+            selected=unknown if selected is None else observed(selected),
             viewport_relation="unknown",
             window_id=na,
             extra_attributes={"role": role} if role else {},
@@ -351,7 +436,6 @@ def _observe_macos_ax_tree(*, bundle_id: str, max_nodes: int, max_depth: int, co
         )
 
     try:
-        ax.timeout(app, 0.25)
         root = visit(app, 1, ())
         if _frontmost_pid(bundle_id) != pid:
             raise RuntimeError("macOS foreground application changed during AX capture.")

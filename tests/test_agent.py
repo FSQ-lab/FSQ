@@ -1374,3 +1374,24 @@ async def test_explicit_final_goal_survives_planner_main_and_verifier(tmp_path: 
     if key_actions:
         assert runtime.last_task.key_actions == key_actions
         assert verification_tasks[0].key_actions == key_actions
+
+
+async def test_disabled_independent_verification_retains_runner_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_provider_refresh(monkeypatch)
+    runtime = _GoalRunRuntime()
+
+    async def unexpected_verification(*args, **kwargs):
+        pytest.fail("Independent verification must not run when disabled.")
+
+    monkeypatch.setattr(runtime, "run_verification", unexpected_verification)
+    settings = _settings_with_knowledge(tmp_path, runs_dir=tmp_path / "runs")
+    settings.agent_runtime.verification_enabled = False
+    agent = FsqAgent(settings, Verifier(), _Reporter(), _KnowledgeLoader(), _SkillLoader(), runtime)
+    task = Task(description="Inspect the visible control.", key_actions=["Inspect"], verification_goal="Control inspected.")
+
+    outcome = await _run_in_context(agent, task, "verification-disabled")
+
+    assert outcome.verification.status == "success"
+    assert outcome.verification.summary == "Goal done"
+    assert outcome.verification.satisfied_criteria == [task.verification_goal]
+    assert "Goal observed" in outcome.verification.diagnostics

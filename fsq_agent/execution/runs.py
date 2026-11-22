@@ -235,7 +235,11 @@ class RunLifecycleService:
         result = {
             "platform": platform,
             "backend": getattr(block, "backend", None),
-            "agent_runtime": {"reasoning_effort": settings.agent_runtime.reasoning_effort, "max_turns": settings.agent_runtime.max_turns},
+            "agent_runtime": {
+                "reasoning_effort": settings.agent_runtime.reasoning_effort,
+                "max_turns": settings.agent_runtime.max_turns,
+                "verification_enabled": settings.agent_runtime.verification_enabled,
+            },
             "post_action_delay_seconds": settings.execution.post_action_delay_seconds.model_dump(),
             "app_version": None,
             "app_version_unavailable_reason": "not_reported",
@@ -416,6 +420,8 @@ class RunLifecycleService:
                 safe_policy["reasoning_effort"] = runtime_policy["reasoning_effort"]
             if type(runtime_policy.get("max_turns")) is int and runtime_policy["max_turns"] > 0:
                 safe_policy["max_turns"] = runtime_policy["max_turns"]
+            if type(runtime_policy.get("verification_enabled")) is bool:
+                safe_policy["verification_enabled"] = runtime_policy["verification_enabled"]
             if safe_policy:
                 safe_config["agent_runtime"] = safe_policy
         import platform as python_platform

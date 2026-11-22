@@ -5,6 +5,9 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 ## [Unreleased]
 
 - Dynamic execution reuses unambiguous same-view locators and checks search scope before refining queries. Planning and verification preserve explicit constraints while supporting evidence-grounded delegated choices, historical record periods, and independent deliverables. Visual AI guidance avoids unauthorized or repeated probes.
+- The iOS preset settles actions for 0.2 seconds, omits non-interactive zero-size snapshot leaves without semantic content by default, and reports bounded identifiers for attributable ambiguous matches without exposing secure field values.
+- Dynamic runs retain up to 30 recent outputs within 60,000-character per-output and 180,000-character total inline limits. `agent_runtime.verification_enabled: false` skips the independent verification model call while retaining local result and evidence reconciliation.
+- Dynamic execution guidance distinguishes verified zero from missing coverage, reserves turns for persistent deliverables, and improves segmented searches, structured forms, record deduplication, media transcription, and route-builder attachment checks.
 
 ## [0.3.8] - 2026-11-21
 

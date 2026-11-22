@@ -86,7 +86,6 @@ class IOSHarness:
         visual_assertion_budget: AssertionBudget | None = None,
         visual_assertion_provider_available: bool | None = None,
     ) -> None:
-        _ = runtime_secret_settings
         self.driver = driver
         self.artifact_store = artifact_store
         self.ai_assertion_evaluator = ai_assertion_evaluator
@@ -97,6 +96,9 @@ class IOSHarness:
         self._owned_resources = OwnedResources(driver, ai_assertion_evaluator)
         self.common_tools = CommonPlatformTools(platform="ios")
         self._configure_driver_ai_assertion_tool()
+        configure_redaction = getattr(self.driver, "configure_diagnostic_redaction", None)
+        if runtime_secret_settings is not None and callable(configure_redaction):
+            configure_redaction(tuple(runtime_secret_settings.private_values().values()))
 
     def capture_scope(self, callback):
         return self.artifact_store.capture_scope(callback) if self.artifact_store is not None else nullcontext()

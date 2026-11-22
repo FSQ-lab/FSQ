@@ -7,6 +7,7 @@ import io
 import json
 import sys
 from contextlib import nullcontext
+from threading import get_ident
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
@@ -54,6 +55,7 @@ from fsq_agent.models import (
     IOSTapOnParams,
     IOSTextAssertion,
     IOSUiSnapshotParams,
+    RuntimeSecretSettings,
 )
 
 if TYPE_CHECKING:
@@ -505,6 +507,53 @@ def test_ios_snapshot_prunes_offscreen_subtrees_without_losing_visible_descendan
     assert full_root.find(".//XCUIElementTypeCell[@name='offscreen-849'][@visible='false']") is not None
     assert full_root.find(".//XCUIElementTypeCell[@name='hidden-child'][@visible='false']") is not None
     assert len(json.dumps(default)) < 30_000 < len(json.dumps(full))
+
+
+def test_ios_snapshot_prunes_empty_geometry_only_in_default_scope() -> None:
+    def node(kind: str = "Other", **attrs: object) -> SimpleNamespace:
+        return SimpleNamespace(type=_obs(f"XCUIElementType{kind}"), **attrs)
+
+    visible_child = node("StaticText", bounds=_obs(_bounds(0, 0, 0, 0)), text=_obs("Readable text"))
+    session = FakeSession()
+    session.tree_roots = (
+        node(
+            "Application",
+            bounds=_obs(_bounds(0, 0, 0, 0)),
+            children=(
+                node(bounds=_obs(_bounds(0, 0, 0, 2)), selected=_obs(True)),
+                node(bounds=_obs(_bounds(0, 0, 4, -1)), children=(node(bounds=_obs(_bounds(0, 0, 0, 0))),)),
+                node(bounds=_obs(SimpleNamespace(width="bad", height="0"))),
+                node(bounds=_obs(SimpleNamespace(width="0.0", height="bad")), selected=_obs(True)),
+                node(bounds=_obs(SimpleNamespace(height=2)), selected=_obs(True)),
+                node(bounds=_obs(SimpleNamespace(width=0.5, height=True)), selected=_obs(True)),
+                node("Button", bounds=_obs(_bounds(0, 0, 0, 0))),
+                node(id=_obs("identified"), bounds=_obs(_bounds(0, 0, 0, 0))),
+                node(label=_obs("container"), bounds=_obs(_bounds(0, 0, 0, 0)), children=(visible_child,)),
+                node(placeholder_value=_obs("Hint"), bounds=_obs(_bounds(0, 0, 0, 0))),
+            ),
+        ),
+    )
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        default = driver.ui_snapshot(IOSUiSnapshotParams())
+        full = driver.ui_snapshot(IOSUiSnapshotParams(include_offscreen=True))
+    finally:
+        driver.close()
+
+    root = ElementTree.fromstring(str(default["xml"]))  # noqa: S314 - controlled test output
+    assert root.tag == "XCUIElementTypeApplication"
+    assert root.find("./XCUIElementTypeButton") is not None
+    assert root.find("./XCUIElementTypeOther[@name='identified']") is not None
+    assert root.find("./XCUIElementTypeOther[@placeholderValue='Hint']") is not None
+    assert root.findtext("./XCUIElementTypeOther[@label='container']/XCUIElementTypeStaticText") == "Readable text"
+    selected = root.findall("./XCUIElementTypeOther[@selected='true']")
+    assert [(child.get("width"), child.get("height")) for child in selected] == [(None, None), (None, "2"), (None, None)]
+    assert default["compaction"]["offscreen_nodes_omitted"] == 4
+    assert default["compaction"]["layout_nodes_removed"] == 0
+    assert default["coverage"]["status"] == "partial"
+    assert full["compaction"]["offscreen_nodes_omitted"] == 0
+    full_root = ElementTree.fromstring(str(full["xml"]))  # noqa: S314 - controlled test output
+    assert full_root.find("./XCUIElementTypeOther[@width='0'][@selected='true']") is not None
 
 
 def test_ios_snapshot_reports_partial_when_offscreen_pruning_is_the_only_loss() -> None:
@@ -1190,6 +1239,195 @@ def test_ios_swipe_safe_interior_ranges_and_validated_element_insets() -> None:
     off_res = driver.swipe(IOSSwipeParams(locator=IOSLocator(accessibility_id="offscreen_slider"), direction="left", percent=1.0))
     assert off_res["status"] == "failed"
     assert off_res["failure_category"] == "action_error"
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_ios_bare_ambiguity_attributes_only_actual_lookup_branch(fallback: bool) -> None:
+    session = FakeSession()
+    text = "Choose"
+    exact = f'label == "{text}"'
+    alternative = f'name == "{text}" OR value == "{text}"'
+    session.elements[("-ios predicate string", exact, None)] = FakeElement(
+        by="-ios predicate string", value=exact, inspect_error=TargetError("target_not_found" if fallback else "target_ambiguous", "untrusted message")
+    )
+    session.elements[("-ios predicate string", alternative, None)] = FakeElement(by="-ios predicate string", value=alternative, inspect_error=TargetError("target_ambiguous", "untrusted message"))
+    session.tree_roots = (
+        SimpleNamespace(type=_obs("XCUIElementTypeStaticText"), id=_obs("label-only"), label=_obs(text)),
+        SimpleNamespace(type=_obs("XCUIElementTypeButton"), id=_obs("second-label"), label=_obs(text)),
+        SimpleNamespace(type=_obs("XCUIElementTypeButton"), id=_obs(text), label=_obs("Matching name")),
+        SimpleNamespace(type=_obs("XCUIElementTypeStaticText"), id=_obs("value-only"), value=_obs(text)),
+    )
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        with pytest.raises(ConfigurationError) as error:
+            driver.tap_on(IOSTapOnParams(target=f" {text} "))
+    finally:
+        driver.close()
+
+    assert error.value.context["resolution_reason"] == "ambiguous"
+    candidates = error.value.context["candidates"]
+    assert [candidate["name"] for candidate in candidates] == ([text, "value-only"] if fallback else ["label-only", "second-label"])
+    assert "untrusted message" not in str(error.value)
+
+
+def test_ios_ambiguity_limits_candidate_text_and_withholds_secrets() -> None:
+    session = FakeSession()
+    locator = IOSLocator(label="Shared")
+    session.default_element.inspect_error = TargetError("target_ambiguous", "untrusted message")
+    credential = "private-input"
+    secure_value = "private-field-value"
+    signing_id = "private-signing-data"
+    runtime_value = "runtime-private-value"
+    long_name = "n" * 170
+    long_value = "v" * 170
+    session.tree_roots = (
+        SimpleNamespace(type=_obs("XCUIElementTypeButton"), id=_obs(long_name), label=_obs("Shared"), value=_obs(long_value), bounds=_obs(_bounds(1, 2))),
+        SimpleNamespace(type=_obs("XCUIElementTypeSecureTextField"), id=_obs(secure_value), label=_obs("Shared"), value=_obs(secure_value)),
+        SimpleNamespace(type=_obs("XCUIElementTypeTextField"), id=_obs(signing_id), label=_obs("Shared"), value=_obs(f"Value: {credential}")),
+        SimpleNamespace(type=_obs("XCUIElementTypeTextField"), id=_obs("n" * 155 + runtime_value), label=_obs("Shared"), value=_obs("visible")),
+        *(SimpleNamespace(type=_obs("XCUIElementTypeTextField"), id=_obs(" "), label=_obs("Shared"), value=_obs("")) for _ in range(5)),
+    )
+    driver = AppiumConnectIOSDriver(session=session, xcode_signing_id=signing_id)
+    settings = RuntimeSecretSettings()
+    settings.set_values({"PRIVATE_VALUE": runtime_value})
+    IOSHarness(driver, runtime_secret_settings=settings)
+    try:
+        with pytest.raises(ConfigurationError) as error:
+            driver.input_text(IOSInputTextParams(locator=locator, text=credential))
+    finally:
+        driver.close()
+
+    candidates = error.value.context["candidates"]
+    assert len(candidates) == 5
+    assert candidates[0] == {
+        "type": "XCUIElementTypeButton",
+        "x": "1",
+        "y": "2",
+        "width": "40",
+        "height": "24",
+        "name": long_name[:160],
+        "label": "Shared",
+        "value": long_value[:160],
+    }
+    assert candidates[1] == {"type": "XCUIElementTypeSecureTextField", "label": "Shared"}
+    assert candidates[2] == {"type": "XCUIElementTypeTextField", "label": "Shared"}
+    assert candidates[3] == {"type": "XCUIElementTypeTextField", "label": "Shared", "value": "visible"}
+    assert candidates[4] == {"type": "XCUIElementTypeTextField", "label": "Shared"}
+
+
+@pytest.mark.parametrize("locator", [IOSLocator(predicate="enabled == false"), IOSLocator(xpath="//XCUIElementTypeOther"), IOSLocator(class_chain="**/XCUIElementTypeOther")])
+@pytest.mark.parametrize("late", [False, True])
+def test_ios_opaque_ambiguity_does_not_observe_or_expose_candidates(locator: IOSLocator, late: bool) -> None:
+    session = FakeSession()
+    tree_observer = Mock(wraps=session.observe_tree)
+    session.observe_tree = tree_observer  # type: ignore[method-assign]
+    sdk_error = TargetError("target_ambiguous", "untrusted message")
+    sdk_error.diagnostics = {"candidates": [{"name": "untrusted candidate"}]}
+    driver = AppiumConnectIOSDriver(session=session)
+    params = IOSTapOnParams(locator=locator)
+    try:
+        if late:
+            session.default_element.click = Mock(side_effect=sdk_error)  # type: ignore[method-assign]
+            result = driver.tap_on(params)
+            assert result["failure_category"] == "target_resolution_error"
+            details = result["metadata"]
+            assert "untrusted message" not in str(result)
+        else:
+            session.default_element.inspect_error = sdk_error
+            with pytest.raises(ConfigurationError) as error:
+                driver.tap_on(params)
+            details = error.value.context
+            assert "untrusted message" not in str(error.value)
+    finally:
+        driver.close()
+
+    assert details["resolution_reason"] == "ambiguous"
+    assert not details.get("candidates")
+    assert "untrusted candidate" not in str(details)
+    tree_observer.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("request_state", "session_state", "fallback", "reports_candidates"),
+    [
+        ("response_received", "active", False, True),
+        ("response_received", "active", True, True),
+        ("response_unknown", "active", False, False),
+        ("response_received", "uncertain", True, False),
+    ],
+)
+def test_ios_late_ambiguity_observes_on_owner_only_when_definitive(request_state: str, session_state: str, fallback: bool, reports_candidates: bool) -> None:
+    action_threads: list[int] = []
+    observed_threads: list[int] = []
+
+    class OwnedSession(FakeSession):
+        def observe_tree(self, *, control: object = None) -> Any:
+            observed_threads.append(get_ident())
+            return super().observe_tree(control=control)
+
+        def quit(self, *, control: object = None) -> None:
+            self.state = "closed"
+
+    session = OwnedSession()
+    text = "Choose"
+    exact = f'label == "{text}"'
+    alternative = f'name == "{text}" OR value == "{text}"'
+    element = session.default_element
+    if fallback:
+        session.elements[("-ios predicate string", exact, None)] = FakeElement(by="-ios predicate string", value=exact, inspect_error=TargetError("target_not_found"))
+        session.elements[("-ios predicate string", alternative, None)] = element
+
+    def fail_action(*, wait_timeout_seconds: float, control: object = None) -> None:
+        action_threads.append(get_ident())
+        session.state = session_state
+        error = TargetError("target_ambiguous", "untrusted message")
+        error.request_state = request_state
+        raise error
+
+    element.click = fail_action  # type: ignore[method-assign]
+    session.tree_roots = (
+        SimpleNamespace(type=_obs("XCUIElementTypeButton"), id=_obs("label-only"), label=_obs(text)),
+        SimpleNamespace(type=_obs("XCUIElementTypeButton"), id=_obs(text), label=_obs("Matching name")),
+    )
+    driver = AppiumConnectIOSDriver()
+    driver._session = session
+    caller_thread = get_ident()
+    try:
+        result = driver.tap_on(IOSTapOnParams(target=text))
+    finally:
+        session.state = "active"
+        driver.close()
+
+    assert len(action_threads) == 1
+    assert action_threads[0] != caller_thread
+    details = result["metadata"]
+    assert "untrusted message" not in str(result)
+    if reports_candidates:
+        assert observed_threads == action_threads
+        assert result["failure_category"] == "target_resolution_error"
+        assert details["resolution_reason"] == "ambiguous"
+        assert [candidate["name"] for candidate in details["candidates"]] == [text if fallback else "label-only"]
+    else:
+        assert not observed_threads
+        assert result["failure_category"] == "action_error"
+        assert not details.get("candidates")
+
+
+def test_ios_element_swipe_does_not_attribute_device_errors_to_locator() -> None:
+    session = FakeSession()
+    tree_observer = Mock(wraps=session.observe_tree)
+    session.observe_tree = tree_observer  # type: ignore[method-assign]
+    session.device.swipe_between = Mock(side_effect=TargetError("target_ambiguous"))  # type: ignore[method-assign]
+    driver = AppiumConnectIOSDriver(session=session)
+    try:
+        result = driver.swipe(IOSSwipeParams(locator=IOSLocator(label="Shared"), direction="down"))
+    finally:
+        driver.close()
+
+    assert result["failure_category"] == "target_resolution_error"
+    assert result["metadata"]["resolution_reason"] == "ambiguous"
+    assert not result["metadata"].get("candidates")
+    tree_observer.assert_not_called()
 
 
 def test_ios_safe_diagnostics_and_non_definitive_target_error_redaction() -> None:

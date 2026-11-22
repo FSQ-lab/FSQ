@@ -54,9 +54,9 @@ class LocalToolOutputSettings(BaseModel):
     artifact_enabled: bool = True
     always_write_artifact: bool = True
     artifact_subdir: str = "artifacts/tools"
-    recent_inline_output_count: int = Field(default=20, ge=0)
-    full_output_max_chars: int = Field(default=30000, ge=1)
-    total_inline_output_max_chars: int = Field(default=60000, ge=1)
+    recent_inline_output_count: int = Field(default=30, ge=0)
+    full_output_max_chars: int = Field(default=60000, ge=1)
+    total_inline_output_max_chars: int = Field(default=180000, ge=1)
     historical_output_mode: Literal["artifact_reference"] = "artifact_reference"
     historical_preview_chars: int = Field(default=1000, ge=0)
     model_response_max_chars: int = Field(default=4000, ge=500)
@@ -427,6 +427,7 @@ class AgentRuntimeSettings(BaseModel):
     max_turns: int = Field(default=50, ge=1)
     reasoning_effort: Literal["low", "mid", "high"] = "mid"
     tracing_enabled: bool = True
+    verification_enabled: bool = True
     prompt: AgentPromptConfig = Field(default_factory=AgentPromptConfig)
     _base_url: str = PrivateAttr(default="")
     _model: str = PrivateAttr(default="")

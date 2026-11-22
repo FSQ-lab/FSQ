@@ -66,17 +66,33 @@ Preserve an explicitly requested complete filename exactly, including an explici
 suffix is not equivalent. Plan complete saved-name/destination verification in the actual file-list/file-management view,
 not an editor title that may hide extensions; never add a save/rename that violates a draft or no-save restriction.
 Put execution-critical qualifications in the same key action's notes; preserve observed facts rather than inventing them.
-Only a valid tool-root write_budget receipt activates max/remaining throttling and goal-required completion reserves.
-Absent, malformed, or throwing optional budget hooks impose no restrictions, synthetic counters, or budget-based stop.
+Only a valid tool-root write_budget receipt activates max/remaining throttling and write-quota reserves.
+Absent, malformed, or throwing optional budget hooks impose no quota-based restriction, synthetic counter, or stop.
+Separately, reserve execution turns for persistent deliverable navigation, writing, authorized commits, and saved-state
+readback/repair. Stop optional browsing at core coverage or around two thirds of the effective max_turns, whichever comes
+first; keep required coverage, prerequisites, and constraints.
 For cross-screen collection, retain identities, relevant fields, unresolved facts, and coverage with multiplicity but no
 overlap double count. Prune only when a goal-defined predicate is disproved; unequal durations can still contribute to
 sum/subset tasks. Reanchor after paging/deletion and continue feasible requested coverage while adequate budget remains.
+For count categories, plan full inspection of all relevant required sources and applicable scopes for the requested window.
+Only complete no-match coverage supports zero; incomplete or inaccessible coverage is unverified. Plan to disclose
+coverage and gaps, compute supported totals, and complete requested downstream writes only from verified inputs.
+Plan to reveal dedicated form fields by safe keyboard dismissal or scrolling and fill visible fields per viewport.
+Do not merge dedicated fields into another field; single-body editors may hold structured sections. Reserve pre-submit
+readback and repair. For deduplication, compare list signatures first, inspect full details for unresolved same-title
+collisions, and batch only confirmed duplicate deletions. For exact media text, reconcile adjacent samples at stable
+mid-segment points, using structural evidence first and visual extraction regions only under existing permission and
+refusal rules; preserve exact trailing characters and diacritics.
 For location search, use the core name with country/region constraints and expand the current general radius until a
 candidate, observed terminal/unchanged/blocked range, or supplied limit before narrow category tabs. No unchanged cycles
 or hidden coordinates. Verified input is not rewritten merely because its display clips; distinguish uncertain acceptance.
+For route waypoints, use the active builder's picker. A standalone detail requires an explicit attach control or
+re-entry to the builder's picker. Verify waypoint list membership and count increment after each selection.
 For other named lookups prefer exposed Search unless the target is already visible or the browsing path is explicit.
 On the first empty or mismatched scoped result verify the parent scope and correct a wrong scope before refining. Use at
 most two concise root queries per unchanged scope, then switch if authorized, never away from an explicitly fixed scope.
+If a default segment has no match, check relevant permitted adjacent tabs before declaring absence. When snapshot text
+is duplicated, use a unique structured locator from current evidence on the first attempt.
 Reuse unambiguous locators for deterministic same-view actions; refresh ui_snapshot at navigation, modal/sheet changes,
 dynamic results, or locator ambiguity/failure. Reserve assertions for goal-required checkpoints and final verification.
 Use result.to_page_id values from page element operations when describing navigation between pages.

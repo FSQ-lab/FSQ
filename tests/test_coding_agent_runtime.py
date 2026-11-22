@@ -628,6 +628,7 @@ async def test_main_closing_policy_preserves_answer_before_cleanup_and_read_only
             assert "harness.close" not in order
             assert request.final_turn_instructions == policy.final_turn_instructions
             assert request.final_turn_instructions.strip()
+            assert "max_turns: 2" in request.input
             action = next(tool for tool in request.tools if tool.name == "tap_on")
             await action.invoke(ToolCall(name="tap_on", arguments={"target": "distance"}, call_id="read-distance"))
             return AgentResult(final_output=main_output, usage=TokenUsage(6, 4, 10, 2))
@@ -2169,8 +2170,8 @@ def test_runtime_builds_neutral_request_with_one_tool_output_budget(monkeypatch:
 
     assert request.tracing_enabled is False
     input_filter = request.tool_output_filter
-    assert input_filter.max_output_chars == 30000
-    assert input_filter.max_total_inline_chars == 60000
+    assert input_filter.max_output_chars == 60000
+    assert input_filter.max_total_inline_chars == 180000
     assert not hasattr(request, "trimming")
 
 
@@ -2200,13 +2201,13 @@ def test_provider_session_preserves_azure_connection_values_for_neutral_access()
     assert not hasattr(session, "create_agents_provider")
 
 
-def test_runtime_tool_count_filter_keeps_twenty_small_recent_outputs(tmp_path: Path) -> None:
+def test_runtime_tool_count_filter_keeps_thirty_small_recent_outputs(tmp_path: Path) -> None:
     output_settings = OutputSettings()
     output_settings.runs_dir = tmp_path / "runs"
     settings = Settings(agent_runtime=AgentRuntimeSettings(), output=output_settings)
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
     input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
-    entries = tuple(ToolOutputEntry(index, str(index), "read_file", f"output {index}") for index in range(1, 22))
+    entries = tuple(ToolOutputEntry(index, str(index), "read_file", f"output {index}") for index in range(1, 32))
 
     filtered = input_filter(entries)
 
@@ -2265,6 +2266,7 @@ async def test_file_helper_context_filter_preserves_complete_artifact(tmp_path: 
     (settings.agent_context.knowledge.root_dir / "large.txt").write_text(content, encoding="utf-8")
     runtime = create_coding_agent_runtime(settings)
     settings.agent_runtime.local_tool_output.recent_inline_output_count = 3
+    settings.agent_runtime.local_tool_output.full_output_max_chars = 30000
     tools = runtime.tool_factory.build_tools(run_id="run-1", task_id="task-1")
     read_tool = next(tool for tool in tools if tool.name == "read_file")
     search_tool = next(tool for tool in tools if tool.name == "search_artifact")
@@ -2656,6 +2658,7 @@ async def test_verifier_receives_original_observation_when_compact_history_stays
     raw = await tool.invoke(ToolCall(name=tool.name, arguments={"target": "editor"}, call_id="read-full"))
     settings = Settings()
     settings.output.runs_dir = tmp_path / "runs"
+    settings.agent_runtime.local_tool_output.full_output_max_chars = 30000
     runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory())
     input_filter = _test_request(runtime, run_id="run-1").tool_output_filter
     projected = input_filter((ToolOutputEntry(1, "read-full", tool.name, raw),))[1]

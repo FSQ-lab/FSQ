@@ -13,7 +13,7 @@ harness:
 
 execution:
   post_action_delay_seconds:
-    platform: 1.0
+    platform: 0.2
     common: 0.0
 
 agent_context:

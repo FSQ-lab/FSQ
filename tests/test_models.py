@@ -95,14 +95,16 @@ def test_agent_runtime_settings_defaults_to_safe_offline_mode() -> None:
     assert settings.base_url == ""
     assert settings.api_key == ""
     assert settings.tracing_enabled is True
+    assert settings.verification_enabled is True
     assert not hasattr(settings.prompt, "custom_instructions")
     assert not hasattr(settings.prompt, "custom_instructions_path")
     assert settings.prompt.agent_template_path is None
     assert settings.prompt.task_template_path is None
     assert settings.prompt.variables == {}
     assert settings.local_tool_output.always_write_artifact is True
-    assert settings.local_tool_output.full_output_max_chars == 30000
-    assert settings.local_tool_output.total_inline_output_max_chars == 60000
+    assert settings.local_tool_output.recent_inline_output_count == 30
+    assert settings.local_tool_output.full_output_max_chars == 60000
+    assert settings.local_tool_output.total_inline_output_max_chars == 180000
 
 
 def test_harness_settings_default_to_android_appium_connect_agent() -> None:

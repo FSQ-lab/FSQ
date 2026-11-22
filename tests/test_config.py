@@ -174,6 +174,12 @@ env: {{}}
     assert settings.agent_context.knowledge.skills.dir == Path(_loader.__file__).resolve().parents[1] / "resources" / "skills"
 
 
+def test_ios_preset_uses_shorter_platform_settle_delay(tmp_path: Path) -> None:
+    settings = load_platform_settings("ios", workspace=tmp_path / "workspace", user_config_root=tmp_path / "user")
+    assert settings.execution.post_action_delay_seconds.platform == 0.2
+    assert settings.execution.post_action_delay_seconds.common == 0.0
+
+
 def _macos_workspace(tmp_path: Path, name: str) -> Path:
     workspace = tmp_path / name
     config_dir = workspace / ".fsq" / "config"
@@ -286,6 +292,7 @@ agent:
 agent_runtime:
   max_turns: 40
   tracing_enabled: false
+  verification_enabled: false
 """,
         ),
         encoding="utf-8",
@@ -298,6 +305,7 @@ agent_runtime:
     assert settings.agent_runtime.model == "gpt-5.5"
     assert settings.agent_runtime.max_turns == 40
     assert settings.agent_runtime.tracing_enabled is False
+    assert settings.agent_runtime.verification_enabled is False
     assert not hasattr(settings, "verification")
     assert not hasattr(settings, "cli_tools")
     assert not hasattr(settings, "shell")

@@ -11,12 +11,13 @@ import time
 from asyncio import CancelledError
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from math import ceil, floor
 from pathlib import Path
 from threading import Event
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar
 from xml.etree import ElementTree
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
@@ -399,6 +400,13 @@ def _resolve_ios_app_artifact_path(app_path: str | Path) -> Path:
     return path
 
 
+@dataclass(slots=True, repr=False)
+class _TargetDiagnostics:
+    # A string represents the driver-generated name-or-value fallback, not an opaque predicate.
+    lookup: IOSLocator | str | None = None
+    submitted_text: str | None = None
+
+
 class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
     backend = "appium_connect_agent"
 
@@ -480,6 +488,10 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         self._closed: bool = False
         self._resolved_device_target: str | None = None
         self._last_session_activity_monotonic: float | None = time.monotonic() if session is not None else None
+        self._diagnostic_private_values: tuple[str, ...] = ()
+
+    def configure_diagnostic_redaction(self, private_values: tuple[str, ...]) -> None:
+        self._diagnostic_private_values = private_values
 
     @_ios_driver_tool("launchApp", description="Start or activate an iOS application in the XCUITest session.")
     def launch_app(self, params: IOSLaunchAppParams) -> dict[str, object]:
@@ -514,14 +526,16 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     @_ios_driver_tool("tapOn", description="Tap an iOS UI element resolved by semantic target or structured XCUITest locator.")
     def tap_on(self, params: IOSTapOnParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
+
         def _op() -> dict[str, object]:
-            element = self._resolve_element_or_none(params)
+            element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
             if element is None:
                 return self._target_missing()
             element.click(wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
             return self._passed()
 
-        return self._run_tool(_op)
+        return self._run_tool(_op, diagnostic_target=diagnostic_target)
 
     @_ios_driver_tool("tapAt", description="Tap explicit iOS logical screen coordinates.")
     def tap_at(self, params: IOSTapAtParams) -> dict[str, object]:
@@ -539,20 +553,24 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     @_ios_driver_tool("doubleTapOn", description="Double-tap an iOS UI element.")
     def double_tap_on(self, params: IOSDoubleTapOnParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
+
         def _op() -> dict[str, object]:
-            element = self._resolve_element_or_none(params)
+            element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
             if element is None:
                 return self._target_missing()
             element.double_click(wait_timeout_seconds=self._wait_timeout(), control=self._ActionControl(self))
             return self._passed()
 
-        return self._run_tool(_op)
+        return self._run_tool(_op, diagnostic_target=diagnostic_target)
 
     @_ios_driver_tool("longPressOn", description="Touch and hold an iOS UI element.")
     def long_press_on(self, params: IOSLongPressOnParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
+
         def _op() -> dict[str, object]:
             duration_ms = int(params.duration_ms)
-            element = self._resolve_element_or_none(params)
+            element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
             if element is None:
                 return self._target_missing()
             element.long_click(
@@ -562,7 +580,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             )
             return self._passed({"duration_ms": duration_ms})
 
-        return self._run_tool(_op)
+        return self._run_tool(_op, diagnostic_target=diagnostic_target)
 
     @_ios_driver_tool(
         "inputText",
@@ -570,11 +588,13 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         metadata={"credential_input": True},
     )
     def input_text(self, params: IOSInputTextParams) -> dict[str, object]:
-        return self._run_tool(lambda: self._input_text_impl(params))
+        diagnostic_target = _TargetDiagnostics(submitted_text=params.text)
+        return self._run_tool(lambda: self._input_text_impl(params, diagnostic_target), diagnostic_target=diagnostic_target)
 
-    def _input_text_impl(self, params: IOSInputTextParams) -> dict[str, object]:
+    def _input_text_impl(self, params: IOSInputTextParams, diagnostic_target: _TargetDiagnostics) -> dict[str, object]:
         return self._mutate_editable_text_impl(
             params,
+            diagnostic_target,
             action_label="inputText",
             clear_existing=bool(params.clear),
             submitted_text=params.text,
@@ -582,29 +602,35 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     @_ios_driver_tool("clearText", description="Clear text from an editable iOS element.")
     def clear_text(self, params: IOSClearTextParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
         return self._run_tool(
             lambda: self._mutate_editable_text_impl(
                 params,
+                diagnostic_target,
                 action_label="clearText",
                 clear_existing=True,
                 submitted_text=None,
-            )
+            ),
+            diagnostic_target=diagnostic_target,
         )
 
     def _mutate_editable_text_impl(
         self,
         params: BaseModel,
+        diagnostic_target: _TargetDiagnostics,
         *,
         action_label: str,
         clear_existing: bool,
         submitted_text: str | None,
     ) -> dict[str, object]:
-        element = self._resolve_element_or_none(params)
+        element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
         if element is None:
             return self._target_missing()
 
         session = self._ensure_session_impl()
         attrs = self._inspect_editable_attributes(element, IOS_INPUT_PRE_ATTRIBUTES)
+        # Binding, clipboard operations, and focus fallback may use a different locator.
+        diagnostic_target.lookup = None
         type_entry = attrs.get("type")
         raw_type = str(type_entry[1]) if type_entry and type_entry[0] == "value" and isinstance(type_entry[1], str) and type_entry[1] else ""
         short_type = raw_type.removeprefix("XCUIElementType") if raw_type else ""
@@ -882,9 +908,10 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     @_ios_driver_tool("swipe", description="Perform an iOS full-screen directional swipe, explicit-point swipe, or element-scoped swipe.")
     def swipe(self, params: IOSSwipeParams) -> dict[str, object]:
-        return self._run_tool(lambda: self._swipe_impl(params))
+        diagnostic_target = _TargetDiagnostics()
+        return self._run_tool(lambda: self._swipe_impl(params, diagnostic_target), diagnostic_target=diagnostic_target)
 
-    def _swipe_impl(self, params: IOSSwipeParams) -> dict[str, object]:
+    def _swipe_impl(self, params: IOSSwipeParams, diagnostic_target: _TargetDiagnostics) -> dict[str, object]:
         session = self._ensure_session_impl()
         duration_ms = int(params.duration) if params.duration is not None else DEFAULT_SWIPE_DURATION_MS
         control = self._operation_control(max(5.0, float(self.action_timeout_seconds) + (duration_ms / 1000.0) + 5.0))
@@ -906,10 +933,11 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
         cur_w, cur_h = self._display_size(session)
         if self._has_semantic_target(params):
-            element = self._resolve_element_or_none(params)
+            element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
             if element is None:
                 return self._target_missing()
             inspection = element.inspect(attributes=("bounds",), control=self._ActionControl(self))
+            diagnostic_target.lookup = None
             attrs = self._inspection_dict(inspection)
             bounds_tuple = self._bounds_tuple_from_attrs(attrs)
             if bounds_tuple is None:
@@ -996,8 +1024,10 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     @_ios_driver_tool("scrollTo", description="Scroll one uniquely resolved iOS scrollable container or element in direction by a bounded distance fraction.")
     def scroll_to(self, params: IOSScrollToParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
+
         def _op() -> dict[str, object]:
-            element = self._resolve_element_or_none(params)
+            element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
             if element is None:
                 return self._target_missing()
             element.ios_scroll(
@@ -1008,7 +1038,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             )
             return self._passed({"direction": params.direction, "distance": float(params.distance)})
 
-        return self._run_tool(_op)
+        return self._run_tool(_op, diagnostic_target=diagnostic_target)
 
     @_ios_driver_tool("takeScreenshot", description="Capture an iOS PNG screenshot.")
     def take_screenshot(self, params: IOSTakeScreenshotParams) -> bytes:
@@ -1060,8 +1090,10 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         description="Inspect one uniquely resolved iOS target or non-empty locator. Returns complete unclipped safe attributes; value is withheld on XCUIElementTypeSecureTextField.",
     )
     def inspect_element(self, params: IOSInspectElementParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
+
         def _op() -> dict[str, object]:
-            element = self._resolve_element_or_none(params)
+            element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
             if element is None:
                 return self._target_missing()
             needs_type_guard = "value" in params.attributes and "type" not in params.attributes
@@ -1090,7 +1122,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 projected[requested] = {"state": "value", "value": val}
             return {"attributes": projected}
 
-        return self._run_tool(_op)
+        return self._run_tool(_op, diagnostic_target=diagnostic_target)
 
     @_ios_driver_tool("inspectWithAI", description="Read current pixel content with extract, or locate an inaccessible iOS target. Read-only; not an assertion.")
     def inspect_with_ai(self, params: IOSInspectWithAIParams) -> dict[str, object]:
@@ -1100,10 +1132,12 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
     @_ios_driver_tool("assertVisible", description="Assert that an iOS UI target is present and visible.")
     def assert_visible(self, params: IOSAssertVisibleParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
+
         def _op() -> dict[str, object]:
             deadline = time.monotonic() + self._wait_timeout()
             while True:
-                element = self._resolve_element_or_none(params)
+                element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
                 if element is not None:
                     inspection = element.inspect(attributes=("displayed",), control=self._ActionControl(self))
                     attrs = self._inspection_dict(inspection)
@@ -1116,16 +1150,18 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                     return self._failed("assertion_error", "Expected iOS element to be visible, but it was not visible.")
                 time.sleep(min(DEFAULT_POLL_INTERVAL_SECONDS, remaining))
 
-        return self._run_tool(_op)
+        return self._run_tool(_op, diagnostic_target=diagnostic_target)
 
     @_ios_driver_tool("assertNotVisible", description="Assert that an iOS UI target is absent or not visible.")
     def assert_not_visible(self, params: IOSAssertNotVisibleParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
+
         def _op() -> dict[str, object]:
             deadline = time.monotonic() + self._wait_timeout()
             while True:
                 ambiguous_exc: ConfigurationError | None = None
                 try:
-                    element = self._resolve_element_or_none(params)
+                    element = self._resolve_element_or_none(params, diagnostic_target=diagnostic_target)
                 except ConfigurationError as exc:
                     if exc.context.get("resolution_reason") == "ambiguous":
                         ambiguous_exc = exc
@@ -1148,10 +1184,12 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                     return self._failed("assertion_error", "Expected iOS element not to be visible, but it remains visible.")
                 time.sleep(min(DEFAULT_POLL_INTERVAL_SECONDS, remaining))
 
-        return self._run_tool(_op)
+        return self._run_tool(_op, diagnostic_target=diagnostic_target)
 
     @_ios_driver_tool("assertState", description="Assert existence, text, or state on one uniquely located iOS element.")
     def assert_state(self, params: IOSAssertStateParams) -> dict[str, object]:
+        diagnostic_target = _TargetDiagnostics()
+
         def _op() -> dict[str, object]:
             locator = IOSLocator(
                 accessibility_id=params.element.accessibility_id,
@@ -1164,7 +1202,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 class_chain=params.element.class_chain,
                 xpath=params.element.xpath,
             )
-            element = self._element_from_locator(locator)
+            element = self._element_from_locator(locator, diagnostic_target=diagnostic_target)
             if element is None:
                 if params.optional:
                     return self._passed({"exists": False, "optional": True})
@@ -1216,7 +1254,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
 
             return self._passed({"exists": True})
 
-        return self._run_tool(_op)
+        return self._run_tool(_op, diagnostic_target=diagnostic_target)
 
     @_ios_driver_tool("assertWithAI", description="Evaluate only an image-space iOS visual assertion.")
     def assert_with_ai(self, params: IOSAssertWithAIParams) -> dict[str, object]:
@@ -1825,24 +1863,32 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         locator = getattr(params, "locator", None)
         return isinstance(locator, IOSLocator) and locator.has_value()
 
-    def _resolve_element_or_none(self, params: BaseModel) -> Any | None:
+    def _resolve_element_or_none(self, params: BaseModel, *, diagnostic_target: _TargetDiagnostics) -> Any | None:
         locator = getattr(params, "locator", None)
         if isinstance(locator, IOSLocator) and locator.has_value():
-            return self._element_from_locator(locator)
+            return self._element_from_locator(locator, diagnostic_target=diagnostic_target)
         target = getattr(params, "target", None)
         if isinstance(target, str) and target.strip():
-            return self._resolve_bare_target(target.strip())
+            return self._resolve_bare_target(target.strip(), diagnostic_target=diagnostic_target)
         return None
 
-    def _resolve_bare_target(self, text: str) -> Any | None:
-        found = self._element_from_locator(IOSLocator(label=text))
+    def _resolve_bare_target(self, text: str, *, diagnostic_target: _TargetDiagnostics) -> Any | None:
+        found = self._element_from_locator(IOSLocator(label=text), diagnostic_target=diagnostic_target)
         if found is not None:
             return found
         lit = _predicate_literal(text)
         fallback_pred = f"name == {lit} OR value == {lit}"
-        return self._element_from_locator(IOSLocator(predicate=fallback_pred))
+        return self._element_from_locator(IOSLocator(predicate=fallback_pred), diagnostic_target=diagnostic_target, fallback_text=text)
 
-    def _element_from_locator(self, locator: IOSLocator) -> Any | None:
+    def _element_from_locator(
+        self,
+        locator: IOSLocator,
+        *,
+        diagnostic_target: _TargetDiagnostics | None = None,
+        fallback_text: str | None = None,
+    ) -> Any | None:
+        if diagnostic_target is not None:
+            diagnostic_target.lookup = None
         if not locator.has_value():
             return None
         by, query_value, extra_predicate = self._build_session_locator_query(locator)
@@ -1867,16 +1913,14 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 if code == "target_not_found":
                     return None
                 if code == "target_ambiguous":
-                    candidates = self._collect_ambiguous_candidates(session, locator)
-                    raise ConfigurationError(
-                        "iOS locator matches multiple elements; refine the locator.",
-                        context={
-                            "resolution_reason": "ambiguous",
-                            "match_count": max(len(candidates), 2),
-                            "candidates": candidates[:5],
-                        },
-                    ) from None
+                    self._raise_ambiguous_locator(
+                        session,
+                        locator if fallback_text is None else fallback_text,
+                        submitted_text=diagnostic_target.submitted_text if diagnostic_target is not None else None,
+                    )
             self._raise_resolution_error(exc)
+        if diagnostic_target is not None:
+            diagnostic_target.lookup = locator if fallback_text is None else fallback_text
         return element
 
     def _intersect_structural_and_predicate(self, session: Any, base_element: Any, locator: IOSLocator) -> Any | None:
@@ -1950,15 +1994,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 if code == "target_not_found":
                     return False
                 if code == "target_ambiguous":
-                    candidates = self._collect_ambiguous_candidates(session, locator)
-                    raise ConfigurationError(
-                        "iOS locator matches multiple elements; refine the locator.",
-                        context={
-                            "resolution_reason": "ambiguous",
-                            "match_count": max(len(candidates), 2),
-                            "candidates": candidates[:5],
-                        },
-                    ) from None
+                    self._raise_ambiguous_locator(session, locator)
             self._raise_resolution_error(exc)
         return True
 
@@ -2084,42 +2120,64 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             clauses.append(locator.predicate)
         return clauses
 
-    def _collect_ambiguous_candidates(self, session: Any, locator: IOSLocator) -> list[dict[str, object]]:
+    def _raise_ambiguous_locator(self, session: Any, lookup: IOSLocator | str, *, submitted_text: str | None = None) -> NoReturn:
+        candidates = self._collect_ambiguous_candidates(session, lookup, submitted_text=submitted_text)
+        raise ConfigurationError(
+            "iOS locator matches multiple elements; refine the locator.",
+            context={"resolution_reason": "ambiguous", "match_count": max(len(candidates), 2), "candidates": candidates},
+        ) from None
+
+    def _collect_ambiguous_candidates(self, session: Any, lookup: IOSLocator | str, *, submitted_text: str | None = None) -> list[dict[str, object]]:
+        locator = lookup if isinstance(lookup, IOSLocator) else None
+        if locator is not None and (locator.xpath or locator.class_chain or locator.predicate):
+            return []
         try:
             observation = session.observe_tree(control=self._ActionControl(self))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 - A diagnostic cannot replace the original failure.
+            self._propagate_if_cancelled(exc)
             return []
+        expected_type = locator.element_type if locator is not None else None
+        if expected_type and not expected_type.startswith("XCUIElementType"):
+            expected_type = f"XCUIElementType{expected_type}"
+        names = tuple(name for name in (locator.accessibility_id, locator.id, locator.name) if name) if locator is not None else ()
+        private_values = tuple(
+            value.strip() or value
+            for value in (
+                *self._diagnostic_private_values,
+                submitted_text,
+                self.udid,
+                self._resolved_device_target,
+                self.xcode_org_id,
+                self.xcode_signing_id,
+                self.updated_wda_bundle_id,
+            )
+            if value
+        )
         matches: list[dict[str, object]] = []
         stack = list(reversed(getattr(observation, "roots", ())))
         while stack and len(matches) < 5:
             node = stack.pop()
-            xml_node = self._tree_node_to_xml_element(node)
-            if self._xml_node_matches_locator(xml_node, locator):
-                candidate_info: dict[str, object] = {"type": xml_node.tag}
-                for coord_key in ("x", "y", "width", "height"):
-                    if coord_key in xml_node.attrib:
-                        candidate_info[coord_key] = xml_node.attrib[coord_key]
-                matches.append(candidate_info)
-            children = getattr(node, "children", ())
-            if children:
-                stack.extend(reversed(children))
+            stack.extend(reversed(getattr(node, "children", ())))
+            tag = self._observed_tree_text(node, "type")
+            if tag is None or (expected_type and tag != expected_type) or not re.fullmatch(r"XCUIElementType[A-Za-z0-9_]{1,145}", tag):
+                continue
+            is_secure = tag == "XCUIElementTypeSecureTextField"
+            name = self._observed_tree_text(node, "id")
+            label = self._observed_tree_text(node, "label")
+            raw_value = self._observed_tree_text(node, "value")
+            value = None if is_secure else raw_value
+            if isinstance(lookup, str):
+                if lookup != name and lookup != raw_value:
+                    continue
+            elif any(name != expected for expected in names) or (lookup.label and label != lookup.label) or (lookup.value and raw_value != lookup.value):
+                continue
+            candidate: dict[str, object] = {"type": tag, **self._tree_bounds_attributes(node)}
+            secure_value = (raw_value or "").strip() if is_secure else ""
+            for key, text in (("name", name), ("label", label), ("value", value)):
+                if text and (text := text.strip()) and not (secure_value and secure_value in text) and not any(secret in text for secret in private_values):
+                    candidate[key] = text[:DEFAULT_IOS_SNAPSHOT_TEXT_LIMIT_CHARS]
+            matches.append(candidate)
         return matches
-
-    @staticmethod
-    def _xml_node_matches_locator(node: ElementTree.Element, locator: IOSLocator) -> bool:
-        attrs = node.attrib
-        for id_like in (locator.accessibility_id, locator.id, locator.name):
-            if id_like and attrs.get("name") != id_like:
-                return False
-        if locator.label and attrs.get("label") != locator.label:
-            return False
-        if locator.value and attrs.get("value") != locator.value:
-            return False
-        if locator.element_type:
-            prefixed = locator.element_type if locator.element_type.startswith("XCUIElementType") else f"XCUIElementType{locator.element_type}"
-            if node.tag not in {locator.element_type, prefixed}:
-                return False
-        return True
 
     @staticmethod
     def _inspection_dict(inspection: Any) -> dict[str, tuple[str, object]]:
@@ -2222,7 +2280,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         omitted = 0
         for index, child in enumerate(element):
             omitted += self._prune_offscreen_descendants(child)
-            if len(child) == 0 and child.get("visible") == "false":
+            if len(child) == 0 and self._is_offscreen_leaf(child):
                 if retained is None:
                     retained = element[:index]
                 omitted += 1
@@ -2231,6 +2289,23 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         if retained is not None:
             element[:] = retained
         return omitted
+
+    def _is_offscreen_leaf(self, element: ElementTree.Element) -> bool:
+        if element.get("visible") == "false":
+            return True
+        if self._xml_name(element.tag).removeprefix("XCUIElementType") in IOS_INTERACTIVE_SHORT_TYPES:
+            return False
+        if (element.text or "").strip() or any(element.attrib.get(key, "").strip() for key in IOS_SNAPSHOT_IDENTITY_ATTRIBUTE_KEYS):
+            return False
+        for key in ("width", "height"):
+            dimension = element.get(key)
+            if dimension is not None:
+                try:
+                    if int(dimension) <= 0:
+                        return True
+                except ValueError:
+                    continue
+        return False
 
     def _count_clipped_in_snapshot(self, snapshot: dict[str, object]) -> int:
         truncated = snapshot.get("truncated_attributes")
@@ -2259,9 +2334,30 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                     el.append(self._snapshot_dict_to_xml(child))
         return el
 
+    @staticmethod
+    def _observed_tree_text(node: Any, field: str) -> str | None:
+        obs = getattr(node, field, None)
+        if getattr(obs, "state", None) == "value" and isinstance(obs.value, str) and obs.value:
+            return obs.value
+        return None
+
+    @staticmethod
+    def _tree_bounds_attributes(node: Any) -> dict[str, str]:
+        bounds_obs = getattr(node, "bounds", None)
+        bounds = getattr(bounds_obs, "value", None) if getattr(bounds_obs, "state", None) == "value" else None
+        attrs: dict[str, str] = {}
+        if bounds is not None:
+            for key in ("x", "y", "width", "height"):
+                value = getattr(bounds, key, None)
+                if _is_strict_int(value):
+                    attrs[key] = str(value)
+                elif isinstance(value, str):
+                    with suppress(ValueError):
+                        attrs[key] = str(int(value))
+        return attrs
+
     def _tree_node_to_xml_element(self, node: Any) -> ElementTree.Element:
-        type_obs = getattr(node, "type", None)
-        tag = type_obs.value if getattr(type_obs, "state", None) == "value" and isinstance(type_obs.value, str) and type_obs.value else "XCUIElementTypeAny"
+        tag = self._observed_tree_text(node, "type") or "XCUIElementTypeAny"
         is_secure = tag.removeprefix("XCUIElementType") == "SecureTextField"
         attribs: dict[str, str] = {}
         for attr_field, xml_name in (
@@ -2272,9 +2368,8 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         ):
             if attr_field == "value" and is_secure:
                 continue
-            obs = getattr(node, attr_field, None)
-            if getattr(obs, "state", None) == "value" and isinstance(obs.value, str) and obs.value:
-                attribs[xml_name] = obs.value
+            if (text := self._observed_tree_text(node, attr_field)) is not None:
+                attribs[xml_name] = text
 
         for bool_field in ("enabled", "selected", "accessible"):
             obs = getattr(node, bool_field, None)
@@ -2287,18 +2382,15 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         elif visibility in {"visible", "partially_visible"}:
             attribs["visible"] = "true"
 
-        bounds_obs = getattr(node, "bounds", None)
-        bounds_val = getattr(bounds_obs, "value", None) if getattr(bounds_obs, "state", None) == "value" else None
-        if bounds_val is not None and all(hasattr(bounds_val, key) for key in ("x", "y", "width", "height")):
-            attribs["x"] = str(int(bounds_val.x))
-            attribs["y"] = str(int(bounds_val.y))
-            attribs["width"] = str(int(bounds_val.width))
-            attribs["height"] = str(int(bounds_val.height))
+        attribs.update(self._tree_bounds_attributes(node))
 
         xml_el = ElementTree.Element(tag, attribs)
         raw_text = getattr(node, "raw_text", None)
-        if isinstance(raw_text, str) and raw_text and not is_secure:
-            xml_el.text = raw_text
+        if not is_secure:
+            if isinstance(raw_text, str) and raw_text:
+                xml_el.text = raw_text
+            elif (text := self._observed_tree_text(node, "text")) is not None and text not in (attribs.get("label"), attribs.get("value"), attribs.get("placeholderValue")):
+                xml_el.text = text
         for child in getattr(node, "children", ()):
             xml_el.append(self._tree_node_to_xml_element(child))
         return xml_el
@@ -2392,7 +2484,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
     def _target_error_is_definitive(self, exc: BaseException) -> bool:
         if getattr(exc, "request_state", None) == "response_unknown":
             return False
-        return self.safe_diagnostics(exc).get("session_state") == "active"
+        return self.safe_diagnostics().get("session_state") == "active"
 
     def _raise_resolution_error(self, error: Exception) -> None:
         cls_name = type(error).__name__
@@ -2472,9 +2564,26 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             return None
         return OperationControl(timeout_seconds=timeout_seconds, cancellation=cancellation)
 
-    def _run_tool(self, func: Callable[[], dict[str, object]]) -> dict[str, object]:
+    def _run_tool(self, func: Callable[[], dict[str, object]], *, diagnostic_target: _TargetDiagnostics | None = None) -> dict[str, object]:
+        def invoke() -> dict[str, object]:
+            try:
+                return func()
+            except Exception as exc:
+                # Keep the optional observation on the same owner as the failed action.
+                if (
+                    diagnostic_target is not None
+                    and (lookup := diagnostic_target.lookup) is not None
+                    and self._session is not None
+                    and type(exc).__name__ == "TargetError"
+                    and getattr(exc, "code", None) == "target_ambiguous"
+                    and self._target_error_is_definitive(exc)
+                ):
+                    candidates = self._collect_ambiguous_candidates(self._session, lookup, submitted_text=diagnostic_target.submitted_text)
+                    return self._late_ambiguity_failure(exc, candidates)
+                raise
+
         try:
-            return self._run_on_worker(func)
+            return self._run_on_worker(func if diagnostic_target is None else invoke)
         except ConfigurationError:
             raise
         except ToolExecutionError as exc:
@@ -2487,11 +2596,7 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
                 if code == "target_not_found":
                     return self._target_missing()
                 if code == "target_ambiguous":
-                    return self._failed(
-                        "target_resolution_error",
-                        "iOS target locator matched multiple elements; refine the locator.",
-                        metadata={"resolution_reason": "ambiguous", **self.safe_diagnostics(exc)},
-                    )
+                    return self._late_ambiguity_failure(exc)
                 if code in {"target_not_displayed", "target_not_enabled", "target_stale"}:
                     return self._failed(
                         "target_resolution_error",
@@ -2503,6 +2608,12 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
             if cls_name in {"InvalidRequestError", "ElementValidationError"}:
                 return self._failed("configuration_error", "Invalid iOS backend request.", metadata=self.safe_diagnostics(exc))
             return self._failed("action_error", "iOS backend operation failed.", metadata=self.safe_diagnostics(exc))
+
+    def _late_ambiguity_failure(self, exc: Exception, candidates: list[dict[str, object]] | None = None) -> dict[str, object]:
+        metadata = {"resolution_reason": "ambiguous", **self.safe_diagnostics(exc)}
+        if candidates:
+            metadata["candidates"] = candidates
+        return self._failed("target_resolution_error", "iOS target locator matched multiple elements; refine the locator.", metadata=metadata)
 
     def _run_on_worker(
         self,

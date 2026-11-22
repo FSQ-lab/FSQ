@@ -165,7 +165,8 @@ class FsqAgent:
             if cancellation_check is not None:
                 cancellation_check()
             events_path = context.run_dir / "events.jsonl" if self.event_logger else None
-            results.extend(await self.runtime.run_verification(task, results, run_id, events_path, emitter.emit))
+            if self.settings.agent_runtime.verification_enabled:
+                results.extend(await self.runtime.run_verification(task, results, run_id, events_path, emitter.emit))
             if cancellation_check is not None:
                 cancellation_check()
             verification = await self.verifier.verify(task, results, events_path=events_path)

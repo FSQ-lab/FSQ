@@ -471,7 +471,7 @@ class DefaultCodingAgentRuntime:
                 request = self._build_request(
                     name=self.settings.agent.name,
                     instructions=self._build_instructions(knowledge, skills),
-                    model_input=self._build_task_input(task),
+                    model_input=self._build_task_input(task, [f"Effective max_turns: {self.settings.agent_runtime.max_turns}"]),
                     tools=[*agent_tools, *harness_tools],
                     output_type=AgentFinalOutput,
                     run_id=run_id,

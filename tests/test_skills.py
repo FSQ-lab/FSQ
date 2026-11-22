@@ -140,3 +140,51 @@ def test_shared_visual_guidance_preserves_platform_assertions(platform: str, tmp
     assert "Follow the platform skill for Web and Windows visual assertions." in shared
     assert "`assert_with_ai`" in platform_guidance
     assert "allow_provider_upload" not in platform_guidance
+
+
+def test_loaded_automation_skill_preserves_coverage_and_completion_reserves() -> None:
+    root = Path(__file__).resolve().parents[1] / "fsq_agent" / "resources" / "skills"
+    [bundle] = SkillLoader(root).load([SkillConfig(name="automation-basics", path=Path("automation-basics.md"), required=True)])
+    guidance = bundle.instructions
+
+    assert "all relevant required sources and applicable scopes" in guidance
+    assert "requested window" in guidance
+    assert "unverified, never zero" in guidance
+    assert "Disclose coverage and gaps" in guidance
+    assert "downstream writes only from verified inputs" in guidance
+    assert "effective `max_turns`" in guidance
+    assert "saved-state readback/repair" in guidance
+    assert "stop optional browsing" in guidance
+    assert "core coverage" in guidance
+    assert "two thirds" in guidance
+    assert "relevant permitted adjacent tabs" in guidance
+    assert "unique structured `locator` on the first attempt" in guidance
+
+
+@pytest.mark.parametrize(("platform", "keyboard_dismissal"), [("android", "`Back` only while the keyboard is open"), ("ios", "`hide_keyboard`")])
+def test_loaded_mobile_skills_preserve_structured_deliverable_evidence(platform: str, keyboard_dismissal: str, tmp_path: Path) -> None:
+    from fsq_agent.config import load_platform_settings
+
+    config = load_platform_settings(platform, workspace=tmp_path / "workspace", user_config_root=tmp_path / "user").agent_context.knowledge.skills
+    bundles = SkillLoader(config.dir).load(config.items)
+    guidance = next(bundle.instructions for bundle in bundles if bundle.name == f"{platform}-harness")
+
+    assert keyboard_dismissal in guidance
+    assert "dedicated fields" in guidance
+    assert "single-body editor" in guidance
+    assert "Never merge inputs meant for dedicated fields into another field" in guidance
+    assert "per viewport" in guidance
+    assert "pre-submit readback and repair" in guidance
+    assert "list-level signatures" in guidance
+    assert "unresolved same-title collisions" in guidance
+    assert "only for confirmed duplicates" in guidance
+    assert "stable mid-segment" in guidance
+    assert "trailing characters and diacritics" in guidance
+    assert "structurally first" in guidance
+    assert "only under the upload permission and refusal rules" in guidance
+    assert '`mode: "extract"`' in guidance
+    assert "`region`" in guidance
+    assert "waypoint list membership and count increment" in guidance
+    assert "Standalone details are not proof of attachment" in guidance
+    assert "explicit attach control" in guidance
+    assert "return to the builder" in guidance

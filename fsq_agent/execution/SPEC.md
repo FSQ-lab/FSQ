@@ -92,6 +92,7 @@ Initial recording and reports finish, fail, or become explicitly unavailable bef
 ## Provenance And Ownership
 
 Required root/nested source snapshots and allowlisted effective non-secret settings are captured before actions with producer/schema versions and digests of safe persisted representations. Secret values and their digests are excluded; safe secret names/presence and explicit omission records do not claim byte-identical original content. Effective runtime policy uses `agent_runtime`, including resolved effort, without reintroducing SDK-prefixed settings or refreshing active task policy.
+The allowlisted `agent_runtime` policy snapshot includes the effective boolean `verification_enabled` alongside effort and maximum turns.
 
 Recording links Run, candidate content, saved/published content, and Strict source through execution identities and content digests. New Case YAML contains no Run provenance; `recording.json` and append-only lineage carry those facts. Existing user `properties.recording` data may be preserved as legacy input. Source filename similarity is never a replay link, and recording validation is not proof of replay success.
 

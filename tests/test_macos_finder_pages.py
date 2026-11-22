@@ -292,6 +292,55 @@ def test_pages_path_launch_reuses_only_same_installation_and_rejects_conflict(pa
         driver.close()
 
 
+@pytest.mark.parametrize("scenario", ["same", "permission_modal", "unknown", "different"])
+def test_pages_bundle_bound_session_checks_running_installation_before_replacement(pages, monkeypatch, scenario):
+    make_app, _, sessions, events = pages
+    running = make_app("current")
+    requested = make_app("different") if scenario == "different" else running
+
+    def running_path(bundle, *, cancellation):
+        assert bundle == PAGES
+        if scenario == "unknown":
+            raise native._NativeForegroundError("foreground_unobservable", "Installation identity unavailable")
+        return running
+
+    def activate(bundle, *, app_path, **kwargs):
+        events.append(("activate", bundle, app_path))
+        if scenario == "permission_modal":
+            raise native._NativeForegroundError("permission_modal", "System permission dialog")
+
+    monkeypatch.setattr(appium, "_running_macos_app_path", running_path)
+    driver = appium.AppiumConnectMacOSDriver()
+    try:
+        assert driver.launch_app(MacOSLaunchAppParams(bundle_id=PAGES, new_session=True))["status"] == "passed"
+        session = sessions[0]
+        session_id = session.session_info().id
+        assert driver._session_app_path is None
+        events.clear()
+        monkeypatch.setattr(appium, "_activate_macos_app_native", activate)
+        result = driver.launch_app(MacOSLaunchAppParams(app_path=str(requested), new_session=False))
+        if scenario == "different":
+            assert result["status"] == "passed"
+            assert events == ["quit", "stop", "start", ("create", FINDER, None, None, True), ("activate", PAGES, requested)]
+            assert driver._session is sessions[1]
+            return
+        if scenario == "same":
+            assert result["status"] == "passed"
+            assert driver._session_app_path == str(running)
+            assert events == ["ensure", ("activate", PAGES, running)]
+        else:
+            assert result["status"] == "failed"
+            assert result["metadata"]["backend_code"] == ("permission_modal" if scenario == "permission_modal" else "foreground_unobservable")
+            assert events == (["ensure", ("activate", PAGES, running)] if scenario == "permission_modal" else [])
+        assert sessions == [session]
+        assert driver._session is session
+        assert driver._session.session_info().id == session_id
+        assert driver._session.session_info().state == "active"
+        assert not driver._cleanup_pending
+    finally:
+        driver.close()
+
+
 @pytest.mark.parametrize("skip_app_kill, arguments", [(False, None), (True, ["--fixture"])])
 def test_pages_direct_path_honors_skip_app_kill_and_arguments(pages, skip_app_kill, arguments):
     make_app, _, _, events = pages

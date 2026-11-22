@@ -96,6 +96,26 @@ def _foreground_identity(*, deadline: float, cancellation: Event | None, include
     raise _NativeForegroundError("foreground_unobservable", "The macOS foreground application could not be identified.")
 
 
+def _running_macos_app_path(bundle_id: str, *, cancellation: Event | None) -> Path:
+    deadline = time.monotonic() + 2.5
+
+    def read(*args: str) -> str:
+        return _native_command(["/usr/bin/lsappinfo", *args], deadline=deadline, cancellation=cancellation)
+
+    try:
+        asn = read("find", f"bundleid={bundle_id}")
+        if asn.startswith("ASN:") and "\n" not in asn:
+            info = read("info", "-only", "bundleid", "-only", "pid", "-only", "bundlepath", asn)
+            bundle = re.search(r'^"CFBundleIdentifier"\s*=\s*"([^"\n]+)"\s*$', info, re.MULTILINE)
+            pid = re.search(r'^"pid"\s*=\s*[1-9]\d*\s*$', info, re.MULTILINE)
+            path = re.search(r'^"LSBundlePath"\s*=\s*"(/[^"\n]+)"\s*$', info, re.MULTILINE)
+            if bundle is not None and bundle.group(1) == bundle_id and pid is not None and path is not None and read("find", f"bundleid={bundle_id}") == asn:
+                return Path(path.group(1)).resolve(strict=True)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        raise _NativeForegroundError("foreground_unobservable", "The running macOS application installation could not be verified.") from exc
+    raise _NativeForegroundError("foreground_unobservable", "The running macOS application installation could not be verified.")
+
+
 def _activate_macos_app_native(
     bundle_id: str,
     *,

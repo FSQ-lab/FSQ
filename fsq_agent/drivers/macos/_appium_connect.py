@@ -40,6 +40,7 @@ from fsq_agent.drivers.macos._native_fallback import (
     _macos_ax_process_trusted,
     _NativeForegroundError,
     _observe_macos_ax_tree,
+    _running_macos_app_path,
     _verify_ax_focus,
     _verify_ax_point_hit,
     _verify_finder_search_click,
@@ -2081,7 +2082,10 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             mode_changed = (requested_bundle != self._active_bundle_id or self._native_ax_mode) and (
                 self._can_use_finder_anchored_native_ax(effective_arguments=None, inferred_target_bundle=requested_bundle) != self._native_ax_mode
             )
-            installation_changed = requested_bundle is not None and requested_path is not None and requested_path != self._session_app_path
+            bound_path = self._session_app_path
+            if self._native_ax_mode and not mode_changed and requested_bundle is not None and requested_bundle == self._active_bundle_id and requested_path is not None and bound_path is None:
+                bound_path = str(_running_macos_app_path(requested_bundle, cancellation=self._operation_cancellation))
+            installation_changed = requested_bundle is not None and requested_path is not None and requested_path != bound_path
             target_changed_with_kill_enabled = not self.skip_app_kill and requested_bundle is not None and requested_bundle != self._active_bundle_id
             replace = mode_changed or installation_changed or target_changed_with_kill_enabled
             if replace or (self._native_ax_mode and requested_path is not None and not self._probe_session_healthy_for_same_bundle_reuse(self._session)):

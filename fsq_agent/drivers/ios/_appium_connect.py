@@ -22,6 +22,7 @@ from xml.etree import ElementTree
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _ios_driver_tool
+from fsq_agent.drivers._color_sample import _sample_color
 from fsq_agent.drivers._visual_inspection import _run_visual_inspection
 from fsq_agent.models import (
     ConfigurationError,
@@ -48,6 +49,7 @@ from fsq_agent.models import (
     IOSTapAtParams,
     IOSTapOnParams,
     IOSUiSnapshotParams,
+    SampleColorParams,
     ToolExecutionError,
 )
 
@@ -1129,6 +1131,19 @@ class AppiumConnectIOSDriver(AIAssertionBackendToolMixin):
         if not isinstance(params, IOSInspectWithAIParams):
             params = IOSInspectWithAIParams.model_validate(params)
         return _run_visual_inspection(self, params)
+
+    @_ios_driver_tool("sampleColor", description="Measure exact local RGB from a current frame point or region without uploading an image.")
+    def sample_color(self, params: SampleColorParams) -> dict[str, object]:
+        def observe() -> dict[str, object]:
+            try:
+                return self._passed(_sample_color(self._ensure_session().device, params, control=self._ActionControl(self)))
+            except ConfigurationError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - SDK observation failures are normalized without raw diagnostics.
+                self._propagate_if_cancelled(exc)
+                return self._failed("observation_error", "iOS color sampling failed.", metadata=self._safe_diagnostics(exc, stage="sample_color"))
+
+        return self._run_tool(observe)
 
     @_ios_driver_tool("assertVisible", description="Assert that an iOS UI target is present and visible.")
     def assert_visible(self, params: IOSAssertVisibleParams) -> dict[str, object]:

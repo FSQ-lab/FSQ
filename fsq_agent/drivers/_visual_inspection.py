@@ -12,7 +12,7 @@ from threading import Event
 
 from PIL import Image, UnidentifiedImageError
 
-from fsq_agent.models import AIVisualInspectionRequest, AIVisualInspectionResult, HarnessArtifactRef
+from fsq_agent.models import AIVisualInspectionRequest, AIVisualInspectionResult, ConfigurationError, HarnessArtifactRef, ToolExecutionError
 
 
 class _CaptureRejectedError(Exception):
@@ -27,6 +27,17 @@ def _inspection_image_size(data, budget):
         raise _CaptureRejectedError("budget_exceeded")
     if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
         raise _CaptureRejectedError("capture_failed")
+    offset = 8
+    while offset + 12 <= len(data):
+        length = struct.unpack_from(">I", data, offset)[0]
+        kind = data[offset + 4 : offset + 8]
+        if kind in {b"acTL", b"fcTL", b"fdAT"}:
+            raise _CaptureRejectedError("frame_not_single")
+        offset += 12 + length
+        if offset > len(data):
+            raise _CaptureRejectedError("capture_failed")
+        if kind == b"IEND":
+            break
     width, height = struct.unpack_from(">II", data, 16)
     if not width or not height:
         raise _CaptureRejectedError("capture_failed")
@@ -44,7 +55,7 @@ def _inspection_image_size(data, budget):
     return width, height
 
 
-_INPUT_REASONS = frozenset({"privacy_blocked", "budget_exceeded", "capture_stale", "capture_failed", "region_invalid", "frame_not_single"})
+_INPUT_REASONS = frozenset({"privacy_blocked", "budget_exceeded", "capture_stale", "capture_failed", "region_invalid", "frame_not_single", "artifact_containment_violation"})
 _SDK_REASONS = frozenset(
     {
         "pointer_mapping_unavailable",
@@ -53,8 +64,10 @@ _SDK_REASONS = frozenset(
         "observation_too_large",
         "operation_timeout",
         "session_busy",
+        "region_invalid",
         "session_closed",
         "session_uncertain",
+        "session_unavailable",
         "execution_unknown",
     }
 )
@@ -77,7 +90,7 @@ def _provider_reason(error):
 def _failure(reason, provider=None, diagnostics=None, *, platform="android"):
     refs = [provider.artifact] if provider is not None and provider.artifact is not None else []
     capture = provider.capture if provider is not None else None
-    platform_label = "iOS" if platform == "ios" else "Android"
+    platform_label = {"android": "Android", "ios": "iOS", "macos": "macOS"}[platform]
     return {
         "status": "failed",
         "failure_category": "observation_error",
@@ -168,7 +181,7 @@ class _InspectionProvider:
         if remaining <= 0:
             raise _CaptureRejectedError("budget_exceeded")
         neutral = AIVisualInspectionRequest(
-            platform=self.runtime.platform if self.runtime.platform in {"android", "ios"} else "android",
+            platform=self.runtime.platform,
             png_bytes=request.png_bytes,
             prompt=request.prompt,
             mode=request.mode,
@@ -206,10 +219,10 @@ class _InspectionProvider:
         )
 
 
-def _run_visual_inspection(driver, params):
+def _run_visual_inspection(driver, params, *, platform=None):
     runtime = getattr(driver, "_ai_assertion_tool_runtime", None)
     invocation = getattr(driver, "_ai_assertion_tool_invocation", None)
-    platform = getattr(runtime, "platform", "android") if runtime is not None else "android"
+    platform = platform or getattr(runtime, "platform", "android")
     if runtime is None or invocation is None:
         return _failure("privacy_blocked", platform=platform)
     check = invocation.context.cancellation_check
@@ -242,7 +255,7 @@ def _run_visual_inspection(driver, params):
         from appium_connect_agent.automation import ImageRegion
         from appium_connect_agent.runtime import OperationControl
 
-        session = driver._ensure_session()
+        session = driver._require_session() if platform == "macos" else driver._ensure_session()
         provider.started = time.monotonic_ns()
         return session.device.inspect_with_ai(
             params.prompt,
@@ -256,7 +269,7 @@ def _run_visual_inspection(driver, params):
     try:
         inspection = driver._run_on_worker(inspect_on_owner, cancellation_check=check_on_caller, cancellation_event=cancellation)
         check_on_caller()
-        if provider.artifact is None or provider.calls != 1 or inspection.png_sha256 != provider.capture["png_sha256"]:
+        if provider.artifact is None or provider.capture is None or provider.calls != 1 or inspection.png_sha256 != provider.capture["png_sha256"]:
             return _failure("capture_failed", provider, platform=platform)
         # Serialization only: all pointer geometry below is produced by the SDK.
         output = {
@@ -284,12 +297,20 @@ def _run_visual_inspection(driver, params):
             if provider.provenance:
                 interruption.fsq_provider_provenance = dict(provider.provenance)
             raise interruption from None
+        if platform == "macos" and isinstance(error, ConfigurationError):
+            raise
         if not isinstance(error, Exception):
             if provider.provenance:
                 error.fsq_provider_provenance = dict(provider.provenance)
             raise
         driver._propagate_if_cancelled(error)
         code = getattr(error, "code", None)
+        if platform == "macos":
+            driver._note_operation_timeout(error)
+            if isinstance(error, ToolExecutionError):
+                code = code or error.context.get("reason")
+        if code == "invalid_argument" and params.region is not None and not provider.calls:
+            code = "region_invalid"
         reason = provider.reason or (code if code in _SDK_REASONS else "capture_failed")
         diagnostics = driver._safe_diagnostics(error, stage="inspect_with_ai")
         return _failure(reason, provider, diagnostics, platform=platform)

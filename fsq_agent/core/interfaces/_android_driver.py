@@ -21,6 +21,7 @@ from fsq_agent.models import (
     AndroidTapAtParams,
     AndroidTapOnParams,
     AndroidUiTreeParams,
+    SampleColorParams,
 )
 
 
@@ -61,3 +62,5 @@ class AndroidDriverInterface(DriverObservationInterface, Protocol):
     def inspect_element(self, params: AndroidInspectElementParams) -> dict[str, object]: ...
 
     def inspect_with_ai(self, params: AndroidInspectWithAIParams) -> dict[str, object]: ...
+
+    def sample_color(self, params: SampleColorParams) -> dict[str, object]: ...

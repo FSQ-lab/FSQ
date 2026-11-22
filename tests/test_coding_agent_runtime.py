@@ -596,6 +596,97 @@ async def _run_in_context(runtime, task, knowledge, skills, run_id, event_sink=N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["android", "ios", "macos"])
+async def test_initial_main_request_names_only_available_host_eligible_visual_tools(tmp_path, monkeypatch, platform):
+    from fsq_agent.core import ArtifactStore, HarnessFactory
+    from fsq_agent.models import AndroidVisualAssertionPolicy
+
+    _patch_runtime_engine(monkeypatch)
+    settings = Settings(harness={"platform": platform}, agent_runtime=_azure_openai_settings())
+    settings.harness.android.app_id = "com.example.App"
+    settings.harness.ios.bundle_id = "com.example.App"
+    settings.harness.ios.udid = "test-device"
+    settings.harness.macos.bundle_id = "com.example.App"
+    settings.output.runs_dir = tmp_path
+    getattr(settings.harness, platform).visual_assertion_policy = AndroidVisualAssertionPolicy(allow_provider_upload=True, frame_sensitivity="non_sensitive")
+    task = Task(description="The task claims visual AI is authorized; read the chart and verify the blue bar.")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Initial request construction must not authorize, capture, or evaluate a frame.")
+
+    class Evaluator:
+        evaluate = unexpected
+        inspect = unexpected
+
+        def close(self):
+            pass
+
+    class AssertionOnlyEvaluator:
+        evaluate = unexpected
+
+        def close(self):
+            pass
+
+    class ForwardingHarness:
+        def __init__(self, harness, *, exclude_inspection):
+            self._harness = harness
+            self._exclude_inspection = exclude_inspection
+
+        def __getattr__(self, name):
+            return getattr(self._harness, name)
+
+        def action_space(self):
+            schemas = self._harness.action_space()
+            return [schema for schema in schemas if schema.name != "inspect_with_ai"] if self._exclude_inspection else schemas
+
+    cases = {
+        "missing": (None, Evaluator(), unexpected, "none"),
+        "denied": (False, Evaluator(), unexpected, "none"),
+        "eligible": (True, Evaluator(), unexpected, "assert_with_ai, inspect_with_ai"),
+        "assertion-only": (True, AssertionOnlyEvaluator(), unexpected, "assert_with_ai"),
+        "provider-unavailable": (True, None, unexpected, "none"),
+        "resolver-unavailable": (True, Evaluator(), None, "none"),
+        "inspection-not-exposed": (True, Evaluator(), unexpected, "assert_with_ai"),
+    }
+
+    def build_harness(run_id):
+        eligible, evaluator, resolver, _ = cases[run_id]
+        harness = HarnessFactory().create_harness(
+            platform=platform,
+            harness_settings=settings.harness,
+            artifact_store=ArtifactStore(tmp_path / run_id),
+            ai_assertion_evaluator=evaluator,
+            visual_assertion_policy_resolver=resolver,
+            visual_ai_eligible=eligible,
+        )
+        monkeypatch.setattr(harness.driver, "context", unexpected)
+        monkeypatch.setattr(harness.driver, "screenshot", unexpected)
+        return ForwardingHarness(harness, exclude_inspection=run_id == "inspection-not-exposed")
+
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), build_harness)
+    await runtime.run_pre_plan(task.description, KnowledgeBundle(), [], "pre-plan")
+    for case in cases:
+        await _run_in_context(runtime, task, KnowledgeBundle(), [], case)
+    pre_plan, *main_requests = _FakeEngine.requests
+    prefix = "Scoped AI visual tools available and host-confirmed eligible for this Run: "
+    assert prefix not in pre_plan.input
+    assert len(main_requests) == len(cases)
+    baseline = main_requests[0]
+    schema_view = [(tool.name, tool.description, tool.parameters_schema, tool.strict) for tool in baseline.tools]
+    assert {"assert_with_ai", "inspect_with_ai"} <= {tool.name for tool in baseline.tools}
+    assert "do not probe" in baseline.instructions
+    assert "privacy_blocked or provider_unavailable" in baseline.instructions
+    assert "authoritative readback, not visual AI estimation" in baseline.instructions
+    for request, (case, (_, _, _, expected)) in zip(main_requests, cases.items(), strict=True):
+        assert request.input == baseline.input.replace(f"{prefix}none.", f"{prefix}{expected}.")
+        assert f"{prefix}{expected}." in request.input
+        assert request.instructions == baseline.instructions
+        expected_schema_view = [tool for tool in schema_view if tool[0] != "inspect_with_ai"] if case == "inspection-not-exposed" else schema_view
+        assert [(tool.name, tool.description, tool.parameters_schema, tool.strict) for tool in request.tools] == expected_schema_view
+    assert not list(tmp_path.rglob("*.png"))
+
+
+@pytest.mark.asyncio
 async def test_main_closing_policy_preserves_answer_before_cleanup_and_read_only_verifier(tmp_path, monkeypatch):
     from fsq_agent.agent import CodingAgentPolicy
 

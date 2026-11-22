@@ -79,6 +79,7 @@ class _HarnessFactoryProtocol(Protocol):
         artifact_store: ArtifactStore | None = None,
         ai_assertion_evaluator: AIAssertionEvaluatorProtocol | None = None,
         visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,
+        visual_ai_eligible: bool | None = None,
         runtime_secret_settings: RuntimeSecretSettings | None = None,
         app_id: str | None = None,
         serial: str | None = None,
@@ -99,6 +100,7 @@ class _HarnessFactoryImplementation:
         artifact_store: ArtifactStore | None = None,
         ai_assertion_evaluator: AIAssertionEvaluatorProtocol | None = None,
         visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,
+        visual_ai_eligible: bool | None = None,
         runtime_secret_settings: RuntimeSecretSettings | None = None,
         app_id: str | None = None,
         serial: str | None = None,
@@ -141,6 +143,7 @@ class _HarnessFactoryImplementation:
                 **(
                     {
                         "visual_assertion_policy_resolver": visual_assertion_policy_resolver,
+                        "visual_ai_eligible": visual_ai_eligible,
                         "visual_assertion_budget": visual_policy.budget,
                         "visual_assertion_provider_available": visual_policy.provider_available,
                     }

@@ -3,10 +3,15 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from types import SimpleNamespace
 from typing import Any
 from xml.etree import ElementTree
@@ -23,6 +28,7 @@ from fsq_agent.core.harness._macos import MacOSHarness
 from fsq_agent.models import (
     AIAssertionRequest,
     AIAssertionResult,
+    AIVisualCandidate,
     AIVisualInspectionRequest,
     AIVisualInspectionResult,
     AndroidVisualAssertionPolicy,
@@ -50,6 +56,7 @@ from fsq_agent.models import (
     MacOSTakeScreenshotParams,
     MacOSTypeTextParams,
     MacOSUiSnapshotParams,
+    VisualImageBounds,
 )
 
 
@@ -186,6 +193,10 @@ class FakeMacOSDriver(AIAssertionBackendToolMixin):
     def screenshot(self, params: object | None = None) -> bytes:
         recorded = params.model_dump(mode="json", exclude_none=True) if hasattr(params, "model_dump") else ({} if isinstance(params, dict) else None)
         self.calls.append(("screenshot", recorded))
+        return _valid_png_bytes()
+
+    def capture_visual_screenshot(self, params: object | None = None) -> bytes:
+        self.calls.append(("capture_visual_screenshot", params))
         return _valid_png_bytes()
 
 
@@ -358,8 +369,9 @@ def test_macos_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> None:
             )
 
     evaluator = FakeEvaluator()
+    driver = FakeMacOSDriver()
     harness = MacOSHarness(
-        driver=FakeMacOSDriver(),
+        driver=driver,
         artifact_store=ArtifactStore(run_dir=tmp_path),
         ai_assertion_evaluator=evaluator,
         visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
@@ -386,6 +398,7 @@ def test_macos_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> None:
     assert len(evaluator.requests) == 1
     assert evaluator.requests[0].platform == "macos"
     assert evaluator.requests[0].prompt == "The preview canvas displays a blue bar chart."
+    assert [name for name, _ in driver.calls if "screenshot" in name] == ["capture_visual_screenshot"]
 
 
 def test_macos_harness_assert_with_ai_without_evaluator_returns_incomplete(tmp_path) -> None:
@@ -1500,76 +1513,197 @@ def test_macos_harness_validation_redacts_secret_input_and_enforces_deterministi
     assert conflict.output["deterministic_conflict"] is True
 
 
-@pytest.mark.usefixtures("android_sdk")
-def test_macos_inspect_with_ai_extract_and_locate_pointer_mapping_unavailable(tmp_path) -> None:
+@pytest.mark.usefixtures("macos_android_sdk")
+def test_macos_inspection_uses_real_sdk_mapping_and_fresh_frame_permissions(tmp_path) -> None:
+    from appium_connect_agent.automation import create_mac2_session
+    from appium_connect_agent.runtime import LocalSettings, Runtime
+
     png_bytes = _valid_png_bytes(64, 48)
+    digest = hashlib.sha256(png_bytes).hexdigest()
+    main_display = {"id": 1, "isMain": True, "rect": {"x": 0, "y": 0, "width": 32, "height": 24}}
+    displays = {"1": main_display}
+    wire_requests = []
+    decisions = []
+    model_requests = []
 
-    class SDKLikeDevice(FakeMacDevice):
-        def inspect_with_ai(self, prompt: str, *, provider: Any, mode: str = "extract", region: Any = None, max_candidates: int = 5, control: Any = None) -> Any:
-            del region, control
-            if mode == "locate":
-                err = RuntimeError("locate unsupported on macOS")
-                err.code = "pointer_mapping_unavailable"  # type: ignore[attr-defined]
-                err.request_state = "not_sent"  # type: ignore[attr-defined]
-                raise err
-            req = SimpleNamespace(
-                png_bytes=png_bytes,
-                prompt=prompt,
-                mode=mode,
-                max_candidates=max_candidates,
-                image_width=64,
-                image_height=48,
-                remaining_timeout_seconds=15.0,
-            )
-            resp = provider.inspect(req)
-            import hashlib
+    class WirePeer(BaseHTTPRequestHandler):
+        def respond(self, value):
+            body = json.dumps({"value": value}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
-            return SimpleNamespace(
-                summary=resp.summary,
-                mode="extract",
-                image_size=SimpleNamespace(width=64, height=48),
-                pointer_size=None,
-                png_sha256=hashlib.sha256(png_bytes).hexdigest(),
-                candidates=(),
-            )
+        def do_GET(self):
+            wire_requests.append(("GET", self.path))
+            if self.path == "/status":
+                self.respond({"ready": True, "build": {"version": "3.7.0"}})
+            elif self.path == "/session/visual/screenshot":
+                self.respond(base64.b64encode(png_bytes).decode("ascii"))
+            else:
+                self.send_error(404)
 
-    session = FakeMacSession({})
-    session.device = SDKLikeDevice(session)
-    driver = AppiumConnectMacOSDriver(session=session)
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            if self.path == "/session":
+                self.respond({"sessionId": "visual", "capabilities": {"platformName": "Mac", "appium:automationName": "Mac2"}})
+            elif self.path == "/session/visual/execute/sync" and payload["script"] == "macos: listDisplays":
+                wire_requests.append(("POST", payload["script"]))
+                self.respond(displays)
+            else:
+                self.send_error(404)
 
-    class FakeVisualEvaluator:
-        def evaluate(self, request: AIAssertionRequest, *, cancellation_check=None) -> AIAssertionResult:
-            raise AssertionError("evaluate must not be called")
+        def do_DELETE(self):
+            self.respond(None)
 
+        def log_message(self, fmt, *args):
+            pass
+
+    class LoopbackHTTPServer(ThreadingHTTPServer):
+        def server_bind(self):
+            TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address
+
+    class Evaluator:
         def inspect(self, request: AIVisualInspectionRequest, *, cancellation_check=None) -> AIVisualInspectionResult:
-            return AIVisualInspectionResult(summary="Extracted chart value: 42%", candidates=())
+            model_requests.append(request)
+            candidates = (AIVisualCandidate(label="Chart icon", image_bounds=VisualImageBounds(x=8, y=12, width=8, height=8)),) if request.mode == "locate" else ()
+            return AIVisualInspectionResult(summary="Chart shows 42%.", candidates=candidates)
 
-    harness = MacOSHarness(
-        driver=driver,
-        artifact_store=ArtifactStore(run_dir=tmp_path),
-        ai_assertion_evaluator=FakeVisualEvaluator(),
-        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
-            allow_provider_upload=True,
-            provider_available=True,
-            frame_sensitivity="non_sensitive",
-        ),
-    )
+    def resolve(context, sequence):
+        decisions.append((context.metadata["capture_invocation"]["step_execution_id"], sequence))
+        return AndroidVisualAssertionPolicy(allow_provider_upload=True, frame_sensitivity="sensitive" if sequence == 3 else "non_sensitive")
 
-    extract_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Read chart percentage", "mode": "extract"}), harness.get_context())
-    assert extract_res.status == "passed"
-    assert extract_res.output["summary"] == "Extracted chart value: 42%"
-    assert extract_res.output["candidates"] == []
-    assert len(extract_res.artifact_refs) == 1
+    server = LoopbackHTTPServer(("127.0.0.1", 0), WirePeer)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        with Runtime(LocalSettings(server_url=f"http://127.0.0.1:{server.server_port}")).connect() as connection:
+            session = create_mac2_session(connection)
+            driver = AppiumConnectMacOSDriver(session=session)
+            try:
+                harness = MacOSHarness(driver, ArtifactStore(tmp_path), Evaluator(), visual_assertion_policy_resolver=resolve, visual_ai_eligible=True)
+                context = HarnessContext(platform="macos", session_id="visual")
+                wire_requests.clear()
 
-    locate_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Find chart icon", "mode": "locate"}), harness.get_context())
-    assert locate_res.status == "failed"
-    assert locate_res.failure_category == "observation_error"
-    assert locate_res.output["reason"] == "pointer_mapping_unavailable"
+                def inspect(mode, identity):
+                    step = _step("inspectWithAI", {"prompt": "Inspect the chart", "mode": mode}).model_copy(update={"step_id": identity, "step_execution_id": identity})
+                    return harness.invoke_action(step, context)
+
+                extracted = inspect("extract", "extract")
+                assert extracted.status == "passed", extracted
+                assert extracted.output["summary"] == "Chart shows 42%."
+                assert extracted.output["candidates"] == []
+                assert extracted.output["pointer_size"] is None
+                located = inspect("locate", "locate")
+                assert located.status == "passed", located
+                assert located.output["pointer_size"] == {"width": 32, "height": 24}
+                assert located.output["candidates"][0]["pointer_center"] == {"x": 6, "y": 8}
+                assert located.output["candidates"][0]["image_bounds"] == {"x": 8, "y": 12, "width": 8, "height": 8}
+                expected_pair = [("GET", "/session/visual/screenshot"), ("POST", "macos: listDisplays")]
+                assert wire_requests == expected_pair * 2
+                for result in (extracted, located):
+                    assert len(result.artifact_refs) == 1
+                    assert result.output["capture"]["png_sha256"] == result.artifact_refs[0].sha256 == digest
+                    assert (tmp_path / result.artifact_refs[0].path).read_bytes() == png_bytes
+
+                denied = inspect("locate", "denied")
+                assert denied.output["reason"] == "privacy_blocked"
+                assert not denied.artifact_refs
+                assert wire_requests == expected_pair * 2
+
+                displays["2"] = {"id": 2, "isMain": False, "rect": {"x": 32, "y": 0, "width": 32, "height": 24}}
+                unsupported = inspect("locate", "unsupported")
+                assert unsupported.status == "failed"
+                assert unsupported.failure_category == "observation_error"
+                assert unsupported.output["reason"] == "pointer_mapping_unavailable"
+                assert not unsupported.artifact_refs
+                assert not unsupported.output["candidates"]
+                assert wire_requests == expected_pair * 3
+                assert decisions == [("extract", 1), ("locate", 2), ("denied", 3), ("unsupported", 4)]
+                assert [(request.platform, request.mode, request.png_bytes) for request in model_requests] == [("macos", "extract", png_bytes), ("macos", "locate", png_bytes)]
+                assert len(list(tmp_path.rglob("*.png"))) == 2
+            finally:
+                driver.close()
+                session.quit()
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join()
+
+
+@pytest.mark.usefixtures("android_sdk")
+def test_macos_visual_assertion_does_not_use_native_fallback_after_sdk_failure(tmp_path, monkeypatch) -> None:
+    session = FakeMacSession({})
+    sdk_attempts = []
+
+    def sdk_failure(*, control):
+        sdk_attempts.append(control)
+        raise RuntimeError("private SDK exception message")
+
+    def native_fallback(*, timeout_seconds):
+        pytest.fail("AI visual capture must never invoke the native screenshot fallback.")
+
+    monkeypatch.setattr(session.device, "take_screenshot", sdk_failure)
+    driver = AppiumConnectMacOSDriver(session=session)
+    monkeypatch.setattr(driver, "_can_use_native_screencapture_fallback", lambda **_kwargs: True)
+    monkeypatch.setattr(driver, "_capture_native_macos_screenshot", native_fallback)
+    try:
+        harness = MacOSHarness(
+            driver,
+            ArtifactStore(tmp_path),
+            SimpleNamespace(evaluate=lambda *_args, **_kwargs: pytest.fail("No frame means no provider request.")),
+            visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(allow_provider_upload=True, frame_sensitivity="non_sensitive"),
+        )
+        result = harness.invoke_action(_step("assertWithAI", {"assertion": "Chart visible?", "surface": "custom_canvas", "full_screen_reason": "Whole chart."}), harness.get_context())
+        assert result.status == "incomplete"
+        assert result.output["error_code"] == "capture_failed"
+        assert "private SDK exception message" not in result.model_dump_json()
+        assert len(sdk_attempts) == 1
+        assert not list(tmp_path.rglob("*.png"))
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("upload,sensitivity", [(False, "non_sensitive"), (True, "unknown")])
+def test_macos_eligible_visual_calls_never_upload_without_frame_approval(tmp_path, monkeypatch, upload, sensitivity):
+    session = FakeMacSession({})
+    driver = AppiumConnectMacOSDriver(session=session)
+    decisions = []
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Unapproved frame must not reach capture or provider")
+
+    def resolve(context, sequence):
+        decisions.append(sequence)
+        return AndroidVisualAssertionPolicy(allow_provider_upload=upload, frame_sensitivity=sensitivity)
+
+    monkeypatch.setattr(session.device, "take_screenshot", unexpected)
+    monkeypatch.setattr(session.device, "inspect_with_ai", unexpected, raising=False)
+    monkeypatch.setattr(driver, "_capture_native_macos_screenshot", unexpected)
+    try:
+        harness = MacOSHarness(
+            driver,
+            ArtifactStore(tmp_path),
+            SimpleNamespace(evaluate=unexpected, inspect=unexpected),
+            visual_assertion_policy_resolver=resolve,
+            visual_ai_eligible=True,
+        )
+        result = harness.invoke_action(_step("assertWithAI", {"assertion": "Chart visible?", "surface": "custom_canvas", "full_screen_reason": "Whole chart."}), harness.get_context())
+        assert result.status == "incomplete"
+        assert result.output["error_code"] == "privacy_blocked"
+        result = harness.invoke_action(_step("inspectWithAI", {"prompt": "Read the chart."}), harness.get_context())
+        assert result.status == "failed"
+        assert result.output["reason"] == "privacy_blocked"
+        assert decisions == [1, 2]
+        assert not list(tmp_path.rglob("*.png"))
+    finally:
+        driver.close()
 
 
 @pytest.mark.usefixtures("android_sdk")
 def test_macos_driver_worker_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
-    import threading
     import time
 
     del monkeypatch
@@ -1753,7 +1887,7 @@ def test_macos_visual_facts_fail_closed_on_ambiguous_or_error_and_short_circuit_
         def inspect_element(self, params: MacOSInspectElementParams) -> dict[str, object]:
             return self.inspect_response
 
-        def screenshot(self, params: object | None = None) -> bytes:
+        def capture_visual_screenshot(self, params: object | None = None) -> bytes:
             self.screenshot_calls += 1
             return _valid_png_bytes()
 
@@ -2178,6 +2312,13 @@ def test_macos_launch_app_reuse_resolves_app_path_and_installed_app_name(tmp_pat
             stream,
         )
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._iter_local_application_bundles", lambda: [safari_bundle])
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect.sys.platform", "darwin")
+    native_activations: list[tuple[str, Path | None]] = []
+
+    def activate(bundle_id, *, app_path, timeout_seconds, cancellation):
+        native_activations.append((bundle_id, app_path))
+
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._activate_macos_app_native", activate)
 
     session = FakeMacSession({})
     driver = AppiumConnectMacOSDriver(bundle_id="com.example.Initial", session=session)
@@ -2185,7 +2326,7 @@ def test_macos_launch_app_reuse_resolves_app_path_and_installed_app_name(tmp_pat
     by_path = driver.launch_app(MacOSLaunchAppParams(app_path=str(safari_bundle), new_session=False))
     assert by_path["status"] == "passed"
     assert by_path["output"]["bundle_id"] == "com.example.CustomBrowser"
-    assert by_path["output"]["app_path"] == str(safari_bundle)
+    assert by_path["output"]["app_path"] == str(safari_bundle.resolve())
 
     by_name = driver.launch_app(MacOSLaunchAppParams(bundle_id="Custom Browser", new_session=False))
     assert by_name["status"] == "passed"
@@ -2195,11 +2336,8 @@ def test_macos_launch_app_reuse_resolves_app_path_and_installed_app_name(tmp_pat
     assert by_case_id["status"] == "passed"
     assert by_case_id["output"]["bundle_id"] == "com.example.CustomBrowser"
 
-    assert session.lifecycle_calls == [
-        ("activate_app", "com.example.CustomBrowser"),
-        ("activate_app", "com.example.CustomBrowser"),
-        ("activate_app", "com.example.CustomBrowser"),
-    ]
+    assert native_activations == [("com.example.CustomBrowser", safari_bundle.resolve())] * 3
+    assert not session.lifecycle_calls
 
     with pytest.raises(ConfigurationError, match="CFBundleIdentifier"):
         driver.launch_app(MacOSLaunchAppParams(bundle_id="NonexistentAppName", new_session=False))
@@ -2685,6 +2823,7 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
         control: object = None,
     ) -> Any:
         del pid, max_nodes, max_depth, control
+        fake_frontmost_pid(bundle_id)
         observed_bundles.append(bundle_id)
         if bundle_id == "com.apple.Notes" and notes_body_value["text"] == "__dialog_fixture__":
             xml = (
@@ -2728,12 +2867,21 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
     monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
     monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", fake_create_mac2_session)
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._activate_macos_app_native", lambda bid, **_kw: fake_activate_macos_app_native(bid))
+
+    def fake_frontmost_pid(bundle_id, **_kwargs):
+        from fsq_agent.drivers.macos._native_fallback import _NativeForegroundError
+
+        if bundle_id != current_frontmost["bundle_id"]:
+            raise _NativeForegroundError("target_not_foreground", "The fixture target is not foreground.")
+        return 9001
+
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._frontmost_pid", fake_frontmost_pid)
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._observe_macos_ax_tree", fake_observe_macos_ax_tree)
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._verify_ax_point_hit", lambda *_args: True)
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._verify_ax_focus", lambda *_args: True)
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._detect_frontmost_macos_bundle_id", lambda **_kw: current_frontmost["bundle_id"])
 
-    driver = AppiumConnectMacOSDriver(bundle_id="auto", native_ax_fallback_bundles=("com.apple.iWork.Keynote", "com.apple.Notes"))
+    driver = AppiumConnectMacOSDriver(bundle_id="auto", skip_app_kill=True, native_ax_fallback_bundles=("com.apple.iWork.Keynote", "com.apple.Notes"))
     try:
         # 1. Initial launch_app(auto, new_session=True) anchors WDA on com.apple.finder while foregrounding Keynote!
         res1 = driver.launch_app(MacOSLaunchAppParams(bundle_id="auto", new_session=True))
@@ -2921,6 +3069,7 @@ def test_macos_native_ax_untrusted_fallback_screencapture_resilience_and_recover
         raising=False,
     )
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._detect_frontmost_macos_bundle_id", lambda **_kw: "com.apple.Preview")
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._frontmost_pid", lambda _bundle_id, **_kw: 123)
     ax_root = _xml_to_tree_node(
         ElementTree.fromstring(  # noqa: S314 - local fixture XML.
             '<XCUIElementTypeApplication title="Preview">'

@@ -387,20 +387,20 @@ async def test_execution_repeated_tasks_allocate_distinct_runs(tmp_path: Path) -
     assert len(list(settings.output.runs_dir.glob("*/run.json"))) == 2
 
 
-def test_run_context_action_before_capture_defaults_enabled_and_immutable(tmp_path) -> None:
+def test_run_context_action_before_capture_defaults_disabled_and_immutable(tmp_path) -> None:
     from pydantic import ValidationError
 
     from fsq_agent.models import RunExecutionContext
 
     context = RunExecutionContext(run_id="allocated", platform="web", run_dir=tmp_path)
 
-    assert context.capture_action_before is True
+    assert context.capture_action_before is False
     with pytest.raises(ValidationError, match="frozen"):
-        context.capture_action_before = False
+        context.capture_action_before = True
 
 
 @pytest.mark.parametrize("record", [False, True])
-async def test_dynamic_derives_immutable_capture_policy_without_changing_allocated_identity(tmp_path, monkeypatch, record) -> None:
+async def test_dynamic_shares_default_disabled_action_before_capture_policy_and_finalizes_manifest(tmp_path, monkeypatch, record) -> None:
     from pydantic import ValidationError
 
     from fsq_agent.execution.runs import RunLifecycleService
@@ -420,7 +420,7 @@ async def test_dynamic_derives_immutable_capture_policy_without_changing_allocat
         async def run_in_context(self, task, context, *args, **kwargs):
             received.append(context)
             with pytest.raises(ValidationError, match="frozen"):
-                context.capture_action_before = not record
+                context.capture_action_before = True
             return await super().run_in_context(task, context, *args, **kwargs)
 
     def make_recording(**kwargs):
@@ -433,13 +433,16 @@ async def test_dynamic_derives_immutable_capture_policy_without_changing_allocat
     )
 
     assert len(allocated) == len(received) == 1
-    assert allocated[0].capture_action_before is True
-    assert received[0].capture_action_before is record
-    assert received[0].model_dump(exclude={"capture_action_before"}) == allocated[0].model_dump(exclude={"capture_action_before"})
+    assert allocated[0].capture_action_before is False
+    assert received[0].capture_action_before is False
+    assert received[0] == allocated[0]
     assert received[0].run_dir is allocated[0].run_dir
     assert received[0].provenance is allocated[0].provenance
     assert received[0].run_id == result.task_result.report.run_id
-    assert received[0].run_dir == settings.output.runs_dir / result.task_result.report.run_id
+    run_dir = settings.output.runs_dir / result.task_result.report.run_id
+    assert received[0].run_dir == run_dir
+    assert (run_dir / "evidence-manifest.json").is_file()
+    assert load_run_metadata(run_dir).artifacts.evidence_manifest == "evidence-manifest.json"
     assert len(recordings) == int(record)
     assert len(list(settings.output.runs_dir.glob("*/run.json"))) == 1
 
@@ -945,6 +948,9 @@ async def test_real_android_unavailable_assertion_sequences_to_effective_dynamic
         def context(self):
             return {"session_id": "fixture"}
 
+        def _tap_on_impl(self, params=None):
+            return {"status": "passed"}
+
         def ui_snapshot(self, params=None):
             return {"xml": "<hierarchy/>", "coverage": {"status": "complete"}}
 
@@ -983,7 +989,7 @@ async def test_real_android_unavailable_assertion_sequences_to_effective_dynamic
                         ),
                         ExecutableStep(step_id="blocked", action_name="wait_ms", kind="action", params={"duration_ms": 1}),
                     ],
-                    teardown_steps=[ExecutableStep(step_id="teardown", action_name="wait_ms", kind="teardown", params={"duration_ms": 1})],
+                    teardown_steps=[ExecutableStep(step_id="teardown", action_name="tap_on", kind="teardown", params={"target": "OK"})],
                 )
                 evidence_sink.write_manifest()
             finally:

@@ -114,6 +114,7 @@ class DynamicExecutionService:
 
         recording = None
         heartbeat = None
+        recorder = None
         primary_failure = False
         try:
             metadata = lifecycle.snapshot_sources(
@@ -123,18 +124,16 @@ class DynamicExecutionService:
             lifecycle.heartbeat(run_dir)
             heartbeat = asyncio.create_task(self._heartbeat(run_dir))
             recorder = EvidenceRecorder(run_id=metadata.run_id, output_dir=run_dir, secret_values=secret_values)
-            context = lifecycle.context(run_dir, metadata).model_copy(update={"capture_action_before": request.record})
+            context = lifecycle.context(run_dir, metadata)
             outcome = await self._agent.run_in_context(safe_task, context, request.event_sink, evidence_sink=recorder, cancellation_check=check_cancellation)
             _validate_outcome_identity(outcome, safe_task)
             check_cancellation()
-            try:
-                bundle = lifecycle.read_evidence(run_dir)
-            except FileNotFoundError:
-                bundle = recorder.build_bundle()
-                if not bundle.steps and not bundle.events and not bundle.planned_steps:
-                    recorder.record_event(RunnerEvent(run_id=metadata.run_id, event_type="session_finish", payload={"capability_execution": "not_requested"}))
-                    recorder.write_manifest()
-                    bundle = lifecycle.read_evidence(run_dir)
+            in_memory_bundle = recorder.build_bundle()
+            if not in_memory_bundle.steps and not in_memory_bundle.events and not in_memory_bundle.planned_steps and not (run_dir / "evidence-manifest.json").is_file():
+                recorder.record_event(RunnerEvent(run_id=metadata.run_id, event_type="session_finish", payload={"capability_execution": "not_requested"}))
+            if (run_dir / "evidence-events.jsonl").is_file() or not (run_dir / "evidence-manifest.json").is_file():
+                recorder.write_manifest()
+            bundle = lifecycle.read_evidence(run_dir)
             verification = Verifier.reconcile_execution_evidence(outcome.verification, [step.model_dump(mode="json") for step in bundle.steps])
             if verification is not outcome.verification:
                 outcome = outcome.model_copy(update={"verification": verification})
@@ -216,6 +215,9 @@ class DynamicExecutionService:
             if active_processing is not None:
                 processing[active_processing] = {"status": "cancelled" if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)) else "failed", "error_type": type(exc).__name__}
             try:
+                if recorder is not None and not recorder.write_failed and (run_dir / "evidence-events.jsonl").is_file():
+                    with suppress(OSError, ValueError):
+                        recorder.write_manifest()
                 try:
                     bundle = lifecycle.read_evidence(run_dir)
                 except (OSError, ValueError):

@@ -139,7 +139,7 @@ def test_whole_sequence_secret_preflight_prevents_earlier_actions(tmp_path):
     assert harness.actions == []
 
 
-def test_fresh_context_failure_records_both_required_capture_failures(tmp_path):
+def test_fresh_context_failure_records_required_capture_failure(tmp_path):
     from test_durable_evidence import JournalHarness, _runner, _step
 
     class ContextFailure(JournalHarness):
@@ -151,8 +151,8 @@ def test_fresh_context_failure_records_both_required_capture_failures(tmp_path):
     runner, recorder = _runner(tmp_path, ContextFailure(tmp_path, failure=True))
     result = runner.run_step("run", _step())
     assert result.failure_category == "assertion_error"
-    assert len(result.evidence_errors) == 2
-    assert {ref.kind for ref in result.phase_reports[-1].artifact_refs} == {"screenshot", "ui_snapshot"}
+    assert len(result.evidence_errors) == 1
+    assert {ref.kind for ref in result.phase_reports[-1].artifact_refs} == {"screenshot"}
     assert recorder.build_bundle().completeness == "partial"
 
 

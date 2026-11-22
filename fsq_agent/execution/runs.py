@@ -164,8 +164,10 @@ class RunLifecycleService:
         run_dir.mkdir(parents=True, exist_ok=True)
         if (run_dir / "run.json").exists():
             metadata = load_run_metadata(run_dir)
-            if metadata.run_id != run_id or metadata.platform != platform or metadata.mode != mode or metadata.status in _TERMINAL:
+            if metadata.run_id != run_id or metadata.platform != platform or metadata.mode != mode or metadata.status in (*_TERMINAL, "finalizing") or (run_dir / "execution-result.json").exists():
                 raise ValueError("Run identity or active lifecycle is incompatible with execution.")
+            if any((run_dir / name).exists() for name in ("evidence-events.jsonl", "evidence-manifest.json")):
+                raise ValueError("Existing Run evidence cannot be adopted as a new execution.")
             return metadata
         if any((run_dir / name).exists() for name in ("execution-result.json", "evidence-events.jsonl", "evidence-manifest.json")):
             raise ValueError("Existing Run evidence cannot be adopted as a new execution.")
@@ -313,6 +315,44 @@ class RunLifecycleService:
         from fsq_agent.models import RunExecutionContext
 
         return RunExecutionContext(run_id=metadata.run_id, platform=metadata.platform, run_dir=run_dir, workspace_name=metadata.workspace["name"], provenance=metadata.provenance)
+
+    @staticmethod
+    def validate_execution_context(run_dir: Path, *, run_id: str, platform: str, execution_context=None, workspace_name: str | None = None) -> None:
+        from fsq_agent.models import ConfigurationError
+
+        if execution_context is None:
+            return
+        resolved_dir = run_dir.resolve()
+        expected_workspace = workspace_name or (load_run_metadata(resolved_dir).workspace["name"] if (resolved_dir / "run.json").is_file() else (resolved_dir.parent.name or "local"))
+        if (
+            execution_context.run_id != run_id
+            or execution_context.platform != platform
+            or execution_context.run_dir.resolve() != resolved_dir
+            or (execution_context.workspace_name and execution_context.workspace_name != expected_workspace)
+        ):
+            raise ConfigurationError(
+                "RunExecutionContext does not match the allocated Run.",
+                context={
+                    "expected_run_id": run_id,
+                    "actual_run_id": execution_context.run_id,
+                    "expected_platform": platform,
+                    "actual_platform": execution_context.platform,
+                },
+            )
+
+    @staticmethod
+    def bind_context(run_dir: Path, metadata: RunMetadata, execution_context=None):
+        RunLifecycleService.validate_execution_context(
+            run_dir,
+            run_id=metadata.run_id,
+            platform=metadata.platform,
+            execution_context=execution_context,
+            workspace_name=metadata.workspace["name"],
+        )
+        expected = RunLifecycleService.context(run_dir, metadata)
+        if execution_context is None:
+            return expected
+        return expected.model_copy(update={"capture_action_before": execution_context.capture_action_before})
 
     @staticmethod
     def snapshot_sources(

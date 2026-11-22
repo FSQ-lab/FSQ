@@ -61,7 +61,7 @@ class HarnessToolAdapter:
         platform: HarnessPlatform = "android",
         evidence_sink: EvidenceJournalSink | None = None,
         cancellation_check=None,
-        capture_action_before: bool = True,
+        capture_action_before: bool = False,
     ) -> None:
         self.cancellation_check = cancellation_check
         self.harness = harness

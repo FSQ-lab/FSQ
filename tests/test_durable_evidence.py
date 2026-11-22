@@ -9,7 +9,7 @@ import pytest
 
 from fsq_agent._capability_bootstrap import build_capability_registry
 from fsq_agent.core import ArtifactStore, EvidenceRecorder, StepRunner, StepSequenceRunner
-from fsq_agent.models import ExecutableStep, HarnessActionResult, HarnessArtifactRef, HarnessContext, RunnerEvent, StepPhaseReport
+from fsq_agent.models import ExecutableStep, HarnessActionResult, HarnessArtifactRef, HarnessContext, RunnerEvent, RunnerStepResult, StepPhaseReport
 
 
 def _step(name="tap", **updates):
@@ -119,11 +119,9 @@ def test_action_failure_survives_independent_capture_failure(tmp_path):
     assert result.failure_category == "assertion_error"
     assert result.error_message == "Expected button missing"
     assert result.evidence_errors
-    assert ("ui_snapshot", "prepare") in harness.captures
-    assert ("ui_snapshot", "finalize") in harness.captures
+    assert harness.captures == [("screenshot", "finalize")]
     bundle = EvidenceRecorder.recover_bundle(tmp_path)
     assert any(ref.availability == "failed" for ref in bundle.artifacts)
-    assert any(ref.kind == "ui_snapshot" and ref.availability == "available" for ref in bundle.artifacts)
 
 
 def test_cancel_and_prepare_failure_preserve_partial_results(tmp_path):
@@ -300,9 +298,120 @@ def test_authoritative_journal_takes_precedence_over_legacy_report_manifest(tmp_
     assert manifest.read_bytes() == before
 
 
-def test_completed_step_writes_checkpoint_before_report_generation(tmp_path):
-    runner, _ = _runner(tmp_path, JournalHarness(tmp_path))
+def test_completed_step_streams_journal_without_implicit_manifest_until_write_manifest(tmp_path):
+    runner, recorder = _runner(tmp_path, JournalHarness(tmp_path))
     runner.run_step("run", _step())
-    payload = json.loads((tmp_path / "evidence-manifest.json").read_text())
+    assert (tmp_path / "evidence-events.jsonl").is_file()
+    assert not (tmp_path / "evidence-manifest.json").exists()
+    recovered_from_journal = EvidenceRecorder.recover_bundle(tmp_path)
+    assert recovered_from_journal.steps[0].status == "passed"
+    manifest_path = recorder.write_manifest()
+    payload = json.loads(manifest_path.read_text())
     assert payload["schema_version"] == "fsq.evidence/v2"
     assert payload["steps"][0]["status"] == "passed"
+
+
+def test_recorder_rejects_incremental_inconsistent_events_and_results_in_constant_step_checks(tmp_path):
+    recorder = EvidenceRecorder(run_id="run", output_dir=tmp_path)
+    with pytest.raises(ValueError, match="start"):
+        recorder.record_event(RunnerEvent(run_id="run", event_type="action_result", step_id="s1", step_execution_id="s1", phase="invoke", payload={"status": "passed"}))
+    recorder.record_event(RunnerEvent(run_id="run", event_type="step_start", step_id="s1", step_execution_id="s1", source_step_id="src1", invocation_path=("root", "0")))
+    with pytest.raises(ValueError, match="started more than once"):
+        recorder.record_event(RunnerEvent(run_id="run", event_type="step_start", step_id="s1", step_execution_id="s1", source_step_id="src1", invocation_path=("root", "0")))
+    recorder.record_event(
+        RunnerEvent(
+            run_id="run",
+            event_type="action_result",
+            step_id="s1",
+            step_execution_id="s1",
+            source_step_id="src1",
+            invocation_path=("root", "0"),
+            phase="invoke",
+            payload={"status": "failed", "failure_category": "action_error"},
+        )
+    )
+    with pytest.raises(ValueError, match="cannot pass"):
+        recorder.record_step_result(
+            RunnerStepResult(step_id="s1", step_execution_id="s1", source_step_id="src1", invocation_path=("root", "0"), status="passed", action_status="failed", failure_category="action_error")
+        )
+    recorder.record_step_result(
+        RunnerStepResult(step_id="s1", step_execution_id="s1", source_step_id="src1", invocation_path=("root", "0"), status="failed", action_status="failed", failure_category="action_error")
+    )
+    with pytest.raises(ValueError, match="after its completed result"):
+        recorder.record_event(
+            RunnerEvent(
+                run_id="run",
+                event_type="phase_finish",
+                step_id="s1",
+                step_execution_id="s1",
+                source_step_id="src1",
+                invocation_path=("root", "0"),
+                phase="finalize",
+                payload={"status": "passed", "phase_report": {"step_id": "s1", "phase": "finalize", "status": "passed"}},
+            )
+        )
+    recorder.record_event(
+        RunnerEvent(
+            run_id="run",
+            event_type="step_finish",
+            step_id="s1",
+            step_execution_id="s1",
+            source_step_id="src1",
+            invocation_path=("root", "0"),
+            payload={"status": "failed"},
+        )
+    )
+    assert EvidenceRecorder.recover_bundle(tmp_path).steps[0].status == "failed"
+
+
+def test_recorder_incremental_validation_avoids_copying_prior_artifacts_and_fsyncs_journal_on_manifest(tmp_path, monkeypatch):
+    import os
+
+    fsynced_names: list[str] = []
+    open_names: dict[int, str] = {}
+    real_open = Path.open
+    real_fdopen = os.fdopen
+    real_fsync = os.fsync
+
+    def tracked_open(self, *args, **kwargs):
+        stream = real_open(self, *args, **kwargs)
+        open_names[stream.fileno()] = self.name
+        return stream
+
+    def tracked_fdopen(fd, *args, **kwargs):
+        open_names[fd] = "manifest.tmp"
+        return real_fdopen(fd, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    monkeypatch.setattr(os, "fdopen", tracked_fdopen)
+    monkeypatch.setattr(os, "fsync", lambda fd: (fsynced_names.append(open_names.get(fd, "other")), real_fsync(fd))[1])
+    runner, recorder = _runner(tmp_path, JournalHarness(tmp_path))
+    runner.run_step("run", _step("step-1"))
+    runner.run_step("run", _step("step-2"))
+    assert "evidence-events.jsonl" not in fsynced_names
+
+    class UniteratedDict(dict):
+        def __iter__(self):
+            raise AssertionError("Incremental step validation must not iterate full Run dictionaries")
+
+        def keys(self):
+            raise AssertionError("Incremental step validation must not read keys() of full Run dictionaries")
+
+        def items(self):
+            raise AssertionError("Incremental step validation must not read items() of full Run dictionaries")
+
+        def values(self):
+            raise AssertionError("Incremental step validation must not read values() of full Run dictionaries")
+
+        def copy(self):
+            raise AssertionError("Incremental step validation must not copy() full Run dictionaries")
+
+    recorder._artifacts = UniteratedDict(recorder._artifacts)
+    recorder._phases = UniteratedDict(recorder._phases)
+    runner.run_step("run", _step("step-3"))
+
+    recorder._artifacts = dict(dict.items(recorder._artifacts))
+    recorder._phases = dict(dict.items(recorder._phases))
+    fsynced_names.clear()
+    recorder.write_manifest()
+    assert fsynced_names[:2] == ["evidence-events.jsonl", "manifest.tmp"]

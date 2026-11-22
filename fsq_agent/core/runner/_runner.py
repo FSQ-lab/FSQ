@@ -60,7 +60,7 @@ class StepRunner:
         runtime_secret_store: RuntimeSecretResolver | None = None,
         evidence_sink: EvidenceJournalSink | None = None,
         cancellation_check: CancellationCheck | None = None,
-        capture_action_before: bool = True,
+        capture_action_before: bool = False,
     ) -> None:
         self.harness = harness
         self.capability_registry = capability_registry
@@ -157,7 +157,7 @@ class StepRunner:
         step: ExecutableStep,
         capability: CapabilityDefinition | None,
     ) -> EvidencePolicy:
-        if capability is None:
+        if capability is None or capability.executor_kind != "driver":
             return EvidencePolicy(capture_after=False)
         if step.kind == "action":
             capture_before = self.capture_action_before
@@ -177,7 +177,7 @@ class StepRunner:
             capture_before=capture_before,
             capture_after=capture_after,
             capture_on_failure=False,
-            artifact_kinds=["screenshot", "ui_snapshot"],
+            artifact_kinds=["screenshot"],
         )
 
     def _start_step(self, run_id: str, step: ExecutableStep) -> _StepExecutionState:
@@ -203,7 +203,7 @@ class StepRunner:
         return state
 
     def _run_harness_step(self, run_id, step, capability, state) -> RunnerStepResult:
-        delay_seconds = self._effective_post_action_delay_seconds(capability)
+        delay_seconds = self._effective_post_action_delay_seconds(capability, step.kind)
         context = self._phase(run_id, step, state, "prepare", lambda: self._prepare(run_id, step))
         action_result = None
         if context is not None:
@@ -307,7 +307,7 @@ class StepRunner:
             phase=phase,
             payload={
                 "status": status,
-                "post_action_delay_seconds": self._effective_post_action_delay_seconds(self._resolve_capability(step.action_name)),
+                "post_action_delay_seconds": self._effective_post_action_delay_seconds(self._resolve_capability(step.action_name), step.kind),
                 "phase_report": report.model_dump(mode="json"),
             },
         )
@@ -365,7 +365,7 @@ class StepRunner:
         elif result.status == "incomplete":
             state.error_message = self._safe_text(result.error_message)
         metadata = self._action_result_metadata(result, validated, invoke_step, capability, context)
-        self._invoke_report_metadata = self._with_post_action_delay_metadata(metadata, self._effective_post_action_delay_seconds(capability))
+        self._invoke_report_metadata = self._with_post_action_delay_metadata(metadata, self._effective_post_action_delay_seconds(capability, step.kind))
         self._emit(
             run_id=run_id,
             event_type="action_result",
@@ -553,14 +553,17 @@ class StepRunner:
         self._emit(run_id=run_id, event_type="step_finish", step=step, payload={"status": status})
         return result
 
-    def _effective_post_action_delay_seconds(self, capability: CapabilityDefinition | None) -> float:
+    def _effective_post_action_delay_seconds(self, capability: CapabilityDefinition | None, step_kind: str | None = None) -> float:
         if capability is None:
             return 0.0
         if capability.post_action_delay_seconds is not None:
             return capability.post_action_delay_seconds
         if capability.executor_kind == "common":
             return self.post_action_delay_seconds.common
-        return self.post_action_delay_seconds.platform
+        effective_kind = step_kind if step_kind is not None else capability.step_kind
+        if effective_kind in {"action", "setup"}:
+            return self.post_action_delay_seconds.platform
+        return 0.0
 
     def _apply_post_action_delay(self, seconds: float) -> None:
         if seconds > 0:

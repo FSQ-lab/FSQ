@@ -676,3 +676,290 @@ def test_nested_incomplete_assertion_keeps_unresolved_container_and_blocker(tmp_
     else:
         assert main.status == "passed"
     assert "provider_unavailable" in str(container.metadata)
+
+
+def test_strict_execution_forwards_run_execution_context_capture_action_before(tmp_path: Path) -> None:
+    from fsq_agent.execution.deterministic import run_fsq_core_case
+    from fsq_agent.models import RunExecutionContext
+
+    case_path = tmp_path / "opt_in.fsq.yaml"
+    case_path.write_text(
+        "schemaVersion: fsq.ai-test/v1\nname: Opt In\nplatform: android\nappId: com.example\n---\n- tapOn:\n    target: Button\n",
+        encoding="utf-8",
+    )
+    registry = build_capability_registry(platform="android")
+    case = FsqCaseLoader().load_case(case_path)
+
+    det_dir = tmp_path / "det-run"
+    det_bundle = run_fsq_core_case(
+        case_path=case_path,
+        harness=LifecycleHarness(),
+        output_dir=det_dir,
+        run_id="det-run",
+        registry=registry,
+        post_action_delay_seconds=PostActionDelaySettings(platform=0, common=0),
+        execution_context=RunExecutionContext(run_id="det-run", platform="android", run_dir=det_dir, capture_action_before=True),
+    )
+    assert det_bundle.steps[0].metadata["evidence_policy"]["capture_before"] is True
+    assert [ref.phase for phase in det_bundle.steps[0].phase_reports for ref in phase.artifact_refs] == ["prepare", "finalize"]
+
+    life_dir = tmp_path / "life-run"
+    recorder = EvidenceRecorder(run_id="life-run", output_dir=life_dir)
+    run_strict_lifecycle_case(
+        case_path=case_path,
+        case=case,
+        settings=Settings(cases={"dir": tmp_path}),
+        harness=LifecycleHarness(),
+        output_dir=life_dir,
+        run_id="life-run",
+        registry=registry,
+        registry_snapshot=registry.snapshot(),
+        recorder=recorder,
+        resolve_steps=lambda steps, _case: steps,
+        post_action_delay_seconds=PostActionDelaySettings(platform=0, common=0),
+        execution_context=RunExecutionContext(run_id="life-run", platform="android", run_dir=life_dir, capture_action_before=True),
+    )
+    life_bundle = recorder.build_bundle()
+    tap_step = next(step for step in life_bundle.steps if step.action_name == "tap_on")
+    assert tap_step.metadata["evidence_policy"]["capture_before"] is True
+    assert [ref.phase for phase in tap_step.phase_reports for ref in phase.artifact_refs] == ["prepare", "finalize"]
+
+    from fsq_agent.execution import RunLifecycleService, load_run_metadata
+    from fsq_agent.models import RunSource
+
+    for label, bad_context in (
+        ("run-id", RunExecutionContext(run_id="other-run", platform="android", run_dir=tmp_path / "mismatch-run-id", capture_action_before=True)),
+        ("platform", RunExecutionContext(run_id="mismatch-platform", platform="web", run_dir=tmp_path / "mismatch-platform", capture_action_before=True)),
+        ("run-dir", RunExecutionContext(run_id="mismatch-run-dir", platform="android", run_dir=det_dir, capture_action_before=True)),
+        (
+            "workspace",
+            RunExecutionContext(
+                run_id="mismatch-workspace",
+                platform="android",
+                run_dir=tmp_path / "mismatch-workspace",
+                workspace_name="foreign-workspace",
+                capture_action_before=True,
+            ),
+        ),
+    ):
+        fresh_det = tmp_path / f"mismatch-{label}"
+        with pytest.raises(ConfigurationError, match="RunExecutionContext does not match"):
+            run_fsq_core_case(
+                case_path=case_path,
+                harness=LifecycleHarness(),
+                output_dir=fresh_det,
+                run_id=f"mismatch-{label}",
+                registry=registry,
+                execution_context=bad_context,
+            )
+        assert not (fresh_det / "run.json").exists()
+
+        life_target = tmp_path / f"life-mismatch-{label}"
+        life_bad = bad_context.model_copy(
+            update={
+                "run_id": "other-run" if label == "run-id" else f"life-mismatch-{label}",
+                "run_dir": det_dir if label == "run-dir" else life_target,
+            }
+        )
+        with pytest.raises(ConfigurationError, match="RunExecutionContext does not match"):
+            run_strict_lifecycle_case(
+                case_path=case_path,
+                case=case,
+                settings=Settings(cases={"dir": tmp_path}),
+                harness=LifecycleHarness(),
+                output_dir=life_target,
+                run_id=f"life-mismatch-{label}",
+                registry=registry,
+                registry_snapshot=registry.snapshot(),
+                resolve_steps=lambda steps, _case: steps,
+                execution_context=life_bad,
+            )
+        assert not (life_target / "run.json").exists()
+
+    preallocated_det = tmp_path / "preallocated-det"
+    RunLifecycleService.ensure_run(
+        preallocated_det,
+        run_id="preallocated-det",
+        platform="android",
+        mode="strict",
+        source=RunSource(kind="case", case_id="opt_in", case_path="opt_in.fsq.yaml"),
+        workspace_name="allocated-ws",
+    )
+    with pytest.raises(ConfigurationError, match="RunExecutionContext does not match"):
+        run_fsq_core_case(
+            case_path=case_path,
+            harness=LifecycleHarness(),
+            output_dir=preallocated_det,
+            run_id="preallocated-det",
+            registry=registry,
+            execution_context=RunExecutionContext(
+                run_id="preallocated-det",
+                platform="android",
+                run_dir=preallocated_det,
+                workspace_name="foreign-ws",
+                capture_action_before=True,
+            ),
+        )
+    assert load_run_metadata(preallocated_det).status == "error"
+    assert RunLifecycleService.load_result(preallocated_det).outcome == "error"
+
+    preallocated_life = tmp_path / "preallocated-life"
+    RunLifecycleService.ensure_run(
+        preallocated_life,
+        run_id="preallocated-life",
+        platform="android",
+        mode="strict",
+        source=RunSource(kind="case", case_id="opt_in", case_path="opt_in.fsq.yaml"),
+        workspace_name="allocated-ws",
+    )
+    with pytest.raises(ConfigurationError, match="RunExecutionContext does not match"):
+        run_strict_lifecycle_case(
+            case_path=case_path,
+            case=case,
+            settings=Settings(cases={"dir": tmp_path}),
+            harness=LifecycleHarness(),
+            output_dir=preallocated_life,
+            run_id="preallocated-life",
+            registry=registry,
+            registry_snapshot=registry.snapshot(),
+            resolve_steps=lambda steps, _case: steps,
+            execution_context=RunExecutionContext(
+                run_id="preallocated-life",
+                platform="android",
+                run_dir=preallocated_life,
+                workspace_name="foreign-ws",
+                capture_action_before=True,
+            ),
+        )
+    assert load_run_metadata(preallocated_life).status == "error"
+    assert RunLifecycleService.load_result(preallocated_life).outcome == "error"
+
+    unrelated_active = tmp_path / "unrelated-active"
+    RunLifecycleService.ensure_run(
+        unrelated_active,
+        run_id="real-owner-run",
+        platform="android",
+        mode="strict",
+        source=RunSource(kind="case", case_id="opt_in", case_path="opt_in.fsq.yaml"),
+    )
+    with pytest.raises(ValueError, match="incompatible with execution"):
+        run_fsq_core_case(
+            case_path=case_path,
+            harness=LifecycleHarness(),
+            output_dir=unrelated_active,
+            run_id="intruder-run",
+            registry=registry,
+            execution_context=RunExecutionContext(
+                run_id="foreign-ctx",
+                platform="android",
+                run_dir=unrelated_active,
+                capture_action_before=True,
+            ),
+        )
+    assert load_run_metadata(unrelated_active).status == "preparing"
+    assert not (unrelated_active / "execution-result.json").exists()
+
+    from fsq_agent.execution.runs import transition_run
+    from fsq_agent.models import EvidenceBundle
+
+    frozen_finalizing = tmp_path / "frozen-finalizing"
+    finalizing_meta = RunLifecycleService.ensure_run(
+        frozen_finalizing,
+        run_id="frozen-finalizing",
+        platform="android",
+        mode="strict",
+        source=RunSource(kind="case", case_id="opt_in", case_path="opt_in.fsq.yaml"),
+        workspace_name="allocated-ws",
+    )
+    prior_recorder = EvidenceRecorder(run_id="frozen-finalizing", output_dir=frozen_finalizing, metadata={"marker": "original-checkpoint"})
+    prior_manifest = prior_recorder.write_manifest()
+    original_manifest_bytes = prior_manifest.read_bytes()
+    original_frozen = RunLifecycleService.freeze(frozen_finalizing, finalizing_meta, bundle=EvidenceBundle(run_id="frozen-finalizing", bundle_id="frozen-finalizing-evidence"))
+    transition_run(frozen_finalizing, finalizing_meta, "finalizing")
+    original_result_bytes = (frozen_finalizing / "execution-result.json").read_bytes()
+
+    for fn in (
+        lambda: run_fsq_core_case(
+            case_path=case_path,
+            harness=LifecycleHarness(),
+            output_dir=frozen_finalizing,
+            run_id="frozen-finalizing",
+            registry=registry,
+            execution_context=RunExecutionContext(
+                run_id="frozen-finalizing",
+                platform="android",
+                run_dir=frozen_finalizing,
+                workspace_name="foreign-ws",
+                capture_action_before=True,
+            ),
+        ),
+        lambda: run_strict_lifecycle_case(
+            case_path=case_path,
+            case=case,
+            settings=Settings(cases={"dir": tmp_path}),
+            harness=LifecycleHarness(),
+            output_dir=frozen_finalizing,
+            run_id="frozen-finalizing",
+            registry=registry,
+            registry_snapshot=registry.snapshot(),
+            resolve_steps=lambda steps, _case: steps,
+            execution_context=RunExecutionContext(
+                run_id="frozen-finalizing",
+                platform="android",
+                run_dir=frozen_finalizing,
+                workspace_name="foreign-ws",
+                capture_action_before=True,
+            ),
+        ),
+    ):
+        with pytest.raises(ValueError, match="incompatible with execution"):
+            fn()
+        assert prior_manifest.read_bytes() == original_manifest_bytes
+        assert (frozen_finalizing / "execution-result.json").read_bytes() == original_result_bytes
+        assert RunLifecycleService.load_result(frozen_finalizing) == original_frozen
+
+    for evidence_kind in ("manifest", "journal"):
+        evidence_only = tmp_path / f"evidence-only-{evidence_kind}"
+        RunLifecycleService.ensure_run(
+            evidence_only,
+            run_id=f"evidence-only-{evidence_kind}",
+            platform="android",
+            mode="strict",
+            source=RunSource(kind="case", case_id="opt_in", case_path="opt_in.fsq.yaml"),
+        )
+        rec = EvidenceRecorder(run_id=f"evidence-only-{evidence_kind}", output_dir=evidence_only, metadata={"marker": evidence_kind})
+        if evidence_kind == "manifest":
+            evidence_file = rec.write_manifest()
+        else:
+            from fsq_agent.models import RunnerEvent
+
+            rec.record_event(RunnerEvent(run_id=f"evidence-only-{evidence_kind}", event_type="session_finish", payload={"marker": "journal"}))
+            evidence_file = evidence_only / "evidence-events.jsonl"
+        original_evidence_bytes = evidence_file.read_bytes()
+        original_meta_bytes = (evidence_only / "run.json").read_bytes()
+
+        for call_entry in (
+            lambda target=evidence_only, rid=f"evidence-only-{evidence_kind}": run_fsq_core_case(
+                case_path=case_path,
+                harness=LifecycleHarness(),
+                output_dir=target,
+                run_id=rid,
+                registry=registry,
+            ),
+            lambda target=evidence_only, rid=f"evidence-only-{evidence_kind}": run_strict_lifecycle_case(
+                case_path=case_path,
+                case=case,
+                settings=Settings(cases={"dir": tmp_path}),
+                harness=LifecycleHarness(),
+                output_dir=target,
+                run_id=rid,
+                registry=registry,
+                registry_snapshot=registry.snapshot(),
+                resolve_steps=lambda steps, _case: steps,
+            ),
+        ):
+            with pytest.raises(ValueError, match="Existing Run evidence cannot be adopted"):
+                call_entry()
+            assert evidence_file.read_bytes() == original_evidence_bytes
+            assert (evidence_only / "run.json").read_bytes() == original_meta_bytes
+            assert not (evidence_only / "execution-result.json").exists()

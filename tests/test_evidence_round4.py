@@ -42,8 +42,9 @@ def test_checkpoint_failure_poison_prevents_every_later_action(tmp_path, monkeyp
 
     with monkeypatch.context() as scoped:
         scoped.setattr(Path, "replace", fail)
+        runner.run_step("run", _step("one"))
         with pytest.raises(OSError, match="checkpoint failed") as caught:
-            runner.run_step("run", _step("one"))
+            recorder.write_manifest()
     assert getattr(caught.value, "fsq_evidence_fatal", False)
     with pytest.raises(OSError, match="evidence"):
         runner.run_step("run", _step("two"))

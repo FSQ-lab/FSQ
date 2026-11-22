@@ -1490,7 +1490,7 @@ def test_server_actual_http_run_paths_sse_evidence_and_cancellation(tmp_path: Pa
     entry.parent.mkdir(parents=True)
     entry.write_text("control plane", encoding="utf-8")
     settings = _settings(tmp_path, "web")
-    _case(settings.cases.dir / "strict.fsq.yaml", platform="web", app_id=False)
+    _case(settings.cases.dir / "strict.fsq.yaml", platform="web", command="navigateTo:\n    url: https://example.com\n- uiSnapshot: {}", app_id=False)
     monkeypatch.setattr("fsq_agent.adapters.control_plane._server.load_control_plane_settings", lambda *_args: settings)
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.validate_target", lambda *_args: None)
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.validate_runtime_settings", lambda *_args: None)
@@ -1528,6 +1528,9 @@ def test_server_actual_http_run_paths_sse_evidence_and_cancellation(tmp_path: Pa
             return None
 
         def invoke_action(self, step, context):
+            if step.action_name == "ui_snapshot":
+                ref = self.capture_artifact("ui_snapshot", "ui-snapshot", context, step.step_id, "invoke")
+                return HarnessActionResult(status="passed", action_name=step.action_name, artifact_refs=[ref])
             return HarnessActionResult(status="passed", action_name=step.action_name)
 
         def after_action(self, step, context, action_result):

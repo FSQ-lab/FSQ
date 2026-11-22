@@ -30,6 +30,7 @@ from fsq_agent.models import (
     FsqCaseHookAction,
     PostActionDelaySettings,
     ReportArtifact,
+    RunExecutionContext,
     RunnerEvent,
     RunnerStepResult,
     SourceRef,
@@ -71,6 +72,7 @@ class LifecycleExecutionRequest:
     resolved_steps_by_path: dict[Path, list[ExecutableStep]] | None = None
     cases_by_path: dict[Path, FsqCase] | None = None
     cancellation_check: CancellationCheck | None = None
+    execution_context: RunExecutionContext | None = None
 
 
 @dataclass(frozen=True)
@@ -106,13 +108,9 @@ def run_strict_lifecycle_case(
     resolved_steps_by_path: dict[Path, list[ExecutableStep]] | None = None,
     cases_by_path: dict[Path, FsqCase] | None = None,
     cancellation_check: CancellationCheck | None = None,
+    execution_context: RunExecutionContext | None = None,
 ) -> ReportArtifact:
-    lifecycle_recorder = recorder or EvidenceRecorder(
-        run_id=run_id,
-        output_dir=output_dir,
-        metadata={"root_case_path": case_path.name, "root_case_id": case.id},
-        secret_values=tuple(settings.runtime_secrets.private_values().values()),
-    )
+    lifecycle_recorder = recorder
     executor = _StrictLifecycleExecutor(
         case_path=case_path.resolve(),
         case=case,
@@ -129,6 +127,7 @@ def run_strict_lifecycle_case(
         resolved_steps_by_path=resolved_steps_by_path or {},
         cases_by_path=cases_by_path or {case_path.resolve(): case},
         cancellation_check=cancellation_check or _no_op,
+        execution_context=execution_context,
     )
     return executor.run()
 
@@ -188,11 +187,12 @@ class _StrictLifecycleExecutor:
         registry_snapshot: CapabilityRegistrySnapshot,
         post_action_delay_seconds: PostActionDelaySettings | None,
         runtime_secret_store: RuntimeSecretStore | None,
-        recorder: EvidenceRecorder,
+        recorder: EvidenceRecorder | None,
         resolve_steps: ResolveSteps,
         resolved_steps_by_path: dict[Path, list[ExecutableStep]],
         cases_by_path: dict[Path, FsqCase],
         cancellation_check: CancellationCheck,
+        execution_context: RunExecutionContext | None = None,
     ) -> None:
         self.case_path = case_path
         self.case = case
@@ -200,13 +200,19 @@ class _StrictLifecycleExecutor:
         self.output_dir = output_dir
         self.run_id = run_id
         self.registry_snapshot = registry_snapshot
+        self._harness = harness
+        self._registry = registry
+        self._post_action_delay_seconds = post_action_delay_seconds
+        self._runtime_secret_store = runtime_secret_store
+        self._execution_context = execution_context
         self.step_runner = StepRunner(
             harness=harness,
             capability_registry=registry,
             post_action_delay_seconds=post_action_delay_seconds,
             runtime_secret_store=runtime_secret_store,
+            capture_action_before=execution_context.capture_action_before if execution_context is not None else False,
         )
-        self.recorder = _LifecycleRecorder(recorder)
+        self.recorder = _LifecycleRecorder(recorder) if recorder is not None else None
         self.resolve_steps = resolve_steps
         self.resolved_steps_by_path = {path.resolve(): list(steps) for path, steps in resolved_steps_by_path.items()}
         self.cases_by_path = {path.resolve(): loaded_case for path, loaded_case in cases_by_path.items()}
@@ -223,6 +229,13 @@ class _StrictLifecycleExecutor:
 
     def run(self) -> ReportArtifact:
         lifecycle = RunLifecycleService()
+        if not (self.output_dir.resolve() / "run.json").is_file():
+            lifecycle.validate_execution_context(
+                self.output_dir,
+                run_id=self.run_id,
+                platform=self.settings.harness.platform,
+                execution_context=self._execution_context,
+            )
         metadata = lifecycle.ensure_run(
             self.output_dir,
             run_id=self.run_id,
@@ -239,6 +252,23 @@ class _StrictLifecycleExecutor:
         thread = Thread(target=heartbeat, daemon=True)
         try:
             try:
+                context = lifecycle.bind_context(self.output_dir, metadata, self._execution_context)
+                if self.recorder is None:
+                    self.recorder = _LifecycleRecorder(
+                        EvidenceRecorder(
+                            run_id=self.run_id,
+                            output_dir=self.output_dir,
+                            metadata={"root_case_path": self.case_path.name, "root_case_id": self.case.id},
+                            secret_values=tuple(self.settings.runtime_secrets.private_values().values()),
+                        )
+                    )
+                self.step_runner = StepRunner(
+                    harness=self._harness,
+                    capability_registry=self._registry,
+                    post_action_delay_seconds=self._post_action_delay_seconds,
+                    runtime_secret_store=self._runtime_secret_store,
+                    capture_action_before=context.capture_action_before,
+                )
                 self._plan_case(self.case_path, self.case, (), None, ("root",))
                 lifecycle.preflight_steps([step for steps in self.resolved_steps_by_path.values() for step in steps], self.step_runner.runtime_secret_store, registry=self.registry_snapshot)
                 if metadata is not None:
@@ -286,16 +316,29 @@ class _StrictLifecycleExecutor:
             except BaseException as exc:
                 if metadata is not None:
                     with suppress(Exception):
-                        self.recorder.write_manifest()
-                        cancelled = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)) or type(exc).__name__ in {"ExecutionCancelled", "RunCancelled", "TaskCancelledError"}
-                        frozen = lifecycle.freeze(
-                            self.output_dir,
-                            metadata,
-                            bundle=self.recorder.build_bundle(),
-                            status="cancelled" if cancelled else "error",
-                            summary="Execution cancelled." if cancelled else f"Execution stopped ({type(exc).__name__}).",
-                        )
-                        lifecycle.finalize(self.output_dir, metadata, execution_result=frozen)
+                        if not (self.output_dir / "execution-result.json").exists():
+                            if self.recorder is not None or not (self.output_dir / "evidence-manifest.json").is_file():
+                                active_recorder = self.recorder or _LifecycleRecorder(
+                                    EvidenceRecorder(
+                                        run_id=self.run_id,
+                                        output_dir=self.output_dir,
+                                        metadata={"root_case_path": self.case_path.name, "root_case_id": self.case.id},
+                                        secret_values=tuple(self.settings.runtime_secrets.private_values().values()),
+                                    )
+                                )
+                                active_recorder.write_manifest()
+                                error_bundle = active_recorder.build_bundle()
+                            else:
+                                error_bundle = lifecycle.read_evidence(self.output_dir)
+                            cancelled = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)) or type(exc).__name__ in {"ExecutionCancelled", "RunCancelled", "TaskCancelledError"}
+                            frozen = lifecycle.freeze(
+                                self.output_dir,
+                                metadata,
+                                bundle=error_bundle,
+                                status="cancelled" if cancelled else "error",
+                                summary="Execution cancelled." if cancelled else f"Execution stopped ({type(exc).__name__}).",
+                            )
+                            lifecycle.finalize(self.output_dir, metadata, execution_result=frozen)
                 raise lifecycle.execution_error(exc, metadata) from exc
             manifest_path = self.recorder.write_manifest()
             frozen = lifecycle.freeze(self.output_dir, metadata, bundle=self.recorder.build_bundle()) if metadata else None

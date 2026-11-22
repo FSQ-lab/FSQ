@@ -106,7 +106,7 @@ class WebHarness:
                 output = driver_method(params)
             finally:
                 self._clear_driver_ai_assertion_tool_invocation()
-            return self._result_from_driver_output(step.action_name, output)
+            return self._result_from_driver_output(step.action_name, output, capability=capability, step_id=step.step_id)
         return HarnessActionResult(
             status="failed",
             action_name=step.action_name,
@@ -258,7 +258,31 @@ class WebHarness:
         except TypeError:
             return error.errors()
 
-    def _result_from_driver_output(self, action_name: str, output: object) -> HarnessActionResult:
+    def _result_from_driver_output(self, action_name: str, output: object, *, capability: CapabilityDefinition | None = None, step_id: str = "step") -> HarnessActionResult:
+        persist_kind = capability.metadata.get("persist_artifact_kind") if capability is not None else None
+        if isinstance(persist_kind, str) and isinstance(output, dict) and "status" not in output:
+            artifact_refs: list[HarnessArtifactRef] = []
+            if self.artifact_store is not None:
+                try:
+                    written = self.artifact_store.write_json(
+                        kind=persist_kind,
+                        step_id=step_id,
+                        phase="invoke",
+                        name=persist_kind.replace("_", "-"),
+                        payload=output,
+                    )
+                except Exception as exc:
+                    if getattr(exc, "fsq_evidence_fatal", False):
+                        raise
+                    written = self.artifact_store.capture_failure(
+                        kind=persist_kind,
+                        step_id=step_id,
+                        phase="invoke",
+                        name=persist_kind.replace("_", "-"),
+                        error=exc,
+                    )
+                artifact_refs.append(self._to_harness_artifact_ref(written))
+            return HarnessActionResult(status="passed", action_name=action_name, output=output, artifact_refs=artifact_refs)
         if not isinstance(output, dict) or "status" not in output:
             return HarnessActionResult(status="passed", action_name=action_name, output=output)
         status_value = output.get("status")

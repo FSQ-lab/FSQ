@@ -34,7 +34,7 @@ def test_recovery_rejects_contradictory_durable_completion(tmp_path, kind):
         if event.get("event_type") == kind and (kind == "step_finish" or event.get("phase") == "invoke"):
             value = event["payload"]["phase_report"] if kind == "phase_finish" else event["payload"]
             value.update(status="failed", failure_category="assertion_error")
-    (tmp_path / "evidence-manifest.json").unlink()
+    (tmp_path / "evidence-manifest.json").unlink(missing_ok=True)
     journal.write_text("".join(json.dumps(record) + chr(10) for record in records))
     with pytest.raises(ValueError, match=r"contradict|conflict"):
         EvidenceRecorder.recover_bundle(tmp_path)

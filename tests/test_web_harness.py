@@ -298,3 +298,109 @@ def test_web_harness_requires_artifact_store_for_capture() -> None:
             step_id="step-1",
             phase="finalize",
         )
+
+
+def test_web_harness_explicit_ui_snapshot_persists_artifact_and_satisfies_web_search_evidence(tmp_path) -> None:
+    from fsq_agent._capability_bootstrap import build_capability_registry
+    from fsq_agent.core import EvidenceRecorder, StepRunner
+    from fsq_agent.execution.dynamic import _has_web_search_evidence
+
+    class AriaWebDriver(FakeWebDriver):
+        @_web_driver_tool("uiSnapshot", description="Return the current Web page accessibility snapshot.")
+        def ui_snapshot(self, params: WebUiSnapshotParams) -> dict[str, object]:
+            self.calls.append(("ui_snapshot", {}))
+            return {
+                "url": "https://www.bing.com/search?q=fsq",
+                "snapshot_type": "aria",
+                "snapshot": '- link "FSQ Official"',
+                "coverage": {"status": "complete", "scope": "observed_aria_snapshot"},
+                "truncated": False,
+            }
+
+    store = ArtifactStore(run_dir=tmp_path)
+    recorder = EvidenceRecorder(run_id=tmp_path.name, output_dir=tmp_path)
+    harness = WebHarness(driver=AriaWebDriver(), artifact_store=store)
+    runner = StepRunner(harness=harness, capability_registry=build_capability_registry(platform="web"), evidence_sink=recorder)
+
+    result = runner.run_step(
+        run_id=tmp_path.name,
+        step=ExecutableStep(step_id="obs-1", kind="observation", action_name="uiSnapshot", params={}),
+    )
+
+    assert result.status == "passed"
+    invoke_refs = result.phase_reports[1].artifact_refs
+    assert [ref.kind for ref in invoke_refs] == ["ui_snapshot"]
+    assert result.phase_reports[0].artifact_refs == []
+    assert result.phase_reports[3].artifact_refs == []
+    bundle = recorder.build_bundle()
+    assert _has_web_search_evidence(bundle, tmp_path) is True
+
+
+def test_web_harness_ui_snapshot_artifact_write_failure_records_failed_evidence(tmp_path, monkeypatch) -> None:
+    from fsq_agent._capability_bootstrap import build_capability_registry
+    from fsq_agent.core import EvidenceRecorder, StepRunner
+    from fsq_agent.execution.dynamic import _has_web_search_evidence
+
+    class AriaWebDriver(FakeWebDriver):
+        @_web_driver_tool("uiSnapshot", description="Return the current Web page accessibility snapshot.")
+        def ui_snapshot(self, params: WebUiSnapshotParams) -> dict[str, object]:
+            return {
+                "url": "https://www.bing.com/search?q=fsq",
+                "snapshot_type": "aria",
+                "snapshot": '- link "FSQ Official"',
+                "coverage": {"status": "complete", "scope": "observed_aria_snapshot"},
+                "truncated": False,
+            }
+
+    store = ArtifactStore(run_dir=tmp_path)
+    monkeypatch.setattr(store, "write_json", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    recorder = EvidenceRecorder(run_id=tmp_path.name, output_dir=tmp_path)
+    harness = WebHarness(driver=AriaWebDriver(), artifact_store=store)
+    runner = StepRunner(harness=harness, capability_registry=build_capability_registry(platform="web"), evidence_sink=recorder)
+
+    result = runner.run_step(
+        run_id=tmp_path.name,
+        step=ExecutableStep(step_id="obs-1", kind="observation", action_name="uiSnapshot", params={}),
+    )
+
+    assert result.action_status == "passed"
+    assert result.status == "failed"
+    assert result.failure_category == "artifact_error"
+    assert len(result.evidence_errors) == 1
+    invoke_refs = result.phase_reports[1].artifact_refs
+    assert len(invoke_refs) == 1
+    assert invoke_refs[0].kind == "ui_snapshot"
+    assert invoke_refs[0].availability == "failed"
+    assert _has_web_search_evidence(recorder.build_bundle(), tmp_path) is False
+
+
+def test_web_harness_ui_snapshot_propagates_fatal_journal_acknowledgement_error(tmp_path) -> None:
+    from fsq_agent._capability_bootstrap import build_capability_registry
+    from fsq_agent.core import StepRunner
+
+    class AriaWebDriver(FakeWebDriver):
+        @_web_driver_tool("uiSnapshot", description="Return the current Web page accessibility snapshot.")
+        def ui_snapshot(self, params: WebUiSnapshotParams) -> dict[str, object]:
+            return {"url": "https://example.com", "snapshot_type": "aria", "snapshot": '- heading "Example"'}
+
+    class FatalSink:
+        def allocate_step_identity(self, step):
+            return step.model_copy(update={"step_execution_id": step.step_id, "source_step_id": step.step_id, "invocation_path": (step.step_id, "1")})
+
+        def record_event(self, event):
+            if event.event_type == "artifact_captured":
+                raise OSError("journal append failed")
+
+        def record_step_result(self, result):
+            pass
+
+    store = ArtifactStore(run_dir=tmp_path)
+    harness = WebHarness(driver=AriaWebDriver(), artifact_store=store)
+    runner = StepRunner(harness=harness, capability_registry=build_capability_registry(platform="web"), evidence_sink=FatalSink())
+
+    with pytest.raises(OSError, match="journal append failed") as caught:
+        runner.run_step(
+            run_id=tmp_path.name,
+            step=ExecutableStep(step_id="obs-fatal", kind="observation", action_name="uiSnapshot", params={}),
+        )
+    assert getattr(caught.value, "fsq_evidence_fatal", False) is True

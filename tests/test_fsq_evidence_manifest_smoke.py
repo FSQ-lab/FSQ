@@ -106,10 +106,11 @@ def test_fsq_steps_sequence_runner_and_recorder_write_evidence_manifest(tmp_path
         "step_index": 1,
         "metadata": {"case_name": "Manifest Smoke Case", "platform": "android"},
     }
-    assert [event["event_type"] for event in manifest["events"]].count("artifact_captured") == 8
+    assert [event["event_type"] for event in manifest["events"]].count("artifact_captured") == 3
     artifact_reasons = [event["payload"]["reason"] for event in manifest["events"] if event["event_type"] == "artifact_captured"]
-    assert artifact_reasons.count("before-action") == 4
-    assert artifact_reasons.count("after-action") == 4
-    assert [artifact["kind"] for artifact in manifest["artifacts"]] == ["screenshot", "ui_snapshot"] * 4
+    assert artifact_reasons.count("before-action") == 1
+    assert artifact_reasons.count("after-action") == 2
+    assert [artifact["kind"] for artifact in manifest["artifacts"]] == ["screenshot"] * 3
     assert manifest["artifacts"][0]["path"] == "artifacts/screenshot/manifest_smoke-step-001-finalize-after-action.screenshot"
-    assert manifest["artifacts"][2]["path"] == "artifacts/screenshot/manifest_smoke-step-002-prepare-before-action.screenshot"
+    assert manifest["artifacts"][1]["path"] == "artifacts/screenshot/manifest_smoke-step-002-finalize-after-action.screenshot"
+    assert manifest["artifacts"][2]["path"] == "artifacts/screenshot/manifest_smoke-step-003-prepare-before-action.screenshot"

@@ -27,6 +27,12 @@ class EvidenceRecorder:
         self._sequence = 0
         self._identities: set[str] = set()
         self._occurrences: dict[str, int] = {}
+        self._starts: dict[str, RunnerEvent] = {}
+        self._actions: dict[str, RunnerEvent] = {}
+        self._artifacts: dict[str, EvidenceArtifactRef] = {}
+        self._phases: dict[str, dict[str | None, dict[str, object]]] = {}
+        self._completions: dict[str, object] = {}
+        self._finished: dict[str, object] = {}
         self._lock = threading.RLock()
         self._write_failed = False
         if (self.output_dir / "evidence-events.jsonl").exists():
@@ -77,8 +83,9 @@ class EvidenceRecorder:
             canonical = record.event
             if canonical is None:
                 raise ValueError("Canonical evidence event is unavailable.")
-            _validate_execution_facts([*self._events, canonical], self._steps)
+            artifact_update = self._validate_incremental_event(canonical)
             self._append_record(record)
+            self._commit_incremental_event(canonical, artifact_update)
             self._events.append(canonical)
 
     def record_step_result(self, result: RunnerStepResult) -> None:
@@ -87,10 +94,10 @@ class EvidenceRecorder:
             canonical = record.step_result
             if canonical is None:
                 raise ValueError("Canonical evidence step result is unavailable.")
-            _validate_execution_facts(self._events, [*self._steps, canonical])
+            artifact_updates = self._validate_incremental_step_result(canonical)
             self._append_record(record)
+            self._commit_incremental_step_result(canonical, artifact_updates)
             self._steps.append(canonical)
-            self.write_manifest()
 
     def _canonical_record(self, **fact) -> EvidenceJournalRecord:
         record = EvidenceJournalRecord(sequence=self._sequence + 1, event_id=uuid.uuid4().hex, run_id=self.run_id, **fact)
@@ -107,7 +114,6 @@ class EvidenceRecorder:
             with path.open("ab") as stream:
                 stream.write(record.model_dump_json().encode("utf-8") + b"\n")
                 stream.flush()
-                os.fsync(stream.fileno())
         except OSError as exc:
             self._write_failed = True
             exc.fsq_evidence_fatal = True
@@ -116,6 +122,114 @@ class EvidenceRecorder:
 
     def _sanitize(self, value):
         return _credential_safe(value, self._secret_values)
+
+    def _validate_incremental_event(self, event: RunnerEvent) -> EvidenceArtifactRef | None:
+        artifact_ref: EvidenceArtifactRef | None = None
+        if event.event_type in {"artifact_captured", "artifact_failed"} and isinstance(event.payload.get("artifact"), dict):
+            artifact_ref = EvidenceArtifactRef.model_validate(event.payload["artifact"])
+            previous = self._artifacts.get(artifact_ref.artifact_id)
+            if previous is not None and previous != artifact_ref:
+                raise ValueError("Evidence artifact identity has conflicting facts.")
+            if artifact_ref.step_execution_id and artifact_ref.step_execution_id != event.step_execution_id:
+                raise ValueError("Evidence artifact execution identity disagrees with event.")
+        identity = event.step_execution_id
+        if identity is None:
+            return artifact_ref
+        if event.step_id != identity:
+            raise ValueError("Evidence execution identity alias disagrees.")
+        if event.event_type == "step_start":
+            if identity in self._starts:
+                raise ValueError("Evidence execution identity started more than once.")
+        elif identity in self._starts:
+            start = self._starts[identity]
+            if (event.source_step_id, event.invocation_path, event.attempt_index) != (start.source_step_id, start.invocation_path, start.attempt_index):
+                raise ValueError("Evidence event source/attempt identity disagrees with start.")
+        else:
+            raise ValueError("Evidence execution event has no acknowledged start identity.")
+        if identity in self._finished and event.event_type != "step_finish":
+            raise ValueError("Evidence journal event occurs after its completed result.")
+        if event.event_type == "action_result" and identity in self._actions and self._actions[identity].payload != event.payload:
+            raise ValueError("Evidence action outcome conflicts with an earlier result.")
+        if event.event_type == "phase_finish":
+            report = event.payload.get("phase_report")
+            if isinstance(report, dict):
+                if report.get("step_id") != identity or report.get("phase") != event.phase or ("status" in event.payload and event.payload["status"] != report.get("status")):
+                    raise ValueError("Evidence durable phase identity or outcome conflicts.")
+                existing_phase = self._phases.get(identity, {}).get(event.phase)
+                if existing_phase is not None and existing_phase != report:
+                    raise ValueError("Evidence durable phase outcomes conflict.")
+        if event.event_type == "step_finish":
+            status = event.payload.get("status")
+            if identity in self._completions and self._completions[identity] != status:
+                raise ValueError("Evidence durable completion outcomes conflict.")
+            if identity in self._finished and self._finished[identity] != status:
+                raise ValueError("Evidence final outcome contradicts durable completion.")
+        return artifact_ref
+
+    def _commit_incremental_event(self, event: RunnerEvent, artifact_ref: EvidenceArtifactRef | None) -> None:
+        if artifact_ref is not None:
+            self._artifacts[artifact_ref.artifact_id] = artifact_ref
+        identity = event.step_execution_id
+        if identity is None:
+            return
+        if event.event_type == "step_start":
+            self._starts[identity] = event
+        elif event.event_type == "action_result":
+            self._actions[identity] = event
+        elif event.event_type == "phase_finish":
+            report = event.payload.get("phase_report")
+            if isinstance(report, dict):
+                self._phases.setdefault(identity, {})[event.phase] = report
+        elif event.event_type == "step_finish":
+            self._completions[identity] = event.payload.get("status")
+
+    def _validate_incremental_step_result(self, result: RunnerStepResult) -> list[EvidenceArtifactRef]:
+        identity = result.step_execution_id
+        if identity is None:
+            return []
+        if identity in self._finished or result.step_id != identity or identity not in self._starts:
+            raise ValueError("Evidence result execution identity is missing or duplicated.")
+        start = self._starts[identity]
+        if (result.source_step_id, result.invocation_path, result.attempt_index) != (start.source_step_id, start.invocation_path, start.attempt_index):
+            raise ValueError("Evidence result source/attempt identity disagrees with start.")
+        action = self._actions.get(identity)
+        if identity in self._completions and self._completions[identity] != result.status:
+            raise ValueError("Evidence final outcome contradicts durable completion.")
+        if action is not None:
+            observed = action.payload.get("status")
+            if result.action_status is not None and observed != result.action_status:
+                raise ValueError("Evidence final action outcome contradicts the acknowledged action result.")
+            if observed != "passed" and result.status == "passed":
+                raise ValueError("Evidence final outcome cannot pass after an unsuccessful action.")
+            if action.payload.get("failure_category") and result.failure_category != action.payload["failure_category"]:
+                raise ValueError("Evidence final outcome lost the primary action failure.")
+        staged_updates: dict[str, EvidenceArtifactRef] = {}
+        updates: list[EvidenceArtifactRef] = []
+        recorded_phases = self._phases.get(identity, {})
+        for phase in result.phase_reports:
+            if phase.step_id != identity:
+                raise ValueError("Evidence phase execution identity disagrees with result.")
+            for ref in phase.artifact_refs:
+                if ref.step_execution_id and ref.step_execution_id != identity:
+                    raise ValueError("Evidence artifact execution identity disagrees with result.")
+                previous = staged_updates.get(ref.artifact_id) or self._artifacts.get(ref.artifact_id)
+                if previous is not None and previous != ref:
+                    raise ValueError("Evidence artifact identity has conflicting facts.")
+                staged_updates[ref.artifact_id] = ref
+                updates.append(ref)
+            recorded = recorded_phases.get(phase.phase)
+            if recorded is not None and StepPhaseReport.model_validate(recorded) != phase:
+                raise ValueError("Evidence final phase contradicts durable phase outcome.")
+        reported_phases = {phase.phase for phase in result.phase_reports}
+        if any(phase_name not in reported_phases for phase_name in recorded_phases):
+            raise ValueError("Evidence final phases conflict with durable phase inventory.")
+        return updates
+
+    def _commit_incremental_step_result(self, result: RunnerStepResult, artifact_updates: list[EvidenceArtifactRef]) -> None:
+        for ref in artifact_updates:
+            self._artifacts[ref.artifact_id] = ref
+        if result.step_execution_id is not None:
+            self._finished[result.step_execution_id] = result.status
 
     def build_bundle(self) -> EvidenceBundle:
         with self._lock:
@@ -138,6 +252,11 @@ class EvidenceRecorder:
     def _write_manifest(self, filename: str) -> Path:
         with self._lock:
             self.output_dir.mkdir(parents=True, exist_ok=True)
+            journal = self._contained("evidence-events.jsonl")
+            if journal.is_file():
+                with journal.open("ab") as journal_stream:
+                    journal_stream.flush()
+                    os.fsync(journal_stream.fileno())
             path = self._contained(filename)
             bundle = self.build_bundle().model_copy(update={"manifest_path": Path(filename)})
             descriptor, temporary = tempfile.mkstemp(prefix=".evidence-", suffix=".tmp", dir=self.output_dir)
@@ -312,10 +431,15 @@ def _read_journal(data: bytes) -> tuple[list[EvidenceJournalRecord], list[str]]:
 def _bundle(bundle_id, run_id, events, steps, planned, sequence, metadata, *, include_unresolved=False) -> EvidenceBundle:
     results = list(steps)
     finished = {step.step_execution_id or step.step_id for step in results}
+    events_by_identity: dict[str, list[RunnerEvent]] = {}
+    for event in events:
+        event_identity = event.step_execution_id or event.step_id
+        if event_identity:
+            events_by_identity.setdefault(event_identity, []).append(event)
     for event in events:
         identity = event.step_execution_id or event.step_id
         if event.event_type == "step_start" and identity and identity not in finished:
-            related = [item for item in events if (item.step_execution_id or item.step_id) == identity]
+            related = events_by_identity.get(identity, [])
             action = next((item for item in reversed(related) if item.event_type == "action_result"), None)
             phases = [StepPhaseReport.model_validate(item.payload["phase_report"]) for item in related if item.event_type == "phase_finish" and isinstance(item.payload.get("phase_report"), dict)]
             results.append(

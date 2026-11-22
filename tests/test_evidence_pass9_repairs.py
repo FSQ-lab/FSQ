@@ -74,7 +74,7 @@ def test_journal_result_cannot_precede_acknowledged_start(tmp_path):
     for index, record in enumerate(records, 1):
         record["sequence"] = index
     path.write_text("".join(json.dumps(record) + chr(10) for record in records))
-    (tmp_path / "evidence-manifest.json").unlink()
+    (tmp_path / "evidence-manifest.json").unlink(missing_ok=True)
     with pytest.raises(ValueError, match=r"start|order"):
         EvidenceRecorder.recover_bundle(tmp_path)
 

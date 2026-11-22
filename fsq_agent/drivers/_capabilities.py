@@ -55,6 +55,9 @@ _android_driver_capability = platform_driver_capability(
     catalog=ANDROID_DRIVER_ACTION_CATALOG,
 )
 
+_WEB_OBSERVATION_ARTIFACT_METADATA: dict[str, dict[str, object]] = {
+    "uiSnapshot": {"persist_artifact_kind": "ui_snapshot"},
+}
 WEB_DRIVER_ACTION_CATALOG = {
     definition.fsq_action_name: CapabilityActionDefinition(
         action_name=definition.fsq_action_name,
@@ -65,6 +68,7 @@ WEB_DRIVER_ACTION_CATALOG = {
         step_kind=definition.step_kind,
         method_name=definition.driver_method,
         replay=ReplayPolicy(kind="fsq_command", alias=definition.fsq_action_name),
+        metadata=_WEB_OBSERVATION_ARTIFACT_METADATA.get(definition.fsq_action_name, {}),
     )
     for definition in WEB_ACTION_DEFINITIONS
     if definition.owner == "driver"

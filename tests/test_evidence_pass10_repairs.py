@@ -93,10 +93,10 @@ def test_terminal_reads_journal_without_current_checkpoint(tmp_path, legacy):
     runner, _ = _runner(tmp_path, JournalHarness(tmp_path))
     step = runner.run_step("run", _step())
     checkpoint = tmp_path / "evidence-manifest.json"
-    checkpoint.unlink()
+    assert not checkpoint.exists()
     if legacy:
         checkpoint.write_text(json.dumps({"schema_version": "1.0", "bundle_id": "old", "run_id": "run", "artifacts": []}))
-    assert len(read_step_artifacts(tmp_path, step.step_id)["artifacts"]) == 4
+    assert len(read_step_artifacts(tmp_path, step.step_id)["artifacts"]) == 1
 
 
 def test_terminal_hash_mismatch_never_emits_raw_body(tmp_path):

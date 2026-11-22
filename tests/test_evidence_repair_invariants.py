@@ -212,7 +212,7 @@ def test_after_capture_uses_new_session_context(tmp_path):
     runner = StepRunner(harness, capability_registry=CapabilityRegistry.from_definitions([CapabilityDefinition(name="launch", executor_kind="driver", params_model=Params, step_kind="setup")]))
     result = runner.run_step("run", ExecutableStep(step_id="launch", kind="setup", action_name="launch"))
     assert result.status == "passed"
-    assert harness.observed == [True, True]
+    assert harness.observed == [True]
 
 
 def test_old_inconsistent_counts_are_unknown_without_invented_zeros(tmp_path):

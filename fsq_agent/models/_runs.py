@@ -154,7 +154,7 @@ class RunExecutionContext(BaseModel):
     run_dir: Path = Field(exclude=True)
     workspace_name: str = ""
     provenance: dict[str, Any] = Field(default_factory=dict)
-    capture_action_before: bool = True
+    capture_action_before: bool = False
 
 
 class DynamicAgentOutcome(BaseModel):

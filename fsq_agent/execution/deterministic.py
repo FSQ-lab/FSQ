@@ -9,7 +9,7 @@ from typing import Protocol
 from fsq_agent._capability_bootstrap import build_capability_registry
 from fsq_agent.case_dsl import FsqCaseLoader, FsqExecutableStepAdapter
 from fsq_agent.core import CapabilityRegistry, EvidenceRecorder, HarnessInterface, RuntimeSecretStore, StepRunner, StepSequenceRunner
-from fsq_agent.models import EvidenceBundle, ExecutableStep, PostActionDelaySettings, ReportArtifact, RunSource
+from fsq_agent.models import EvidenceBundle, ExecutableStep, PostActionDelaySettings, ReportArtifact, RunExecutionContext, RunSource
 from fsq_agent.report import CoreEvidenceReportGenerator
 
 from .runs import RunLifecycleService, transition_run
@@ -32,6 +32,7 @@ class DeterministicExecutionRequest:
     evidence_recorder: EvidenceRecorder | None = None
     cancellation_check: Callable[[], None] | None = None
     report_generator: ReportGenerator | None = None
+    execution_context: RunExecutionContext | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ def run_fsq_core_case(
     runtime_secret_store: RuntimeSecretStore | None = None,
     evidence_recorder: EvidenceRecorder | None = None,
     cancellation_check: Callable[[], None] | None = None,
+    execution_context: RunExecutionContext | None = None,
 ) -> EvidenceBundle:
     return _execute(
         DeterministicExecutionRequest(
@@ -73,6 +75,7 @@ def run_fsq_core_case(
             runtime_secret_store=runtime_secret_store,
             evidence_recorder=evidence_recorder,
             cancellation_check=cancellation_check,
+            execution_context=execution_context,
         ),
         generate_report=False,
     )[0]
@@ -107,22 +110,30 @@ def _execute(request, *, generate_report):
     ]
     lifecycle = RunLifecycleService()
     root = Path(request.output_dir)
+    if not (root.resolve() / "run.json").is_file():
+        lifecycle.validate_execution_context(root, run_id=request.run_id, platform=platform, execution_context=request.execution_context)
     metadata = lifecycle.ensure_run(root, run_id=request.run_id, platform=platform, mode="strict", source=RunSource(kind="case", case_id=case.id if case else name, case_path=name))
+    recorder = None
     try:
+        context = lifecycle.bind_context(root, metadata, request.execution_context)
         metadata = lifecycle.snapshot_sources(
             root, metadata, sources={"case" if case else "explicit-executable-steps": source_bytes}, configuration={"platform": platform}, secret_values=secret_values
         )
         metadata = transition_run(root, metadata, "running") if metadata.status == "preparing" else metadata
         lifecycle.heartbeat(root)
+        context = lifecycle.bind_context(root, metadata, request.execution_context)
         recorder = request.evidence_recorder or EvidenceRecorder(run_id=request.run_id, output_dir=root, secret_values=secret_values)
         for index, step in enumerate(steps):
             steps[index] = step.model_copy(update={"invocation_path": step.invocation_path or ("root", "body", str(index))})
             recorder.record_planned_step(steps[index])
         normal, teardown = _split_trailing_teardown_steps(steps)
-        runner = StepRunner(harness=request.harness, capability_registry=registry, post_action_delay_seconds=request.post_action_delay_seconds, runtime_secret_store=request.runtime_secret_store)
-    except BaseException as exc:
-        raise lifecycle.execution_error(exc, metadata) from exc
-    try:
+        runner = StepRunner(
+            harness=request.harness,
+            capability_registry=registry,
+            post_action_delay_seconds=request.post_action_delay_seconds,
+            runtime_secret_store=request.runtime_secret_store,
+            capture_action_before=context.capture_action_before,
+        )
         if request.cancellation_check is not None:
             request.cancellation_check()
         bundle = StepSequenceRunner(step_runner=runner, evidence_recorder=recorder, cancellation_check=request.cancellation_check).run_steps(
@@ -132,10 +143,22 @@ def _execute(request, *, generate_report):
             request.cancellation_check()
     except BaseException as exc:
         with suppress(Exception):
-            recorder.write_manifest()
-            cancelled = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)) or type(exc).__name__ in {"TaskCancelledError", "ExecutionCancelled", "RunCancelled"}
-            frozen = lifecycle.freeze(root, metadata, bundle=recorder.build_bundle(), status="cancelled" if cancelled else "error")
-            lifecycle.finalize(root, metadata, execution_result=frozen)
+            if not (root / "execution-result.json").exists():
+                if recorder is not None or request.evidence_recorder is not None or not (root / "evidence-manifest.json").is_file():
+                    active_recorder = recorder or request.evidence_recorder or EvidenceRecorder(run_id=request.run_id, output_dir=root, secret_values=secret_values)
+                    active_recorder.write_manifest()
+                    error_bundle = active_recorder.build_bundle()
+                else:
+                    error_bundle = lifecycle.read_evidence(root)
+                cancelled = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)) or type(exc).__name__ in {"TaskCancelledError", "ExecutionCancelled", "RunCancelled"}
+                frozen = lifecycle.freeze(
+                    root,
+                    metadata,
+                    bundle=error_bundle,
+                    status="cancelled" if cancelled else "error",
+                    summary="Execution cancelled." if cancelled else f"Execution stopped ({type(exc).__name__}).",
+                )
+                lifecycle.finalize(root, metadata, execution_result=frozen)
         raise lifecycle.execution_error(exc, metadata) from exc
     manifest = recorder.write_manifest()
     bundle = bundle.model_copy(update={"manifest_path": manifest})
@@ -170,6 +193,7 @@ def run_strict_fsq_core_case(
     steps: list[ExecutableStep] | None = None,
     post_action_delay_seconds: PostActionDelaySettings | None = None,
     runtime_secret_store: RuntimeSecretStore | None = None,
+    execution_context: RunExecutionContext | None = None,
 ) -> ReportArtifact:
     _, report = _execute(
         DeterministicExecutionRequest(
@@ -181,6 +205,7 @@ def run_strict_fsq_core_case(
             steps=steps,
             post_action_delay_seconds=post_action_delay_seconds,
             runtime_secret_store=runtime_secret_store,
+            execution_context=execution_context,
         ),
         generate_report=True,
     )

@@ -20,8 +20,10 @@ from fsq_agent.models import ExecutableStep, RunMetadata, RunResultSummary, RunS
 def test_invalid_unregistered_params_never_persist_credentials(tmp_path, params):
     from test_step_runner import SuccessfulHarness
 
-    runner = StepRunner(SuccessfulHarness(), evidence_sink=EvidenceRecorder(run_id="run", output_dir=tmp_path))
+    recorder = EvidenceRecorder(run_id="run", output_dir=tmp_path)
+    runner = StepRunner(SuccessfulHarness(), evidence_sink=recorder)
     runner.run_step("run", ExecutableStep(step_id="invalid", kind="diagnostic", action_name="unknown", params=params))
+    recorder.write_manifest()
     assert "CREDENTIAL_CANARY" not in (tmp_path / "evidence-events.jsonl").read_text()
     assert "CREDENTIAL_CANARY" not in (tmp_path / "evidence-manifest.json").read_text()
 

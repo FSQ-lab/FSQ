@@ -416,7 +416,7 @@ def test_windows_runner_lifecycle_captures_before_and_after_when_window_capture_
     assert result.status == "failed"
     assert result.failure_category == "artifact_error"
     assert result.action_status == "passed"
-    assert len(result.evidence_errors) == 4
+    assert len(result.evidence_errors) == 1
     assert all(ref.availability == "failed" for phase in result.phase_reports for ref in phase.artifact_refs)
 
 

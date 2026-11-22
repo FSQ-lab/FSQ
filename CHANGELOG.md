@@ -4,6 +4,8 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+- Dynamic execution reuses unambiguous same-view locators and checks search scope before refining queries. Planning and verification preserve explicit constraints while supporting evidence-grounded delegated choices, historical record periods, and independent deliverables. Visual AI guidance avoids unauthorized or repeated probes.
+
 ## [0.3.8] - 2026-11-21
 
 - macOS automation defaults to direct Appium Mac2. Finder-anchored native fallback is limited to eligible applications on the explicit XCTest quiescence blacklist.

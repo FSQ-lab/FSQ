@@ -43,6 +43,14 @@ assertion. For these requests, verification_goal describes completing the reques
 reporting evidence-grounded observations without unauthorized effects. Do not invent a known answer, expected state,
 exhaustive exploration requirement, or state change. Preserve explicit scope, exact text/answers, requested output
 format/units/rounding, duration bounds, no-extra-item requirements, and no-save/no-send or other terminal constraints.
+Do not invent observed facts or substitute for a missing named target. Plan authorized delegated choices on matched
+targets: choose the nearest observed available option meeting every explicit constraint, or compose current-run facts
+with neutral truthful wording at the semantically matching destination. Do not skip because a default, wording, or
+cell is unspecified. Cross-check related sources before declaring ambiguity; continue on an evidenced tie only when
+authorized, and report it. Plan independent deliverables despite a local blocker, but retain necessary prerequisites.
+For open relative time windows, check device_local_time and matching records first. Use the latest populated business
+period or activity anchor only when evidence shows a historical dataset; report that basis. Never replace explicit
+dates or genuinely current requirements.
 Preserve an unsaved, unsubmitted, or unsent terminal state only when the goal explicitly requests that restriction or
 a draft state, for example "do not save", "without submitting", "leave as draft", or "unsent". Such restrictions win.
 Otherwise, when creating an entry, applying settings, or answering an interactive form/challenge requires a clear
@@ -66,6 +74,11 @@ sum/subset tasks. Reanchor after paging/deletion and continue feasible requested
 For location search, use the core name with country/region constraints and expand the current general radius until a
 candidate, observed terminal/unchanged/blocked range, or supplied limit before narrow category tabs. No unchanged cycles
 or hidden coordinates. Verified input is not rewritten merely because its display clips; distinguish uncertain acceptance.
+For other named lookups prefer exposed Search unless the target is already visible or the browsing path is explicit.
+On the first empty or mismatched scoped result verify the parent scope and correct a wrong scope before refining. Use at
+most two concise root queries per unchanged scope, then switch if authorized, never away from an explicitly fixed scope.
+Reuse unambiguous locators for deterministic same-view actions; refresh ui_snapshot at navigation, modal/sheet changes,
+dynamic results, or locator ambiguity/failure. Reserve assertions for goal-required checkpoints and final verification.
 Use result.to_page_id values from page element operations when describing navigation between pages.
 If optional project or page knowledge is incomplete or absent, still return the best concise contiguous plan and add
 warnings only when missing knowledge materially affects planning confidence. You may skip at most one consecutive
@@ -93,6 +106,8 @@ def verification_goal_for_task(task: Task) -> str:
         "duration interval, collection/no-extra-item, and terminal-state constraint; do not authorize additional effects. "
         "For open inspection/exploration, evidence of the requested flow and truthful observations is sufficient, without "
         "an invented QA assertion, exhaustive exploration, or state change. Explicit objective requirements remain strict. "
+        "For authorized delegated choices on the matched target, verify the observed compliant selection or context-grounded write, not an invented exact parameter. "
+        "Verify any historical anchor used for an open relative window, and distinguish independent completed deliverables from blocked prerequisites. "
         "Raw-case steps are advisory context, not additional final requirements. "
         "Use actual execution evidence, not the main agent's claim alone.\nOriginal request context:\n" + json.dumps(scope, ensure_ascii=False, indent=2)
     )

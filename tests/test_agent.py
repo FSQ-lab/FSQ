@@ -913,6 +913,63 @@ async def test_blank_plan_keeps_explicit_objective_goal(tmp_path: Path, monkeypa
     assert outcome.task.key_actions == []
 
 
+@pytest.mark.parametrize("explicit_goal", [None, "Book the named venue after 5 PM and leave the notification unsent."])
+def test_model_facing_delivery_policy_preserves_delegation_and_exact_constraints(explicit_goal: str | None) -> None:
+    from fsq_agent.agent import CodingAgentPolicy
+    from fsq_agent.models import AgentPromptConfig
+
+    policy = CodingAgentPolicy()
+    request = "At Example Venue, book an available time after 5 PM and draft an update; do not send it."
+    task = Task(description=request, verification_goal=explicit_goal)
+    execution = policy.build_agent_prompt(AgentPromptConfig(), KnowledgeBundle(), [])
+    delivery = policy.build_task_prompt(AgentPromptConfig(), task)
+    evidence = json.loads(policy.build_verification_input(task, []))
+    instructions = " ".join(evidence["instructions"])
+
+    assert "same view" in execution
+    assert "dynamic results" in execution
+    assert "explicit browsing path" in execution
+    assert "at most two" in execution
+    assert "exact selected option" in delivery
+    assert "when that format excludes them" in delivery
+    assert "actual data period used" in policy.final_turn_instructions
+    assert "outside summary when the requested answer format excludes them" in policy.final_turn_instructions
+    assert "evidence bundle's rules for delegated choices" in policy.verification_instructions
+    assert "Do not invent observed facts" in policy.pre_plan_instructions
+    assert "semantically matching destination" in policy.pre_plan_instructions
+    assert "latest populated period" in instructions
+    assert "explicit dates" in instructions
+    assert "independent deliverables" in instructions
+    assert "necessary prerequisites" in instructions
+    assert "supplied evidence" in instructions
+    assert "no-save/no-send" in instructions
+    if explicit_goal is not None:
+        assert evidence["verification_goal"] == explicit_goal
+    else:
+        assert request in evidence["verification_goal"]
+        assert "delegated choices" in evidence["verification_goal"]
+    assert request not in execution
+
+
+def test_default_execution_policy_does_not_infer_domain_rules_from_task_identity() -> None:
+    from fsq_agent.agent import CodingAgentPolicy
+    from fsq_agent.models import AgentPromptConfig
+
+    policy = CodingAgentPolicy()
+    settings = AgentPromptConfig()
+    planner = policy.pre_plan_instructions
+    verifier = policy.verification_instructions
+    instructions = policy.build_agent_prompt(settings, KnowledgeBundle(), [])
+    for identity in ("Copper Lantern Studio", "Juniper Archive"):
+        request = f"Draft an update in {identity}; do not send it."
+        task = Task(description=request, planning_reference_text=request)
+        planned = json.loads(policy.build_pre_plan_input(request, KnowledgeBundle(), [], reference_type="goal"))
+        verified = json.loads(policy.build_verification_input(task, []))
+        assert planned["reference_text"] == request
+        assert verified["task"]["planning_reference_text"] == request
+        assert identity not in instructions + planner + verifier + " ".join(verified["instructions"])
+
+
 @pytest.mark.asyncio
 async def test_blank_plan_cannot_create_authorized_scope_from_empty_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_provider_refresh(monkeypatch)

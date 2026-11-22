@@ -115,3 +115,28 @@ def test_package_macos_skill_preserves_element_only_guidance(tmp_path: Path) -> 
     assert "Keynote" in macos.instructions
     assert "LibreOffice" in macos.instructions
     assert "double_click_on" in macos.instructions
+
+
+@pytest.mark.parametrize("filename", ["automation-basics.md", "ios-harness.md", "android-harness.md", "macos-harness.md"])
+def test_loaded_automation_guidance_disables_visual_ai_after_operational_refusal(filename: str) -> None:
+    root = Path(__file__).resolve().parents[1] / "fsq_agent" / "resources" / "skills"
+    [bundle] = SkillLoader(root).load([SkillConfig(name="automation", path=root / filename)])
+
+    assert bundle.instructions is not None
+    assert "`allow_provider_upload=False`" in bundle.instructions
+    assert "`privacy_blocked` or `provider_unavailable`" in bundle.instructions
+    assert "stop all visual AI calls for this task" in bundle.instructions
+
+
+@pytest.mark.parametrize("platform", ["web", "windows"])
+def test_shared_visual_guidance_preserves_platform_assertions(platform: str, tmp_path: Path) -> None:
+    from fsq_agent.config import load_platform_settings
+
+    config = load_platform_settings(platform, workspace=tmp_path / "workspace", user_config_root=tmp_path / "user").agent_context.knowledge.skills
+    bundles = SkillLoader(config.dir).load(config.items)
+    shared = next(bundle.instructions for bundle in bundles if bundle.name == "automation-basics")
+    platform_guidance = next(bundle.instructions for bundle in bundles if bundle.name == f"{platform}-harness")
+    assert "On Android, iOS, and macOS, host upload authorization" in shared
+    assert "Follow the platform skill for Web and Windows visual assertions." in shared
+    assert "`assert_with_ai`" in platform_guidance
+    assert "allow_provider_upload" not in platform_guidance

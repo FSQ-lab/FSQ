@@ -25,13 +25,14 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 ## Snapshot-First, Structural Inspection, and Scrolling Rules
 
 - Start app-owned workflows with `launch_app`; do not assume a Mac2 session exists before lifecycle setup.
-- Call `ui_snapshot` after launch and after state-changing actions when the next target is not already unambiguous.
+- Call `ui_snapshot` after launch, navigation, modal/sheet changes, dynamic search results, or locator ambiguity/failure. Reuse unambiguous locators for consecutive deterministic controls on an unchanged view; keep required checkpoint and final assertions.
 - Use `inspect_element` (`inspectElement`) on a uniquely resolved `target` or `locator` to read unclipped `label`, `value`, `title`, `text`, `placeholder_value`, `bounds`, or exact boolean states (`enabled`, `focused`, `selected`, `hittable`, `displayed`) when `ui_snapshot` clips strings at 50 characters or omits default booleans. Note that `SecureTextField` `text` and `value` are intentionally withheld as `unavailable` (`protected_text`).
 - Use `scroll_on` (`scrollOn`) on a resolved scroll container/view or explicit `point` with finite `delta_y` and/or `delta_x` (under macOS CGEvent wheel semantics, negative `delta_y` scrolls content down toward lower items; positive `delta_y` scrolls content up) for long lists, tables, settings panes, and documents instead of misusing `drag_to`.
 - Use `inspect_with_ai` (`inspectWithAI`) with `mode: "extract"` only to read genuinely pixel-only Canvas, chart, map, image, or video-frame content. It is a read-only observation, never a pass/fail assertion. Note that `mode: "locate"` is currently unavailable on macOS (`pointer_mapping_unavailable`).
+- If `ui_snapshot`, `scroll_on`, or `inspect_element` can expose the content, do not call `inspect_with_ai`. Host upload authorization defaults to `allow_provider_upload=False`; never probe visual tools without known permission. On `privacy_blocked` or `provider_unavailable`, stop all visual AI calls for this task and leave any required visual check unverified.
 - Prefer stable macOS accessibility identifiers and names over coordinates. Use coordinate `point` values only as an explicit fallback when the target cannot be represented by accessibility metadata.
 - In Keynote, Pages, Numbers, and LibreOffice document or slide canvases, use accessibility locators for exposed controls. If interior text boxes, shapes, or cells are not exposed and the task is not element-only, use a fresh screenshot to place `click_on` or `double_click_on` on the intended canvas region, then edit with `type_text` or `press_key`. Verify the resulting content or state before continuing.
-- Do not infer that the window changed from a screenshot path alone. Use a fresh `ui_snapshot`, `inspect_element`, or assertion after the action.
+- Do not infer a view change from a screenshot path alone. Refresh with `ui_snapshot` after a view change; otherwise inspect or assert the resulting state when the goal requires it.
 
 ## Locator Rules
 
@@ -143,6 +144,6 @@ Use when `harness.platform` is macOS. This skill contains macOS-specific stabili
 ## Tool Usage Error Recovery
 
 - If a macOS tool validation fails, rebuild the payload from the active schema and the requested semantic action.
-- If an action executes but the expected state is not present, take a fresh `ui_snapshot` or `inspect_element`, then decide whether retrying the same semantic action is justified.
+- If an action executes but the expected state is not present, refresh with `ui_snapshot` before deciding whether retrying the same semantic action is justified; use `inspect_element` for additional readback.
 - If `type_text` reports `verification_unavailable` after sending text, inspect current UI state before re-entering so text is not duplicated.
 - Before `assert_with_ai`, keep the window at the intended visual state and use the returned tri-state verdict (`passed`, `failed`, or `inconclusive`).

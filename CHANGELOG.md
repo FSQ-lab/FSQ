@@ -4,6 +4,8 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+- Pin the development tree to `appium-connect-agent==0.1.3` from PyPI.
+
 - Dynamic execution reuses unambiguous same-view locators and checks search scope before refining queries. Planning and verification preserve explicit constraints while supporting evidence-grounded delegated choices, historical record periods, and independent deliverables. Visual AI guidance avoids unauthorized or repeated probes.
 
 ## [0.3.8] - 2026-11-21

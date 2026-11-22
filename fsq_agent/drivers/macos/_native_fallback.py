@@ -48,7 +48,7 @@ def _read_ax_identity_and_value(read: Callable[[str], str | None]) -> tuple[str 
 
 
 _FINDER_BUNDLE = "com.apple.finder"
-_PERMISSION_UI_BUNDLES = ("com.apple.UserNotificationCenter", "com.apple.SecurityAgent")
+_PERMISSION_UI_BUNDLES = ("com.apple.UserNotificationCenter", "com.apple.SecurityAgent", "com.apple.CoreServicesUIAgent")
 _AX_MISSING = {-25205, -25212}
 
 

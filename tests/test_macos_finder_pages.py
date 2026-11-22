@@ -400,17 +400,50 @@ def test_pages_native_setup_preserves_activation_and_cleanup_errors(pages, monke
         driver.close()
 
 
-def test_pages_snapshot_never_substitutes_finder_wda(pages, monkeypatch):
+@pytest.mark.parametrize("scenario", ["empty", "permission_modal", "foreground_mismatch", "unobservable"])
+def test_pages_snapshot_never_substitutes_finder_wda(pages, monkeypatch, scenario):
     make_app, _, sessions, events = pages
     installation = make_app("snapshot")
     driver = appium.AppiumConnectMacOSDriver()
     try:
         assert driver.launch_app(MacOSLaunchAppParams(app_path=str(installation)))["status"] == "passed"
-        sessions[0].observe_tree = lambda **kwargs: events.append("wda_tree")
-        monkeypatch.setattr(appium, "_observe_macos_ax_tree", lambda **kwargs: SimpleNamespace(roots=()))
+        session = sessions[0]
+        session_id = session.session_info().id
+        events.clear()
+        session.observe_tree = lambda **kwargs: pytest.fail("A rejected native snapshot must not request a WDA tree")
+        other = "com.apple.TextEdit"
+
+        def observe(**kwargs):
+            if scenario == "foreground_mismatch":
+                raise native._NativeForegroundError("target_not_foreground", "Target is not foreground")
+            return SimpleNamespace(roots=())
+
+        def foreground(**kwargs):
+            if scenario == "unobservable":
+                raise native._NativeForegroundError("foreground_unobservable", "Foreground is unknown")
+            return (other if scenario == "foreground_mismatch" else PAGES, 51, None)
+
+        def modal(bundle, path, *, foreground, **kwargs):
+            assert bundle == PAGES
+            assert path == installation
+            return scenario == "permission_modal" and foreground == (PAGES, 51)
+
+        monkeypatch.setattr(appium, "_observe_macos_ax_tree", observe)
+        monkeypatch.setattr(appium, "_foreground_identity", foreground)
+        monkeypatch.setattr(appium, "_permission_modal_for_target", modal)
         result = driver.ui_snapshot(MacOSUiSnapshotParams())
         assert result["failure_category"] == "observation_error"
-        assert "wda_tree" not in events
+        assert not result.get("output")
+        expected = scenario if scenario in {"permission_modal", "foreground_mismatch"} else None
+        assert result["metadata"].get("backend_code") == expected
+        if scenario == "foreground_mismatch":
+            assert result["metadata"]["logical_bundle_id"] == PAGES
+            assert result["metadata"]["foreground_bundle_id"] == other
+        assert events == []
+        assert driver._session is session
+        assert session.session_info().id == session_id
+        assert session.session_info().state == "active"
+        assert not driver._cleanup_pending
     finally:
         driver.close()
 

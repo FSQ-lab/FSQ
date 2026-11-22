@@ -36,10 +36,12 @@ from fsq_agent.drivers._visual_inspection import _run_visual_inspection
 from fsq_agent.drivers.macos._elements import candidate
 from fsq_agent.drivers.macos._native_fallback import (
     _activate_macos_app_native,
+    _foreground_identity,
     _frontmost_pid,
     _macos_ax_process_trusted,
     _NativeForegroundError,
     _observe_macos_ax_tree,
+    _permission_modal_for_target,
     _running_macos_app_path,
     _verify_ax_focus,
     _verify_ax_point_hit,
@@ -1656,8 +1658,15 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         observation_source = "appium_connect_agent_tree_observation"
         observation: Any | None = None
         if self._native_ax_mode:
-            observation = self._observe_native_ax_tree_or_none(max_depth=max(20, (params.max_depth or self.page_source_max_depth) + 4))
+            try:
+                observation = self._observe_native_ax_tree_or_none(max_depth=max(20, (params.max_depth or self.page_source_max_depth) + 4))
+            except _NativeForegroundError:
+                if (diagnosis := self._native_snapshot_rejection()) is not None:
+                    return diagnosis
+                raise
             if observation is None:
+                if (diagnosis := self._native_snapshot_rejection()) is not None:
+                    return diagnosis
                 raise ToolExecutionError("No verifiable accessibility evidence for the logical macOS application.", context={"stage": "ui_snapshot"})
             observation_source = "macos_native_ax"
         if observation is None:
@@ -1700,6 +1709,32 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             "include_attributes": include_attributes,
             "diagnostics": diagnostics,
         }
+
+    def _native_snapshot_rejection(self) -> dict[str, object] | None:
+        target = self._active_bundle_id
+        if target is None or sys.platform != "darwin":
+            return None
+        deadline = time.monotonic() + 2.5
+        cancellation = self._operation_cancellation
+        try:
+            bundle, pid, _ = _foreground_identity(deadline=deadline, cancellation=cancellation)
+        except _NativeForegroundError:
+            return None
+        metadata = self._safe_diagnostics(stage="ui_snapshot")
+        path = Path(self._session_app_path) if self._session_app_path is not None else None
+        if _permission_modal_for_target(target, path, deadline=deadline, cancellation=cancellation, foreground=(bundle, pid)):
+            return self._failed(
+                "observation_error",
+                "A macOS system permission dialog for the logical application requires user attention.",
+                metadata={**metadata, "backend_code": "permission_modal"},
+            )
+        if bundle != target and MACOS_BUNDLE_ID_SYNTAX.fullmatch(bundle) and MACOS_BUNDLE_ID_SYNTAX.fullmatch(target):
+            return self._failed(
+                "observation_error",
+                "The foreground macOS application does not match the logical snapshot target.",
+                metadata={**metadata, "backend_code": "foreground_mismatch", "logical_bundle_id": target, "foreground_bundle_id": bundle},
+            )
+        return None
 
     def _observe_frontmost_window_tree(self, session: Any) -> Any | None:
         element_fn = getattr(session, "element", None)

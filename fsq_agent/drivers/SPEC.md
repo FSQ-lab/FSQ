@@ -7,6 +7,7 @@ Own concrete platform automation backends for Android, Web, Windows, macOS, and 
 ## Dependencies
 
 - `core.interfaces`: public driver, observation, evaluator, and artifact-related protocols.
+- `core.runtime_secrets.RuntimeSecretStore`: shared in-memory credential sanitizer, used only for desktop snapshot values before clipping and XML escaping.
 - `capabilities`: neutral declaration decorators and discovery contracts.
 - `models`: platform parameters, capability metadata, normalized results, and errors.
 

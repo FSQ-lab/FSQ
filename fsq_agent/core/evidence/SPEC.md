@@ -8,6 +8,7 @@ Own run-contained artifact storage, durable runner evidence journals, atomic evi
 
 - `models`: evidence bundles, runner events/results, artifact references, and safe metadata.
 - `core.interfaces`: artifact/evidence sink boundaries where required by callers.
+- `core.runtime_secrets.RuntimeSecretStore`: public shared credential sanitizer for artifact and journal persistence.
 
 Evidence must not import adapters, Application, Agent, Case DSL, concrete harnesses, concrete drivers, or report renderers.
 
@@ -31,7 +32,7 @@ Both symbols are exported from `core.evidence` and re-exported from `core` with 
 - Internal modules: `_artifact_store.py` and `_recorder.py`.
 - Domain boundaries: safe artifact/evidence persistence only.
 - Boundary models: evidence and artifact records come from `models`.
-- Dependency direction: Runner and Execution consume Evidence; Evidence depends only on shared models and public interfaces.
+- Dependency direction: Runner and Execution consume Evidence; Evidence depends only on shared Models, Core Interfaces, and the public Core sanitizer.
 - Rationale: persistence is focused and run-local, so no repository or Unit of Work is warranted.
 
 ## Error Handling

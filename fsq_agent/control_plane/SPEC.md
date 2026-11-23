@@ -27,7 +27,7 @@ The module must not import `cli`, `capabilities`, module-private `_*.py` files f
 Current `__init__.py` exports via explicit `__all__`:
 
 - `ControlPlaneServer`: Local HTTP/static server wrapper with registry-backed workspace management and one workspace-aware Devices in-memory task state.
-- `ControlPlaneServerOptions`: Host, port, open-browser flag, optional static-path override, and optional user-config-root override used by tests.
+- `ControlPlaneServerOptions`: Host, port, open-browser flag, optional static-path override, optional user-config-root override used by tests, and optional trusted in-process `visual_assertion_policy_resolver(context, capture_sequence)` for Strict Runs. The resolver is not accepted from HTTP, YAML, or user Provider configuration. Absent or negative frame authorization allows no image upload.
 - `run_control_plane(options: ControlPlaneServerOptions) -> None`: Blocking server entry used by CLI.
 
 The public HTTP prefix is `/api/control-plane`.

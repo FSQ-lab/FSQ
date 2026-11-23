@@ -9,6 +9,7 @@ Own platform-neutral capability execution for one canonical step and ordered seq
 - `models`: canonical steps, capability definitions, events, results, evidence references, and execution settings.
 - `capabilities`: resolved neutral declaration metadata only where registry construction requires it.
 - `core.interfaces`: harness, capability-executor, observation, runtime-secret, evidence-recorder, and cancellation boundaries.
+- `core.runtime_secrets.RuntimeSecretStore`: public shared credential sanitizer for runner events and results.
 
 Runner must not import adapters, Application, Agent SDK types, concrete harnesses, concrete drivers, or report renderers.
 
@@ -34,7 +35,7 @@ Both symbols are exported from `core.runner` and re-exported from `core` with id
 - Internal modules: `_runner.py` and `_sequence.py`.
 - Domain boundaries: capability execution policy and ordering only.
 - Boundary models: public execution models come from `models`; collaborator protocols come from `core.interfaces`.
-- Dependency direction: Execution depends on Runner; Runner depends on Interfaces; concrete implementations point inward to Interfaces.
+- Dependency direction: Execution depends on Runner; Runner consumes public Interfaces and the shared Core sanitizer; concrete implementations point inward to Interfaces.
 - Rationale: execution coordinates validation, secrets, timing, evidence, and side effects, requiring Level 3 without a domain framework.
 
 ## Error Handling

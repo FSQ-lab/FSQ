@@ -111,6 +111,8 @@ The terminal `run_failed` event emitted by `FsqAgent.run_in_context` preserves `
 
 Failure event projection never copies the complete exception context, raw exception/cause text, traceback, response body, headers, cookies, tokens, credential values, paths, or task/model content. These additive fields use the existing `RunEvent.payload` and event redaction/persistence pipeline without a new event type or model schema. Diagnostic projection or sink failure does not replace or suppress the original failure or cancellation, which is re-raised unchanged. Credential-preparation attempts and waits do not extend the owning operation's deadline or change task, action, inference, or turn budgets.
 
+`FsqAgent.run_in_context` delivers the safe failure candidate to the supplied event sink before re-raising. For managed Runs it persists progress only: Execution, not the Agent collaborator, persists and publishes the one authoritative terminal event after freeze. The public Agent signature does not acquire a private deferral keyword; progress and failure diagnostics retain the existing payload and redaction pipeline.
+
 ## Current Invariants
 
 - The orchestration module depends on all leaf modules, but leaf modules never depend on `agent`.

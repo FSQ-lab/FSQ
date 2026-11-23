@@ -212,7 +212,7 @@ Windows platform block:
 - Workspace targets supply application path, title constraint, and launch arguments. Presets own pywinauto backend policy and automation mode (`uia` or `win32`), not a second FSQ backend.
 - Config owns one bundled Windows application YAML catalogue containing stable IDs `edge`, `notepad`, `chrome`, `edge-beta`, `edge-canary`, and `calculator`, names/descriptions, executable path candidates, and the existing `window_title_re`. Quick Test uses its existing intent-analysis request for optional semantic catalogue selection; explicit paths take priority, and only no-match uses existing inference/local lookup. A selected invalid configuration or unavailable path fails explicitly without fallback.
 - Application resolves and validates a selected catalogue path through existing concrete-path lookup and persists the resulting `app_path` and `window_title_re` in existing Workspace target fields. Case consumes those fields unchanged; no catalogue ID is added to Workspace/Case configuration or CLI/UI parameters.
-- Windows Driver target binding, foreground activation, occlusion-free capture, and cleanup enforce executable/launch ownership: when `app_path` is configured, observations and actions require an active `launchApp` session and resolve visible top-level windows owned by the started process or matching normalized `app_path` (preferring post-launch window handles across single-instance process handoff, with `ApplicationFrameHost.exe` host-window support when `window_title_re` is configured), applying optional `window_title_re` within that verified scope without falling back to unrelated foreground windows. After `launchApp` binds a target window and before mouse/keyboard actions (`clickOn`, `doubleClickOn`, `rightClickOn`, `typeText`, `pressKey`, `hoverOn`, `scrollOn`, `dragTo`), the driver restores the bound `HWND` if minimized (`IsIconic`) and activates it via `set_focus()`. Screenshot capture uses hybrid unoccluded acquisition: desktop capture when the target process window is foreground and unoccluded by external top-level windows (preserving same-process owned popups), and Win32 `PrintWindow(..., PW_RENDERFULLCONTENT)` on the bound `HWND` when backgrounded or externally occluded. Focus changes do not retarget another application, and `killApp` / `close()` terminate only an owned process or close only the newly opened handoff window without killing pre-existing processes.
+- Windows Driver target binding, foreground activation, isolated capture, and cleanup enforce executable/launch ownership: when `app_path` is configured, observations and actions require an active `launchApp` session and resolve visible top-level windows owned by the started process or matching normalized `app_path` (preferring post-launch window handles across single-instance process handoff, with `ApplicationFrameHost.exe` host-window support when `window_title_re` is configured), applying optional `window_title_re` within that verified scope without falling back to unrelated foreground windows. Before mouse or keyboard input the driver restores the bound window if minimized, requests focus, and verifies the bound window or a genuinely owned popup is foreground; otherwise it does not dispatch input. Screenshots capture only the bound `HWND` via Win32 `PrintWindow(..., PW_RENDERFULLCONTENT)`, never a desktop region. Separate top-level popup pixels may be absent; unavailable target rendering fails without a desktop fallback. `killApp` / `close()` terminate only an owned process or close only the newly opened handoff window without killing pre-existing processes.
 - Windows action surface exposes desktop aliases through the existing PlatformTool registry: `launchApp`, `killApp`, `clickOn`, `doubleClickOn`, `rightClickOn`, `typeText`, `pressKey`, `hoverOn`, `scrollOn`, `dragTo`, `assertVisible`, `uiSnapshot`, `inspectWithAI`, and `assertWithAI`.
 - Explicit observation capabilities: `ui_snapshot` (`uiSnapshot`) returning a compact single-string XML envelope (`format="xml"`, `xml`, `node_count`, `coverage`, `compaction`) with locator-aligned attributes, and read-only `inspect_with_ai` (`inspectWithAI`); Windows must not expose Android `ui_tree`/`uiTree` naming. Automatic runner evidence captures `screenshot` according to driver step-kind policy, recording `availability="not_applicable"` when no target window session is active.
 - Harness skill: `windows-harness.md`.
@@ -383,6 +383,7 @@ flowchart TD
     Execution --> Config
     Execution --> Models
     Execution --> Report
+    Execution --> Observation
     Config --> Models
     Providers --> Config
     Providers --> Models
@@ -405,6 +406,11 @@ flowchart TD
     Report --> Models
     CoreRunner --> CoreInterfaces[core/interfaces]
     CoreEvidence --> CoreInterfaces
+    CoreRunner --> CoreSecrets[core runtime secrets and redaction]
+    CoreEvidence --> CoreSecrets
+    Execution --> CoreSecrets
+    Core --> CoreSecrets
+    CoreSecrets --> Models
     CoreRunner --> Models
     CoreEvidence --> Models
     CoreInterfaces --> Models
@@ -422,6 +428,7 @@ flowchart TD
     Harnesses --> Models
     Harnesses --> Capabilities
     Drivers --> CoreInterfaces
+    Drivers -->|Desktop snapshot value redaction only| CoreSecrets
     Drivers --> Models
     Drivers --> Capabilities
     Capabilities[capabilities] --> Models

@@ -182,7 +182,9 @@ def test_runner_submodule_imports_only_public_core_interfaces():
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             imports = [node.module or ""] if isinstance(node, ast.ImportFrom) else [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
             violations.extend(
-                f"{path}:{node.lineno}:{module}" for module in imports if module.startswith("fsq_agent.core") and not module.startswith(("fsq_agent.core.interfaces", "fsq_agent.core.runner"))
+                f"{path}:{node.lineno}:{module}"
+                for module in imports
+                if module.startswith("fsq_agent.core") and not module.startswith(("fsq_agent.core.interfaces", "fsq_agent.core.runner", "fsq_agent.core._redaction"))
             )
     assert violations == []
 

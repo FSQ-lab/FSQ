@@ -117,7 +117,7 @@ class FakeWindowsDriver(AIAssertionBackendToolMixin):
         else:
             recorded = params
         self.calls.append(("ui_snapshot", recorded))
-        return {"title": "Notepad", "snapshot_type": "control_tree"}
+        return {"format": "xml", "xml": '<Window title="Notepad" />'}
 
     def screenshot(self, params: object | None = None) -> bytes:
         self.calls.append(("screenshot", None))
@@ -1371,3 +1371,206 @@ def test_pywinauto_driver_drag_releases_mouse_after_move_failure(monkeypatch) ->
         )
 
     assert mouse.releases == [((40, 20), "left")]
+
+
+def test_pywinauto_driver_ui_snapshot_compacts_deep_tree_withholds_passwords_and_sanitizes_xml(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from xml.etree import ElementTree
+
+    from fsq_agent.drivers.windows._pywinauto import PywinautoWindowsDriver
+
+    class FakeRect:
+        def __init__(self, left: int, top: int, right: int, bottom: int) -> None:
+            self.left = left
+            self.top = top
+            self.right = right
+            self.bottom = bottom
+
+    class FakeElement:
+        def __init__(
+            self,
+            *,
+            control_type: str | None = None,
+            title: str = "",
+            automation_id: str | None = None,
+            class_name: str | None = None,
+            value: str | None = None,
+            rect: tuple[int, int, int, int] = (0, 0, 100, 40),
+            visible: bool = True,
+            enabled: bool = True,
+            selected: bool = False,
+            toggle_state: int | None = None,
+            focused: bool = False,
+            is_password: bool = False,
+            runtime_id: tuple[int, ...] | None = None,
+            children: list["FakeElement"] | None = None,
+        ) -> None:
+            self.element_info = SimpleNamespace(
+                control_type=control_type,
+                automation_id=automation_id,
+                class_name=class_name,
+                runtime_id=runtime_id,
+                is_password=is_password,
+            )
+            self._title = title
+            self._value = value
+            self._rect = FakeRect(*rect)
+            self._visible = visible
+            self._enabled = enabled
+            self._selected = selected
+            self._toggle_state = toggle_state
+            self._focused = focused
+            self._children = children or []
+
+        def window_text(self) -> str:
+            return self._title
+
+        def get_value(self) -> str | None:
+            return self._value
+
+        def rectangle(self) -> FakeRect:
+            return self._rect
+
+        def is_visible(self) -> bool:
+            return self._visible
+
+        def is_enabled(self) -> bool:
+            return self._enabled
+
+        def is_selected(self) -> bool:
+            return self._selected
+
+        def get_toggle_state(self) -> int | None:
+            return self._toggle_state
+
+        def has_keyboard_focus(self) -> bool:
+            return self._focused
+
+        def children(self) -> list["FakeElement"]:
+            return list(self._children)
+
+    long_title = "Save \x00Document " + ("X" * 180)
+    deep_button = FakeElement(
+        control_type="Button",
+        title=long_title,
+        automation_id="btnSave",
+        class_name="WinButton",
+        rect=(10, 20, 110, 50),
+        enabled=False,
+        focused=True,
+        runtime_id=(1, 2),
+    )
+    # Nest inside 30 unnamed Pane/Group wrappers (exceeding old depth=20 ceiling)
+    nested: FakeElement = deep_button
+    for idx in range(30):
+        nested = FakeElement(
+            control_type="Pane" if idx % 2 == 0 else "Group",
+            rect=(0, 0, 800, 600),
+            runtime_id=(100 + idx,),
+            children=[nested],
+        )
+    password_edit = FakeElement(
+        control_type="Edit",
+        title="PASSWORD_PLAINTEXT_CANARY",
+        automation_id="pwdInput",
+        class_name="Edit",
+        value="PASSWORD_PLAINTEXT_CANARY",
+        is_password=True,
+        rect=(10, 60, 210, 90),
+        runtime_id=(2,),
+    )
+    password_box = FakeElement(
+        control_type="PasswordBox",
+        title="BOX_PASSWORD_CANARY",
+        automation_id="pwdBox",
+        value="BOX_PASSWORD_CANARY",
+        rect=(10, 100, 210, 130),
+        runtime_id=(3,),
+    )
+    checked_box = FakeElement(
+        control_type="CheckBox",
+        title="Remember me",
+        automation_id="chkRemember",
+        toggle_state=1,
+        rect=(10, 140, 150, 165),
+        runtime_id=(4,),
+    )
+    dead_zero_leaf = FakeElement(
+        control_type="Pane",
+        rect=(0, 0, 0, 0),
+        runtime_id=(5,),
+    )
+    hidden_leaf = FakeElement(
+        control_type="Button",
+        title="HiddenButton",
+        visible=False,
+        rect=(10, 170, 90, 200),
+        runtime_id=(6,),
+    )
+    weird_tag_leaf = FakeElement(
+        control_type="123 Invalid Tag!",
+        title="Custom Widget",
+        automation_id="custom1",
+        rect=(10, 210, 120, 240),
+        runtime_id=(7,),
+    )
+    window = FakeElement(
+        control_type="Window",
+        title="Main\x07App",
+        class_name="MainWindowClass",
+        rect=(0, 0, 1024, 768),
+        runtime_id=(1,),
+        children=[nested, password_edit, password_box, checked_box, dead_zero_leaf, hidden_leaf, weird_tag_leaf],
+    )
+
+    driver = PywinautoWindowsDriver()
+    try:
+        monkeypatch.setattr(driver, "_require_window", lambda: window)
+        snap = driver.ui_snapshot(WindowsUiSnapshotParams())
+    finally:
+        driver.close()
+
+    assert snap["format"] == "xml"
+    assert "root" not in snap
+    assert "snapshot_type" not in snap
+    assert "PASSWORD_PLAINTEXT_CANARY" not in snap["xml"]
+    assert "BOX_PASSWORD_CANARY" not in snap["xml"]
+    assert snap["node_count"] == 38
+    assert snap["compaction"]["offscreen_nodes_omitted"] == 2
+    assert snap["compaction"]["layout_nodes_removed"] == 30
+    assert snap["compaction"]["clipped_attributes"] == 1
+    assert snap["compaction"]["text_attribute_limit"] == 160
+    assert snap["coverage"]["status"] == "partial"
+    assert snap["coverage"]["reason"] == "semantic_compaction"
+
+    parsed = ElementTree.fromstring(snap["xml"])  # noqa: S314
+    assert parsed.tag == "Window"
+    assert parsed.attrib["title"] == "MainApp"
+    assert parsed.attrib["bounds"] == "[0,0][1024,768]"
+    assert "enabled" not in parsed.attrib
+    assert "visible" not in parsed.attrib
+
+    by_auto_id = {child.attrib.get("automation_id"): child for child in parsed}
+    btn = by_auto_id["btnSave"]
+    assert btn.tag == "Button"
+    assert btn.attrib["title"] == ("Save Document " + ("X" * 180))[:160]
+    assert btn.attrib["enabled"] == "false"
+    assert btn.attrib["focused"] == "true"
+    assert btn.attrib["bounds"] == "[10,20][110,50]"
+
+    pwd1 = by_auto_id["pwdInput"]
+    assert "value" not in pwd1.attrib
+    assert "title" not in pwd1.attrib
+    assert "is_password" not in pwd1.attrib
+
+    pwd2 = by_auto_id["pwdBox"]
+    assert pwd2.tag == "PasswordBox"
+    assert "value" not in pwd2.attrib
+    assert "title" not in pwd2.attrib
+
+    chk = by_auto_id["chkRemember"]
+    assert chk.attrib["checked"] == "true"
+    assert "selected" not in chk.attrib
+
+    weird = by_auto_id["custom1"]
+    assert weird.attrib["control_type"] == "123 Invalid Tag!"

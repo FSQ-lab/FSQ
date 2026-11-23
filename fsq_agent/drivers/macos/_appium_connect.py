@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import logging
 import os
 import plistlib
@@ -31,6 +30,17 @@ from pydantic import ValidationError
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _macos_driver_tool
+from fsq_agent.drivers._tree_compaction import (
+    DEFAULT_SNAPSHOT_TEXT_LIMIT_CHARS,
+    TreeCompactionPolicy,
+    build_compacted_envelope,
+    compact_xml_element_tree,
+    count_xml_elements,
+    empty_compacted_envelope,
+    sanitize_xml_tag,
+    sanitize_xml_text,
+    unparsed_fallback_envelope,
+)
 from fsq_agent.drivers.macos._elements import candidate
 from fsq_agent.drivers.macos._native_fallback import _activate_macos_app_native, _macos_ax_process_trusted, _observe_macos_ax_tree, _verify_ax_focus, _verify_ax_point_hit
 from fsq_agent.drivers.macos._visual_inspection import _run_visual_inspection
@@ -74,8 +84,8 @@ DEFAULT_MACOS_ACTION_TIMEOUT_SECONDS = 10
 DEFAULT_MACOS_NEW_COMMAND_TIMEOUT_SECONDS = 900.0
 DEFAULT_MACOS_SKIP_APP_KILL = True
 DEFAULT_MACOS_SNAPSHOT_SOURCE_PREVIEW_CHARS = 2000
-DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS = 50
-DEFAULT_MACOS_SNAPSHOT_MAX_JSON_CHARS = 28_000
+DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS = DEFAULT_SNAPSHOT_TEXT_LIMIT_CHARS
+DEFAULT_MACOS_SNAPSHOT_MAX_XML_CHARS = 28_000
 DEFAULT_MACOS_ACTIVATE_TIMEOUT_SECONDS = 30.0
 DEFAULT_MANAGED_STARTUP_TIMEOUT_SECONDS = 60.0
 DEFAULT_SESSION_CREATE_TIMEOUT_SECONDS = 60.0
@@ -656,6 +666,31 @@ MACOS_INTERACTIVE_SHORT_TYPES = frozenset(
         "Switch",
         "Link",
     }
+)
+
+
+def _is_macos_secure_tag_or_attrs(tag: str, attribs: Any) -> bool:
+    short_type = tag.removeprefix("XCUIElementType")
+    if short_type == "SecureTextField":
+        return True
+    attr_type = str(attribs.get("type", "")).removeprefix("XCUIElementType")
+    if attr_type == "SecureTextField":
+        return True
+    return str(attribs.get("subrole", "")) == "AXSecureTextField"
+
+
+MACOS_SNAPSHOT_POLICY = TreeCompactionPolicy(
+    empty_root_tag="XCUIElementTypeApplication",
+    interactive_tags=MACOS_INTERACTIVE_SHORT_TYPES,
+    identity_attribute_keys=MACOS_SNAPSHOT_IDENTITY_ATTRIBUTE_KEYS,
+    semantic_attribute_keys=MACOS_SNAPSHOT_SEMANTIC_ATTRIBUTE_KEYS,
+    text_attribute_keys=MACOS_SNAPSHOT_TEXT_ATTRIBUTE_KEYS,
+    default_attribute_keys=DEFAULT_MACOS_SNAPSHOT_ATTRIBUTE_KEYS,
+    state_defaults={**MACOS_SNAPSHOT_STATE_DEFAULTS, "focused": "false"},
+    text_limit_chars=DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS,
+    source_preview_chars=DEFAULT_MACOS_SNAPSHOT_SOURCE_PREVIEW_CHARS,
+    tag_prefix_to_strip="XCUIElementType",
+    secure_tag_predicate=_is_macos_secure_tag_or_attrs,
 )
 
 
@@ -1583,15 +1618,19 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     self._raise_resolution_error(exc)
         max_depth = params.max_depth or self.page_source_max_depth
         include_attributes = bool(params.include_attributes)
-        page_source, compaction_meta = self._simplify_tree_observation_with_budget(
+        complete_scope = False if window_scoped_fallback else bool(getattr(observation, "complete_for_requested_scope", True))
+        upstream_cov = "frontmost_window_fallback" if window_scoped_fallback else str(getattr(observation, "coverage", "requested_scope"))
+        envelope, compaction_meta = self._simplify_tree_observation_with_budget(
             observation,
             max_depth=max_depth,
             include_attributes=include_attributes,
+            complete_for_scope=complete_scope,
+            upstream_reason=upstream_cov if window_scoped_fallback else f"upstream_{upstream_cov}",
         )
         diagnostics: dict[str, object] = {
             "source": observation_source,
-            "coverage": "frontmost_window_fallback" if window_scoped_fallback else getattr(observation, "coverage", "requested_scope"),
-            "complete_for_requested_scope": False if window_scoped_fallback else bool(getattr(observation, "complete_for_requested_scope", True)),
+            "coverage": upstream_cov,
+            "complete_for_requested_scope": complete_scope,
             "atomic_with_screenshot": False,
             "absence_proves_invisibility": False,
         }
@@ -1600,8 +1639,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         if compaction_meta:
             diagnostics.update(compaction_meta)
         return {
-            "snapshot_type": "macos_accessibility_tree",
-            "page_source": page_source,
+            **envelope,
             "max_depth": max_depth,
             "include_attributes": include_attributes,
             "diagnostics": diagnostics,
@@ -3187,12 +3225,12 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         max_depth: int,
         include_attributes: bool,
     ) -> dict[str, object]:
-        page_source, _ = self._simplify_tree_observation_with_budget(
+        envelope, _ = self._simplify_tree_observation_with_budget(
             observation,
             max_depth=max_depth,
             include_attributes=include_attributes,
         )
-        return page_source
+        return envelope
 
     def _simplify_tree_observation_with_budget(
         self,
@@ -3200,77 +3238,74 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         *,
         max_depth: int,
         include_attributes: bool,
+        complete_for_scope: bool = True,
+        upstream_reason: str = "requested_scope",
     ) -> tuple[dict[str, object], dict[str, object]]:
         roots = getattr(observation, "roots", ())
         if not roots:
-            return {"format": "xml", "root": None, "source_length": 0}, {}
-        xml_root = self._tree_node_to_xml_element(roots[0])
+            return (
+                empty_compacted_envelope(
+                    empty_root_tag="XCUIElementTypeApplication",
+                    max_depth=max_depth,
+                    text_limit_chars=DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS,
+                ),
+                {},
+            )
+        if len(roots) == 1:
+            xml_root = self._tree_node_to_xml_element(roots[0])
+        else:
+            xml_root = ElementTree.Element("XCUIElementTypeApplication")
+            for child_root in roots:
+                xml_root.append(self._tree_node_to_xml_element(child_root))
         serialized = ElementTree.tostring(xml_root, encoding="unicode")
+        source_nodes = count_xml_elements(xml_root)
         try:
-            node_count = self._element_count(xml_root)
-            depth_candidates = [max_depth, *(step_depth for step_depth in (8, 6, 4) if step_depth < max_depth)]
-            chosen_root: dict[str, object] | None = None
+            compacted = compact_xml_element_tree(
+                xml_root,
+                policy=MACOS_SNAPSHOT_POLICY,
+                max_depth=max_depth,
+                include_attributes=include_attributes,
+                max_xml_chars=DEFAULT_MACOS_SNAPSHOT_MAX_XML_CHARS,
+                depth_stepdowns=(8, 6, 4),
+                sibling_stepdowns=MACOS_COMPACT_SIBLING_STEPDOWNS,
+            )
             compaction_meta: dict[str, object] = {}
-            for candidate_depth in depth_candidates:
-                for sibling_limit in MACOS_COMPACT_SIBLING_STEPDOWNS:
-                    built_root = self._element_snapshot(
-                        xml_root,
-                        depth=1,
-                        max_depth=candidate_depth,
-                        include_attributes=include_attributes,
-                        max_siblings=sibling_limit,
-                    )
-                    chosen_root = built_root
-                    encoded_len = len(json.dumps(built_root, ensure_ascii=False, separators=(",", ":")))
-                    if encoded_len <= DEFAULT_MACOS_SNAPSHOT_MAX_JSON_CHARS:
-                        if candidate_depth < max_depth or sibling_limit is not None:
-                            compaction_meta = {
-                                "adaptive_compaction": True,
-                                "effective_max_depth": candidate_depth,
-                                **({"max_siblings_per_parent": sibling_limit} if sibling_limit is not None else {}),
-                            }
-                        return (
-                            {
-                                "format": "xml",
-                                "source_length": len(serialized),
-                                "node_count": node_count,
-                                "root": built_root,
-                            },
-                            compaction_meta,
-                        )
-            if chosen_root is not None:
+            if (compacted.effective_max_depth is not None and compacted.effective_max_depth < max_depth) or compacted.max_siblings_per_parent is not None:
                 compaction_meta = {
                     "adaptive_compaction": True,
-                    "effective_max_depth": depth_candidates[-1],
-                    "max_siblings_per_parent": MACOS_COMPACT_SIBLING_STEPDOWNS[-1],
+                    "effective_max_depth": compacted.effective_max_depth if compacted.effective_max_depth is not None else max_depth,
+                    **({"max_siblings_per_parent": compacted.max_siblings_per_parent} if compacted.max_siblings_per_parent is not None else {}),
                 }
-            return (
-                {
-                    "format": "xml",
-                    "source_length": len(serialized),
-                    "node_count": node_count,
-                    "root": chosen_root,
-                },
-                compaction_meta,
+            envelope = build_compacted_envelope(
+                compacted,
+                policy=MACOS_SNAPSHOT_POLICY,
+                requested_max_depth=max_depth,
+                complete_for_scope=complete_for_scope,
+                upstream_reason=upstream_reason,
             )
         except Exception as exc:  # noqa: BLE001 - preserve observation availability on unexpected local compaction failure.
             self._propagate_if_cancelled(exc)
-            preview = serialized[:DEFAULT_MACOS_SNAPSHOT_SOURCE_PREVIEW_CHARS]
             return (
-                {
-                    "format": "unparsed_xml",
-                    "source_preview": preview,
-                    "source_length": len(serialized),
-                    "truncated": len(serialized) > len(preview),
-                    "parse_error": type(exc).__name__,
-                },
+                unparsed_fallback_envelope(
+                    serialized_source=serialized,
+                    source_nodes=source_nodes,
+                    max_depth=max_depth,
+                    error=exc,
+                    preview_chars=DEFAULT_MACOS_SNAPSHOT_SOURCE_PREVIEW_CHARS,
+                ),
                 {},
             )
+        else:
+            return envelope, compaction_meta
 
     def _tree_node_to_xml_element(self, node: Any) -> ElementTree.Element:
         type_obs = getattr(node, "type", None)
-        tag = type_obs.value if getattr(type_obs, "state", None) == "value" and isinstance(type_obs.value, str) and type_obs.value else "XCUIElementTypeAny"
+        raw_tag = type_obs.value if getattr(type_obs, "state", None) == "value" and isinstance(type_obs.value, str) and type_obs.value else "XCUIElementTypeAny"
+        tag, was_sanitized = sanitize_xml_tag(raw_tag, fallback="XCUIElementTypeAny")
+        is_secure = self._is_secure_text_type(raw_tag)
         attribs: dict[str, str] = {}
+        if was_sanitized and raw_tag.strip():
+            attribs["type"] = sanitize_xml_text(raw_tag.strip())
         for attr_field, xml_name in (
             ("id", "identifier"),
             ("label", "label"),
@@ -3278,15 +3313,17 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             ("value", "value"),
             ("placeholder_value", "placeholderValue"),
         ):
+            if attr_field == "value" and is_secure:
+                continue
             obs = getattr(node, attr_field, None)
             if getattr(obs, "state", None) == "value" and isinstance(obs.value, str) and obs.value:
-                attribs[xml_name] = obs.value
+                attribs[xml_name] = sanitize_xml_text(obs.value)
 
         element_type_obs = getattr(node, "element_type", None)
         if getattr(element_type_obs, "state", None) == "value" and _is_strict_int(element_type_obs.value):
             attribs["elementType"] = str(element_type_obs.value)
 
-        for bool_field in ("enabled", "selected"):
+        for bool_field in ("enabled", "selected", "focused"):
             obs = getattr(node, bool_field, None)
             if getattr(obs, "state", None) == "value" and type(obs.value) is bool:
                 attribs[bool_field] = "true" if obs.value else "false"
@@ -3307,131 +3344,39 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
 
         extra_attrs = getattr(node, "extra_attributes", None)
         if isinstance(extra_attrs, dict):
+            if str(extra_attrs.get("subrole", "")) == "AXSecureTextField":
+                is_secure = True
+                attribs.pop("value", None)
             for key, raw_val in extra_attrs.items():
-                if isinstance(key, str) and key not in attribs and raw_val is not None:
-                    attribs[key] = str(raw_val)
+                if not isinstance(key, str) or key in attribs or raw_val is None:
+                    continue
+                if is_secure and key == "value":
+                    continue
+                safe_key, _ = sanitize_xml_tag(key, fallback="attr")
+                attribs[safe_key] = sanitize_xml_text(str(raw_val))
 
         xml_el = ElementTree.Element(tag, attribs)
         raw_text = getattr(node, "raw_text", None)
-        if isinstance(raw_text, str) and raw_text:
-            xml_el.text = raw_text
+        text_obs = getattr(node, "text", None)
+        if not is_secure:
+            if isinstance(raw_text, str) and raw_text:
+                xml_el.text = sanitize_xml_text(raw_text)
+            elif (
+                getattr(text_obs, "state", None) == "value"
+                and isinstance(text_obs.value, str)
+                and text_obs.value
+                and text_obs.value
+                not in (
+                    attribs.get("label"),
+                    attribs.get("value"),
+                    attribs.get("title"),
+                    attribs.get("placeholderValue"),
+                )
+            ):
+                xml_el.text = sanitize_xml_text(text_obs.value)
         for child in getattr(node, "children", ()):
             xml_el.append(self._tree_node_to_xml_element(child))
         return xml_el
-
-    def _element_snapshot(
-        self,
-        element: ElementTree.Element,
-        *,
-        depth: int,
-        max_depth: int,
-        include_attributes: bool,
-        max_siblings: int | None = None,
-    ) -> dict[str, object]:
-        snapshot = self._compact_element_snapshots(element, include_attributes=include_attributes, preserve_node=True)[0]
-        self._bound_snapshot_depth(snapshot, depth=depth, max_depth=max_depth, max_siblings=max_siblings)
-        return snapshot
-
-    def _compact_element_snapshots(
-        self,
-        element: ElementTree.Element,
-        *,
-        include_attributes: bool,
-        preserve_node: bool = False,
-    ) -> list[dict[str, object]]:
-        children = [child_snapshot for child in element for child_snapshot in self._compact_element_snapshots(child, include_attributes=include_attributes)]
-        attributes = self._snapshot_attributes(element.attrib, include_attributes=include_attributes)
-        text = (element.text or "").strip()[:DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS]
-        interactive = self._xml_name(element.tag).removeprefix("XCUIElementType") in MACOS_INTERACTIVE_SHORT_TYPES
-        if not preserve_node and not interactive and not self._has_snapshot_signal(attributes, text=text):
-            return children
-
-        snapshot: dict[str, object] = {"type": self._xml_name(element.tag)}
-        if attributes:
-            snapshot["attributes"] = attributes
-        clipped = [
-            key
-            for key, value in element.attrib.items()
-            if self._xml_name(key) in MACOS_SNAPSHOT_TEXT_ATTRIBUTE_KEYS
-            and (include_attributes or self._xml_name(key) in DEFAULT_MACOS_SNAPSHOT_ATTRIBUTE_KEYS)
-            and len(value.strip()) > DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS
-        ]
-        if clipped:
-            snapshot["truncated_attributes"] = clipped
-        if len((element.text or "").strip()) > DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS:
-            snapshot["text_truncated"] = True
-        if text:
-            snapshot["text"] = text
-        if children:
-            snapshot["children"] = children
-        return [snapshot]
-
-    def _bound_snapshot_depth(
-        self,
-        snapshot: dict[str, object],
-        *,
-        depth: int,
-        max_depth: int,
-        max_siblings: int | None = None,
-    ) -> None:
-        children = snapshot.get("children")
-        if not isinstance(children, list) or not children:
-            return
-        if depth >= max_depth:
-            snapshot.pop("children")
-            snapshot["children_truncated"] = len(children)
-            return
-        if max_siblings is not None and len(children) > max_siblings:
-            omitted = len(children) - max_siblings
-            kept = children[:max_siblings]
-            snapshot["children"] = kept
-            snapshot["children_truncated"] = int(snapshot.get("children_truncated", 0)) + omitted
-            children = kept
-        for child in children:
-            if isinstance(child, dict):
-                self._bound_snapshot_depth(child, depth=depth + 1, max_depth=max_depth, max_siblings=max_siblings)
-
-    def _snapshot_attributes(self, attributes: dict[str, str], *, include_attributes: bool) -> dict[str, object]:
-        selected: dict[str, object] = {}
-        for key, raw_value in attributes.items():
-            normalized_key = self._xml_name(key)
-            value = str(raw_value).strip()
-            if not value or (not include_attributes and normalized_key not in DEFAULT_MACOS_SNAPSHOT_ATTRIBUTE_KEYS):
-                continue
-            default_state = MACOS_SNAPSHOT_STATE_DEFAULTS.get(normalized_key)
-            if default_state is not None and value.lower() == default_state:
-                continue
-            if normalized_key in MACOS_SNAPSHOT_TEXT_ATTRIBUTE_KEYS:
-                value = value[:DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS]
-            selected[normalized_key] = value
-        return selected
-
-    def _has_snapshot_signal(self, attributes: dict[str, object], *, text: str) -> bool:
-        non_default_state = any(key in MACOS_SNAPSHOT_STATE_DEFAULTS for key in attributes)
-        identity_or_text = bool(text) or any(key in MACOS_SNAPSHOT_IDENTITY_ATTRIBUTE_KEYS for key in attributes)
-        if self._is_zero_size(attributes) or str(attributes.get("visible", "")).lower() == "false":
-            return identity_or_text or non_default_state
-        return identity_or_text or non_default_state or any(key in MACOS_SNAPSHOT_SEMANTIC_ATTRIBUTE_KEYS for key in attributes)
-
-    @staticmethod
-    def _is_zero_size(attributes: dict[str, object]) -> bool:
-        for key in ("width", "height"):
-            value = attributes.get(key)
-            if value is None:
-                continue
-            try:
-                if float(str(value)) == 0:
-                    return True
-            except ValueError:
-                continue
-        return False
-
-    def _element_count(self, element: ElementTree.Element) -> int:
-        return 1 + sum(self._element_count(child) for child in list(element))
-
-    @staticmethod
-    def _xml_name(value: str) -> str:
-        return value.rsplit("}", 1)[-1] if "}" in value else value
 
     def _viewport_size(self, session: Any) -> tuple[int, int] | None:
         observation: Any | None = None

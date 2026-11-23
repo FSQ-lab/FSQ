@@ -223,14 +223,16 @@ def test_xpath_locator_literal_apostrophe_and_quotes_are_encoded() -> None:
 
 
 def test_title_is_preserved_and_supported_by_locators() -> None:
-    title = "Save Link As" + "x" * 50
+    title = "Save Link As" + "x" * 170
     source = f'<XCUIElementTypeApplication><XCUIElementTypeMenuItem identifier="a" title="{title}"/><XCUIElementTypeMenuItem identifier="b" title="{title}"/></XCUIElementTypeApplication>'
     driver = AppiumConnectMacOSDriver(session=SessionStub(source=source))
     assert "title" in MacOSLocator.model_json_schema()["properties"]
 
     tree = driver.ui_snapshot(MacOSUiSnapshotParams())
-    assert tree["page_source"]["root"]["children"][0]["attributes"]["title"] == title[:50]
-
+    assert tree["format"] == "xml"
+    parsed = ElementTree.fromstring(tree["xml"])  # noqa: S314
+    assert parsed[0].attrib["title"] == title[:160]
+    assert tree["compaction"]["clipped_attributes"] == 2
     locator_session = SessionStub([ElementStub("one")])
     AppiumConnectMacOSDriver(session=locator_session).assert_visible(MacOSAssertVisibleParams(locator=MacOSLocator(title=title)))
     assert f'title == "{title}"' in locator_session.calls[0][1]
@@ -264,11 +266,14 @@ def test_backend_error_not_disguised_as_missing_target() -> None:
 
 
 def test_tree_clipping_is_explicit() -> None:
-    source = '<XCUIElementTypeApplication><XCUIElementTypeButton label="' + "x" * 60 + '"/></XCUIElementTypeApplication>'
+    source = '<XCUIElementTypeApplication><XCUIElementTypeButton label="' + "x" * 180 + '"/></XCUIElementTypeApplication>'
     driver = AppiumConnectMacOSDriver(session=SessionStub(source=source))
     tree = driver.ui_snapshot(MacOSUiSnapshotParams())
-    node = tree["page_source"]["root"]["children"][0]
-    assert node["truncated_attributes"] == ["label"]
+    assert tree["format"] == "xml"
+    assert tree["compaction"]["clipped_attributes"] == 1
+    assert tree["compaction"]["text_attribute_limit"] == 160
+    parsed = ElementTree.fromstring(tree["xml"])  # noqa: S314
+    assert parsed[0].attrib["label"] == "x" * 160
 
 
 @pytest.mark.parametrize(
@@ -384,7 +389,10 @@ def test_interactive_unlabelled_node_preserved() -> None:
     result = AppiumConnectMacOSDriver(session=SessionStub(source='<XCUIElementTypeApplication><Wrapper><XCUIElementTypeButton enabled="true"/></Wrapper></XCUIElementTypeApplication>')).ui_snapshot(
         MacOSUiSnapshotParams()
     )
-    assert result["page_source"]["root"]["children"][0]["type"] == "XCUIElementTypeButton"
+    assert result["format"] == "xml"
+    parsed = ElementTree.fromstring(result["xml"])  # noqa: S314
+    assert parsed[0].tag == "XCUIElementTypeButton"
+    assert result["compaction"]["layout_nodes_removed"] == 1
 
 
 def test_ui_snapshot_schema_rejects_query() -> None:

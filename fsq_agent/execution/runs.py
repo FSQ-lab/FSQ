@@ -11,6 +11,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fsq_agent.core import RuntimeSecretStore
 from fsq_agent.models import RunArtifactIndex, RunMetadata, RunResultSummary, RunRuntime, RunSource, RunStepCounts
 from fsq_agent.report import RunReportService
 
@@ -673,12 +674,12 @@ def _process_start(pid: int) -> str | None:
 
 
 def _safe_text(text: str, secrets_to_remove: tuple[str, ...] = ()) -> str:
-    for value in sorted((item for item in secrets_to_remove if item), key=len, reverse=True):
-        text = text.replace(value, "[REDACTED]")
-    text = re.sub(r"(?i)\b(?:Bearer|Basic)\s+[^\s,;]+", "[REDACTED_AUTH]", text)
-    text = re.sub(r"(?im)((?:authorization|cookie|password|passwd|api[_-]?key|client[_-]?secret|secret|(?:access_|refresh_|id_)?token)[\"']?\s*[:=]\s*)[^\r\n]+", r"\1[REDACTED]", text)
-    text = re.sub(r"(?i)([?&](?:token|access_token|api[_-]?key|secret|password|signature|sig|authorization)=)[^&#\s\"']*", r"\1[REDACTED]", text)
-    return _safe_urls(text)
+    return RuntimeSecretStore.redact_text(
+        text,
+        secrets_to_remove,
+        replacement="[REDACTED]",
+        auth_replacement="[REDACTED_AUTH]",
+    )
 
 
 def _safe_source_text(text: str, secret_values: tuple[str, ...] = ()) -> str:
@@ -732,82 +733,22 @@ def _safe_source_text(text: str, secret_values: tuple[str, ...] = ()) -> str:
     return _safe_urls(text)
 
 
-def _safe_urls(text):
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-    def safe_parameters(value):
-        parameters = parse_qsl(value, keep_blank_values=True)
-        if not any(_credential_key(key) or key.casefold() in {"signature", "sig"} for key, _ in parameters):
-            return value
-        return urlencode([(key, "[REDACTED]" if _credential_key(key) or key.casefold() in {"signature", "sig"} else item) for key, item in parameters])
-
-    def replace(match):
-        raw = match.group(0)
-        try:
-            parsed = urlsplit(raw)
-            safe_query = safe_parameters(parsed.query)
-            safe_fragment = parsed.fragment
-            if "=" in parsed.fragment:
-                # A '?' before the first assignment separates a route query;
-                # after an assignment it may be part of the credential value.
-                route, separator, parameters = parsed.fragment.partition("?")
-                safe_fragment = route + separator + safe_parameters(parameters) if separator and "=" not in route else safe_parameters(parsed.fragment)
-            if "@" not in parsed.netloc and safe_query == parsed.query and safe_fragment == parsed.fragment:
-                return raw
-            return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, safe_query, safe_fragment))
-        except ValueError:
-            return "[REDACTED_URL]"
-
-    return re.sub(r"https?://[^\s<>\"']+", replace, text, flags=re.I)
+def _safe_urls(text: str) -> str:
+    return RuntimeSecretStore.sanitize_urls(text)
 
 
-def _credential_key(key):
-    from urllib.parse import unquote
-
-    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", unquote(str(key)).strip()).lower().replace("-", "_")
-    return normalized in {
-        "password",
-        "passwd",
-        "pwd",
-        "api_key",
-        "apikey",
-        "token",
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "client_secret",
-        "secret",
-        "authorization",
-        "proxy_authorization",
-        "cookie",
-        "set_cookie",
-        "private_values",
-        "credentials",
-    }
+def _credential_key(key: object) -> bool:
+    return RuntimeSecretStore.is_credential_key(key)
 
 
-def _safe_structure(value, secret_values=(), depth=0):
-    if depth > 20:
-        return "[REDACTED: nesting limit]"
-    if isinstance(value, dict):
-        return {key: "[REDACTED]" if _credential_key(key) else _safe_structure(item, secret_values, depth + 1) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_safe_structure(item, secret_values, depth + 1) for item in value]
-    if not isinstance(value, str):
-        return value
-    for secret in sorted((item for item in secret_values if item), key=len, reverse=True):
-        value = value.replace(secret, "[REDACTED]")
-    if value.strip().startswith(("{", "[", '"')):
-        try:
-            decoded = json.loads(value)
-        except ValueError:
-            decoded = None
-        if isinstance(decoded, (dict, list, str)) and decoded != value:
-            safe = _safe_structure(decoded, secret_values, depth + 1)
-            if safe != decoded:
-                return json.dumps(safe, ensure_ascii=False)
-    value = re.sub(r"(?im)((?:proxy[-_]authorization|authorization|set[-_]cookie|cookie)\s*[:=]\s*)[^\r\n]+", r"\1[REDACTED]", value)
-    return _safe_text(value, secret_values)
+def _safe_structure(value: object, secret_values: tuple[str, ...] = (), depth: int = 0) -> object:
+    return RuntimeSecretStore.redact_structure(
+        value,
+        secret_values,
+        replacement="[REDACTED]",
+        auth_replacement="[REDACTED_AUTH]",
+        depth=depth,
+    )
 
 
 def _contained_destination(root: Path, destination: Path) -> None:

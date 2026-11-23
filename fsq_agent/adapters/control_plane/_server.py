@@ -16,14 +16,14 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from threading import Thread
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from fsq_agent import application
 from fsq_agent.application import ApplicationError, CaseSaveRequest, save_recorded_case
 from fsq_agent.application.contracts import runs as contracts
 from fsq_agent.case_dsl import FSQ_CASE_SUFFIX
-from fsq_agent.models import ConfigurationError, FsqAgentError
+from fsq_agent.models import AndroidVisualAssertionPolicy, ConfigurationError, FsqAgentError, HarnessContext
 
 from ._cases import discover_cases, resolve_case
 from ._config import (
@@ -65,6 +65,9 @@ from ._workspaces import (
     map_workspace_exception,
     update_workspace_platform_request,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _HISTORY_PREFIX = "/api/control-plane/history"
 _HISTORY_HEADERS = {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
@@ -229,6 +232,7 @@ class ControlPlaneServerOptions:
     open_browser: bool = True
     static_path: Path | None = None
     user_config_root: Path | None = None
+    visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None
 
 
 class ControlPlaneServer:
@@ -767,7 +771,12 @@ class ControlPlaneServer:
             source = self._run_source(body, settings)
             if source:
                 self.state.update_source(request_id, source)
-            prepared = prepare_run(request_id=request_id, settings=settings, body=body)
+            prepared = prepare_run(
+                request_id=request_id,
+                settings=settings,
+                body=body,
+                visual_assertion_policy_resolver=self.options.visual_assertion_policy_resolver,
+            )
             if getattr(prepared, "mode", None) == "strict":
                 self.state.update_source(request_id, {"caseSteps": _strict_case_steps(prepared)})
             self._handles[request_id] = start_execution(prepared, self.state)

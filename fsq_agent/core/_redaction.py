@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import json
 import re
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+from xml.etree import ElementTree
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 MAX_REDACTION_DEPTH = 128
 
@@ -71,7 +76,20 @@ def sanitize_urls(text: str) -> str:
 
 def redact_text(
     text: str,
-    secrets: tuple[str, ...] = (),
+    secrets: Collection[str] = (),
+    *,
+    replacement: str = "***",
+    auth_replacement: str | None = None,
+) -> str:
+    xml = _redact_xml(text, secrets)
+    if xml is not None:
+        return xml
+    return _redact_plain_text(text, secrets, replacement=replacement, auth_replacement=auth_replacement)
+
+
+def _redact_plain_text(
+    text: str,
+    secrets: Collection[str],
     *,
     replacement: str = "***",
     auth_replacement: str | None = None,
@@ -109,9 +127,78 @@ def redact_text(
     return sanitize_urls(text)
 
 
+def _redact_xml(text: str, secrets: Collection[str]) -> str | None:
+    """Redact XML as decoded values, never as attribute syntax or entity spellings."""
+    if not text.lstrip().startswith("<") or not text.rstrip().endswith(">"):
+        return None
+    if "<!DOCTYPE" in text:
+        return "<Redacted />"
+    try:
+        root = ElementTree.fromstring(text)  # noqa: S314 - DTDs are rejected before parsing.
+    except (ElementTree.ParseError, LookupError, ValueError):
+        return None
+
+    # ElementTree discards comments and processing instructions; don't return
+    # the original source with their unchecked contents still present.
+    changed = "<!--" in text or "<?" in text
+    # XML-bearing consumers share the producer's marker so another persistence
+    # layer does not rewrite an already-redacted tree with a different marker.
+    for element in root.iter():
+        for key, raw in element.attrib.items():
+            safe = "***" if is_credential_key(key.rsplit("}", 1)[-1]) else _redact_plain_text(raw, secrets)
+            if safe != raw:
+                element.set(key, safe)
+                changed = True
+        if element.text:
+            safe = _redact_plain_text(element.text, secrets)
+            if safe != element.text:
+                element.text = safe
+                changed = True
+        if element.tail:
+            safe = _redact_plain_text(element.tail, secrets)
+            if safe != element.tail:
+                element.tail = safe
+                changed = True
+    if not changed:
+        return text
+    try:
+        return ElementTree.tostring(root, encoding="unicode")
+    except RecursionError:
+        return "<Redacted />"
+
+
+def _maintain_xml_envelope(original: dict, redacted: dict) -> None:
+    if original.get("format") not in ("xml", "unparsed_xml"):
+        return
+    compaction = redacted.get("compaction")
+    xml = redacted.get("xml")
+    if not isinstance(compaction, dict) or not isinstance(xml, str) or original.get("xml") == xml:
+        return
+    limit = compaction.get("max_xml_chars")
+    if type(limit) is not int or limit < 4:
+        return
+    coverage = redacted.get("coverage")
+    if len(xml) > limit:
+        # Redaction can expand XML (for example when replacing a one-character
+        # credential absent from earlier settings). Never publish an oversized
+        # result or clip through element syntax during late persistence.
+        xml = redacted["xml"] = "<r/>"
+        compaction["size_limit_applied"] = True
+        if isinstance(coverage, dict):
+            coverage["retained_nodes"] = 0
+            if coverage.get("status") == "complete":
+                coverage.update(status="partial", reason="semantic_compaction")
+        if original.get("format") == "unparsed_xml":
+            redacted["truncated"] = True
+    if original.get("source_preview") == original.get("xml"):
+        redacted["source_preview"] = xml
+    if isinstance(coverage, dict):
+        coverage["retained_characters"] = len(xml)
+
+
 def redact_structure(
     value: object,
-    secrets: tuple[str, ...] = (),
+    secrets: Collection[str] = (),
     *,
     replacement: str = "***",
     auth_replacement: str | None = None,
@@ -129,7 +216,7 @@ def redact_structure(
         active_ids.add(obj_id)
         try:
             if isinstance(value, dict):
-                return {
+                redacted = {
                     key: replacement
                     if is_credential_key(key)
                     else redact_structure(
@@ -142,6 +229,8 @@ def redact_structure(
                     )
                     for key, item in value.items()
                 }
+                _maintain_xml_envelope(value, redacted)
+                return redacted
             return [
                 redact_structure(
                     item,
@@ -157,6 +246,9 @@ def redact_structure(
             active_ids.discard(obj_id)
     if not isinstance(value, str):
         return value
+    xml = _redact_xml(value, secrets)
+    if xml is not None:
+        return xml
     redacted_str = value
     for secret in sorted((item for item in secrets if item), key=len, reverse=True):
         redacted_str = redacted_str.replace(secret, replacement)
@@ -179,4 +271,4 @@ def redact_structure(
             )
             if safe != decoded:
                 return json.dumps(safe, ensure_ascii=False)
-    return redact_text(redacted_str, secrets, replacement=replacement, auth_replacement=auth_replacement)
+    return _redact_plain_text(redacted_str, secrets, replacement=replacement, auth_replacement=auth_replacement)

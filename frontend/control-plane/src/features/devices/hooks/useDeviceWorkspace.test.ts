@@ -86,27 +86,25 @@ it('treats Quick preparation as shared busy without replacing Manager workspace 
   expect(client.runSnapshot).not.toHaveBeenCalled();
 });
 
-it('uses shared Gemini readiness for Explore and AI Strict without submitting provider credentials', async () => {
-  const ready = { ...readiness('web'), provider: { status: 'ready' as const, message: 'Google Gemini is ready.', action: '' } };
-  const inventory = cases('web');
-  inventory.cases[0].requiresAiAssertion = true;
-  const client = { bootstrap: vi.fn().mockResolvedValue(bootstrap), readiness: vi.fn().mockResolvedValue(ready), targets: vi.fn().mockResolvedValue(targets('web')), cases: vi.fn().mockResolvedValue(inventory), startRun: vi.fn().mockReturnValue(new Promise(() => {})) } as unknown as ControlPlaneClient;
-  const { result } = renderHook(() => useDeviceWorkspace(deviceContext, client));
-  await waitFor(() => expect(result.current.bootstrap.state).toBe('ready'));
-  act(() => { result.current.setPlatform('web'); result.current.setGoal('Verify Gemini task'); });
-  await waitFor(() => expect(result.current.canStart).toBe(true));
-  act(() => { result.current.setMode('strict'); result.current.setCasePath('web.fsq.yaml'); });
-  await waitFor(() => expect(result.current.canStart).toBe(true));
-  vi.mocked(client.readiness).mockResolvedValueOnce({ ...ready, provider: { status: 'unavailable', message: 'Google Gemini unavailable.', action: 'Check Settings.' } });
-  act(() => result.current.refresh());
-  await waitFor(() => expect(result.current.readiness.data?.provider.status).toBe('unavailable'));
+it.each(['web', 'windows'] as const)('submits offline %s AI Strict without allowing offline Explore or sending credentials', async platform => {
+  const offline = { ...readiness('web'), platformId: platform, provider: { status: 'unavailable' as const, message: 'Google Gemini unavailable.', action: 'Check Settings.' } };
+  const path = `${platform}.fsq.yaml`;
+  const registry = [...platforms, { id: 'windows' as const, label: 'Windows' }];
+  const inventory = { platform, truncated: false, cases: [{ ...cases('web').cases[0], platform, path, requiresAiAssertion: true }] };
+  const targetInventory = { ...targets('web'), platform, targets: [{ ...targets('web').targets[0], id: `${platform}-target` }] };
+  const client = { bootstrap: vi.fn().mockResolvedValue({ ...bootstrap, platforms: registry }), readiness: vi.fn().mockResolvedValue(offline), targets: vi.fn().mockResolvedValue(targetInventory), cases: vi.fn().mockResolvedValue(inventory), startRun: vi.fn().mockReturnValue(new Promise(() => {})) } as unknown as ControlPlaneClient;
+  const { result } = renderHook(() => useDeviceWorkspace({ ...deviceContext, platforms: registry }, client));
+  act(() => { result.current.setPlatform(platform); result.current.setGoal('Verify Gemini task'); });
+  await waitFor(() => expect(result.current.cases.state).toBe('ready'));
   expect(result.current.canStart).toBe(false);
-  act(() => result.current.refresh());
+  await act(async () => result.current.start());
+  expect(client.startRun).not.toHaveBeenCalled();
+  act(() => { result.current.setMode('strict'); result.current.setCasePath(path); });
   await waitFor(() => expect(result.current.canStart).toBe(true));
   act(() => { void result.current.start(); });
   expect(result.current.controlsLocked).toBe(true);
   const payload = vi.mocked(client.startRun).mock.calls[0][0];
-  expect(payload).toMatchObject({ workspaceName: 'test', platform: 'web', mode: 'strict', casePath: 'web.fsq.yaml' });
+  expect(payload).toEqual({ workspaceName: 'test', platform, mode: 'strict', casePath: path, targetId: `${platform}-target` });
   expect(payload).not.toHaveProperty('apiKey');
   expect(payload).not.toHaveProperty('provider');
 });

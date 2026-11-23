@@ -44,7 +44,9 @@ from fsq_agent.models import (
 
 def _valid_png_bytes(width: int = 80, height: int = 60, color: str = "teal") -> bytes:
     buf = io.BytesIO()
-    Image.new("RGB", (width, height), color).save(buf, format="PNG")
+    with Image.new("RGB", (width, height), color) as image:
+        image.putpixel((width // 2, height // 2), (255, 255, 255))
+        image.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -1483,6 +1485,7 @@ def test_pywinauto_driver_ui_snapshot_compacts_deep_tree_withholds_passwords_and
     from xml.etree import ElementTree
 
     from fsq_agent.drivers.windows._pywinauto import PywinautoWindowsDriver
+    from fsq_agent.models import RuntimeSecretSettings
 
     class FakeRect:
         def __init__(self, left: int, top: int, right: int, bottom: int) -> None:
@@ -1612,10 +1615,12 @@ def test_pywinauto_driver_ui_snapshot_compacts_deep_tree_withholds_passwords_and
         rect=(10, 170, 90, 200),
         runtime_id=(6,),
     )
+    private_value = "SecretTest&<Text>"
     weird_tag_leaf = FakeElement(
         control_type="123 Invalid Tag!",
-        title="Custom Widget",
+        title="https://example.com/?page=1&sig=signed-value&keep=yes",
         automation_id="custom1",
+        value=f"Localized message {private_value}",
         rect=(10, 210, 120, 240),
         runtime_id=(7,),
     )
@@ -1631,6 +1636,9 @@ def test_pywinauto_driver_ui_snapshot_compacts_deep_tree_withholds_passwords_and
     driver = PywinautoWindowsDriver()
     try:
         monkeypatch.setattr(driver, "_require_window", lambda: window)
+        secrets = RuntimeSecretSettings()
+        secrets.set_values({"DESKTOP_SNAPSHOT_SECRET": private_value})
+        WindowsHarness(driver=driver, runtime_secret_settings=secrets)
         snap = driver.ui_snapshot(WindowsUiSnapshotParams())
     finally:
         driver.close()
@@ -1679,6 +1687,10 @@ def test_pywinauto_driver_ui_snapshot_compacts_deep_tree_withholds_passwords_and
 
     weird = by_auto_id["custom1"]
     assert weird.attrib["control_type"] == "123 Invalid Tag!"
+    assert private_value not in weird.attrib["value"]
+    assert "Localized message" in weird.attrib["value"]
+    assert "signed-value" not in weird.attrib["title"]
+    assert "keep=yes" in weird.attrib["title"]
 
 
 @pytest.mark.parametrize("kind", ["screenshot", "ui_snapshot"])

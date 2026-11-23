@@ -132,13 +132,14 @@ def test_freeze_skips_finalize_required_capture_when_step_aborted_in_prepare(tmp
     assert "required_evidence_incomplete" not in report.run["gate"]["reasons"]
 
 
-def test_freeze_explore_mode_recovers_superseded_failed_step_capture_into_warnings(tmp_path: Path) -> None:
+@pytest.mark.parametrize("variant", ["matched_retry", "waiting", "different_occurrence", "not_a_retry", "missing_retry_capture", "session_error", "session_artifact"])
+def test_explore_recovery_requires_complete_matching_retry_and_no_session_errors(tmp_path: Path, variant: str) -> None:
     metadata = allocate_run(workspace=tmp_path, workspace_name="demo", platform="windows", source_id="goal", mode="explore", source=RunSource(kind="goal", goal_summary="Open Notepad"))
     run_dir = tmp_path / ".fsq/runs/windows" / metadata.run_id
     store = ArtifactStore(run_dir)
     recorder = EvidenceRecorder(run_id=metadata.run_id, output_dir=run_dir)
 
-    attempt1 = recorder.allocate_step_identity(ExecutableStep(step_id="attempt-1", action_name="launchApp", kind="action"))
+    attempt1 = recorder.allocate_step_identity(ExecutableStep(step_id="attempt-1", source_step_id="launch-notepad", invocation_path=("root", "notepad"), action_name="launchApp", kind="action"))
     recorder.record_event(
         RunnerEvent(event_type="step_start", run_id=metadata.run_id, **attempt1.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}))
     )
@@ -179,7 +180,16 @@ def test_freeze_explore_mode_recovers_superseded_failed_step_capture_into_warnin
         )
     )
 
-    attempt2 = recorder.allocate_step_identity(ExecutableStep(step_id="attempt-2", action_name="launchApp", kind="action"))
+    attempt2 = recorder.allocate_step_identity(
+        ExecutableStep(
+            step_id="attempt-2",
+            source_step_id=attempt1.source_step_id,
+            invocation_path=("root", "other-window") if variant == "different_occurrence" else attempt1.invocation_path,
+            action_name="wait_ms" if variant == "waiting" else attempt1.action_name,
+            kind="action",
+            attempt_index=1 if variant == "not_a_retry" else 2,
+        )
+    )
     recorder.record_event(
         RunnerEvent(event_type="step_start", run_id=metadata.run_id, **attempt2.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}))
     )
@@ -190,32 +200,40 @@ def test_freeze_explore_mode_recovers_superseded_failed_step_capture_into_warnin
         name="after-launch",
         data=b"\x89PNG\r\n\x1a\nfake",
     ).model_copy(update={"step_execution_id": attempt2.step_execution_id})
-    recorder.record_event(
-        RunnerEvent(
-            event_type="artifact_captured",
-            run_id=metadata.run_id,
-            **attempt2.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}),
-            phase="finalize",
-            payload={"artifact": passed_ref.model_dump(mode="json")},
+    if variant != "missing_retry_capture":
+        recorder.record_event(
+            RunnerEvent(
+                event_type="artifact_captured",
+                run_id=metadata.run_id,
+                **attempt2.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}),
+                phase="finalize",
+                payload={"artifact": passed_ref.model_dump(mode="json")},
+            )
         )
-    )
     recorder.record_step_result(
         RunnerStepResult(
             step_id=attempt2.step_id,
             source_step_id=attempt2.source_step_id,
             step_execution_id=attempt2.step_execution_id,
             invocation_path=attempt2.invocation_path,
-            action_name="launchApp",
+            action_name=attempt2.action_name,
+            attempt_index=attempt2.attempt_index,
+            action_status="passed",
             status="passed",
             phase_reports=[
                 StepPhaseReport(step_id=attempt2.step_id, phase="prepare", status="passed"),
                 StepPhaseReport(step_id=attempt2.step_id, phase="invoke", status="passed"),
-                StepPhaseReport(step_id=attempt2.step_id, phase="finalize", status="passed", artifact_refs=[passed_ref]),
+                StepPhaseReport(step_id=attempt2.step_id, phase="finalize", status="passed", artifact_refs=[] if variant == "missing_retry_capture" else [passed_ref]),
             ],
-            evidence_refs=[passed_ref.artifact_id],
+            evidence_refs=[] if variant == "missing_retry_capture" else [passed_ref.artifact_id],
             metadata={"evidence_policy": {"capture_before": False, "capture_after": True, "artifact_kinds": ["screenshot"]}},
         )
     )
+    if variant == "session_error":
+        recorder.record_event(RunnerEvent(event_type="session_finish", run_id=metadata.run_id, payload={"evidence_errors": [{"reason": "session_capture_failed"}]}))
+    elif variant == "session_artifact":
+        session_ref = EvidenceArtifactRef(artifact_id="session-screen", kind="screenshot", availability="failed", unavailable_reason="session_capture_failed")
+        recorder.record_event(RunnerEvent(event_type="artifact_failed", run_id=metadata.run_id, payload={"artifact": session_ref.model_dump(mode="json")}))
     recorder.write_manifest()
     bundle = EvidenceRecorder.recover_bundle(run_dir)
     assert bundle.completeness == "partial"
@@ -228,15 +246,28 @@ def test_freeze_explore_mode_recovers_superseded_failed_step_capture_into_warnin
         verification=VerificationResult(status="success", summary="Notepad opened and verified."),
     )
     final_metadata = service.finalize(run_dir, metadata, execution_result=frozen)
+    report = RunReportService().project(run_dir, final_metadata.model_dump(mode="json"), bundle)
+    if variant != "matched_retry":
+        assert frozen.outcome == "error"
+        assert frozen.evidence["status"] == report.evidence["status"] == "partial"
+        assert "recovered_step_execution_ids" not in frozen.evidence
+        assert frozen.evidence["warnings"] == []
+        assert report.execution["recovered_failures"] == []
+        assert report.run["gate"]["status"] == "error"
+        if variant in {"session_error", "session_artifact"}:
+            assert any(error.get("reason") == "session_capture_failed" for error in frozen.evidence["errors"])
+            assert any(error.get("reason") == "session_capture_failed" for error in report.evidence["errors"])
+        return
     assert frozen.outcome == "success"
     assert frozen.primary_failure is None
     assert frozen.evidence["status"] == "complete"
     assert frozen.evidence["errors"] == []
+    assert frozen.evidence["recovered_step_execution_ids"] == [attempt1.step_execution_id]
     assert len(frozen.evidence["warnings"]) == 1
     assert "Recovered intermediate step attempt-1" in frozen.evidence["warnings"][0]
     assert frozen.steps[0]["evidence_errors"] == [{"phase": "finalize", "kind": "screenshot", "message": "window not ready"}]
 
-    report = RunReportService().project(run_dir, final_metadata.model_dump(mode="json"), bundle)
+    assert [step["step_execution_id"] for step in report.execution["recovered_failures"]] == [attempt1.step_execution_id]
     assert report.evidence["status"] == "complete"
     assert report.evidence["errors"] == []
     assert report.evidence["required_missing"] == []

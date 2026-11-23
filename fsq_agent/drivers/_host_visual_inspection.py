@@ -7,6 +7,7 @@ import hashlib
 import io
 import struct
 import time
+import zlib
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
@@ -43,7 +44,7 @@ class _CaptureRejectedError(Exception):
 def _inspection_image_size(data: bytes, budget: Any) -> tuple[int, int]:
     if len(data) > budget.max_image_bytes:
         raise _CaptureRejectedError("budget_exceeded")
-    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[8:16] != b"\x00\x00\x00\rIHDR":
         raise _CaptureRejectedError("capture_failed")
     offset = 8
     while offset + 12 <= len(data):
@@ -51,11 +52,18 @@ def _inspection_image_size(data: bytes, budget: Any) -> tuple[int, int]:
         kind = data[offset + 4 : offset + 8]
         if kind in {b"acTL", b"fcTL", b"fdAT"}:
             raise _CaptureRejectedError("frame_not_single")
-        offset += 12 + length
-        if offset > len(data):
+        end = offset + 12 + length
+        if end > len(data) or (kind == b"IHDR" and offset != 8):
             raise _CaptureRejectedError("capture_failed")
+        if zlib.crc32(memoryview(data)[offset + 4 : end - 4]) & 0xFFFFFFFF != struct.unpack_from(">I", data, end - 4)[0]:
+            raise _CaptureRejectedError("capture_failed")
+        offset = end
         if kind == b"IEND":
+            if length or offset != len(data):
+                raise _CaptureRejectedError("capture_failed")
             break
+    else:
+        raise _CaptureRejectedError("capture_failed")
     width, height = struct.unpack_from(">II", data, 16)
     if not width or not height:
         raise _CaptureRejectedError("capture_failed")

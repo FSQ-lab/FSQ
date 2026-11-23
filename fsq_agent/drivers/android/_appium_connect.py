@@ -438,6 +438,8 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         self._scope_exit_attempted = False
 
     def context(self) -> dict[str, object]:
+        if self._closed or (self._session is None and not self._cleanup_pending):
+            return {"session_id": None, "metadata": {"backend": self.backend, "session_started": False}}
         return self._run_on_worker(self._context_impl)
 
     def _context_impl(self) -> dict[str, object]:

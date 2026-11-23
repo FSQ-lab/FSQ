@@ -70,6 +70,9 @@ class WindowsHarness:
         self.common_tools = CommonPlatformTools(
             platform="windows",
         )
+        configure_snapshot_redaction = getattr(driver, "configure_snapshot_redaction", None)
+        if callable(configure_snapshot_redaction) and runtime_secret_settings is not None:
+            configure_snapshot_redaction(tuple(runtime_secret_settings.private_values().values()))
         self._configure_driver_ai_assertion_tool()
 
     @property
@@ -185,7 +188,15 @@ class WindowsHarness:
                 context=capture_context,
             )
             policy = self._frame_policy(current.context, current.capture_sequence)
-            artifact = _capture_host_visual(self.driver, self.artifact_store, current, policy, callable(getattr(self.ai_assertion_evaluator, "evaluate", None)), phase)
+            artifact = _capture_host_visual(
+                self.driver.screenshot,
+                self.artifact_store,
+                current,
+                policy,
+                callable(getattr(self.ai_assertion_evaluator, "evaluate", None)),
+                phase,
+                inactive_reason="windows_app_not_launched" if self._app_not_started(current.context) else None,
+            )
             self._visual_assertion_capture = _HostVisualAssertionCapture(current, policy, artifact)
             return artifact
         if self.artifact_store is None:

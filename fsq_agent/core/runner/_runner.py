@@ -12,8 +12,8 @@ from datetime import UTC, datetime
 
 from pydantic import ValidationError
 
-from fsq_agent.core._redaction import redact_structure as _credential_safe
 from fsq_agent.core.interfaces import CancellationCheck, CapabilityRegistryInterface, EvidenceJournalSink, HarnessInterface, RuntimeSecretResolver
+from fsq_agent.core.runtime_secrets import RuntimeSecretStore
 from fsq_agent.models import (
     CapabilityDefinition,
     CapabilityExecutionResult,
@@ -456,10 +456,10 @@ class StepRunner:
         return isinstance(error, (asyncio.CancelledError, KeyboardInterrupt)) or type(error).__name__ == "TaskCancelledError"
 
     def _safe_text(self, text):
-        return _credential_safe(text, self._secret_values)
+        return RuntimeSecretStore.redact_structure(text, self._secret_values)
 
     def _safe_value(self, value):
-        return _credential_safe(value, self._secret_values)
+        return RuntimeSecretStore.redact_structure(value, self._secret_values)
 
     def _with_validated_params(self, step: ExecutableStep, capability: CapabilityDefinition | None) -> ExecutableStep:
         if capability is None:

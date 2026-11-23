@@ -4,10 +4,10 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
-- Windows restores and activates the bound window before input and captures background or occluded windows without including pixels from other applications.
-- Windows and macOS UI snapshots use bounded compact XML and withhold protected field values. Run evidence shares cycle- and depth-safe credential redaction.
-- Evidence distinguishes an unstarted target from a failed capture and does not require a post-action frame when preparation aborted. Recovered Explore capture failures remain warnings; the completion event reports the frozen result.
-- Windows and Web visual assertions now use the scoped five-platform `passed` / `failed` / `inconclusive` contract and reuse the authorized prepare frame. `assertWithAI` requires `assertion`, `surface`, and an image region or `full_screen_reason`; the old `prompt` form is rejected. Provider-free Strict replay records an unverified step instead of failing startup. Windows and Web also support read-only `inspectWithAI` extraction; coordinate lookup remains unavailable.
+- Windows verifies foreground ownership before sending input. Screenshots render only the bound window, without reading the desktop or separate top-level popups.
+- Windows and macOS UI snapshots redact credentials before XML escaping, withhold protected values, and enforce their output caps. Run evidence shares cycle- and depth-safe redaction.
+- Evidence distinguishes unstarted targets from capture failures and does not require a post-action frame when preparation aborted. Explore downgrades a capture failure to a warning only after an evidenced retry of the same operation. Managed completion reports the frozen status and summary.
+- Windows and Web visual assertions use the scoped five-platform `passed` / `failed` / `inconclusive` contract and reuse the authorized prepare frame. Web reasoned full-page assertions capture below the fold. `assertWithAI` requires `assertion`, `surface`, and an image region or `full_screen_reason`; the old `prompt` form is rejected. Strict replay, including Devices, runs without a provider and records visual assertions as unverified. Windows and Web support read-only `inspectWithAI` extraction; coordinate lookup remains unavailable.
 
 ## [0.3.9] - 2026-11-23
 

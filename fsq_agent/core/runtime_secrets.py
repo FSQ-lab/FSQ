@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Collection, Iterable
 
 from fsq_agent.core._redaction import is_credential_key, redact_structure, redact_text, sanitize_urls
 from fsq_agent.models import ConfigurationError, RuntimeSecretSettings
@@ -49,7 +49,7 @@ class RuntimeSecretStore:
     @staticmethod
     def redact_text(
         text: str,
-        secrets: tuple[str, ...] = (),
+        secrets: Collection[str] = (),
         *,
         replacement: str = "***",
         auth_replacement: str | None = None,
@@ -64,7 +64,7 @@ class RuntimeSecretStore:
     @staticmethod
     def redact_structure(
         value: object,
-        secrets: tuple[str, ...] = (),
+        secrets: Collection[str] = (),
         *,
         replacement: str = "***",
         auth_replacement: str | None = None,

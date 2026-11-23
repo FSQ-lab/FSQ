@@ -32,6 +32,8 @@ def _safe_encoded_values(value, secrets):
 
 
 def primary_summary(result: TaskResult) -> str:
+    if result.status in {"error", "cancelled"}:
+        return RunLifecycleService().load_result(result.report.path.parent).summary
     for step in reversed(result.steps):
         if step.tool_name != "agent_runtime.runner":
             continue

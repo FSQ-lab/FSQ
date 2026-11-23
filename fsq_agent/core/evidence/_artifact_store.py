@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from fsq_agent.core._redaction import redact_structure as _credential_safe
+from fsq_agent.core.runtime_secrets import RuntimeSecretStore
 from fsq_agent.models import EvidenceArtifactKind, EvidenceArtifactRef, StepPhase
 
 _ARTIFACT_DIRS: dict[EvidenceArtifactKind, str] = {
@@ -110,7 +110,7 @@ class ArtifactStore:
         return self._acknowledge(ref)
 
     def _sanitize(self, value):
-        return _credential_safe(value, self._secret_values)
+        return RuntimeSecretStore.redact_structure(value, self._secret_values)
 
     def write_text(
         self,
@@ -137,11 +137,8 @@ class ArtifactStore:
     def _write(self, *, kind, step_id, phase, name, extension, data, structured=False) -> EvidenceArtifactRef:
         with self._lock:
             transformed = False
-            if kind not in {"screenshot", "other"}:
-                if structured:
-                    safe_data = json.dumps(self._sanitize(json.loads(data)), indent=2, ensure_ascii=False).encode("utf-8")
-                else:
-                    safe_data = self._sanitize(data.decode("utf-8")).encode("utf-8")
+            if not structured and kind not in {"screenshot", "other"}:
+                safe_data = self._sanitize(data.decode("utf-8")).encode("utf-8")
                 transformed = safe_data != data
                 data = safe_data
             key = f"{kind}-{self._artifact_id(step_id=step_id, phase=phase, name=name)}"

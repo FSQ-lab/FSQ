@@ -12,7 +12,7 @@ import pytest
 
 from fsq_agent.config import Settings
 from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService, load_run_metadata
-from fsq_agent.models import DynamicAgentOutcome, ExecutableStep, ReportArtifact, RunnerEvent, RunnerStepResult, StepPhaseReport, Task, ToolExecutionError, VerificationResult
+from fsq_agent.models import DynamicAgentOutcome, ExecutableStep, ReportArtifact, RunEvent, RunnerEvent, RunnerStepResult, StepPhaseReport, Task, ToolExecutionError, VerificationResult
 
 
 def _settings(root: Path) -> Settings:
@@ -310,7 +310,8 @@ async def test_real_core_capture_failure_retains_precedence_through_terminal(tmp
     frozen = json.loads((directory / "execution-result.json").read_text())
     assert frozen["outcome"] == load_run_metadata(directory).status == status
     assert frozen["verification"]["status"] == verification_status
-    assert result.report.path.read_text() == result.verification.summary == snapshot["summary"]
+    assert result.report.path.read_text() == result.verification.summary
+    assert snapshot["summary"] == (frozen["summary"] if status in {"error", "cancelled"} else result.verification.summary)
     if required and model_status == "success":
         assert "web_search_evidence_missing" in result.verification.diagnostics
         assert "Model verification fixture" not in snapshot["summary"]
@@ -374,6 +375,38 @@ async def test_execution_allocates_one_identity_and_finalizes_after_agent(tmp_pa
     assert metadata.result.summary == "Execution evidence reviewed."
     assert metadata.artifacts.report_markdown == "report.md"
     assert len(list(settings.output.runs_dir.glob("*/run.json"))) == 1
+
+
+@pytest.mark.parametrize("fatal", [False, True])
+async def test_public_agent_signature_cannot_publish_a_provisional_completion(tmp_path: Path, fatal: bool) -> None:
+    settings = _settings(tmp_path)
+    observed = []
+
+    class PublicAgent(_Agent):
+        async def run_in_context(self, task, context, event_sink=None, *, evidence_sink, cancellation_check=None):
+            assert event_sink is not None
+            event_sink(RunEvent(run_id=context.run_id, task_id=task.id, type="run_completed", title="Unfrozen", message="Provisional success", payload={"status": "success"}))
+            assert observed == []
+            assert not (context.run_dir / "execution-result.json").exists()
+            outcome = await super().run_in_context(task, context, event_sink, evidence_sink=evidence_sink, cancellation_check=cancellation_check)
+            return outcome.model_copy(update={"errors": [{"category": "agent_runtime_error", "message": "Fatal run error"}]}) if fatal else outcome
+
+    def observe(event: RunEvent) -> None:
+        run_dir = settings.output.runs_dir / event.run_id
+        frozen = json.loads((run_dir / "execution-result.json").read_text(encoding="utf-8"))
+        assert event.payload["status"] == frozen["outcome"] == ("error" if fatal else "success")
+        assert event.message == frozen["summary"]
+        observed.append(event)
+
+    result = await DynamicExecutionService(agent=PublicAgent(settings)).execute(DynamicExecutionRequest(task=Task(description="Task"), settings=settings, event_sink=observe))
+    assert len(observed) == 1
+    assert observed[0].type == "run_completed"
+    assert "Provisional success" not in observed[0].message
+    if fatal:
+        assert observed[0].payload["verification_status"] == "success"
+        assert observed[0].message == "Execution failed before it could be completed."
+    timeline_path = settings.output.runs_dir / result.task_result.report.run_id / "events.jsonl"
+    assert [json.loads(line) for line in timeline_path.read_text(encoding="utf-8").splitlines()] == [observed[0].model_dump(mode="json")]
 
 
 async def test_execution_repeated_tasks_allocate_distinct_runs(tmp_path: Path) -> None:
@@ -1220,3 +1253,6 @@ async def test_dynamic_execution_emits_terminal_run_completed_error_when_freeze_
     assert len(completed_events) == 1
     assert completed_events[0].payload["status"] == "error"
     assert completed_events[0].payload["verification_status"] == "success"
+    assert completed_events[0].message == frozen["summary"]
+    assert "required evidence" in completed_events[0].message
+    assert "Verifier claimed success" not in completed_events[0].message

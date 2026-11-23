@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree
 
@@ -44,7 +44,7 @@ def xml_local_name(value: str) -> str:
 
 
 def count_xml_elements(element: ElementTree.Element) -> int:
-    return 1 + sum(count_xml_elements(child) for child in list(element))
+    return sum(1 for _ in element.iter())
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,8 @@ class CompactedXmlResult:
     children_truncated: int
     effective_max_depth: int | None
     max_siblings_per_parent: int | None
+    size_limit_applied: bool = False
+    max_xml_chars: int | None = None
 
 
 def empty_compacted_envelope(
@@ -80,9 +82,22 @@ def empty_compacted_envelope(
     empty_root_tag: str,
     max_depth: int | None,
     text_limit_chars: int = DEFAULT_SNAPSHOT_TEXT_LIMIT_CHARS,
+    max_xml_chars: int | None = None,
 ) -> dict[str, object]:
     safe_tag, _ = sanitize_xml_tag(empty_root_tag, fallback="Control")
     xml_str = f"<{safe_tag} />"
+    if max_xml_chars is not None and len(xml_str) > max_xml_chars:
+        xml_str, _ = _bounded_xml(ElementTree.Element(safe_tag), max_xml_chars, fallback_tag="Control")
+    compaction = {
+        "applied": True,
+        "text_attribute_limit": text_limit_chars,
+        "max_depth": max_depth,
+        "layout_nodes_removed": 0,
+        "clipped_attributes": 0,
+        "offscreen_nodes_omitted": 0,
+    }
+    if max_xml_chars is not None:
+        compaction["max_xml_chars"] = max_xml_chars
     return {
         "format": "xml",
         "xml": xml_str,
@@ -94,45 +109,56 @@ def empty_compacted_envelope(
             "retained_nodes": 0,
             "retained_characters": 0,
         },
-        "compaction": {
-            "applied": True,
-            "text_attribute_limit": text_limit_chars,
-            "max_depth": max_depth,
-            "layout_nodes_removed": 0,
-            "clipped_attributes": 0,
-            "offscreen_nodes_omitted": 0,
-        },
+        "compaction": compaction,
     }
 
 
 def unparsed_fallback_envelope(
     *,
-    serialized_source: str,
-    source_nodes: int,
+    xml_root: ElementTree.Element,
+    policy: TreeCompactionPolicy,
     max_depth: int | None,
     error: BaseException,
-    preview_chars: int = DEFAULT_SNAPSHOT_SOURCE_PREVIEW_CHARS,
+    secret_values: tuple[str, ...] = (),
+    max_xml_chars: int | None = None,
 ) -> dict[str, object]:
-    preview = sanitize_xml_text(serialized_source)[:preview_chars]
+    source_nodes = count_xml_elements(xml_root)
+    limit = policy.source_preview_chars if max_xml_chars is None else min(policy.source_preview_chars, max_xml_chars)
+    source_length: int | None
+    try:
+        safe_root = _clone_sanitized_tree(xml_root, policy=policy, secret_values=secret_values)
+        preview = ElementTree.tostring(safe_root, encoding="unicode")
+        source_length = len(preview)
+        retained_nodes = source_nodes
+        if source_length > limit:
+            preview, retained_nodes = _bounded_xml(safe_root, limit, fallback_tag=policy.empty_root_tag)
+        truncated = source_length > len(preview)
+    except (RecursionError, ValueError):
+        # A failed fallback must never expose the untreated source.
+        preview, _ = _bounded_xml(ElementTree.Element(policy.empty_root_tag), limit, fallback_tag="Control")
+        source_length = None
+        retained_nodes = 0
+        truncated = True
     return {
         "format": "unparsed_xml",
         "xml": preview,
         "source_preview": preview,
-        "source_length": len(serialized_source),
+        "source_length": source_length,
         "node_count": source_nodes,
-        "truncated": len(serialized_source) > len(preview),
+        "truncated": truncated,
         "parse_error": type(error).__name__,
         "coverage": {
             "status": "unknown",
             "reason": "uncompacted_tree_fallback",
             "source_nodes": source_nodes,
-            "retained_nodes": source_nodes,
+            "retained_nodes": retained_nodes,
             "retained_characters": len(preview),
         },
         "compaction": {
             "applied": False,
             "text_attribute_limit": None,
             "max_depth": max_depth,
+            "max_xml_chars": limit,
             "layout_nodes_removed": 0,
             "clipped_attributes": 0,
             "offscreen_nodes_omitted": 0,
@@ -148,7 +174,9 @@ def build_compacted_envelope(
     complete_for_scope: bool = True,
     upstream_reason: str = "requested_scope",
 ) -> dict[str, object]:
-    is_partial = not complete_for_scope or result.layout_nodes_removed > 0 or result.clipped_attributes > 0 or result.offscreen_nodes_omitted > 0 or result.children_truncated > 0
+    is_partial = (
+        not complete_for_scope or result.layout_nodes_removed > 0 or result.clipped_attributes > 0 or result.offscreen_nodes_omitted > 0 or result.children_truncated > 0 or result.size_limit_applied
+    )
     if not complete_for_scope:
         reason = upstream_reason
     elif is_partial:
@@ -164,8 +192,12 @@ def build_compacted_envelope(
         "clipped_attributes": result.clipped_attributes,
         "offscreen_nodes_omitted": result.offscreen_nodes_omitted,
     }
+    if result.max_xml_chars is not None:
+        compaction["max_xml_chars"] = result.max_xml_chars
     if result.children_truncated > 0:
         compaction["children_truncated"] = result.children_truncated
+    if result.size_limit_applied:
+        compaction["size_limit_applied"] = True
     if result.effective_max_depth is not None and requested_max_depth is not None and result.effective_max_depth < requested_max_depth:
         compaction["effective_max_depth"] = result.effective_max_depth
     if result.max_siblings_per_parent is not None:
@@ -190,6 +222,7 @@ def compact_xml_element_tree(
     xml_root: ElementTree.Element,
     *,
     policy: TreeCompactionPolicy,
+    secret_values: tuple[str, ...] = (),
     max_depth: int | None = None,
     include_attributes: bool = False,
     include_offscreen: bool = False,
@@ -197,10 +230,9 @@ def compact_xml_element_tree(
     depth_stepdowns: Sequence[int] = (),
     sibling_stepdowns: Sequence[int | None] = (None,),
 ) -> CompactedXmlResult:
-    working_root = _clone_sanitized_element(xml_root, fallback_tag=policy.empty_root_tag)
+    working_root = _clone_sanitized_tree(xml_root, policy=policy, secret_values=secret_values)
     source_nodes = count_xml_elements(working_root)
     offscreen_omitted = 0 if include_offscreen else _prune_offscreen_descendants(working_root, policy=policy)
-    _ = source_nodes - offscreen_omitted
 
     if max_depth is not None:
         candidate_depths: list[int | None] = [max_depth, *(step for step in depth_stepdowns if step < max_depth)]
@@ -235,33 +267,91 @@ def compact_xml_element_tree(
                 children_truncated=children_truncated,
                 effective_max_depth=depth_limit,
                 max_siblings_per_parent=sibling_limit,
+                max_xml_chars=max_xml_chars,
             )
             chosen = candidate
             if max_xml_chars is None or len(compact_xml) <= max_xml_chars:
                 return candidate
 
-    if chosen is None:
-        msg = "Tree compaction produced no candidate result"
-        raise RuntimeError(msg)
-    return chosen
+    if chosen is None or max_xml_chars is None:
+        raise RuntimeError("Tree compaction produced no candidate result")
+    bounded_xml, retained_nodes = _bounded_xml(compacted_node, max_xml_chars, fallback_tag=policy.empty_root_tag)
+    return replace(
+        chosen,
+        xml=bounded_xml,
+        retained_nodes=retained_nodes,
+        children_truncated=chosen.children_truncated + chosen.retained_nodes - retained_nodes,
+        size_limit_applied=True,
+    )
 
 
-def _clone_sanitized_element(element: ElementTree.Element, *, fallback_tag: str) -> ElementTree.Element:
-    raw_local_tag = xml_local_name(element.tag)
-    safe_tag, was_sanitized = sanitize_xml_tag(raw_local_tag, fallback=fallback_tag)
-    attribs: dict[str, str] = {}
-    if was_sanitized and raw_local_tag.strip():
-        attribs["control_type"] = sanitize_xml_text(raw_local_tag.strip())
-    for raw_key, raw_val in element.attrib.items():
-        local_key = xml_local_name(str(raw_key))
-        safe_key, _ = sanitize_xml_tag(local_key, fallback="attr")
-        attribs[safe_key] = sanitize_xml_text(str(raw_val))
-    cloned = ElementTree.Element(safe_tag, attribs)
-    if element.text:
-        cloned.text = sanitize_xml_text(element.text)
-    for child in element:
-        cloned.append(_clone_sanitized_element(child, fallback_tag=fallback_tag))
-    return cloned
+def _bounded_xml(root: ElementTree.Element, limit: int, *, fallback_tag: str) -> tuple[str, int]:
+    """Keep the root and a prefix of complete child subtrees within the serialized budget."""
+    if limit < 4:
+        raise ValueError("An XML character limit must allow at least one empty element.")
+    shell = ElementTree.Element(root.tag, root.attrib)
+    shell.text = root.text
+    root_xml = ElementTree.tostring(shell, encoding="unicode")
+    if len(root_xml) > limit:
+        root_xml = f"<{root.tag} />"
+        if len(root_xml) > limit:
+            root_xml = f"<{fallback_tag} />"
+            return (root_xml if len(root_xml) <= limit else "<r/>"), 1
+
+    closing = f"</{root.tag}>"
+    opening = root_xml.removesuffix(" />") + ">" if root_xml.endswith(" />") else root_xml.removesuffix(closing)
+    remaining = limit - len(opening) - len(closing)
+    children: list[str] = []
+    retained = 1
+    for child in root:
+        child_xml = ElementTree.tostring(child, encoding="unicode")
+        if len(child_xml) > remaining:
+            break
+        remaining -= len(child_xml)
+        children.append(child_xml)
+        retained += count_xml_elements(child)
+    return (opening + "".join(children) + closing if children else root_xml), retained
+
+
+def _clone_sanitized_tree(root: ElementTree.Element, *, policy: TreeCompactionPolicy, secret_values: tuple[str, ...]) -> ElementTree.Element:
+    # The Core root also loads driver metadata; import only when a snapshot is requested.
+    from fsq_agent.core.runtime_secrets import RuntimeSecretStore
+
+    def safe_text(value: str) -> str:
+        redacted = str(RuntimeSecretStore.redact_structure(value, secret_values))
+        cleaned = sanitize_xml_text(redacted)
+        if cleaned != redacted:
+            return sanitize_xml_text(str(RuntimeSecretStore.redact_structure(cleaned, secret_values)))
+        return cleaned
+
+    def contains_secret(value: str) -> bool:
+        return any(secret and secret in value for secret in secret_values)
+
+    def clone(element: ElementTree.Element) -> ElementTree.Element:
+        raw_tag = xml_local_name(element.tag)
+        secure = _is_secure_node(raw_tag, element.attrib, policy)
+        tag, renamed = sanitize_xml_tag(raw_tag, fallback=policy.empty_root_tag)
+        if contains_secret(raw_tag) or contains_secret(tag):
+            tag, renamed = policy.empty_root_tag, True
+        attribs: dict[str, str] = {}
+        if renamed and raw_tag.strip():
+            attribs["control_type"] = safe_text(raw_tag.strip())
+        for raw_key, raw_value in element.attrib.items():
+            key = xml_local_name(raw_key)
+            if contains_secret(key):
+                continue
+            safe_key, _ = sanitize_xml_tag(key, fallback="attr")
+            if (secure and safe_key.casefold() == "value") or contains_secret(safe_key):
+                continue
+            credential = RuntimeSecretStore.is_credential_key(key) or RuntimeSecretStore.is_credential_key(safe_key)
+            attribs[safe_key] = "***" if credential else safe_text(raw_value)
+        cloned = ElementTree.Element(tag, attribs)
+        if element.text and not secure:
+            cloned.text = safe_text(element.text)
+        cloned.extend(clone(child) for child in element)
+        return cloned
+
+    return clone(root)
 
 
 def _short_tag(tag: str, policy: TreeCompactionPolicy) -> str:

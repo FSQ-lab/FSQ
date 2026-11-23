@@ -24,7 +24,7 @@ from fsq_agent.application.contracts import (
 from fsq_agent.application.workspace import require_initialized_workspace
 from fsq_agent.config import Settings, load_workspace_platform_settings
 from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService, RecordingService
-from fsq_agent.models import ConfigurationError, DynamicAgentOutcome, RunExecutionContext, Task
+from fsq_agent.models import AndroidVisualAssertionPolicy, ConfigurationError, DynamicAgentOutcome, HarnessContext, RunExecutionContext, Task
 
 
 class _Agent(Protocol):
@@ -147,9 +147,17 @@ def _goal_task_id(goal: str) -> str:
 from fsq_agent.application._case_test import execute_case_test
 
 
-def test_case(request: CaseTestRequest) -> CaseTestResult:
-    """Execute the canonical Case testing use case through its private strict helper."""
-    return execute_case_test(request, suggestion_analyzer_factory=build_case_suggestion_analyzer)
+def test_case(
+    request: CaseTestRequest,
+    *,
+    visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,  # noqa: PT028 - public Case operation, not a pytest test.
+) -> CaseTestResult:
+    """Execute the Case using the host's current-frame policy, if one is supplied."""
+    return execute_case_test(
+        request,
+        suggestion_analyzer_factory=build_case_suggestion_analyzer,
+        visual_assertion_policy_resolver=visual_assertion_policy_resolver,
+    )
 
 
 __all__ = ["create_case", "test_case"]

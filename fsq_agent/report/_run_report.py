@@ -551,14 +551,19 @@ class RunReportService:
         execution["observed_attempt_count"] = observed_attempt_count
         execution["source_outcomes"] = source_outcomes
         execution["history_conflict"] = history_conflict and not frozen
-        execution["recovered_failures"] = []
+        recorded_evidence = frozen.get("evidence") or metadata.get("evidence") or {}
+        recorded_recovery = (frozen.get("evidence") or {}).get("recovered_step_execution_ids")
+        recovered_ids = set()
+        if accounting_complete and outcome == "success" and recorded_evidence.get("status") == "complete" and isinstance(recorded_recovery, list):
+            failed_ids = {step["step_execution_id"] for step in steps if step["aggregate_status"] == "failed"}
+            recovered_ids = {item for item in recorded_recovery if isinstance(item, str) and item in failed_ids}
+        execution["recovered_failures"] = [step for step in steps if step["step_execution_id"] in recovered_ids]
         if outcome == "success":
-            execution["recovered_failures"] = [step for step in steps if step["status"] == "failed"]
             execution["first_failure"] = None
         execution["interpretations"] = self._interpretations(run_id, execution, documents, suggestions, projected_artifacts)
         if isinstance(execution.get("first_failure"), dict):
             execution["first_failure"].update(provenance="recorded_fact", references=[{"run_id": run_id, "step_execution_id": execution["first_failure"].get("step_execution_id")}])
-        evidence = self._coverage(steps, projected_artifacts, frozen.get("evidence") or metadata.get("evidence") or {}, bundle, warnings, mode=metadata.get("mode"), outcome=outcome)
+        evidence = self._coverage(steps, projected_artifacts, recorded_evidence, bundle, warnings, recovered_ids=recovered_ids)
         blocking_steps = list(logical_steps.values()) if outcome != "success" else []
         execution["infrastructure_failures"] = [
             {"step_execution_id": step.get("step_execution_id"), "failure_category": step.get("failure_category")}
@@ -956,17 +961,11 @@ class RunReportService:
             values[artifact_id] = artifact
         return list(values.values())
 
-    def _coverage(self, steps, artifacts, recorded, bundle, warnings, *, mode=None, outcome=None):
+    def _coverage(self, steps, artifacts, recorded, bundle, warnings, *, recovered_ids):
         missing = list(recorded.get("required_missing") or [])
-        last_passed = max((index for index, item in enumerate(steps) if (item.get("aggregate_status") or item.get("status")) == "passed"), default=-1)
         bundle_warnings = bundle.get("warnings") or []
-        recovered_indices = (
-            {index for index, item in enumerate(steps) if (item.get("aggregate_status") or item.get("status")) == "failed" and index < last_passed}
-            if mode == "explore" and outcome == "success" and recorded.get("status") == "complete" and not bundle_warnings and bundle.get("completeness") != "unavailable"
-            else set()
-        )
-        for index, step in enumerate(steps):
-            if index in recovered_indices:
+        for step in steps:
+            if step["step_execution_id"] in recovered_ids:
                 continue
             required = list(step.get("required_evidence") or [])
             policy = step.get("evidence_policy") or {}
@@ -987,16 +986,15 @@ class RunReportService:
                 )
                 if not found:
                     missing.append({"run_id": step["run_id"], "step_execution_id": step["step_execution_id"], **expected})
-        errors = [error for index, step in enumerate(steps) if index not in recovered_indices for error in step.get("evidence_errors", [])]
+        errors = [error for step in steps if step["step_execution_id"] not in recovered_ids for error in step.get("evidence_errors", [])]
         unknown_legacy = bundle.get("schema_version") != "fsq.evidence/v2" and (bundle.get("metadata") or {}).get("legacy_coverage_unknown", False)
+        evidence_artifact_ids = {item.get("artifact_id") for item in bundle.get("artifacts", [])}
         unrecovered_artifact_failure = any(
-            item.get("availability") not in {None, "available", "not_applicable"} and item.get("step_execution_id") not in {steps[i].get("step_execution_id") for i in recovered_indices}
+            item.get("availability") not in {None, "available", "not_applicable"} and item.get("step_execution_id") not in recovered_ids
             for item in artifacts
-            if item.get("step_execution_id") is not None
+            if item.get("step_execution_id") is not None or item.get("artifact_id") in evidence_artifact_ids
         )
-        bundle_incomplete = bundle.get("completeness") == "unavailable" or (
-            bundle.get("completeness") == "partial" and (not recovered_indices or bool(bundle_warnings) or unrecovered_artifact_failure)
-        )
+        bundle_incomplete = bundle.get("completeness") == "unavailable" or (bundle.get("completeness") == "partial" and (not recovered_ids or bool(bundle_warnings) or unrecovered_artifact_failure))
         incomplete = (not unknown_legacy and bundle_incomplete) or any(item.get("unavailable_reason") == "identity_conflict" for item in artifacts)
         combined_warnings = list(dict.fromkeys([*(recorded.get("warnings") or []), *warnings]))
         status = "partial" if missing or errors or incomplete else recorded.get("status") or ("complete" if bundle and not unknown_legacy else "unavailable")

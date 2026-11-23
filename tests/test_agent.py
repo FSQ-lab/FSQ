@@ -405,7 +405,7 @@ async def test_agent_run_emits_and_persists_live_events(tmp_path: Path, monkeypa
         knowledge_loader=_KnowledgeLoader(),  # type: ignore[arg-type]
         skill_loader=_SkillLoader(),  # type: ignore[arg-type]
         runtime=_Runtime(),  # type: ignore[arg-type]
-        event_logger=ExecutionLogger(tmp_path),
+        event_logger=ExecutionLogger(settings.output.runs_dir),
     )
     task = Task(
         id="smoke",
@@ -420,9 +420,8 @@ async def test_agent_run_emits_and_persists_live_events(tmp_path: Path, monkeypa
 
     assert [event.type for event in events] == ["run_started", "agent_started", "run_completed"]
     assert [event.sequence for event in events] == [1, 2, 3]
-    timeline_path = tmp_path / result.report.run_id / "events.jsonl"
-    assert timeline_path.exists()
-    assert "agent_started" in timeline_path.read_text(encoding="utf-8")
+    timeline_path = settings.output.runs_dir / result.report.run_id / "events.jsonl"
+    assert [json.loads(line) for line in timeline_path.read_text(encoding="utf-8").splitlines()] == [event.model_dump(mode="json") for event in events]
 
 
 async def test_agent_events_redact_configured_values_before_persistence_and_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -444,12 +443,13 @@ async def test_agent_events_redact_configured_values_before_persistence_and_disp
     assert events[0].message == "Check [REDACTED]"
 
 
-async def _capture_failed_agent_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary: BaseException) -> tuple[RunEvent, dict[str, Any], str]:
+async def _capture_failed_agent_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary: BaseException) -> tuple[RunEvent, str]:
     def failed_refresh(settings):
         raise primary
 
     monkeypatch.setattr("fsq_agent.agent._core.refresh_model_provider_session", failed_refresh)
     settings = Settings()
+    settings.workspace.root_dir = tmp_path
     settings.output.runs_dir = tmp_path / "runs"
     events: list[RunEvent] = []
     runtime = _Runtime()
@@ -457,18 +457,23 @@ async def _capture_failed_agent_run(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     task = Task(description="Task", key_actions=["Inspect"], verification_goal="Inspection complete.")
     original_cause = primary.__cause__
 
-    with pytest.raises(type(primary)) as failure:
-        await _run_in_context(agent, task, "safe-failure", events.append)
+    cancelled = isinstance(primary, asyncio.CancelledError)
+    with pytest.raises(asyncio.CancelledError if cancelled else ToolExecutionError) as failure:
+        await _coordinate(agent).run(task, event_sink=events.append)
 
-    assert failure.value is primary
+    assert (failure.value if cancelled else failure.value.__cause__) is primary
     assert primary.__cause__ is original_cause
     assert runtime.last_task is None
     assert [event.type for event in events] == ["run_started", "agent_started", "run_failed"]
     assert [event.sequence for event in events] == [1, 2, 3]
-    raw_events = (settings.output.runs_dir / "safe-failure" / "events.jsonl").read_text(encoding="utf-8")
+    run_dir = settings.output.runs_dir / events[-1].run_id
+    raw_events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
     persisted = [json.loads(line) for line in raw_events.splitlines()]
+    frozen = json.loads((run_dir / "execution-result.json").read_text(encoding="utf-8"))
     assert persisted[-1] == events[-1].model_dump(mode="json")
-    return events[-1], persisted[-1], raw_events
+    assert events[-1].payload["status"] == frozen["outcome"] == ("cancelled" if cancelled else "error")
+    assert events[-1].message == frozen["summary"]
+    return events[-1], raw_events
 
 
 @pytest.mark.parametrize(
@@ -502,10 +507,9 @@ async def test_agent_run_failed_projects_known_domain_codes_without_context_leak
     primary.error_code = "CANARY_ATTRIBUTE_CODE"
     primary.__cause__ = OSError(13, "CANARY_CAUSE_TEXT", "/private/CANARY_CAUSE_PATH")
 
-    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+    event, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
 
-    assert event.message == exception_class.__name__
-    assert persisted["payload"] == {"exception_type": exception_class.__name__, "error_code": error_code, "reason": "network", "status_code": 503, "errno": 61}
+    assert event.payload == {"status": "error", "exception_type": exception_class.__name__, "error_code": error_code, "reason": "network", "status_code": 503, "errno": 61}
     assert "CANARY" not in raw_events
     assert "CANARY" not in event.model_dump_json()
     assert primary.context == context
@@ -516,9 +520,9 @@ async def test_agent_run_failed_projects_known_domain_codes_without_context_leak
 async def test_agent_run_failed_preserves_allowlisted_reasons_and_exact_numeric_bounds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str, status_code: int, errno: int) -> None:
     primary = ConfigurationError("safe message", context={"reason": reason, "status_code": status_code, "errno": errno})
 
-    event, persisted, _ = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+    event, _ = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
 
-    assert event.payload == persisted["payload"] == {"exception_type": "ConfigurationError", "error_code": "configuration_error", "reason": reason, "status_code": status_code, "errno": errno}
+    assert event.payload == {"status": "error", "exception_type": "ConfigurationError", "error_code": "configuration_error", "reason": reason, "status_code": status_code, "errno": errno}
 
 
 @pytest.mark.parametrize(
@@ -538,9 +542,9 @@ async def test_agent_run_failed_preserves_allowlisted_reasons_and_exact_numeric_
 async def test_agent_run_failed_omits_unknown_and_invalid_diagnostic_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: dict[str, object]) -> None:
     primary = ConfigurationError("CANARY_EXCEPTION_TEXT", context=context)
 
-    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+    event, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
 
-    assert event.payload == persisted["payload"] == {"exception_type": "ConfigurationError", "error_code": "configuration_error"}
+    assert event.payload == {"status": "error", "exception_type": "ConfigurationError", "error_code": "configuration_error"}
     assert "CANARY" not in raw_events
 
 
@@ -574,12 +578,12 @@ async def test_agent_run_failed_bounds_cycle_safe_oserror_cause_errno(
     if cycle:
         os_error.__cause__ = primary
 
-    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+    event, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
 
-    expected: dict[str, object] = {"exception_type": "ConfigurationError", "error_code": "configuration_error"}
+    expected: dict[str, object] = {"status": "error", "exception_type": "ConfigurationError", "error_code": "configuration_error"}
     if expected_errno is not None:
         expected["errno"] = expected_errno
-    assert event.payload == persisted["payload"] == expected
+    assert event.payload == expected
     assert "CANARY" not in raw_events
 
 
@@ -590,9 +594,9 @@ async def test_agent_run_failed_stops_cyclic_causes_without_oserror_and_ignores_
     cause.__cause__ = primary
     primary.__context__ = OSError(13, "CANARY_IMPLICIT_CONTEXT")
 
-    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+    event, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
 
-    assert event.payload == persisted["payload"] == {"exception_type": "ConfigurationError", "error_code": "configuration_error"}
+    assert event.payload == {"status": "error", "exception_type": "ConfigurationError", "error_code": "configuration_error"}
     assert "CANARY" not in raw_events
 
 
@@ -603,9 +607,9 @@ async def test_agent_run_failed_does_not_derive_codes_from_unknown_domain_classe
     primary = UnknownDomainError("CANARY_EXCEPTION_TEXT", context={"error_code": "CANARY_CODE", "reason": "storage", "errno": 13})
     primary.error_code = "CANARY_ATTRIBUTE_CODE"
 
-    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+    event, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
 
-    assert event.payload == persisted["payload"] == {"exception_type": "UnknownDomainError", "reason": "storage", "errno": 13}
+    assert event.payload == {"status": "error", "exception_type": "UnknownDomainError", "reason": "storage", "errno": 13}
     assert "CANARY" not in raw_events
 
 
@@ -618,9 +622,9 @@ async def test_agent_run_failed_keeps_non_domain_exceptions_class_only(tmp_path:
     primary.errno = 13
     primary.__cause__ = OSError(13, "CANARY_CAUSE_TEXT", "/private/CANARY_PATH")
 
-    event, persisted, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
+    event, raw_events = await _capture_failed_agent_run(tmp_path, monkeypatch, primary)
 
-    assert event.payload == persisted["payload"] == {"exception_type": exception_class.__name__}
+    assert event.payload == {"status": "cancelled" if isinstance(primary, asyncio.CancelledError) else "error", "exception_type": exception_class.__name__}
     assert "CANARY" not in raw_events
 
 
@@ -638,14 +642,17 @@ async def test_failure_notification_cannot_replace_primary_exception_or_run_stat
             run_ids.append(run_id)
             raise primary
 
-    class FailedLogger:
+    class FailedLogger(ExecutionLogger):
         def write_run_event(self, event: RunEvent) -> None:
-            if notification == "logger" and event.type == "run_failed":
-                raise OSError("secondary log failure")
+            assert event.type == "run_failed"
+            raise OSError("secondary log failure")
 
     def event_sink(event: RunEvent) -> None:
         if notification == "sink" and event.type == "run_failed":
             raise OSError("secondary sink failure")
+
+    if notification == "logger":
+        monkeypatch.setattr("fsq_agent.execution.dynamic.ExecutionLogger", FailedLogger)
 
     if notification == "projection":
 
@@ -657,7 +664,7 @@ async def test_failure_notification_cannot_replace_primary_exception_or_run_stat
     settings = Settings()
     settings.workspace.root_dir = tmp_path
     settings.output.runs_dir = tmp_path / "runs"
-    agent = FsqAgent(settings, Verifier(), _Reporter(), _KnowledgeLoader(), _SkillLoader(), FailedRuntime(), FailedLogger())
+    agent = FsqAgent(settings, Verifier(), _Reporter(), _KnowledgeLoader(), _SkillLoader(), FailedRuntime(), ExecutionLogger(settings.output.runs_dir))
     task = Task(description="Task", key_actions=["Inspect"], verification_goal="Inspection complete.")
     with pytest.raises(asyncio.CancelledError if cancelled else ToolExecutionError) as failure:
         await DynamicExecutionService(agent=agent).execute(DynamicExecutionRequest(task=task, settings=settings, event_sink=event_sink))
@@ -729,7 +736,7 @@ async def test_agent_run_persists_run_failed_for_cancellation(tmp_path: Path, mo
         knowledge_loader=_KnowledgeLoader(),  # type: ignore[arg-type]
         skill_loader=_SkillLoader(),  # type: ignore[arg-type]
         runtime=_CancelledRuntime(),  # type: ignore[arg-type]
-        event_logger=ExecutionLogger(tmp_path),
+        event_logger=ExecutionLogger(settings.output.runs_dir),
     )
     task = Task(
         id="smoke",
@@ -746,9 +753,7 @@ async def test_agent_run_persists_run_failed_for_cancellation(tmp_path: Path, mo
     run_files = list(settings.output.runs_dir.glob("*/run.json"))
     assert json.loads(run_files[0].read_text())["status"] == "cancelled"
     assert json.loads((run_files[0].parent / "execution-result.json").read_text())["outcome"] == "cancelled"
-    timeline_paths = await asyncio.to_thread(lambda: list(tmp_path.glob("smoke-*/events.jsonl")))
-    assert len(timeline_paths) == 1
-    timeline = await asyncio.to_thread(timeline_paths[0].read_text, encoding="utf-8")
+    timeline = (run_files[0].parent / "events.jsonl").read_text(encoding="utf-8")
     assert "run_failed" in timeline
     assert "CancelledError" in timeline
 

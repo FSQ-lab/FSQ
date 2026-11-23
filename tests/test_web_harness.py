@@ -41,7 +41,9 @@ from fsq_agent.models import (
 
 def _valid_png_bytes(width: int = 80, height: int = 60, color: str = "navy") -> bytes:
     buf = io.BytesIO()
-    Image.new("RGB", (width, height), color).save(buf, format="PNG")
+    with Image.new("RGB", (width, height), color) as image:
+        image.putpixel((width // 2, height // 2), (255, 255, 255))
+        image.save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -267,7 +269,8 @@ def test_web_harness_captures_screenshot_and_ui_snapshot_with_artifact_store(tmp
     assert driver.calls == [("context", None), ("screenshot", {}), ("ui_snapshot", {})]
 
 
-def test_web_harness_assert_with_ai_uses_injected_evaluator_and_single_frame_prepare_reuse(tmp_path) -> None:
+@pytest.mark.parametrize("regional", [False, True])
+def test_web_harness_assert_with_ai_uses_injected_evaluator_and_single_frame_prepare_reuse(tmp_path, regional) -> None:
     from fsq_agent._capability_bootstrap import build_capability_registry
     from fsq_agent.core import EvidenceRecorder, StepRunner
 
@@ -316,7 +319,7 @@ def test_web_harness_assert_with_ai_uses_injected_evaluator_and_single_frame_pre
             params={
                 "assertion": "Verify chart bars are blue",
                 "surface": "custom_canvas",
-                "region": {"kind": "image_rect", "rect": {"left": 5, "top": 5, "right": 50, "bottom": 40}},
+                **({"region": {"kind": "image_rect", "rect": {"left": 5, "top": 5, "right": 50, "bottom": 40}}} if regional else {"full_screen_reason": "The chart extends below the fold"}),
             },
         ),
     )
@@ -326,12 +329,12 @@ def test_web_harness_assert_with_ai_uses_injected_evaluator_and_single_frame_pre
     assert evaluator.requests[0].platform == "web"
     assert evaluator.requests[0].prompt == "Verify chart bars are blue"
     screenshot_calls = [call for call in driver.calls if call[0] == "screenshot"]
-    assert len(screenshot_calls) == 1
+    assert [params["fullPage"] for _, params in screenshot_calls] == [not regional]
     prepare_refs = step_result.phase_reports[0].artifact_refs
     assert len(prepare_refs) == 1
     assert evaluator.requests[0].screenshot_artifact_ref.artifact_id == prepare_refs[0].artifact_id
     with Image.open(tmp_path / prepare_refs[0].path) as recorded:
-        assert recorded.size == (45, 35)
+        assert recorded.size == ((45, 35) if regional else (80, 60))
         assert recorded.getpixel((0, 0)) == (0, 0, 128)
 
 
@@ -380,7 +383,50 @@ def test_web_harness_assert_with_ai_offline_and_privacy_blocked_and_verifier_rec
     assert reconciled.diagnostics == ["assert-chart: provider_unavailable"]
 
 
-def test_web_harness_inspect_with_ai_extract_locate_and_privacy(tmp_path) -> None:
+@pytest.mark.parametrize("browser_started", [False, True])
+def test_web_visual_assertion_neither_uploads_blank_frame_nor_captures_without_browser(tmp_path, browser_started) -> None:
+    from fsq_agent._capability_bootstrap import build_capability_registry
+    from fsq_agent.core import StepRunner
+
+    class Driver(FakeWebDriver):
+        def context(self):
+            return {"metadata": {"browser_started": browser_started}}
+
+        def screenshot(self, params=None):
+            self.calls.append(("screenshot", params))
+            with io.BytesIO() as buffer, Image.new("RGB", (40, 30), "white") as blank:
+                blank.save(buffer, format="PNG")
+                return buffer.getvalue()
+
+    class Evaluator:
+        def evaluate(self, *_args, **_kwargs):
+            pytest.fail("An unlaunched or blank frame must not be evaluated")
+
+    driver = Driver()
+    harness = WebHarness(
+        driver,
+        ArtifactStore(tmp_path),
+        Evaluator(),
+        visual_assertion_policy_resolver=lambda *_: AndroidVisualAssertionPolicy(allow_provider_upload=True, frame_sensitivity="non_sensitive"),
+    )
+    result = StepRunner(harness, capability_registry=build_capability_registry(platform="web")).run_step(
+        "visual",
+        ExecutableStep(
+            step_id="assert-chart",
+            kind="assertion",
+            action_name="assertWithAI",
+            params={"assertion": "Chart visible", "surface": "custom_canvas", "full_screen_reason": "Page contains the chart"},
+        ),
+    )
+    assert result.status == "incomplete"
+    [artifact] = result.phase_reports[0].artifact_refs
+    assert artifact.availability == ("failed" if browser_started else "not_applicable")
+    assert artifact.unavailable_reason == ("capture_failed" if browser_started else "browser_not_started")
+    assert len(driver.calls) == int(browser_started)
+    assert not list(tmp_path.rglob("*.png"))
+
+
+def test_web_harness_inspect_with_ai_extract_locate_and_privacy(tmp_path, monkeypatch) -> None:
     class InspectEvaluator:
         def __init__(self) -> None:
             self.inspect_requests = []
@@ -411,6 +457,14 @@ def test_web_harness_inspect_with_ai_extract_locate_and_privacy(tmp_path) -> Non
     assert (tmp_path / "extract" / extract_res.artifact_refs[0].path).is_file()
     assert len(evaluator.inspect_requests) == 1
     assert evaluator.inspect_requests[0].platform == "web"
+
+    invalid_png = _valid_png_bytes() + b"trailing private bytes"
+    monkeypatch.setattr(driver, "screenshot", lambda *_: invalid_png)
+    rejected = harness.invoke_action(_step("inspectWithAI", {"prompt": "Read chart total"}), harness.get_context())
+    assert rejected.output["reason"] == "capture_failed"
+    assert not rejected.artifact_refs
+    assert len(evaluator.inspect_requests) == 1
+    assert len(list((tmp_path / "extract").rglob("*.png"))) == 1
 
     locate_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Find chart legend", "mode": "locate"}), harness.get_context())
     assert locate_res.status == "failed"

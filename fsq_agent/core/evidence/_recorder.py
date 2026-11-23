@@ -9,7 +9,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from fsq_agent.core._redaction import redact_structure as _credential_safe
+from fsq_agent.core.runtime_secrets import RuntimeSecretStore
 from fsq_agent.models import EvidenceArtifactRef, EvidenceBundle, EvidenceJournalRecord, ExecutableStep, RunnerEvent, RunnerStepResult, SourceRef, StepPhaseReport
 
 
@@ -121,7 +121,7 @@ class EvidenceRecorder:
         self._sequence = record.sequence
 
     def _sanitize(self, value):
-        return _credential_safe(value, self._secret_values)
+        return RuntimeSecretStore.redact_structure(value, self._secret_values)
 
     def _validate_incremental_event(self, event: RunnerEvent) -> EvidenceArtifactRef | None:
         artifact_ref: EvidenceArtifactRef | None = None

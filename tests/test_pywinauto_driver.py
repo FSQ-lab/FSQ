@@ -8,7 +8,7 @@ from io import BytesIO
 from typing import Any
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageGrab
 
 from fsq_agent.drivers.windows._pywinauto import PW_RENDERFULLCONTENT, PywinautoWindowsDriver
 from fsq_agent.models import (
@@ -48,7 +48,11 @@ class _FakeControlWrapper:
         button = kwargs.get("button", "left")
         self._events.append(f"double_click:{button}:iconic={self._state['iconic']}:focused={self._state['focused']}")
 
+    def set_focus(self) -> None:
+        self._events.append(f"control_set_focus:iconic={self._state['iconic']}:focused={self._state['focused']}")
+
     def type_keys(self, text: str, **kwargs: object) -> None:
+        assert kwargs["set_foreground"] is False
         self._events.append(f"type_keys:{text}:iconic={self._state['iconic']}:focused={self._state['focused']}")
 
     def rectangle(self) -> _DynamicRect:
@@ -87,6 +91,7 @@ class _FakeInteractiveWindow:
         return _FakeControlSpec(self._wrapper)
 
     def type_keys(self, key: str, **kwargs: object) -> None:
+        assert kwargs["set_foreground"] is False
         self._events.append(f"window_type_keys:{key}:iconic={self._state['iconic']}:focused={self._state['focused']}")
 
 
@@ -139,6 +144,7 @@ def test_launch_app_restores_iconic_hwnd_and_sets_focus_after_binding(monkeypatc
     monkeypatch.setattr(driver, "_process_executable_path", lambda _pid: exe_path)
     monkeypatch.setattr(driver, "_is_win32_window", lambda candidate: candidate == hwnd)
     monkeypatch.setattr(driver, "_is_window_iconic", lambda candidate: candidate == hwnd and state["iconic"])
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: hwnd if state["focused"] else 0)
 
     def _restore(candidate: int, *, activate: bool = True) -> None:
         assert candidate == hwnd
@@ -188,6 +194,7 @@ def test_launch_app_restores_iconic_hwnd_and_sets_focus_after_binding(monkeypatc
             [
                 "child_window:iconic=False:focused=True",
                 "click:left:iconic=False:focused=True",
+                "control_set_focus:iconic=False:focused=True",
                 "type_keys:^a{BACKSPACE}:iconic=False:focused=True",
                 "type_keys:fsq:iconic=False:focused=True",
             ],
@@ -234,11 +241,13 @@ def test_launch_app_restores_iconic_hwnd_and_sets_focus_after_binding(monkeypatc
         ),
     ],
 )
+@pytest.mark.parametrize("focus_locked", [False, True])
 def test_all_eight_interactions_restore_minimized_window_and_focus_before_resolving_or_acting(
     monkeypatch: pytest.MonkeyPatch,
     action_label: str,
     invoke: Any,
     expected_tail: list[str],
+    focus_locked: bool,
 ) -> None:
     events: list[str] = []
     state = {"iconic": True, "focused": False}
@@ -252,6 +261,14 @@ def test_all_eight_interactions_restore_minimized_window_and_focus_before_resolv
     monkeypatch.setattr(driver, "_mouse_module", lambda: mouse)
     monkeypatch.setattr(driver, "_is_win32_window", lambda candidate: candidate == hwnd)
     monkeypatch.setattr(driver, "_is_window_iconic", lambda candidate: candidate == hwnd and state["iconic"])
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: hwnd if state["focused"] else 0)
+
+    def _blocked_focus() -> None:
+        events.append("focus_locked")
+        raise RuntimeError("SetForegroundWindow blocked by foreground lock")
+
+    if focus_locked:
+        monkeypatch.setattr(window, "set_focus", _blocked_focus)
 
     def _restore(candidate: int, *, activate: bool = True) -> None:
         assert candidate == hwnd
@@ -262,6 +279,11 @@ def test_all_eight_interactions_restore_minimized_window_and_focus_before_resolv
     monkeypatch.setattr(driver, "_restore_window", _restore)
 
     try:
+        if focus_locked:
+            with pytest.raises(RuntimeError, match="foreground lock"):
+                invoke(driver)
+            assert events == [f"restore:{hwnd}", "focus_locked"]
+            return
         result = invoke(driver)
         assert result["status"] == "passed", f"{action_label} failed"
         assert events == [
@@ -273,7 +295,8 @@ def test_all_eight_interactions_restore_minimized_window_and_focus_before_resolv
         driver.close()
 
 
-def test_ensure_window_foreground_falls_back_to_wrapper_restore_and_tolerates_focus_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("focus_locked", [False, True])
+def test_ensure_window_foreground_preserves_non_native_wrapper_behavior_without_swallowing_focus_errors(monkeypatch: pytest.MonkeyPatch, focus_locked: bool) -> None:
     calls: list[str] = []
 
     class _WrapperWindow:
@@ -287,125 +310,140 @@ def test_ensure_window_foreground_falls_back_to_wrapper_restore_and_tolerates_fo
 
         def set_focus(self) -> None:
             calls.append("wrapper_set_focus")
-            raise RuntimeError("SetForegroundWindow blocked by foreground lock")
+            if focus_locked:
+                raise RuntimeError("SetForegroundWindow blocked by foreground lock")
 
     driver = PywinautoWindowsDriver(window_title_re=".*Wrapper")
     monkeypatch.setattr(driver, "_is_win32_window", lambda _hwnd: False)
 
+    window = _WrapperWindow()
     try:
-        returned = driver._ensure_window_foreground(_WrapperWindow())
-        assert returned is not None
+        if focus_locked:
+            with pytest.raises(RuntimeError, match="foreground lock"):
+                driver._ensure_window_foreground(window)
+        else:
+            assert driver._ensure_window_foreground(window) == (window, None)
         assert calls == ["wrapper_restore", "wrapper_set_focus"]
     finally:
         driver.close()
 
 
-def test_screenshot_uses_capture_as_image_when_foreground_and_only_same_process_popup_overlaps(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target_hwnd = 7001
-    popup_hwnd = 7002
-    target_pid = 8800
-    capture_calls: list[str] = []
-
-    class _ForegroundWindow:
-        handle = target_hwnd
-        process_id = target_pid
-
-        def capture_as_image(self) -> Image.Image:
-            capture_calls.append("capture_as_image")
-            return Image.new("RGB", (64, 48), (12, 180, 90))
-
-    driver = PywinautoWindowsDriver(window_title_re=".*Browser")
-    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: _ForegroundWindow())
-    monkeypatch.setattr(driver, "_is_win32_window", lambda hwnd: hwnd == target_hwnd)
-    monkeypatch.setattr(driver, "_is_window_iconic", lambda _hwnd: False)
+@pytest.mark.parametrize(
+    ("owners", "foreground_pid", "allowed"),
+    [
+        ({7003: 7002, 7002: 7001}, 8800, True),
+        ({7003: 0}, 8800, False),  # A same-PID sibling is not a popup of the bound HWND.
+        ({7003: 7001}, 9900, False),  # Do not admit an owned window of another process.
+        ({7003: 7002, 7002: 7003}, 8800, False),  # Inconsistent ownership cannot authorize input.
+    ],
+)
+def test_press_key_requires_foreground_to_be_the_target_or_its_owned_popup_chain(monkeypatch: pytest.MonkeyPatch, owners: dict[int, int], foreground_pid: int, allowed: bool) -> None:
+    hwnd, popup_hwnd = 7001, 7003
+    events: list[str] = []
+    window = _FakeInteractiveWindow(hwnd, 8800, events, {"iconic": False, "focused": False})
+    driver = PywinautoWindowsDriver(window_title_re=".*Target")
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: window)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle == hwnd)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _handle: False)
     monkeypatch.setattr(driver, "_foreground_window_handle", lambda: popup_hwnd)
-    monkeypatch.setattr(
-        driver,
-        "_window_process_id",
-        lambda hwnd: target_pid if hwnd in (target_hwnd, popup_hwnd) else 9999,
-    )
-    monkeypatch.setattr(driver, "_win32_window_rect", lambda _hwnd: (100, 100, 900, 700))
-    # Same-process popup/flyout sits above target_hwnd and overlaps its bounds; non-overlapping external window is elsewhere.
-    monkeypatch.setattr(
-        driver,
-        "_iter_visible_windows_above",
-        lambda _hwnd: [
-            (popup_hwnd, (600, 140, 880, 420)),
-            (9001, (950, 100, 1200, 700)),
-        ],
-    )
-    monkeypatch.setattr(
-        driver,
-        "_capture_window_via_print_window",
-        lambda _hwnd: (_ for _ in ()).throw(AssertionError("PrintWindow must not run for unoccluded foreground target")),
-    )
+    monkeypatch.setattr(driver, "_window_process_id", lambda handle: foreground_pid if handle == popup_hwnd else 8800)
+    monkeypatch.setattr(driver, "_window_owner_handle", owners.__getitem__)
 
     try:
-        png_bytes = driver.screenshot()
-        assert capture_calls == ["capture_as_image"]
-        decoded = Image.open(BytesIO(png_bytes))
-        assert decoded.format == "PNG"
-        assert decoded.size == (64, 48)
-        assert decoded.getpixel((10, 10)) == (12, 180, 90)
+        if allowed:
+            assert driver.press_key(WindowsPressKeyParams(key="{ENTER}"))["status"] == "passed"
+            assert events == [f"set_focus:{hwnd}:iconic=False", "window_type_keys:{ENTER}:iconic=False:focused=True"]
+        else:
+            with pytest.raises(RuntimeError, match="foreground window"):
+                driver.press_key(WindowsPressKeyParams(key="{ENTER}"))
+            assert events == [f"set_focus:{hwnd}:iconic=False"]
+    finally:
+        driver.close()
+
+
+def test_scroll_does_not_dispatch_after_focus_changes_during_control_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    hwnd = 7001
+    events: list[str] = []
+    state = {"iconic": False, "focused": False}
+    window = _FakeInteractiveWindow(hwnd, 8800, events, state)
+    original_child_window = window.child_window
+
+    def _child_window(**kwargs: object) -> _FakeControlSpec:
+        control = original_child_window(**kwargs)
+        state["focused"] = False
+        return control
+
+    driver = PywinautoWindowsDriver(window_title_re=".*Target")
+    monkeypatch.setattr(window, "child_window", _child_window)
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: window)
+    monkeypatch.setattr(driver, "_mouse_module", lambda: _FakeMouse(events))
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle == hwnd)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _handle: False)
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: hwnd if state["focused"] else 7003)
+    monkeypatch.setattr(driver, "_window_process_id", lambda _handle: 8800)
+    monkeypatch.setattr(driver, "_window_owner_handle", lambda _handle: 0)
+
+    try:
+        with pytest.raises(RuntimeError, match="foreground window"):
+            driver.scroll_on(WindowsScrollOnParams(target="List", locator={"title": "List"}, wheel_dist=1))
+        assert events == [
+            f"set_focus:{hwnd}:iconic=False",
+            "child_window:iconic=False:focused=True",
+            "rect:iconic=False:focused=False",
+        ]
     finally:
         driver.close()
 
 
 @pytest.mark.parametrize(
-    ("scenario", "fg_hwnd", "above_windows", "is_iconic"),
+    ("fg_hwnd", "is_iconic"),
     [
-        ("background_other_pid_foreground", 9100, [], False),
-        ("external_topmost_window_occluding", 7001, [(9200, (200, 150, 600, 500))], False),
-        ("minimized_target_window", 7001, [], True),
+        (7001, False),  # The target itself is foreground.
+        (7002, False),  # An owned popup is foreground.
+        (7003, False),  # An unrelated same-process sibling is foreground.
+        (9100, False),  # An unrelated process is foreground.
+        (9100, True),  # The target is minimized and must be restored without activation.
     ],
 )
-def test_screenshot_uses_print_window_when_backgrounded_minimized_or_externally_occluded(
-    monkeypatch: pytest.MonkeyPatch,
-    scenario: str,
-    fg_hwnd: int,
-    above_windows: list[tuple[int, tuple[int, int, int, int]]],
-    is_iconic: bool,
-) -> None:
+def test_screenshot_uses_only_bound_hwnd_even_if_foreground_changes_during_capture(monkeypatch: pytest.MonkeyPatch, fg_hwnd: int, is_iconic: bool) -> None:
     target_hwnd = 7001
     target_pid = 8800
     events: list[str] = []
     iconic_state = {"iconic": is_iconic}
+    foreground = [fg_hwnd]
 
-    class _OccludedWindow:
+    class _BoundWindow:
         handle = target_hwnd
         process_id = target_pid
 
         def capture_as_image(self) -> Image.Image:
-            raise AssertionError(f"capture_as_image must not be used in scenario={scenario}")
+            pytest.fail("A bound Win32 window must never be captured with a desktop grab.")
 
     driver = PywinautoWindowsDriver(window_title_re=".*Target")
-    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: _OccludedWindow())
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: _BoundWindow())
     monkeypatch.setattr(driver, "_is_win32_window", lambda hwnd: hwnd == target_hwnd)
+    monkeypatch.setattr(ImageGrab, "grab", lambda **kwargs: pytest.fail("The driver must not grab desktop pixels."))
     monkeypatch.setattr(driver, "_is_window_iconic", lambda hwnd: hwnd == target_hwnd and iconic_state["iconic"])
 
     def _restore_no_activate(hwnd: int, *, activate: bool = True) -> None:
+        assert foreground[0] == fg_hwnd
         events.append(f"restore:{hwnd}:activate={activate}")
         iconic_state["iconic"] = False
 
     def _reminimize_no_activate(hwnd: int) -> None:
+        assert foreground[0] == 9999
         events.append(f"minimize_no_activate:{hwnd}")
         iconic_state["iconic"] = True
 
     monkeypatch.setattr(driver, "_restore_window", _restore_no_activate)
     monkeypatch.setattr(driver, "_minimize_window_no_activate", _reminimize_no_activate)
-    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: fg_hwnd)
-    monkeypatch.setattr(
-        driver,
-        "_window_process_id",
-        lambda hwnd: target_pid if hwnd == target_hwnd else 4444,
-    )
-    monkeypatch.setattr(driver, "_win32_window_rect", lambda _hwnd: (100, 100, 700, 500))
-    monkeypatch.setattr(driver, "_iter_visible_windows_above", lambda _hwnd: above_windows)
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: foreground[0])
+    monkeypatch.setattr(driver, "_window_process_id", lambda hwnd: target_pid if hwnd in (7001, 7002, 7003) else 4444)
 
     def _fake_print_window(hwnd: int) -> Image.Image:
         assert hwnd == target_hwnd
+        assert iconic_state["iconic"] is False
+        foreground[0] = 9999
         events.append(f"print_window:{hwnd}")
         return Image.new("RGB", (80, 60), (220, 40, 30))
 
@@ -413,6 +451,7 @@ def test_screenshot_uses_print_window_when_backgrounded_minimized_or_externally_
 
     try:
         png_bytes = driver.screenshot()
+        assert foreground == [9999]
         if is_iconic:
             assert events == [
                 f"restore:{target_hwnd}:activate=False",
@@ -430,31 +469,76 @@ def test_screenshot_uses_print_window_when_backgrounded_minimized_or_externally_
         driver.close()
 
 
-def test_screenshot_raises_when_print_window_fails_never_falling_back_to_occluded_screen_grab(
+@pytest.mark.parametrize("is_iconic", [False, True])
+def test_screenshot_raises_when_print_window_fails_without_a_desktop_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    is_iconic: bool,
 ) -> None:
     target_hwnd = 7001
+    iconic = is_iconic
 
-    class _OccludedWindow:
+    class _BoundWindow:
         handle = target_hwnd
         process_id = 8800
 
         def capture_as_image(self) -> Image.Image:
-            raise AssertionError("Must never substitute external occluding screen pixels on PrintWindow failure")
+            pytest.fail("The driver must not grab desktop pixels on PrintWindow failure.")
 
     driver = PywinautoWindowsDriver(window_title_re=".*Target")
-    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: _OccludedWindow())
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: _BoundWindow())
     monkeypatch.setattr(driver, "_is_win32_window", lambda hwnd: hwnd == target_hwnd)
-    monkeypatch.setattr(driver, "_is_unoccluded_foreground_target", lambda _hwnd, _win=None: False)
-    monkeypatch.setattr(driver, "_is_window_iconic", lambda _hwnd: False)
-    monkeypatch.setattr(
-        driver,
-        "_capture_window_via_print_window",
-        lambda hwnd: (_ for _ in ()).throw(RuntimeError(f"Win32 PrintWindow(PW_RENDERFULLCONTENT) failed for occluded/background window (hwnd={hwnd}).")),
-    )
+    monkeypatch.setattr(ImageGrab, "grab", lambda **kwargs: pytest.fail("The driver must not grab desktop pixels on PrintWindow failure."))
+    monkeypatch.setattr(driver, "_window_process_id", lambda _hwnd: 8800)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _hwnd: iconic)
+
+    def _restore(hwnd: int, *, activate: bool) -> None:
+        nonlocal iconic
+        assert hwnd == target_hwnd
+        assert not activate
+        iconic = False
+
+    def _minimize(hwnd: int) -> None:
+        nonlocal iconic
+        assert hwnd == target_hwnd
+        iconic = True
+
+    def _fail_capture(hwnd: int) -> Image.Image:
+        assert hwnd == target_hwnd
+        assert not iconic
+        raise RuntimeError(f"Win32 PrintWindow(PW_RENDERFULLCONTENT) failed for the bound window (hwnd={hwnd}).")
+
+    monkeypatch.setattr(driver, "_restore_window", _restore)
+    monkeypatch.setattr(driver, "_minimize_window_no_activate", _minimize)
+    monkeypatch.setattr(driver, "_capture_window_via_print_window", _fail_capture)
 
     try:
         with pytest.raises(RuntimeError, match=r"PrintWindow\(PW_RENDERFULLCONTENT\) failed"):
+            driver.screenshot()
+        assert iconic == is_iconic
+    finally:
+        driver.close()
+
+
+def test_screenshot_rejects_render_if_bound_handle_changes_ownership_during_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BoundWindow:
+        handle = 7001
+
+    owner_pid = 8800
+
+    def _capture(hwnd: int) -> Image.Image:
+        nonlocal owner_pid
+        assert hwnd == _BoundWindow.handle
+        owner_pid = 8801
+        return Image.new("RGB", (16, 16), (1, 2, 3))
+
+    driver = PywinautoWindowsDriver(window_title_re=".*Target")
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: _BoundWindow())
+    monkeypatch.setattr(driver, "_is_win32_window", lambda hwnd: hwnd == _BoundWindow.handle)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _hwnd: False)
+    monkeypatch.setattr(driver, "_window_process_id", lambda _hwnd: owner_pid)
+    monkeypatch.setattr(driver, "_capture_window_via_print_window", _capture)
+    try:
+        with pytest.raises(RuntimeError, match="target disappeared or changed ownership"):
             driver.screenshot()
     finally:
         driver.close()
@@ -619,7 +703,6 @@ def test_live_win32_print_window_captures_background_hwnd_without_gdi_handle_lea
                 raise AssertionError("Expected occluded path to use Win32 PrintWindow")
 
         monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: _LiveBoundWindow())
-        monkeypatch.setattr(driver, "_is_unoccluded_foreground_target", lambda _h, _w=None: False)
         png_bytes = driver.screenshot()
         decoded = Image.open(BytesIO(png_bytes))
         assert decoded.format == "PNG"
@@ -810,9 +893,21 @@ def test_live_uia_minimized_window_resolves_for_lossless_screenshot_and_restores
         # Window MUST remain minimized after read-only screenshot observation.
         assert title_driver._is_window_iconic(hwnd) is True
 
-        # Exercise press_key through real UIA _resolve_main_window without emitting host keyboard input.
+        # Keep live window resolution and restoration, but do not depend on whether Windows grants
+        # this CI process the foreground or emit any host keyboard input.
         from pywinauto.base_wrapper import BaseWrapper
+        from pywinauto.controls.uiawrapper import UIAWrapper
 
+        foreground = 0
+
+        def _set_focus(wrapper: UIAWrapper) -> None:
+            nonlocal foreground
+            assert wrapper.handle == hwnd
+            assert not app_driver._is_window_iconic(hwnd)
+            foreground = hwnd
+
+        monkeypatch.setattr(UIAWrapper, "set_focus", _set_focus)
+        monkeypatch.setattr(app_driver, "_foreground_window_handle", lambda: foreground)
         monkeypatch.setattr(BaseWrapper, "type_keys", lambda self, *a, **kw: self)
         press_res = app_driver.press_key(WindowsPressKeyParams(key="{VK_SHIFT}"))
         assert press_res["status"] == "passed"

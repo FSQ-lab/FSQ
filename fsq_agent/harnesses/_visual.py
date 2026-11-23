@@ -190,14 +190,20 @@ class _CaptureRejectedError(Exception):
         self.code = code
 
 
-def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=(), capture_failed=False):
+def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=(), capture_failed=False, unavailable_reason=None):
     diagnostics = {key: value for key, value in (diagnostics or {}).items() if key in {"backend_code", "request_state", "session_state", "stage"}}
     outcome = "failed" if conflict else "inconclusive"
     result = {
         "status": outcome,
         "outcome": outcome,
         "passed": False,
-        "explanation": "Deterministic evidence contradicts the expectation." if conflict else f"Visual assertion is unverified ({code}).",
+        "explanation": (
+            "Deterministic evidence contradicts the expectation."
+            if conflict
+            else "An available Provider is required; visual assertions cannot be verified offline."
+            if code == "provider_unavailable"
+            else f"Visual assertion is unverified ({unavailable_reason or code})."
+        ),
         "error_code": None if conflict else code,
         "deterministic_conflict": conflict,
         "capture": None,
@@ -207,7 +213,7 @@ def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=(), 
         artifact_id=f"visual-{step_id}-{uuid.uuid4().hex}",
         kind="screenshot",
         availability="failed" if capture_failed else "not_applicable",
-        unavailable_reason=code,
+        unavailable_reason=unavailable_reason or code,
         metadata={"visual_assertion": result, "capture_required": capture_failed},
     )
 

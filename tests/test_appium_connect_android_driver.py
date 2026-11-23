@@ -548,6 +548,35 @@ def owned_android_backend(monkeypatch: pytest.MonkeyPatch, android_sdk):
     return session, events
 
 
+def test_runner_android_capture_observes_session_before_and_after_real_action(tmp_path, owned_android_backend):
+    from fsq_agent._capability_bootstrap import build_capability_registry
+
+    session, events = owned_android_backend
+    driver = AppiumConnectAndroidDriver(app_id="com.example.app", serial="isolated-evidence-device")
+    harness = AndroidHarness(driver=driver, artifact_store=ArtifactStore(tmp_path))
+    runner = StepRunner(harness, capability_registry=build_capability_registry(platform="android"), capture_action_before=True)
+    try:
+        step = ExecutableStep(step_id="press-home", action_name="press_key", kind="action", params={"key": "Home"})
+        session.screenshot_error = RuntimeError("active screenshot unavailable")
+        result = runner.run_step("run", step)
+        prepare, invoke, _, finalize = result.phase_reports
+        assert prepare.artifact_refs[0].availability == "not_applicable"
+        assert prepare.artifact_refs[0].unavailable_reason == "android_session_not_started"
+        assert prepare.artifact_refs[0].metadata["requested_artifact_kind"] == "screenshot"
+        assert invoke.status == "passed"
+        assert finalize.artifact_refs[0].availability == "failed"
+        assert result.failure_category == "artifact_error"
+        assert [event[0] for event in events] == ["scope.enter", "create_session"]
+        assert [call[0] for call in session.calls] == ["press_keycode", "observe_tree", "display_size", "take_screenshot"]
+    finally:
+        harness.close()
+    closed = runner.run_step("run", step)
+    assert closed.action_status == "failed"
+    assert not closed.evidence_errors
+    assert [ref.availability for phase in closed.phase_reports for ref in phase.artifact_refs] == ["not_applicable", "not_applicable"]
+    assert [event[0] for event in events] == ["scope.enter", "create_session", "scope.exit"]
+
+
 @pytest.mark.parametrize("policy", [{}, {"new_command_timeout_seconds": None}, {"new_command_timeout_seconds": 0}, {"new_command_timeout_seconds": 0.125}, {"new_command_timeout_seconds": 1800.5}])
 @pytest.mark.parametrize("idle", [None, 0, 1000])
 def test_factory_forwards_command_and_ui_idle_policies_unchanged(owned_android_backend, policy, idle):
@@ -708,8 +737,7 @@ def test_close_after_idle_never_probes_and_owned_close_fences_later_recovery(own
     event_snapshot = list(events)
     if not borrowed:
         assert driver.press_key({"key": "Back"})["metadata"]["reason"] == "closed"
-        with pytest.raises(ToolExecutionError):
-            driver.context()
+        assert driver.context()["metadata"]["session_started"] is False
     driver.close()
     assert session.calls == calls
     assert events == event_snapshot
@@ -1370,7 +1398,7 @@ def test_driver_raises_configuration_error_when_appium_connect_agent_missing(mon
     driver = AppiumConnectAndroidDriver(app_id="com.example.app", serial="emulator-5554")
     try:
         with pytest.raises(ConfigurationError) as exc_info:
-            driver.context()
+            driver.press_key({"key": "Home"})
         assert "Reinstall or repair fsq-agent" in str(exc_info.value.context.get("action", ""))
     finally:
         driver.close()
@@ -1622,12 +1650,11 @@ def test_inspection_password_and_safe_attributes_share_one_total_deadline(monkey
     assert budgets == [10.0, 4.0]
 
 
-def test_closed_driver_context_and_input_are_distinct_safe_local_failures() -> None:
+def test_closed_driver_context_is_non_applicable_but_input_remains_failed() -> None:
     driver = AppiumConnectAndroidDriver(app_id="com.example.app", serial="never-connect")
     driver.close()
-    with pytest.raises(ToolExecutionError) as closed:
-        driver.context()
-    assert closed.value.context["reason"] == "closed"
+    assert driver.context()["session_id"] is None
+    assert driver.context()["metadata"]["session_started"] is False
     result = driver.input_text({"target": "Input", "text": "closed-input-canary"})
     assert result["metadata"]["reason"] == "closed"
     assert result["metadata"]["stage"] == "pre_inspection"

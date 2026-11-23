@@ -543,6 +543,77 @@ def test_unready_provider_macos_case_runs_real_assertion_path_to_inconclusive(tm
     assert frozen["counts"]["failed"] == 0
 
 
+@pytest.mark.parametrize(("has_key", "authorized", "outcome"), [(False, True, "provider_unavailable"), (True, False, "privacy_blocked"), (True, True, "passed")])
+def test_web_strict_distinguishes_provider_readiness_and_frame_authorization(tmp_path, monkeypatch, has_key, authorized, outcome):
+    from test_web_harness import FakeWebDriver
+
+    from fsq_agent import _strict_visual
+    from fsq_agent.application import test_case
+    from fsq_agent.models import AIAssertionResult, AndroidVisualAssertionPolicy, HarnessContext
+
+    browser = tmp_path / "Google Chrome" / "chrome.exe"
+    browser.parent.mkdir()
+    browser.touch()
+    source = tmp_path / "visual.fsq.yaml"
+    source.write_text(
+        "schemaVersion: fsq.ai-test/v1\nname: Visual\nplatform: web\n---\n- assertWithAI:\n    assertion: The page chart is visible\n    surface: custom_canvas\n    full_screen_reason: The chart spans the page\n"
+    )
+    settings = Settings(harness={"platform": "web"})
+    settings.harness.web.browser_executable_path = browser
+    settings.agent_runtime.provider = "openai"
+    settings.agent_runtime.model = "gpt-5"
+    settings.agent_runtime.base_url = "https://api.openai.com/v1/"
+    if has_key:
+        settings.agent_runtime.api_key = "example-test-credential"
+    settings.workspace.root_dir = tmp_path
+    settings.cases.dir = tmp_path
+    settings.output.runs_dir = tmp_path / ".fsq" / "runs" / "web"
+
+    class Driver(FakeWebDriver):
+        def close(self):
+            self.calls.append(("close", None))
+
+    driver = Driver()
+    evaluations = []
+    decisions = []
+
+    def authorize(context: HarnessContext, sequence: int):
+        decisions.append((context.metadata["capture_invocation"]["run_id"], sequence))
+        return AndroidVisualAssertionPolicy(allow_provider_upload=authorized, frame_sensitivity="non_sensitive")
+
+    class Evaluator:
+        def evaluate(self, request, *, cancellation_check=None):
+            evaluations.append(request)
+            return AIAssertionResult(status="passed", outcome="passed", passed=True, explanation="The chart is visible.", capture=request.capture)
+
+        def close(self):
+            pass
+
+    def build(settings):
+        if not has_key:
+            pytest.fail("Missing Provider credentials must not construct a Provider session")
+        return Evaluator()
+
+    monkeypatch.setattr(_strict_visual, "build_ai_assertion_evaluator", build)
+    monkeypatch.setattr("fsq_agent.core.interfaces.DriverFactory.create_web_driver", lambda *_: driver)
+    monkeypatch.setattr(case_test_module, "require_initialized_workspace", lambda *_: SimpleNamespace(workspace=tmp_path))
+    monkeypatch.setattr(case_test_module, "load_workspace_platform_settings", lambda *_: settings)
+    monkeypatch.setattr(case_test_module, "_registered_workspace_name", lambda *_: "offline")
+    result = test_case(CaseTestRequest(current_directory=tmp_path, platform="web", case_path=source), visual_assertion_policy_resolver=authorize)
+    run = settings.output.runs_dir / result.run_id
+    assert result.status == ("success" if outcome == "passed" else "inconclusive")
+    assert len([entry for entry in driver.calls if entry[0] == "screenshot"]) == int(outcome == "passed")
+    if outcome == "passed":
+        [request] = evaluations
+        assert request.run_id == result.run_id
+        assert (run / request.screenshot_path).is_file()
+        assert decisions == [(result.run_id, 1)]
+    else:
+        assert not evaluations
+        assert not list(run.rglob("*.png"))
+        assert outcome in (run / "core-report.md").read_text()
+
+
 def test_macos_case_test_falls_back_to_case_app_id_when_workspace_bundle_id_unset(tmp_path, monkeypatch):
     from fsq_agent.config import Settings
     from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver

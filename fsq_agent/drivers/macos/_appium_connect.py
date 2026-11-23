@@ -36,10 +36,8 @@ from fsq_agent.drivers._tree_compaction import (
     TreeCompactionPolicy,
     build_compacted_envelope,
     compact_xml_element_tree,
-    count_xml_elements,
     empty_compacted_envelope,
     sanitize_xml_tag,
-    sanitize_xml_text,
     unparsed_fallback_envelope,
 )
 from fsq_agent.drivers._visual_inspection import _run_visual_inspection
@@ -991,6 +989,10 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         self._operation_cancellation: Event | None = None
         self._last_operation_finished_at: float | None = None
         self._terminal_disposal_diagnostic: dict[str, object] | None = None
+        self._snapshot_secret_values: tuple[str, ...] = ()
+
+    def configure_snapshot_redaction(self, private_values: tuple[str, ...]) -> None:
+        self._snapshot_secret_values = private_values
 
     def close(self) -> None:
         if self._borrowed_session:
@@ -3414,6 +3416,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     empty_root_tag="XCUIElementTypeApplication",
                     max_depth=max_depth,
                     text_limit_chars=DEFAULT_MACOS_SNAPSHOT_TEXT_LIMIT_CHARS,
+                    max_xml_chars=DEFAULT_MACOS_SNAPSHOT_MAX_XML_CHARS,
                 ),
                 {},
             )
@@ -3423,12 +3426,11 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             xml_root = ElementTree.Element("XCUIElementTypeApplication")
             for child_root in roots:
                 xml_root.append(self._tree_node_to_xml_element(child_root))
-        serialized = ElementTree.tostring(xml_root, encoding="unicode")
-        source_nodes = count_xml_elements(xml_root)
         try:
             compacted = compact_xml_element_tree(
                 xml_root,
                 policy=MACOS_SNAPSHOT_POLICY,
+                secret_values=self._snapshot_secret_values,
                 max_depth=max_depth,
                 include_attributes=include_attributes,
                 max_xml_chars=DEFAULT_MACOS_SNAPSHOT_MAX_XML_CHARS,
@@ -3436,7 +3438,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 sibling_stepdowns=MACOS_COMPACT_SIBLING_STEPDOWNS,
             )
             compaction_meta: dict[str, object] = {}
-            if (compacted.effective_max_depth is not None and compacted.effective_max_depth < max_depth) or compacted.max_siblings_per_parent is not None:
+            if compacted.size_limit_applied or (compacted.effective_max_depth is not None and compacted.effective_max_depth < max_depth) or compacted.max_siblings_per_parent is not None:
                 compaction_meta = {
                     "adaptive_compaction": True,
                     "effective_max_depth": compacted.effective_max_depth if compacted.effective_max_depth is not None else max_depth,
@@ -3453,11 +3455,12 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
             self._propagate_if_cancelled(exc)
             return (
                 unparsed_fallback_envelope(
-                    serialized_source=serialized,
-                    source_nodes=source_nodes,
+                    xml_root=xml_root,
+                    policy=MACOS_SNAPSHOT_POLICY,
+                    secret_values=self._snapshot_secret_values,
                     max_depth=max_depth,
                     error=exc,
-                    preview_chars=DEFAULT_MACOS_SNAPSHOT_SOURCE_PREVIEW_CHARS,
+                    max_xml_chars=DEFAULT_MACOS_SNAPSHOT_MAX_XML_CHARS,
                 ),
                 {},
             )
@@ -3468,10 +3471,12 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
         type_obs = getattr(node, "type", None)
         raw_tag = type_obs.value if getattr(type_obs, "state", None) == "value" and isinstance(type_obs.value, str) and type_obs.value else "XCUIElementTypeAny"
         tag, was_sanitized = sanitize_xml_tag(raw_tag, fallback="XCUIElementTypeAny")
+        if any(secret and secret in raw_tag for secret in self._snapshot_secret_values):
+            tag, was_sanitized = "XCUIElementTypeAny", True
         is_secure = self._is_secure_text_type(raw_tag)
         attribs: dict[str, str] = {}
         if was_sanitized and raw_tag.strip():
-            attribs["type"] = sanitize_xml_text(raw_tag.strip())
+            attribs["type"] = raw_tag.strip()
         for attr_field, xml_name in (
             ("id", "identifier"),
             ("label", "label"),
@@ -3483,7 +3488,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                 continue
             obs = getattr(node, attr_field, None)
             if getattr(obs, "state", None) == "value" and isinstance(obs.value, str) and obs.value:
-                attribs[xml_name] = sanitize_xml_text(obs.value)
+                attribs[xml_name] = obs.value
 
         element_type_obs = getattr(node, "element_type", None)
         if getattr(element_type_obs, "state", None) == "value" and _is_strict_int(element_type_obs.value):
@@ -3518,15 +3523,14 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     continue
                 if is_secure and key == "value":
                     continue
-                safe_key, _ = sanitize_xml_tag(key, fallback="attr")
-                attribs[safe_key] = sanitize_xml_text(str(raw_val))
+                attribs[key] = str(raw_val)
 
         xml_el = ElementTree.Element(tag, attribs)
         raw_text = getattr(node, "raw_text", None)
         text_obs = getattr(node, "text", None)
         if not is_secure:
             if isinstance(raw_text, str) and raw_text:
-                xml_el.text = sanitize_xml_text(raw_text)
+                xml_el.text = raw_text
             elif (
                 getattr(text_obs, "state", None) == "value"
                 and isinstance(text_obs.value, str)
@@ -3539,7 +3543,7 @@ class AppiumConnectMacOSDriver(AIAssertionBackendToolMixin):
                     attribs.get("placeholderValue"),
                 )
             ):
-                xml_el.text = sanitize_xml_text(text_obs.value)
+                xml_el.text = text_obs.value
         for child in getattr(node, "children", ()):
             xml_el.append(self._tree_node_to_xml_element(child))
         return xml_el

@@ -82,8 +82,6 @@ def _failure_event_payload(exc: BaseException) -> dict[str, str | int]:
 
 
 class FsqAgent:
-    _supports_deferred_completion_event = True
-
     def __init__(
         self,
         settings: Settings,
@@ -101,7 +99,6 @@ class FsqAgent:
         self.skill_loader = skill_loader
         self.runtime = runtime
         self.event_logger = event_logger
-        self._pending_completion_emitters: dict[str, RunEventEmitter] = {}
 
     @classmethod
     def from_settings(
@@ -139,7 +136,6 @@ class FsqAgent:
         *,
         evidence_sink: EvidenceJournalSink | None = None,
         cancellation_check: Callable[[], None] | None = None,
-        _defer_completion_event: bool = False,
     ) -> DynamicAgentOutcome:
         run_id = context.run_id
         if not run_id.strip() or run_id in {".", ".."} or any(character in run_id for character in "/\\:\x00") or Path(run_id).name != run_id:
@@ -174,10 +170,6 @@ class FsqAgent:
             if cancellation_check is not None:
                 cancellation_check()
             verification = await self.verifier.verify(task, results, events_path=events_path)
-            if _defer_completion_event:
-                self._pending_completion_emitters[run_id] = emitter
-            else:
-                await emitter.emit(RunEvent(run_id=run_id, task_id=task.id, type="run_completed", title="Execution completed", message=verification.summary, payload={"status": verification.status}))
             return DynamicAgentOutcome(
                 task=task,
                 steps=results,
@@ -190,39 +182,9 @@ class FsqAgent:
                 ],
             )
         except BaseException as exc:
-            self._pending_completion_emitters.pop(run_id, None)
             with suppress(BaseException):
                 await emitter.emit(RunEvent(run_id=run_id, task_id=task.id, type="run_failed", title="Execution interrupted", message=type(exc).__name__, payload=_failure_event_payload(exc)))
             raise
-
-    async def emit_deferred_run_completed(
-        self,
-        *,
-        run_id: str,
-        task_id: str,
-        status: str,
-        summary: str,
-        verification_status: str | None = None,
-    ) -> None:
-        emitter = self._pending_completion_emitters.pop(run_id, None)
-        if emitter is None:
-            return
-        payload: dict[str, Any] = {"status": status}
-        if verification_status is not None and verification_status != status:
-            payload["verification_status"] = verification_status
-        await emitter.emit(
-            RunEvent(
-                run_id=run_id,
-                task_id=task_id,
-                type="run_completed",
-                title="Execution completed",
-                message=summary,
-                payload=payload,
-            )
-        )
-
-    def discard_deferred_run_completed(self, run_id: str) -> None:
-        self._pending_completion_emitters.pop(run_id, None)
 
     def _load_pre_plan_knowledge(self) -> KnowledgeBundle:
         items: dict[str, str] = {}

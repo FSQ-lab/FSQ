@@ -189,7 +189,15 @@ class WebHarness:
                 context=capture_context,
             )
             policy = self._frame_policy(current.context, current.capture_sequence)
-            artifact = _capture_host_visual(self.driver, self.artifact_store, current, policy, callable(getattr(self.ai_assertion_evaluator, "evaluate", None)), phase)
+            artifact = _capture_host_visual(
+                lambda: self.driver.screenshot(WebTakeScreenshotParams(fullPage=current.params.region is None)),
+                self.artifact_store,
+                current,
+                policy,
+                callable(getattr(self.ai_assertion_evaluator, "evaluate", None)),
+                phase,
+                inactive_reason="browser_not_started" if self._browser_not_started(current.context) else None,
+            )
             self._visual_assertion_capture = _HostVisualAssertionCapture(current, policy, artifact)
             return artifact
         if self.artifact_store is None:

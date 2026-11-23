@@ -22,7 +22,7 @@ class RunEventEmitter:
         values = _safe_event_value(event.model_dump(mode="json"), self._secret_values)
         values["sequence"] = self.sequence
         sequenced = RunEvent.model_validate(values)
-        if self.logger:
+        if self.logger and event.type not in {"run_completed", "run_failed"}:
             self.logger.write_run_event(sequenced)
         if self.sink:
             result = self.sink(sequenced)

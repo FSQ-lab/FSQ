@@ -45,7 +45,9 @@ it('shows strict case facts without claiming human review', async () => {
   expect(screen.getByText('web')).toBeInTheDocument();
   expect(screen.getByText('6')).toBeInTheDocument();
   expect(screen.getByText('validated')).toBeInTheDocument();
-  expect(screen.getByText('Provider required')).toBeInTheDocument();
+  expect(screen.getByText('AI assertion').parentElement).toHaveTextContent(/unverified/);
+  expect(screen.getByText('Strict runner')).toBeVisible();
+  expect(screen.queryByText('Provider')).not.toBeInTheDocument();
   expect(screen.queryByText(/reviewed/i)).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole('radio', { name: 'Explore' }));
   expect(onModeChange).toHaveBeenCalledWith('explore');

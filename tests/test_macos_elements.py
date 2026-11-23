@@ -6,20 +6,24 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from xml.etree import ElementTree
 
 import pytest
 from pydantic import ValidationError
 
+from fsq_agent.drivers.macos import _appium_connect
 from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
 from fsq_agent.models import (
     ConfigurationError,
+    ExecutableStep,
     MacOSAssertVisibleParams,
     MacOSClickOnParams,
     MacOSLocator,
     MacOSPoint,
     MacOSRightClickOnParams,
     MacOSUiSnapshotParams,
+    RuntimeSecretSettings,
 )
 
 
@@ -274,6 +278,74 @@ def test_tree_clipping_is_explicit() -> None:
     assert tree["compaction"]["text_attribute_limit"] == 160
     parsed = ElementTree.fromstring(tree["xml"])  # noqa: S314
     assert parsed[0].attrib["label"] == "x" * 160
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_snapshot_redacts_workspace_values_and_credential_patterns_before_serialization(monkeypatch: pytest.MonkeyPatch, fallback: bool) -> None:
+    from fsq_agent.harnesses._macos import MacOSHarness
+
+    private_value = 'private<&"value'
+    prefix = "x" * 150
+    root = ElementTree.Element("XCUIElementTypeApplication")
+    button = ElementTree.SubElement(
+        root,
+        "XCUIElementTypeButton",
+        {
+            "label": f"{prefix}{private_value} tail",
+            "title": "password=ASSIGNMENT_CANARY",
+            "apiKey": "ATTRIBUTE_CANARY",
+            "url": "https://example.test/?scope=notes&sig=URL_CANARY&view=full",
+        },
+    )
+    button.text = f"Click & choose {private_value}"
+    driver = AppiumConnectMacOSDriver(session=SessionStub(source=ElementTree.tostring(root, encoding="unicode")))
+    settings = RuntimeSecretSettings()
+    settings.set_values({"ACTIVE_SECRET": private_value})
+    harness = MacOSHarness(driver, runtime_secret_settings=settings)
+    if fallback:
+
+        def fail_compaction(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("COMP_FAIL_CANARY")
+
+        monkeypatch.setattr(_appium_connect, "compact_xml_element_tree", fail_compaction)
+
+    step = ExecutableStep(step_id="snapshot", kind="observation", action_name="ui_snapshot", params={"include_attributes": True})
+    result = harness.invoke_action(step, harness.get_context())
+    assert result.status == "passed"
+    snapshot = result.output
+    assert snapshot["format"] == ("unparsed_xml" if fallback else "xml")
+    xml = snapshot["xml"]
+    assert not any(canary in json.dumps(snapshot) for canary in ("private", "ASSIGNMENT_CANARY", "ATTRIBUTE_CANARY", "URL_CANARY", "COMP_FAIL_CANARY"))
+    parsed = ElementTree.fromstring(xml)  # noqa: S314
+    assert parsed[0].attrib["label"] == f"{prefix}*** tail"
+    assert parsed[0].attrib["title"] == "password=***"
+    assert parsed[0].attrib["apiKey"] == "***"
+    assert parse_qs(urlsplit(parsed[0].attrib["url"]).query) == {"scope": ["notes"], "sig": ["[REDACTED]"], "view": ["full"]}
+    assert parsed[0].text == "Click & choose ***"
+
+
+def test_snapshot_hard_character_cap_preserves_complete_xml_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_appium_connect, "DEFAULT_MACOS_SNAPSHOT_MAX_XML_CHARS", 140)
+    root = ElementTree.Element("XCUIElementTypeApplication", {"identifier": "&" * 40})
+    ElementTree.SubElement(root, "XCUIElementTypeButton", {"label": "Keep"})
+    ElementTree.SubElement(root, "XCUIElementTypeButton", {"identifier": "<" * 40})
+    driver = AppiumConnectMacOSDriver(session=SessionStub(source=ElementTree.tostring(root, encoding="unicode")))
+
+    snapshot = driver.ui_snapshot(MacOSUiSnapshotParams(max_depth=3, include_attributes=True))
+    assert snapshot["format"] == "xml"
+    assert len(snapshot["xml"]) <= 140
+    parsed = ElementTree.fromstring(snapshot["xml"])  # noqa: S314
+    assert parsed.tag == root.tag
+    assert [child.attrib for child in parsed] == [{"label": "Keep"}]
+    assert snapshot["coverage"] == {
+        "status": "partial",
+        "reason": "semantic_compaction",
+        "source_nodes": 3,
+        "retained_nodes": 2,
+        "retained_characters": len(snapshot["xml"]),
+    }
+    assert snapshot["compaction"]["size_limit_applied"] is True
+    assert snapshot["compaction"]["children_truncated"] == 1
 
 
 @pytest.mark.parametrize(

@@ -351,13 +351,8 @@ def test_android_harness_requires_artifact_store_for_capture() -> None:
 
 
 @pytest.mark.parametrize("kind", ["screenshot", "ui_snapshot"])
-def test_android_harness_records_not_applicable_when_session_unstarted_and_cannot_autoconnect(tmp_path, kind: str) -> None:
+def test_android_harness_uses_explicit_context_applicability_for_capture(tmp_path, kind: str) -> None:
     class UnstartedAndroidDriver(FakeAndroidDriver):
-        def __init__(self) -> None:
-            super().__init__()
-            self._session = None
-            self.serial = None
-
         def context(self) -> dict[str, object]:
             return {"session_id": None, "metadata": {"session_started": False}}
 

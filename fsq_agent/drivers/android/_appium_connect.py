@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _android_driver_tool
+from fsq_agent.drivers._color_sample import _sample_color
 from fsq_agent.drivers._visual_inspection import _run_visual_inspection
 from fsq_agent.models import (
     AndroidAssertNotVisibleParams,
@@ -42,6 +43,7 @@ from fsq_agent.models import (
     AndroidTapOnParams,
     AndroidUiTreeParams,
     ConfigurationError,
+    SampleColorParams,
     ToolExecutionError,
 )
 
@@ -78,6 +80,8 @@ ANDROID_SAFE_BACKEND_CODES = frozenset(
         "invalid_argument",
         "invalid_request",
         "command_failed",
+        "pointer_mapping_unavailable",
+        "frame_not_single",
         "operation_timeout",
         "condition_timeout",
         "operation_cancelled",
@@ -1035,6 +1039,20 @@ class AppiumConnectAndroidDriver(AIAssertionBackendToolMixin):
         if not isinstance(params, AndroidInspectWithAIParams):
             params = AndroidInspectWithAIParams.model_validate(params)
         return _run_visual_inspection(self, params)
+
+    @_android_driver_tool("sampleColor", description="Measure exact local RGB from a current frame point or region without uploading an image.")
+    def sample_color(self, params: SampleColorParams) -> dict[str, object]:
+        def observe() -> dict[str, object]:
+            try:
+                control = self._operation_control(DEFAULT_OPERATION_TIMEOUT_SECONDS, cancellation=self._operation_cancellation)
+                return self._passed(_sample_color(self._ensure_session().device, params, control=control))
+            except ConfigurationError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - SDK observation failures are normalized without raw diagnostics.
+                self._propagate_if_cancelled(exc)
+                return self._failed("observation_error", "Android color sampling failed.", metadata=self._safe_diagnostics(exc, stage="sample_color"))
+
+        return self._run_tool(observe)
 
     def screenshot(self, params: object | None = None) -> bytes:
         options = params if isinstance(params, dict) else {}

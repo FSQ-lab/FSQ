@@ -368,11 +368,11 @@ class FakeSession:
         )
 
 
-def test_ios_22_tool_schemas_pass_openai_strict_and_google_gemini_and_canonical_case_dsl(tmp_path: Path) -> None:
+def test_ios_tool_schemas_pass_openai_strict_and_google_gemini_and_canonical_case_dsl(tmp_path: Path) -> None:
     registry = build_capability_registry(platform="ios")
     snapshot = registry.snapshot()
     names = [cap.name for cap in snapshot.capabilities]
-    assert len(names) == 22
+    assert "sample_color" in names
     assert set(names) == {"wait_ms", *{d.driver_method for d in IOS_ACTION_DEFINITIONS}}
 
     harness = HarnessFactory().create_harness(
@@ -386,7 +386,7 @@ def test_ios_22_tool_schemas_pass_openai_strict_and_google_gemini_and_canonical_
         assert isinstance(harness, IOSHarness)
         assert isinstance(harness, HarnessInterface)
         schemas = harness.action_space()
-        assert len(schemas) == 22
+        assert {schema.driver_method for schema in schemas} == set(names)
         for schema in schemas:
             # reference_screen_size must never leak into model-facing online JSON schemas
             serialized = str(schema.params_json_schema)

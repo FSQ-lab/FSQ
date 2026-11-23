@@ -59,12 +59,12 @@ def capture(monkeypatch):
     )
     monkeypatch.setattr(native, "_AX", lambda: ax)
     monkeypatch.setattr(native, "_macos_ax_process_trusted", lambda: True)
-    monkeypatch.setattr(native, "_frontmost_pid", lambda _: 42)
+    monkeypatch.setattr(native, "_frontmost_pid", lambda _, **_kw: 42)
     monkeypatch.setattr(native, "time", SimpleNamespace(monotonic=lambda: clock.now))
 
-    def run():
+    def run(bundle_id="example.app"):
         control = SimpleNamespace(timeout_seconds=1.0, cancellation=None)
-        return native._observe_macos_ax_tree(bundle_id="example.app", max_nodes=30, max_depth=10, control=control)
+        return native._observe_macos_ax_tree(bundle_id=bundle_id, max_nodes=30, max_depth=10, control=control)
 
     return run, attributes, calls, clock
 
@@ -238,6 +238,7 @@ def test_keynote_toolbar_metadata_failure_does_not_hide_canvas(capture, monkeypa
     monkeypatch.setattr(driver, "_native_ax_candidate_bundles", lambda **_: ("example.app",))
     monkeypatch.setattr(driver, "_observe_native_ax_tree_for_bundle", lambda _: run())
     monkeypatch.setattr(appium, "_verify_ax_point_hit", lambda handle, x, y: (handle.element, x, y) == (7, 320, 240))
+    monkeypatch.setattr(appium, "_frontmost_pid", lambda _, **_kw: 42)
     result = driver.click_on(MacOSClickOnParams(locator=canvas_locator))
     assert result["status"] == "passed", result
     assert len(clicks) == 1
@@ -287,3 +288,39 @@ def test_unknown_menu_selection_makes_menu_topology_incomplete(capture):
     assert not run().complete_for_requested_scope
     attributes[5, "AXExpanded"] = True
     assert run().complete_for_requested_scope
+
+
+@pytest.mark.parametrize("rooted_at_application", [False, True])
+def test_finder_capture_includes_live_search_menu_but_not_nested_menus(capture, rooted_at_application):
+    run, attributes, calls, _ = capture
+    attributes.update(
+        {
+            (2, "AXChildren"): [4],
+            (4, "AXRole"): "AXTextField",
+            (4, "AXSubrole"): "AXSearchField",
+            (4, "AXChildren"): [] if rooted_at_application else [5],
+            (5, "AXRole"): "SGTMenu",
+            (5, "AXChildren"): [6],
+            (6, "AXRole"): "AXMenu",
+            (6, "AXPosition"): (830, 291, 244, 115),
+            (6, "AXChildren"): [7],
+            (7, "AXRole"): "AXMenuItem",
+            (7, "AXTitle"): "Suggestion",
+            (7, "AXChildren"): [8],
+            (8, "AXRole"): "AXMenu",
+            (8, "AXChildren"): [9],
+            (9, "AXRole"): "AXMenuItem",
+            (1, "AXChildren"): [2, 3, 5],
+        }
+    )
+    observation = run("com.apple.finder")
+    assert observation.complete_for_requested_scope
+    assert observation.raw_xml.count(b'title="Suggestion"') == 1
+    assert b'role="SGTMenu"' in observation.raw_xml
+    assert not {(7, "AXChildren"), (8, "AXRole"), (9, "AXRole")} & set(calls)
+
+
+def test_finder_search_menu_with_unknown_geometry_does_not_prove_absence(capture):
+    run, attributes, _, _ = capture
+    attributes.update({(1, "AXChildren"): [4], (4, "AXRole"): "AXMenu", (4, "AXPosition"): -25200})
+    assert not run("com.apple.finder").complete_for_requested_scope

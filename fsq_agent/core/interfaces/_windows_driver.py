@@ -11,6 +11,7 @@ from fsq_agent.models import (
     WindowsDoubleClickOnParams,
     WindowsDragToParams,
     WindowsHoverOnParams,
+    WindowsInspectWithAIParams,
     WindowsKillAppParams,
     WindowsLaunchAppParams,
     WindowsPressKeyParams,
@@ -50,5 +51,7 @@ class WindowsDriverInterface(DriverObservationInterface, Protocol):
     def assert_with_ai(self, params: WindowsAssertWithAIParams) -> dict[str, object]: ...
 
     def ui_snapshot(self, params: WindowsUiSnapshotParams) -> dict[str, object]: ...
+
+    def inspect_with_ai(self, params: WindowsInspectWithAIParams) -> dict[str, object]: ...
 
     def screenshot(self, params: object | None = None) -> bytes: ...

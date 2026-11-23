@@ -39,7 +39,7 @@ class AIVisualInspectionRequest(_VisualInspectWithAIParams):
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True, str_strip_whitespace=True, allow_inf_nan=False)
 
-    platform: Literal["android", "ios", "macos"] = "android"
+    platform: Literal["android", "ios", "macos", "windows", "web"] = "android"
     png_bytes: bytes = Field(exclude=True, repr=False)
     image_width: int = Field(gt=0)
     image_height: int = Field(gt=0)

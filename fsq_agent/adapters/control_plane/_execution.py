@@ -162,14 +162,18 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         run_settings.harness.macos.visual_assertion_policy = run_settings.harness.macos.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
         require_macos_preflight(run_settings, "strict", requires_provider=False)
     else:
-        require_macos_preflight(run_settings, "strict", requires_provider=requires_ai)
+        require_macos_preflight(run_settings, "strict", requires_provider=False)
     if platform == "android":
         run_settings.harness.android.app_id = _android_app_id(run_settings, case)
         run_settings.harness.android.visual_assertion_policy = run_settings.harness.android.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
         require_android_preflight(run_settings, "strict", requires_provider=False)
+    elif platform == "ios":
+        run_settings.harness.ios.visual_assertion_policy = run_settings.harness.ios.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
+    elif platform == "web":
+        run_settings.harness.web.visual_assertion_policy = run_settings.harness.web.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
+    elif platform == "windows":
+        run_settings.harness.windows.visual_assertion_policy = run_settings.harness.windows.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
     validate_strict_core_settings(run_settings, requires_ai_assertion=requires_ai)
-    if requires_ai and platform not in {"android", "macos"}:
-        require_provider(run_settings)
     return PreparedRun(
         request_id=request_id,
         settings=run_settings,
@@ -381,8 +385,6 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         state.transition(request_id, "running", summary="Strict replay is executing.")
         metadata = transition_run(run_dir, metadata, "running")
         evaluator = None
-        if prepared.requires_ai_assertion and settings.harness.platform not in {"android", "macos"}:
-            evaluator = build_ai_assertion_evaluator(settings)
         harness = HarnessFactory().create_harness(
             platform=settings.harness.platform,
             harness_settings=settings.harness,

@@ -117,7 +117,7 @@ def test_package_macos_skill_preserves_element_only_guidance(tmp_path: Path) -> 
     assert "double_click_on" in macos.instructions
 
 
-@pytest.mark.parametrize("filename", ["automation-basics.md", "ios-harness.md", "android-harness.md", "macos-harness.md"])
+@pytest.mark.parametrize("filename", ["automation-basics.md", "ios-harness.md", "android-harness.md", "macos-harness.md", "web-harness.md", "windows-harness.md"])
 def test_loaded_automation_guidance_disables_visual_ai_after_operational_refusal(filename: str) -> None:
     root = Path(__file__).resolve().parents[1] / "fsq_agent" / "resources" / "skills"
     [bundle] = SkillLoader(root).load([SkillConfig(name="automation", path=root / filename)])
@@ -136,11 +136,10 @@ def test_shared_visual_guidance_preserves_platform_assertions(platform: str, tmp
     bundles = SkillLoader(config.dir).load(config.items)
     shared = next(bundle.instructions for bundle in bundles if bundle.name == "automation-basics")
     platform_guidance = next(bundle.instructions for bundle in bundles if bundle.name == f"{platform}-harness")
-    assert "On Android, iOS, and macOS, host upload authorization" in shared
-    assert "Follow the platform skill for Web and Windows visual assertions." in shared
+    assert "On Android, iOS, macOS, Windows, and Web, host upload authorization" in shared
+    assert "`inspect_with_ai`" in platform_guidance
     assert "`assert_with_ai`" in platform_guidance
-    assert "allow_provider_upload" not in platform_guidance
-
+    assert "`allow_provider_upload=False`" in platform_guidance
 
 def test_loaded_automation_skill_preserves_coverage_and_completion_reserves() -> None:
     root = Path(__file__).resolve().parents[1] / "fsq_agent" / "resources" / "skills"

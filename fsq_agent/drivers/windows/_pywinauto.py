@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _windows_driver_tool
+from fsq_agent.drivers._host_visual_inspection import _run_host_visual_inspection
 from fsq_agent.models import (
     ConfigurationError,
     WindowsAssertVisibleParams,
@@ -25,6 +26,7 @@ from fsq_agent.models import (
     WindowsDoubleClickOnParams,
     WindowsDragToParams,
     WindowsHoverOnParams,
+    WindowsInspectWithAIParams,
     WindowsKillAppParams,
     WindowsLaunchAppParams,
     WindowsPressKeyParams,
@@ -380,10 +382,13 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             return self._passed()
         return self._target_missing(params)
 
-    @_windows_driver_tool("assertWithAI", description="Evaluate an explicit Windows visual assertion with AI.")
+    @_windows_driver_tool("inspectWithAI", description="Read pixel-only Windows visual content without performing an action.")
+    def inspect_with_ai(self, params: WindowsInspectWithAIParams) -> dict[str, object]:
+        return _run_host_visual_inspection(self, params, platform="windows")
+
+    @_windows_driver_tool("assertWithAI", description="Evaluate a scoped Windows image-space visual assertion with AI.")
     def assert_with_ai(self, params: WindowsAssertWithAIParams) -> dict[str, object]:
         return self._run_ai_assertion_tool(params)
-
     @_windows_driver_tool("uiSnapshot", description="Return the current Windows window control tree snapshot.")
     def ui_snapshot(self, params: WindowsUiSnapshotParams) -> dict[str, object]:
         return self._run_sync(self._ui_snapshot)

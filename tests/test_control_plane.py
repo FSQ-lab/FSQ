@@ -368,11 +368,7 @@ def test_case_discovery_limit_and_contained_resolution(tmp_path: Path) -> None:
 @pytest.mark.parametrize("platform", ["android", "web"])
 def test_case_discovery_retains_authored_ai_assertion_obligation(tmp_path: Path, platform: str) -> None:
     settings = _settings(tmp_path, platform=platform)
-    command = (
-        "assertWithAI:\n    assertion: The logo is blue\n    surface: appearance\n    full_screen_reason: Logo fills the screen"
-        if platform == "android"
-        else "assertWithAI:\n    prompt: Verify the page"
-    )
+    command = "assertWithAI:\n    assertion: The logo is blue\n    surface: appearance\n    full_screen_reason: Logo fills the screen"
     _case(settings.cases.dir / "ai.fsq.yaml", platform=platform, command=command)
 
     entry = discover_cases(settings)["cases"][0]

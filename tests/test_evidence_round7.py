@@ -74,19 +74,34 @@ def test_ai_invoke_failed_capture_is_acknowledged(tmp_path):
 
         def screenshot(self, params=None):
             self.calls_to_screenshot += 1
-            if self.calls_to_screenshot > 1:
-                raise RuntimeError("capture unavailable")
-            return b"before"
+            raise RuntimeError("capture unavailable")
 
     class Evaluator:
         def evaluate(self, request, *, cancellation_check=None):
             raise AssertionError("must not run without screenshot")
 
+    from fsq_agent.models import AndroidVisualAssertionPolicy
+
     recorder = EvidenceRecorder(run_id="run", output_dir=tmp_path)
-    harness = WebHarness(driver=Driver(), artifact_store=ArtifactStore(tmp_path), ai_assertion_evaluator=Evaluator())
-    result = StepRunner(harness, capability_registry=build_capability_registry(platform="web"), evidence_sink=recorder).run_step(
-        "run", ExecutableStep(step_id="assert", kind="assertion", action_name="assertWithAI", params={"prompt": "check"})
+    harness = WebHarness(
+        driver=Driver(),
+        artifact_store=ArtifactStore(tmp_path),
+        ai_assertion_evaluator=Evaluator(),
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
     )
-    failed = [event for event in recorder.build_bundle().events if event.event_type == "artifact_failed" and event.phase == "invoke"]
+    result = StepRunner(harness, capability_registry=build_capability_registry(platform="web"), evidence_sink=recorder).run_step(
+        "run",
+        ExecutableStep(
+            step_id="assert",
+            kind="assertion",
+            action_name="assertWithAI",
+            params={"assertion": "check", "surface": "appearance", "full_screen_reason": "Full page check"},
+        ),
+    )
+    failed = [event for event in recorder.build_bundle().events if event.event_type == "artifact_failed" and event.phase == "prepare"]
     assert len(failed) == 1
     assert result.evidence_errors

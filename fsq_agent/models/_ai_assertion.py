@@ -95,10 +95,10 @@ class AIAssertionResult(BaseModel):
         if isinstance(value, dict) and value.get("outcome") is not None:
             value = dict(value)
             if value.get("status") != value["outcome"]:
-                raise ValueError("Assertion status must agree with the Android outcome.")
+                raise ValueError("Assertion status must agree with the visual outcome.")
             if value["outcome"] != "inconclusive" and value.get("error_code") is not None:
                 raise ValueError("A visual verdict cannot carry an inconclusive reason.")
             value["passed"] = value["outcome"] == "passed"
         elif isinstance(value, dict) and value.get("status") == "inconclusive":
-            raise ValueError("An inconclusive assertion requires an Android outcome.")
+            raise ValueError("An inconclusive assertion requires a visual outcome.")
         return value

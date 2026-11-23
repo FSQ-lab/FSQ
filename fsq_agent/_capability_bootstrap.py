@@ -40,9 +40,8 @@ def ai_assertion_capability_names(platform: HarnessPlatform) -> frozenset[str]:
 
 
 def provider_required_capability_names(platform: HarnessPlatform) -> frozenset[str]:
-    # Android, iOS, and macOS Strict recognize unavailable visual assertions as incomplete.
-    return frozenset() if platform in {"android", "ios", "macos"} else ai_assertion_capability_names(platform)
-
+    # Strict across all five platforms recognizes unavailable visual assertions as incomplete.
+    return frozenset()
 
 def steps_require_provider(
     steps: list[Any],

@@ -22,6 +22,13 @@ if TYPE_CHECKING:
     from fsq_agent.agent_engine import ReasoningEffort
     from fsq_agent.providers import ModelProviderSession
 
+_PLATFORM_LABELS: dict[str, str] = {
+    "android": "Android",
+    "ios": "iOS",
+    "macos": "macOS",
+    "windows": "Windows",
+    "web": "Web",
+}
 
 class _InspectionCandidate(AIVisualCandidate):
     confidence: float | None = Field(ge=0, le=1)
@@ -87,7 +94,7 @@ def _validate_image(request: AIVisualInspectionRequest) -> None:
 
 
 def _model_input(request: AIVisualInspectionRequest, reasoning_effort: ReasoningEffort) -> ModelRequest[_InspectionOutput]:
-    platform_label = "iOS" if request.platform == "ios" else "macOS" if request.platform == "macos" else "Android"
+    platform_label = _PLATFORM_LABELS.get(request.platform, "Android")
     text = (
         f"Inspect only the supplied {platform_label} screenshot for the requested read-only observation. "
         "Return only a JSON object with summary and candidates. Summary must be nonblank. "

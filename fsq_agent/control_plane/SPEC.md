@@ -267,7 +267,7 @@ Static serving rejects path traversal and cross-entry fallback. Missing generate
 - Each Case Manager Devices run request names a registered workspace and explicit configured platform; Quick Test obtains its registered identity and selected platform from Application preparation. Exact platform settings and roots are reloaded and frozen per run. Later browser selection or platform configuration changes do not mutate active state.
 - Exactly one task may be active across preparation, execution, and finalization.
 - Run-start validation is authoritative even when discovery/readiness data was previously returned to a client.
-- Provider readiness blocks Explore on every platform and Web/Windows Strict cases containing `assertWithAI`, while Android and macOS Strict cases containing `assertWithAI` remain runnable without Provider readiness and record recognized incomplete `provider_unavailable` steps; provider-free Strict cases never require Provider readiness.
+- Provider readiness blocks Explore on every platform, while Strict cases containing `assertWithAI` across all five platforms remain runnable without Provider readiness and record recognized incomplete `provider_unavailable` steps; provider-free Strict cases never require Provider readiness.
 - Automatic live evidence uses `screenshot` (with normalized `ui_snapshot` projected when explicitly captured); UI labels do not change artifact semantics.
 - Per-step comparison and replay use persisted artifact metadata without changing automatic capture policy or inventing evidence.
 - Control Plane stores browser-generated replay videos but does not generate or transcode media in Python.

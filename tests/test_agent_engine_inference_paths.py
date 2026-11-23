@@ -120,7 +120,7 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
         "pre_plan": GoalPrePlan(goal="Open the app.", verification_goal="The app is open.").model_dump_json(),
         "main": AgentFinalOutput(status="success", summary="Done.").model_dump_json(),
         "verification": AgentFinalOutput(status="success", summary="Verified.").model_dump_json(),
-        "assertion": '{"passed":true,"explanation":"Visible.","confidence":0.9}',
+        "assertion": '{"outcome":"passed","explanation":"Visible.","confidence":0.9}',
         "connection": "FSQ_OK",
         "suggestion": '{"summary":"No change needed.","suggestions":[],"candidate_case_yaml":null}',
         "quick_test": json.dumps(
@@ -248,11 +248,46 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
         else:
             assert payloads[0]["text"]["format"]["strict"] is True
     elif path == "assertion":
-        screenshot = tmp_path / "sample.png"
-        screenshot.write_bytes(b"synthetic-image")
-        result = build_ai_assertion_evaluator(settings).evaluate(AIAssertionRequest(platform="web", prompt="Visible?", screenshot_path=screenshot))
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), "blue").save(buf, format="PNG")
+        pixels = buf.getvalue()
+        relative = Path("artifacts/sample.png")
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_bytes(pixels)
+        now = time.monotonic_ns()
+        sha256 = hashlib.sha256(pixels).hexdigest()
+        from fsq_agent.models import HarnessArtifactRef, HostCaptureEnvelopeV1
+        capture = HostCaptureEnvelopeV1(
+            run_id="run-path",
+            step_id="step-1",
+            step_execution_id="exec-1",
+            capture_sequence=1,
+            host_capture_started_monotonic_ns=now - 1000,
+            host_capture_finished_monotonic_ns=now,
+            captured_wall_clock="2026-01-01T00:00:00Z",
+            png_sha256=sha256,
+            png_size_bytes=len(pixels),
+            image_width=8,
+            image_height=8,
+        )
+        artifact = HarnessArtifactRef(artifact_id="sample", kind="screenshot", path=relative, sha256=sha256, size_bytes=len(pixels))
+        result = build_ai_assertion_evaluator(settings).evaluate(
+            AIAssertionRequest(
+                platform="web",
+                prompt="Visible?",
+                surface="image_content",
+                run_id="run-path",
+                step_id="exec-1",
+                run_dir=tmp_path,
+                screenshot_path=relative,
+                screenshot_artifact_ref=artifact,
+                capture=capture,
+                upload_authorized=True,
+                frame_sensitivity="non_sensitive",
+            )
+        )
         assert result.passed is (failure_kind is None)
-        assert result.status == ("error" if failure_kind else "passed")
+        assert result.status == ("inconclusive" if failure_kind else "passed")
         assert payloads[0]["input"][0]["content"][1]["type"] == ("image" if provider == "google_gemini" else "input_image")
     elif path in {"inspection_extract", "inspection_locate"}:
         request = _inspection_request(path.removeprefix("inspection_"))

@@ -16,6 +16,7 @@ from fsq_agent.ai_services import AIAssertionEvaluator
 from fsq_agent.core.interfaces import AIAssertionEvaluatorProtocol, AIVisualInspectionEvaluatorProtocol
 from fsq_agent.models import (
     ANDROID_ACTION_DEFINITIONS_BY_NAME,
+    WEB_ACTION_DEFINITIONS_BY_NAME,
     AIVisualCandidate,
     AIVisualInspectionRequest,
     AIVisualInspectionResult,
@@ -23,6 +24,8 @@ from fsq_agent.models import (
     AssertionBudget,
     VisualImageBounds,
     VisualRect,
+    WebInspectWithAIParams,
+    WindowsInspectWithAIParams,
 )
 from fsq_agent.providers import ModelProviderSession
 from fsq_agent.providers._client_config import ProviderClientConfig
@@ -96,6 +99,17 @@ def test_inspection_parameters_and_catalog_are_observation_only():
     assert definition.params_model is AndroidInspectWithAIParams
     assert definition.step_kind == "observation"
 
+    web_params = WebInspectWithAIParams(prompt=" Read Web chart ")
+    assert web_params.prompt == "Read Web chart"
+    assert web_params.mode == "extract"
+    web_def = WEB_ACTION_DEFINITIONS_BY_NAME["inspectWithAI"]
+    assert web_def.driver_method == "inspect_with_ai"
+    assert web_def.params_model is WebInspectWithAIParams
+    assert web_def.step_kind == "observation"
+
+    win_params = WindowsInspectWithAIParams(prompt=" Read Windows chart ")
+    assert win_params.prompt == "Read Windows chart"
+    assert win_params.mode == "extract"
 
 @pytest.mark.parametrize(
     "updates",
@@ -137,6 +151,12 @@ def test_valid_extract_uses_one_strict_tool_free_request_and_shared_protocol():
     assert call.output.schema["additionalProperties"] is False
     assert set(call.output.schema["required"]) == {"summary", "candidates"}
 
+    for platform, expected_label in (("windows", "Windows"), ("web", "Web")):
+        plat_session = _Session()
+        plat_req = _request(platform=platform)
+        plat_res = AIAssertionEvaluator(plat_session).inspect(plat_req)
+        assert plat_res == AIVisualInspectionResult(summary="Readable heading")
+        assert expected_label in plat_session.requests[0].input[0].content[0].text
 
 def test_valid_locate_returns_full_image_bounds_in_requested_region():
     session = _Session({"summary": "Found heading", "candidates": [_candidate()]})

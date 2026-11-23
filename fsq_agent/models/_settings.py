@@ -179,6 +179,7 @@ class WebHarnessSettings(BaseModel):
     attach: bool = False
     attach_endpoint: str = "http://127.0.0.1:9222"
     _browser_executable_path: Path | None = PrivateAttr(default=None)
+    _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)
 
     @property
     def browser_executable_path(self) -> Path | None:
@@ -187,6 +188,14 @@ class WebHarnessSettings(BaseModel):
     @browser_executable_path.setter
     def browser_executable_path(self, value: str | Path | None) -> None:
         self._browser_executable_path = Path(value) if value else None
+
+    @property
+    def visual_assertion_policy(self) -> AndroidVisualAssertionPolicy:
+        return self._visual_assertion_policy
+
+    @visual_assertion_policy.setter
+    def visual_assertion_policy(self, value: AndroidVisualAssertionPolicy) -> None:
+        self._visual_assertion_policy = AndroidVisualAssertionPolicy.model_validate(value)
 
     @field_validator("base_url")
     @classmethod
@@ -220,6 +229,15 @@ class WindowsHarnessSettings(BaseModel):
     app_path: Path | None = None
     window_title_re: str | None = None
 
+    _visual_assertion_policy: AndroidVisualAssertionPolicy = PrivateAttr(default_factory=AndroidVisualAssertionPolicy)
+
+    @property
+    def visual_assertion_policy(self) -> AndroidVisualAssertionPolicy:
+        return self._visual_assertion_policy
+
+    @visual_assertion_policy.setter
+    def visual_assertion_policy(self, value: AndroidVisualAssertionPolicy) -> None:
+        self._visual_assertion_policy = AndroidVisualAssertionPolicy.model_validate(value)
     @field_validator("window_title_re")
     @classmethod
     def _normalize_window_title_re(cls, value: str | None) -> str | None:

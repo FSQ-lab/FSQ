@@ -11,12 +11,13 @@ Use when `harness.platform` is Web. This skill contains Web-specific stability g
 - Refresh the snapshot after relevant state changes or when a target is stale or missing. Do not retry an ambiguous locator unchanged.
 - Do not infer that a page changed from a screenshot path alone. Use a fresh snapshot or assertion after the action.
 - Treat screenshots as evidence artifacts. They can support debugging, but they do not replace `ui_snapshot` for action targeting.
+- Use `inspect_with_ai` (`inspectWithAI`) with `mode: "extract"` only to read genuinely pixel-only Canvas, chart, map, or image content when `ui_snapshot` does not expose it. It is a read-only observation, never an assertion or UI action; `mode: "locate"` is unavailable on Web (`pointer_mapping_unavailable`). Host upload authorization defaults to `allow_provider_upload=False`; on `privacy_blocked` or `provider_unavailable`, stop all visual AI calls for this task and leave any required visual check unverified.
 
 ## Verification and Assertion Rules
 
 - Use locatorless `assert_text` for literal page-body text and a semantic locator for element text. Text is not an element-interaction locator.
 - Use `assert_visible` or `assert_not_visible` for required presence or absence of page elements.
-- Use `assert_with_ai` when the assertion requires visual judgment, page interpretation, or a deterministic check would require a brittle complex selector.
+- Reserve `assert_with_ai` (`assertWithAI`) strictly for pure visual appearance, custom-canvas, map, or image-content checks that semantic snapshots and `assert_text` do not expose, supplying `assertion`, `surface`, and either `region: {"kind": "image_rect", "rect": ...}` or `full_screen_reason`. Never use it to locate targets, drive coordinates, or override deterministic checks. Interpret tri-state `outcome` (`passed`, `failed`, or `inconclusive` when unverified) truthfully.
 - Use `ui_snapshot` to inspect, locate, or collect context before an assertion.
 
 ## Argument Rules
@@ -70,10 +71,28 @@ Use one payload from the matching semantic action. Do not combine unrelated fiel
 
 Do not use `*example.com/search*` to match a full URL; the single `*` cannot cross the `/` characters in `https://example.com/search`.
 
+### Scoped `assertWithAI`
+
+```json
+{
+  "assertion": "The preview canvas renders a blue bar chart with three bars.",
+  "surface": "custom_canvas",
+  "region": {
+    "kind": "image_rect",
+    "rect": {
+      "left": 100,
+      "top": 120,
+      "right": 640,
+      "bottom": 480
+    }
+  }
+}
+```
+
 ## Tool Usage Error Recovery
 
 - If a Web tool validation fails, rebuild the payload from the active schema and the requested semantic action.
 - If an action executes but the expected state is not present, take a fresh `ui_snapshot`, then decide whether a corrected semantic action is justified.
 - If a key action returns the wrong page state, do not count it. Retry the requested key/action with schema-valid payload or report the mismatch.
 - Before `assert_with_ai`, use `wait_for` for required waits and keep the page at the intended visual state.
-- For `assert_with_ai`, use the returned verdict rather than deciding from screenshot existence.
+- For `assert_with_ai`, use the returned tri-state verdict (`passed`, `failed`, or `inconclusive`) rather than deciding from screenshot existence.

@@ -1,17 +1,22 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import io
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from fsq_agent.core import ArtifactStore, HarnessInterface
 from fsq_agent.core.harness._ai_assertion_tool import AIAssertionBackendToolMixin
 from fsq_agent.core.harness._driver_tools import _web_driver_tool
 from fsq_agent.core.harness._web import WebHarness
+from fsq_agent.drivers._host_visual_inspection import _run_host_visual_inspection
 from fsq_agent.models import (
     AIAssertionRequest,
     AIAssertionResult,
+    AIVisualInspectionResult,
+    AndroidVisualAssertionPolicy,
     ExecutableStep,
     HarnessContext,
     WebAssertNotVisibleParams,
@@ -21,6 +26,7 @@ from fsq_agent.models import (
     WebClickOnParams,
     WebCloseBrowserParams,
     WebHoverOnParams,
+    WebInspectWithAIParams,
     WebNavigateBackParams,
     WebNavigateToParams,
     WebPressKeyParams,
@@ -31,6 +37,12 @@ from fsq_agent.models import (
     WebUiSnapshotParams,
     WebWaitForParams,
 )
+
+def _valid_png_bytes(width: int = 80, height: int = 60, color: str = "navy") -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buf, format="PNG")
+    return buf.getvalue()
+
 
 
 class FakeWebDriver(AIAssertionBackendToolMixin):
@@ -109,6 +121,10 @@ class FakeWebDriver(AIAssertionBackendToolMixin):
         self.calls.append(("ui_snapshot", recorded))
         return {"url": "https://www.bing.com", "snapshot": {"role": "WebArea", "name": "Bing"}}
 
+    @_web_driver_tool("inspectWithAI", description="Read pixel-only Web page visual content without performing an action.")
+    def inspect_with_ai(self, params: WebInspectWithAIParams) -> dict[str, object]:
+        return _run_host_visual_inspection(self, params, platform="web")
+
     @_web_driver_tool("assertVisible", description="Assert that a Web page target is visible.")
     def assert_visible(self, params: WebAssertVisibleParams) -> dict[str, object]:
         return self._record("assert_visible", params)
@@ -127,7 +143,7 @@ class FakeWebDriver(AIAssertionBackendToolMixin):
 
     def screenshot(self, params: object | None = None) -> bytes:
         self.calls.append(("screenshot", params.model_dump(mode="json", exclude_none=True) if hasattr(params, "model_dump") else params))
-        return b"fake-png"
+        return _valid_png_bytes()
 
 
 def _step(action_name: str, params: dict[str, Any] | None = None) -> ExecutableStep:
@@ -184,7 +200,8 @@ def test_web_harness_action_space_returns_catalog_backed_schemas() -> None:
     assert "start_browser" in schemas
     assert "close_browser" in schemas
     assert "ui_snapshot" in schemas
-    assert "assert_with_ai" not in schemas
+    assert "inspect_with_ai" in schemas
+    assert "assert_with_ai" in schemas
     assert schemas["start_browser"].driver_method == "start_browser"
     assert schemas["start_browser"].fsq_action_name == "startBrowser"
     assert schemas["start_browser"].metadata["replay"] == {"kind": "fsq_command", "alias": "startBrowser"}
@@ -242,7 +259,7 @@ def test_web_harness_captures_screenshot_and_ui_snapshot_with_artifact_store(tmp
     assert screenshot_ref.path.parent.as_posix() == "artifacts/screenshots"
     assert (tmp_path / screenshot_ref.path).is_file()
     assert screenshot_ref.sha256 is not None
-    assert (tmp_path / screenshot_ref.path).read_bytes() == b"fake-png"
+    assert (tmp_path / screenshot_ref.path).read_bytes() == _valid_png_bytes()
     assert ui_snapshot_ref.path.parent.as_posix() == "artifacts/ui-snapshots"
     assert (tmp_path / ui_snapshot_ref.path).is_file()
     assert ui_snapshot_ref.sha256 is not None
@@ -250,7 +267,10 @@ def test_web_harness_captures_screenshot_and_ui_snapshot_with_artifact_store(tmp
     assert driver.calls == [("context", None), ("screenshot", {}), ("ui_snapshot", {})]
 
 
-def test_web_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> None:
+def test_web_harness_assert_with_ai_uses_injected_evaluator_and_single_frame_prepare_reuse(tmp_path) -> None:
+    from fsq_agent._capability_bootstrap import build_capability_registry
+    from fsq_agent.core import EvidenceRecorder, StepRunner
+
     class FakeEvaluator:
         def __init__(self) -> None:
             self.requests: list[AIAssertionRequest] = []
@@ -259,33 +279,184 @@ def test_web_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> None:
             self.requests.append(request)
             return AIAssertionResult(
                 status="passed",
+                outcome="passed",
                 passed=True,
-                explanation="The expected page is visible.",
+                explanation="The expected chart is visible.",
                 provider="fake",
                 model="fake-model",
+                capture=request.capture,
                 artifact_refs=[request.screenshot_artifact_ref] if request.screenshot_artifact_ref else [],
             )
 
     driver = FakeWebDriver()
     evaluator = FakeEvaluator()
-    harness = WebHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path), ai_assertion_evaluator=evaluator)
-    context = harness.get_context()
-
+    harness = WebHarness(
+        driver=driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path),
+        ai_assertion_evaluator=evaluator,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
     schemas = {schema.name: schema for schema in harness.action_space()}
-    result = harness.invoke_action(_step("assertWithAI", {"prompt": "Verify Bing homepage"}), context)
-
     assert "assert_with_ai" in schemas
+    assert "inspect_with_ai" in schemas
     assert schemas["assert_with_ai"].metadata["owner"] == "driver"
-    assert result.status == "passed"
-    assert result.output["passed"] is True
-    assert result.metadata["ai_assertion"]["provider"] == "fake"
-    assert result.artifact_refs[0].kind == "screenshot"
-    assert (tmp_path / result.artifact_refs[0].path).read_bytes() == b"fake-png"
-    assert evaluator.requests[0].platform == "web"
-    assert evaluator.requests[0].prompt == "Verify Bing homepage"
-    assert evaluator.requests[0].screenshot_artifact_ref == result.artifact_refs[0]
-    assert driver.calls == [("context", None), ("screenshot", {})]
 
+    recorder = EvidenceRecorder(run_id="run-web", output_dir=tmp_path)
+    runner = StepRunner(harness=harness, capability_registry=build_capability_registry(platform="web"), evidence_sink=recorder)
+    step_result = runner.run_step(
+        run_id="run-web",
+        step=ExecutableStep(
+            step_id="step-visual",
+            kind="assertion",
+            action_name="assertWithAI",
+            params={
+                "assertion": "Verify chart bars are blue",
+                "surface": "custom_canvas",
+                "region": {"kind": "image_rect", "rect": {"left": 5, "top": 5, "right": 50, "bottom": 40}},
+            },
+        ),
+    )
+
+    assert step_result.status == "passed"
+    assert len(evaluator.requests) == 1
+    assert evaluator.requests[0].platform == "web"
+    assert evaluator.requests[0].prompt == "Verify chart bars are blue"
+    screenshot_calls = [call for call in driver.calls if call[0] == "screenshot"]
+    assert len(screenshot_calls) == 1
+    prepare_refs = step_result.phase_reports[0].artifact_refs
+    assert len(prepare_refs) == 1
+    assert evaluator.requests[0].screenshot_artifact_ref.artifact_id == prepare_refs[0].artifact_id
+    assert (tmp_path / prepare_refs[0].path).read_bytes() == _valid_png_bytes()
+
+
+def test_web_harness_assert_with_ai_offline_and_privacy_blocked_and_verifier_reconciliation(tmp_path) -> None:
+    from fsq_agent.agent._verifier import Verifier
+    from fsq_agent.models import AgentFinalOutput, StepResult
+
+    driver = FakeWebDriver()
+    offline_harness = WebHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path / "offline"))
+    offline_res = offline_harness.invoke_action(
+        _step("assertWithAI", {"assertion": "Chart visible", "surface": "custom_canvas", "full_screen_reason": "Canvas fills viewport"}),
+        offline_harness.get_context(),
+    )
+    assert offline_res.status == "incomplete"
+    assert offline_res.output["outcome"] == "inconclusive"
+    assert offline_res.output["error_code"] == "provider_unavailable"
+    assert [c for c in driver.calls if c[0] == "screenshot"] == []
+
+    class DummyEvaluator:
+        def evaluate(self, request, *, cancellation_check=None):
+            raise AssertionError("Unauthorized upload must not call evaluator")
+
+    blocked_harness = WebHarness(
+        driver=driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "blocked"),
+        ai_assertion_evaluator=DummyEvaluator(),
+    )
+    blocked_res = blocked_harness.invoke_action(
+        _step("assertWithAI", {"assertion": "Chart visible", "surface": "custom_canvas", "full_screen_reason": "Canvas fills viewport"}),
+        blocked_harness.get_context(),
+    )
+    assert blocked_res.status == "incomplete"
+    assert blocked_res.output["outcome"] == "inconclusive"
+    assert blocked_res.output["error_code"] == "privacy_blocked"
+
+    verifier = Verifier()
+    reconciled = verifier.reconcile_execution_evidence(
+        AgentFinalOutput(status="success", summary="Looks good"),
+        [
+            StepResult(
+                step_id="s1",
+                title="assertWithAI",
+                status="incomplete",
+                kind="assertion",
+                metadata={"harness_metadata": {"ai_assertion": offline_res.output}},
+            )
+        ],
+    )
+    assert reconciled.status == "inconclusive"
+
+
+def test_web_harness_inspect_with_ai_extract_locate_privacy_and_recording_exclusion(tmp_path) -> None:
+    from fsq_agent.execution.recording import RecordingService
+    from fsq_agent.config import Settings
+    from fsq_agent.models import ReportArtifact, RunEvent, Task, TaskResult, VerificationResult
+
+    class InspectEvaluator:
+        def __init__(self) -> None:
+            self.inspect_requests = []
+
+        def evaluate(self, request, *, cancellation_check=None):
+            raise AssertionError("inspect_with_ai must not call evaluate")
+
+        def inspect(self, request, *, cancellation_check=None) -> AIVisualInspectionResult:
+            self.inspect_requests.append(request)
+            return AIVisualInspectionResult(summary="Canvas shows Q4 revenue 42M", candidates=())
+
+    driver = FakeWebDriver()
+    evaluator = InspectEvaluator()
+    harness = WebHarness(
+        driver=driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "extract"),
+        ai_assertion_evaluator=evaluator,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
+    extract_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Read chart total", "mode": "extract"}), harness.get_context())
+    assert extract_res.status == "passed"
+    assert extract_res.output["status"] == "ok"
+    assert extract_res.output["summary"] == "Canvas shows Q4 revenue 42M"
+    assert len(extract_res.artifact_refs) == 1
+    assert (tmp_path / "extract" / extract_res.artifact_refs[0].path).is_file()
+    assert len(evaluator.inspect_requests) == 1
+    assert evaluator.inspect_requests[0].platform == "web"
+
+    locate_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Find chart legend", "mode": "locate"}), harness.get_context())
+    assert locate_res.status == "passed"
+    assert locate_res.output["status"] == "unavailable"
+    assert locate_res.output["reason"] == "pointer_mapping_unavailable"
+    assert locate_res.output["provider_provenance"]["provider_upload_occurred"] is False
+    assert len(evaluator.inspect_requests) == 1
+
+    blocked_driver = FakeWebDriver()
+    blocked_harness = WebHarness(
+        driver=blocked_driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "privacy"),
+        ai_assertion_evaluator=evaluator,
+    )
+    privacy_res = blocked_harness.invoke_action(_step("inspectWithAI", {"prompt": "Read chart total"}), blocked_harness.get_context())
+    assert privacy_res.status == "passed"
+    assert privacy_res.output["status"] == "unavailable"
+    assert privacy_res.output["reason"] == "privacy_blocked"
+    assert privacy_res.artifact_refs == []
+    assert [c for c in blocked_driver.calls if c[0] == "screenshot"] == []
+
+    run_dir = tmp_path / "record-web"
+    run_dir.mkdir(parents=True)
+    events = [
+        RunEvent(run_id="r1", task_id="t1", type="tool_call_started", title="Start", tool_name="start_browser", tool_call_id="c1", tool_arguments={}, payload={"tool_origin": "platform", "step_kind": "setup", "replay": {"kind": "fsq_command", "alias": "startBrowser"}}),
+        RunEvent(run_id="r1", task_id="t1", type="tool_call_completed", title="Start done", tool_name="start_browser", tool_call_id="c1", payload={"tool_origin": "platform", "step_kind": "setup", "status": "passed", "replay": {"kind": "fsq_command", "alias": "startBrowser"}, "safe_replay_params": {}}),
+        RunEvent(run_id="r1", task_id="t1", type="tool_call_started", title="Inspect", tool_name="inspect_with_ai", tool_call_id="c2", tool_arguments={"prompt": "Read chart"}, payload={"tool_origin": "platform", "step_kind": "observation", "replay": {"kind": "fsq_command", "alias": "inspectWithAI"}}),
+        RunEvent(run_id="r1", task_id="t1", type="tool_call_completed", title="Inspect done", tool_name="inspect_with_ai", tool_call_id="c2", payload={"tool_origin": "platform", "step_kind": "observation", "status": "passed", "replay": {"kind": "fsq_command", "alias": "inspectWithAI"}, "safe_replay_params": {"prompt": "Read chart"}}),
+    ]
+    (run_dir / "events.jsonl").write_text("\n".join(e.model_dump_json() for e in events) + "\n", encoding="utf-8")
+    settings = Settings(harness={"platform": "web"})
+    rec = RecordingService().record(
+        run_dir=run_dir,
+        task=Task(id="t1", description="Inspect web canvas"),
+        result=TaskResult(task_id="t1", status="success", steps=[], verification=VerificationResult(status="success", summary="ok"), report=ReportArtifact(run_id="r1", path=run_dir / "report.md")),
+        settings=settings,
+        publication_directory=None,
+    )
+    assert rec.status == "recorded"
+    assert "inspectWithAI" not in rec.recorded_case_path.read_text(encoding="utf-8")
 
 def test_web_harness_requires_artifact_store_for_capture() -> None:
     harness = WebHarness(driver=FakeWebDriver())

@@ -4,7 +4,11 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
-- Pin the development tree to `appium-connect-agent==0.1.3` from PyPI.
+## [0.3.9] - 2026-11-23
+
+- Pin `appium-connect-agent==0.1.4` from PyPI. Android, iOS, and macOS share SDK-backed visual capture with an explicit host Run eligibility signal and independent per-frame authorization. `sample_color` provides exact local RGB without provider upload.
+- Verify transient Finder menu targets before a single dispatch; never replay unknown mutations. Reuse healthy Finder-anchored sessions for the same verified Pages installation and report attributable permission-modal or foreground mismatch on rejected native snapshots.
+- See the [release notes](docs/releases/v0.3.9.md) for compatibility and verification scope.
 
 - Dynamic execution reuses unambiguous same-view locators and checks search scope before refining queries. Planning and verification preserve explicit constraints while supporting evidence-grounded delegated choices, historical record periods, and independent deliverables. Visual AI guidance avoids unauthorized or repeated probes.
 - The iOS preset settles actions for 0.2 seconds, omits non-interactive zero-size snapshot leaves without semantic content by default, and reports bounded identifiers for attributable ambiguous matches without exposing secure field values.
@@ -192,7 +196,8 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.8...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.9...HEAD
+[0.3.9]: https://github.com/FSQ-lab/FSQ/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/FSQ-lab/FSQ/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/FSQ-lab/FSQ/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/FSQ-lab/FSQ/compare/v0.3.5...v0.3.6

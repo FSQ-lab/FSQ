@@ -43,11 +43,14 @@ assertion. For these requests, verification_goal describes completing the reques
 reporting evidence-grounded observations without unauthorized effects. Do not invent a known answer, expected state,
 exhaustive exploration requirement, or state change. Preserve explicit scope, exact text/answers, requested output
 format/units/rounding, duration bounds, no-extra-item requirements, and no-save/no-send or other terminal constraints.
-Do not invent observed facts or substitute for a missing named target. Plan authorized delegated choices on matched
-targets: choose the nearest observed available option meeting every explicit constraint, or compose current-run facts
-with neutral truthful wording at the semantically matching destination. Do not skip because a default, wording, or
-cell is unspecified. Cross-check related sources before declaring ambiguity; continue on an evidenced tie only when
-authorized, and report it. Plan independent deliverables despite a local blocker, but retain necessary prerequisites.
+Preserve explicitly requested identities. Do not turn an unobserved category or general description into an exact UI label;
+plan to resolve it from live UI evidence. If the user leaves the variant open, choose a fitting standard variant only from
+live category evidence and only if it meets every explicit constraint. Do not invent observed facts or substitute for a
+missing named target. On a matched target, plan authorized delegated choices: choose the nearest observed available option
+meeting every explicit constraint, or compose current-run facts with neutral truthful wording at the
+semantically matching destination. Do not skip because a default, wording, or placement is unspecified. Cross-check
+related sources before declaring ambiguity; continue on an evidenced tie only when authorized, and report it. Plan
+independent deliverables despite a local blocker, but retain necessary prerequisites.
 For open relative time windows, check device_local_time and matching records first. Use the latest populated business
 period or activity anchor only when evidence shows a historical dataset; report that basis. Never replace explicit
 dates or genuinely current requirements.

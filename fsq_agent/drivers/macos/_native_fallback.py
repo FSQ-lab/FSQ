@@ -53,9 +53,10 @@ _AX_MISSING = {-25205, -25212}
 
 
 class _NativeForegroundError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, request_state: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.request_state = request_state
 
 
 def _remaining(deadline: float, cancellation: Event | None) -> float:
@@ -495,39 +496,45 @@ def _verify_finder_search_click(
         return is_search
 
 
-def _verify_ax_focus(handle: _AXHandle | None) -> bool:
-    if handle is None:
-        return False
-    ax = handle.backend
+def _focused_ax_handle(pid: int, *, deadline: float, cancellation: Event | None, backend: _AX | None = None) -> _AXHandle | None:
+    if not _macos_ax_process_trusted():
+        return None
     try:
+        ax = backend if backend is not None else _AX()
         with ExitStack() as stack:
-            read = _ScopedAXRead(ax, stack, time.monotonic() + 2.5, None)
+            read = _ScopedAXRead(ax, stack, deadline, cancellation)
             system = read.keep(ax.system())
             focused = read.reference(system, "AXFocusedUIElement") if system is not None else None
-            return focused is not None and read.pid(focused) == handle.pid and ax.equal(focused, handle.element)
-    except (_AXReadError, TimeoutError):
-        return False
+            if focused is not None and read.pid(focused) == pid:
+                return _AXHandle(ax, focused, pid)
+    except (_AXReadError, OSError, TimeoutError):
+        pass
+    return None
 
 
-def _verify_ax_point_hit(handle: _AXHandle | None, x: int, y: int) -> bool:
-    if handle is None:
+def _verify_ax_focus(handle: _AXHandle, *, deadline: float, cancellation: Event | None) -> bool:
+    focused = _focused_ax_handle(handle.pid, deadline=deadline, cancellation=cancellation, backend=handle.backend)
+    return focused is not None and handle.backend.equal(focused.element, handle.element)
+
+
+def _verify_ax_point_hit(handle: _AXHandle | None, x: int, y: int, *, pid: int, deadline: float, cancellation: Event | None) -> bool:
+    if (handle is not None and handle.pid != pid) or not _macos_ax_process_trusted():
         return False
-    ax = handle.backend
     try:
+        ax = handle.backend if handle is not None else _AX()
         with ExitStack() as stack:
-            read = _ScopedAXRead(ax, stack, time.monotonic() + 2.5, None)
+            read = _ScopedAXRead(ax, stack, deadline, cancellation)
             system = read.keep(ax.system())
-            if system is None:
-                return False
-            current: int | None = read.hit(system, x, y)
-            for _ in range(32):
-                if current is None or read.pid(current) != handle.pid:
-                    return False
-                if ax.equal(current, handle.element):
-                    return True
-                current = read.reference(current, "AXParent")
-    except (_AXReadError, TimeoutError):
-        return False
+            if system is not None:
+                current: int | None = read.hit(system, x, y)
+                for _ in range(32):
+                    if current is None or read.pid(current) != pid:
+                        return False
+                    if handle is None or ax.equal(current, handle.element):
+                        return True
+                    current = read.reference(current, "AXParent")
+    except (_AXReadError, OSError, TimeoutError):
+        pass
     return False
 
 

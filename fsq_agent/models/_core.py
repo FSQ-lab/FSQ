@@ -1203,6 +1203,7 @@ class MacOSLaunchAppParams(BaseModel):
             "description": (
                 "Launch or activate a macOS application. If the target app or document is already open in the bound session, reuse it directly or call launch_app with new_session=false; "
                 "set new_session=true on initial session setup, when rebinding the Mac2 accessibility tree to another desktop app, or when passing startup arguments."
+                " After foreground loss, pass the original explicit bundle_id and new_session=false; do not use auto for recovery."
             )
         },
     )
@@ -1256,8 +1257,9 @@ class MacOSScrollOnParams(_MacOSTargetParams):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Scroll on a uniquely resolved macOS element center or explicit coordinate-only point via Appium Mac2 macos: scroll. "
-                "Provide finite delta_x and/or delta_y (at least one non-zero). Under macOS CGEvent scroll wheel semantics, negative delta_y scrolls content down (toward lower items) and positive delta_y scrolls content up."
+                "Scroll on a uniquely resolved macOS element center or explicit coordinate-only point. "
+                "Provide finite delta_x and/or delta_y (at least one non-zero); native wheel input requires integer-valued deltas. "
+                "Negative delta_y scrolls down toward lower items, positive scrolls up; positive delta_x scrolls left."
             )
         },
     )
@@ -1289,7 +1291,12 @@ class MacOSScrollOnParams(_MacOSTargetParams):
 class MacOSTypeTextParams(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
-        json_schema_extra={"description": "Type text into macOS. Optional target, locator, or point may focus a destination before typing."},
+        json_schema_extra={
+            "description": (
+                "Type text into macOS. Without a target, locator, or point, send text directly to the current focus without clicking. "
+                "Dispatch alone does not verify a value, document commit, or save. Read back the intended state after any required commit."
+            )
+        },
     )
 
     text: str = Field(description="Literal text to type, or a runtime secret name when textType is runtimeSecret.")

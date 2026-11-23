@@ -1139,6 +1139,58 @@ async def test_runtime_routes_three_agent_flows_through_neutral_engine(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_macos_runtime_delivers_desktop_guidance_to_planning_and_execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fsq_agent.config import load_platform_settings
+    from fsq_agent.core import ArtifactStore, HarnessFactory
+    from fsq_agent.skills import SkillLoader
+
+    _patch_runtime_engine(monkeypatch)
+    settings = load_platform_settings("macos", workspace=tmp_path / "workspace", user_config_root=tmp_path / "user")
+    settings.agent_runtime = _azure_openai_settings()
+    settings.harness.macos.bundle_id = "com.example.App"
+    settings.output.runs_dir = tmp_path / "runs"
+    config = settings.agent_context.knowledge.skills
+    skills = SkillLoader(config.dir).load(config.items)
+    task = Task(description="Update the 'North Hall' record to standard access, then include it in the monthly export with the archived entries.")
+
+    def build_harness(run_id):
+        return HarnessFactory().create_harness(platform="macos", harness_settings=settings.harness, artifact_store=ArtifactStore(settings.output.runs_dir / run_id))
+
+    runtime = DefaultCodingAgentRuntime(settings, _EmptyToolFactory(), build_harness)
+    await runtime.run_pre_plan(task.description, KnowledgeBundle(), skills, "desktop-policy")
+    await _run_in_context(runtime, task, KnowledgeBundle(), skills, "desktop-policy")
+
+    planning, execution = _FakeEngine.requests
+    plan_input = json.loads(planning.input)
+    assert plan_input["reference_text"] == task.description
+    assert {tool.name for tool in planning.tools} == {"read_knowledge_index", "read_knowledge_page"}
+    planning_rules = " ".join(planning.instructions.split())
+    assert "Preserve explicitly requested identities" in planning_rules
+    assert "Do not turn an unobserved category or general description into an exact UI label" in planning_rules
+    assert "choose a fitting standard variant only from live category evidence" in planning_rules
+
+    macos_skill = next(skill["instructions"] for skill in plan_input["skills"] if skill["name"] == "macos-harness")
+    assert macos_skill.strip() in execution.instructions
+    assert {"launch_app", "ui_snapshot", "inspect_element", "type_text"} <= {tool.name for tool in execution.tools}
+    rules = " ".join(macos_skill.split())
+    assert "edit the underlying source record, not its derived field" in rules
+    assert "Explicitly commit authorized record edits and read back the resulting state" in rules
+    assert "verify the source value and the recalculated result" in rules
+    assert "Reuse a healthy session already bound to the intended application" in rules
+    assert "compose the requested result from already verified sources" in rules
+    assert "instead of retrying with startup arguments" in rules
+    assert "reactivate the explicit logical `bundle_id` with `launch_app(new_session=false)`" in rules
+    assert "never recover using `auto` or the session's host bundle" in rules
+    assert "take a fresh `ui_snapshot` before resuming" in rules
+    assert "never substitute the host application's tree or screenshot" in rules
+    assert "Leave a reported `permission_modal` untouched" in rules
+    assert "dispatch does not prove UI receipt, a state change, or persistence" in rules
+    assert "on `response_unknown`, do not replay the mutation" in rules
+    assert "value readback proves current control content, not a saved document" in rules
+    assert "`not_sent` means the rejected dispatch did not post" in rules
+
+
+@pytest.mark.asyncio
 async def test_runtime_emits_one_dynamic_agent_token_usage_event_from_engine_result(monkeypatch: pytest.MonkeyPatch) -> None:
     class UsageEngine(_FakeEngine):
         async def run(self, model, request, *, on_event=None):

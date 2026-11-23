@@ -29,6 +29,7 @@ def test_color_sample_rejects_ambiguous_or_invalid_geometry(payload):
         SampleColorParams.model_validate(payload)
 
 
+@pytest.mark.usefixtures("android_sdk")
 def test_local_region_sampling_delivers_calculated_extrema():
     from appium_connect_agent.automation import sample_png_color
 
@@ -49,6 +50,7 @@ def test_local_region_sampling_delivers_calculated_extrema():
     assert result["max_rgb"] == (20, 200, 244)
 
 
+@pytest.mark.usefixtures("android_sdk")
 @pytest.mark.parametrize("platform", ["android", "ios"])
 def test_mobile_color_sampling_preserves_safe_failure_details(platform, monkeypatch):
     class MappingError(RuntimeError):

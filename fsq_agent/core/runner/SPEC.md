@@ -47,6 +47,8 @@ An action result with `status="incomplete"` remains incomplete in phase, step, c
 
 Capability-neutral evidence coordination permits the active harness to supply one privacy-approved assertion screenshot as the step's before evidence without an earlier unsafe or duplicate capture. This does not add a Runner action-name switch or a public `CapabilityDefinition.capture_evidence` policy. Other step-kind capture behavior remains unchanged; missing/omitted evidence carries its actual requirement and reason rather than a fabricated artifact.
 
+Runner event/output credential redaction delegates to Core's single shared cycle-safe (`active_ids`) sanitizer with a 128-level container ceiling rather than maintaining a local depth-20 copy. Steps that fail or abort in `prepare` before entering `invoke` record no synthetic post-action (`finalize`) required-capture obligation.
+
 ## Current Invariants
 
 - Capability metadata, not action-name branches, controls routing, replay metadata, timing, sensitivity, and evidence policy.

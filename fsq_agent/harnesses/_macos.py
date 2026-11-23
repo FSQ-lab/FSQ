@@ -3,7 +3,6 @@
 
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
 from typing import ClassVar
 
 from pydantic import BaseModel, ValidationError
@@ -12,8 +11,8 @@ from fsq_agent.core.evidence import ArtifactStore
 from fsq_agent.core.interfaces import AIAssertionEvaluatorProtocol, MacOSDriverInterface
 from fsq_agent.drivers._capabilities import _capability_matches, _discover_driver_capability_definitions, _schema_from_capability_definition, _with_driver_metadata
 from fsq_agent.harnesses._common_tools import CommonPlatformTools
-from fsq_agent.harnesses._macos_visual import _capture_visual
 from fsq_agent.harnesses._resources import OwnedResources
+from fsq_agent.harnesses._visual import _ScopedVisualTools
 from fsq_agent.models import (
     AndroidVisualAssertionPolicy,
     AssertionBudget,
@@ -25,30 +24,12 @@ from fsq_agent.models import (
     HarnessArtifactRef,
     HarnessContext,
     HarnessFunctionSchema,
-    MacOSAssertWithAIParams,
     MacOSTakeScreenshotParams,
     MacOSUiSnapshotParams,
     RuntimeSecretSettings,
     StepPhase,
     ToolExecutionError,
 )
-
-
-@dataclass(frozen=True)
-class _VisualAssertionInvocation:
-    run_id: str
-    step_id: str
-    step_execution_id: str
-    capture_sequence: int
-    params: MacOSAssertWithAIParams
-    context: HarnessContext
-
-
-@dataclass(frozen=True)
-class _VisualAssertionCapture:
-    invocation: _VisualAssertionInvocation
-    policy: AndroidVisualAssertionPolicy
-    artifact: HarnessArtifactRef
 
 
 class MacOSHarness:
@@ -76,19 +57,21 @@ class MacOSHarness:
         visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,
         visual_assertion_budget: AssertionBudget | None = None,
         visual_assertion_provider_available: bool | None = None,
+        visual_ai_eligible: bool | None = None,
     ) -> None:
         self.driver = driver
         self.artifact_store = artifact_store
         self.ai_assertion_evaluator = ai_assertion_evaluator
-        self._visual_assertion_policy_resolver = visual_assertion_policy_resolver
-        self._visual_assertion_budget = visual_assertion_budget or AssertionBudget()
-        self._visual_assertion_provider_available = visual_assertion_provider_available
-        self._visual_assertion_capture: _VisualAssertionCapture | None = None
+        self.visual_ai_eligible = visual_ai_eligible
+        self._visual = _ScopedVisualTools("macos", driver, artifact_store, ai_assertion_evaluator, visual_assertion_policy_resolver, visual_assertion_budget, visual_assertion_provider_available)
         self._owned_resources = OwnedResources(driver, ai_assertion_evaluator)
         self.common_tools = CommonPlatformTools(
             platform="macos",
         )
-        self._configure_driver_ai_assertion_tool()
+
+    @property
+    def available_scoped_visual_tools(self) -> tuple[str, ...]:
+        return self._visual.available_tools
 
     def capture_scope(self, callback):
         return self.artifact_store.capture_scope(callback) if self.artifact_store is not None else nullcontext()
@@ -184,7 +167,7 @@ class MacOSHarness:
         context: HarnessContext,
         action_result: HarnessActionResult | None,
     ) -> None:
-        self._visual_assertion_capture = None
+        self._visual.discard_capture()
 
     def screenshot(self, params: MacOSTakeScreenshotParams | None = None) -> bytes:
         return self.driver.screenshot(params or MacOSTakeScreenshotParams())
@@ -200,38 +183,7 @@ class MacOSHarness:
         invocation = context.metadata.get("capture_invocation", {})
         capability = self._capability_for(invocation.get("action_name", "")) if isinstance(invocation, dict) else None
         if kind == "screenshot" and capability is not None and capability.name == "assert_with_ai":
-            self._visual_assertion_capture = None
-            check = context.cancellation_check
-            if check is not None:
-                check()
-            run_id = invocation.get("run_id") or (self.artifact_store.run_dir.name if self.artifact_store else "unallocated")
-            execution_id = invocation.get("step_execution_id") or step_id
-            capture_context = context.model_copy(
-                update={"metadata": {**context.metadata, "capture_invocation": {**invocation, "run_id": run_id, "step_id": step_id, "step_execution_id": execution_id}}}
-            )
-            current = _VisualAssertionInvocation(
-                run_id=run_id,
-                step_id=step_id,
-                step_execution_id=execution_id,
-                capture_sequence=self.artifact_store.allocate_capture_sequence() if self.artifact_store is not None else 1,
-                params=MacOSAssertWithAIParams.model_validate(invocation["params"]),
-                context=capture_context,
-            )
-            try:
-                resolved = self._visual_assertion_policy_resolver(current.context, current.capture_sequence) if self._visual_assertion_policy_resolver is not None else None
-            except Exception:  # noqa: BLE001 - incompatible host authorization must fail closed without exposing its error.
-                resolved = None
-            policy = resolved if isinstance(resolved, AndroidVisualAssertionPolicy) else AndroidVisualAssertionPolicy()
-            available = policy.provider_available if policy.provider_available is not None else self._visual_assertion_provider_available
-            policy = policy.model_copy(
-                update={
-                    "provider_available": False if self._visual_assertion_provider_available is False else available,
-                    "budget": AssertionBudget(**{name: min(getattr(policy.budget, name), getattr(self._visual_assertion_budget, name)) for name in AssertionBudget.model_fields}),
-                }
-            )
-            artifact = _capture_visual(self.driver, self.artifact_store, current, policy, self.ai_assertion_evaluator is not None, phase)
-            self._visual_assertion_capture = _VisualAssertionCapture(current, policy, artifact)
-            return artifact
+            return self._visual.capture_assertion(context, invocation, step_id, phase)
         if self.artifact_store is None:
             raise RuntimeError("Artifact capture requires an ArtifactStore.")
         if kind in {"screenshot", "ui_snapshot"} and self._session_not_started():
@@ -319,71 +271,12 @@ class MacOSHarness:
         )
         return [_with_driver_metadata(definition, updates) for definition in definitions]
 
-    def _configure_driver_ai_assertion_tool(self) -> None:
-        configure = getattr(self.driver, "configure_ai_assertion_tool", None)
-        if callable(configure):
-            configure(
-                platform="macos",
-                artifact_store=self.artifact_store,
-                ai_assertion_evaluator=self.ai_assertion_evaluator,
-            )
-
     def _prepare_driver_ai_assertion_tool_invocation(self, step: ExecutableStep, context: HarnessContext) -> None:
-        binding, self._visual_assertion_capture = self._visual_assertion_capture, None
-        policy = None
         capability = self._capability_for(step.action_name)
-        if capability is not None and capability.name == "inspect_with_ai":
-            sequence = self.artifact_store.allocate_capture_sequence() if self.artifact_store is not None else 1
-            identity = {
-                "run_id": step.metadata.get("run_id") or (self.artifact_store.run_dir.name if self.artifact_store else "unallocated"),
-                "step_id": step.step_id,
-                "step_execution_id": step.step_execution_id or step.step_id,
-                "action_name": capability.name,
-                "params": step.params,
-                "capture_sequence": sequence,
-            }
-            context = context.model_copy(update={"metadata": {**context.metadata, "capture_invocation": identity}})
-            try:
-                resolved = self._visual_assertion_policy_resolver(context, sequence) if self._visual_assertion_policy_resolver is not None else None
-            except Exception:  # noqa: BLE001 - incompatible host authorization must fail closed without exposing its error.
-                resolved = None
-            policy = resolved if isinstance(resolved, AndroidVisualAssertionPolicy) else AndroidVisualAssertionPolicy()
-            policy = policy.model_copy(
-                update={
-                    "provider_available": False if self._visual_assertion_provider_available is False else policy.provider_available,
-                    "budget": AssertionBudget(**{name: min(getattr(policy.budget, name), getattr(self._visual_assertion_budget, name)) for name in AssertionBudget.model_fields}),
-                }
-            )
-        if binding is not None:
-            current = binding.invocation
-            refs = step.metadata.get("prepared_artifacts", [])
-            screenshot = next((ref for ref in refs if ref.get("kind") == "screenshot"), None)
-            if (
-                current.run_id == step.metadata.get("run_id")
-                and current.step_id == step.step_id
-                and current.step_execution_id == (step.step_execution_id or step.step_id)
-                and current.params == MacOSAssertWithAIParams.model_validate(step.params)
-                and screenshot is not None
-                and screenshot.get("artifact_id") == binding.artifact.artifact_id
-                and screenshot.get("metadata", {}).get("capture") == binding.artifact.metadata.get("capture")
-            ):
-                policy = binding.policy
-        prepare = getattr(self.driver, "prepare_ai_assertion_tool_invocation", None)
-        if callable(prepare):
-            prepare(
-                context=context,
-                step_id=step.step_id,
-                action_name=step.action_name,
-                metadata=step.metadata,
-                capture_artifact=self.capture_artifact,
-                visual_assertion_policy=policy,
-            )
+        self._visual.prepare(step, context, capability.name if capability is not None else None, self.capture_artifact)
 
     def _clear_driver_ai_assertion_tool_invocation(self) -> None:
-        clear = getattr(self.driver, "clear_ai_assertion_tool_invocation", None)
-        self._visual_assertion_capture = None
-        if callable(clear):
-            clear()
+        self._visual.clear()
 
     def _session_not_started(self) -> bool:
         if getattr(self.driver, "_session", "unknown") not in (None, "unknown"):

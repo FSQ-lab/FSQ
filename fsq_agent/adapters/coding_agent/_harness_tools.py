@@ -23,6 +23,8 @@ from fsq_agent.models import (
     RunnerStepResult,
 )
 
+_SCOPED_VISUAL_CAPABILITIES = frozenset({"assert_with_ai", "inspect_with_ai"})
+
 
 def _validated_write_budget(value: object) -> dict[str, int] | None:
     keys = {"max", "used", "remaining", "charged"}
@@ -86,6 +88,17 @@ class HarnessToolAdapter:
     @property
     def tool_names(self) -> set[str]:
         return set(self.schemas_by_name)
+
+    def eligible_scoped_visual_tools(self) -> tuple[str, ...]:
+        try:
+            if getattr(self._dispatch, "visual_ai_eligible", None) is not True:
+                return ()
+            available = getattr(self._dispatch, "available_scoped_visual_tools", ())
+        except Exception:  # noqa: BLE001 - unavailable optional host signals deny probing.
+            return ()
+        if not isinstance(available, (tuple, frozenset)):
+            return ()
+        return tuple(sorted(schema.name for schema in self.schemas if (name := self._capability_name(schema)) in _SCOPED_VISUAL_CAPABILITIES and name in available))
 
     def build_tools(self) -> list[ToolBinding]:
         return [

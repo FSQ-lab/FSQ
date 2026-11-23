@@ -26,6 +26,7 @@ from fsq_agent.models import (
     IOSTapAtParams,
     IOSTapOnParams,
     IOSUiSnapshotParams,
+    SampleColorParams,
 )
 
 
@@ -76,3 +77,5 @@ class IOSDriverInterface(DriverObservationInterface, Protocol):
     def inspect_element(self, params: IOSInspectElementParams) -> dict[str, object]: ...
 
     def inspect_with_ai(self, params: IOSInspectWithAIParams) -> dict[str, object]: ...
+
+    def sample_color(self, params: SampleColorParams) -> dict[str, object]: ...

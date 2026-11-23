@@ -448,6 +448,30 @@ class VisualRect(BaseModel):
     bottom: int
 
 
+class ColorSamplePoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+
+
+class SampleColorParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    point: ColorSamplePoint | None = None
+    region: VisualRect | None = None
+    coordinate_space: Literal["pointer", "image"] = "pointer"
+
+    @model_validator(mode="after")
+    def _validate_geometry(self) -> "SampleColorParams":
+        if (self.point is None) == (self.region is None):
+            raise ValueError("provide exactly one point or region")
+        region = self.region
+        if region is not None and not (0 <= region.left < region.right and 0 <= region.top < region.bottom):
+            raise ValueError("region must have nonnegative coordinates and positive area")
+        return self
+
+
 class _VisualInspectWithAIParams(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
 
@@ -783,6 +807,7 @@ ANDROID_ACTION_DEFINITIONS: tuple[AndroidActionDefinition, ...] = (
     AndroidActionDefinition("uiTree", "ui_snapshot", AndroidUiTreeParams, "observation"),
     AndroidActionDefinition("inspectElement", "inspect_element", AndroidInspectElementParams, "observation"),
     AndroidActionDefinition("inspectWithAI", "inspect_with_ai", AndroidInspectWithAIParams, "observation"),
+    AndroidActionDefinition("sampleColor", "sample_color", SampleColorParams, "observation"),
     AndroidActionDefinition("assertWithAI", "assert_with_ai", AndroidAssertWithAIParams, "assertion"),
 )
 ANDROID_ACTION_DEFINITIONS_BY_NAME: dict[str, AndroidActionDefinition] = {definition.fsq_action_name: definition for definition in ANDROID_ACTION_DEFINITIONS}
@@ -1383,18 +1408,13 @@ class MacOSInspectWithAIParams(_VisualInspectWithAIParams):
         extra="forbid",
         strict=True,
         str_strip_whitespace=True,
-        json_schema_extra={
-            "description": (
-                "Read pixel-only visual content in the current macOS frame with mode='extract' without pass/fail verdicts or UI actions. "
-                "mode='locate' currently returns pointer_mapping_unavailable on macOS under the pinned SDK."
-            )
-        },
+        json_schema_extra={"description": "Read pixel-only content with extract, or locate on SDK-supported display topology. No UI actions or assertion verdicts."},
     )
 
     prompt: str = Field(
         min_length=1,
         max_length=4096,
-        description="Read pixel-only content in the current macOS image without performing an action. Locate mode currently returns pointer_mapping_unavailable on macOS.",
+        description="Read or locate pixel-only content in the current macOS frame without acting.",
     )
 
 
@@ -1522,6 +1542,7 @@ MACOS_ACTION_DEFINITIONS: tuple[MacOSActionDefinition, ...] = (
     MacOSActionDefinition("uiSnapshot", "ui_snapshot", MacOSUiSnapshotParams, "observation"),
     MacOSActionDefinition("inspectElement", "inspect_element", MacOSInspectElementParams, "observation"),
     MacOSActionDefinition("inspectWithAI", "inspect_with_ai", MacOSInspectWithAIParams, "observation"),
+    MacOSActionDefinition("sampleColor", "sample_color", SampleColorParams, "observation"),
     MacOSActionDefinition("assertVisible", "assert_visible", MacOSAssertVisibleParams, "assertion"),
     MacOSActionDefinition("assertNotVisible", "assert_not_visible", MacOSAssertNotVisibleParams, "assertion"),
     MacOSActionDefinition("assert", "assert_state", MacOSAssertStateParams, "assertion"),
@@ -1906,6 +1927,7 @@ IOS_ACTION_DEFINITIONS: tuple[IOSActionDefinition, ...] = (
     IOSActionDefinition("uiSnapshot", "ui_snapshot", IOSUiSnapshotParams, "observation"),
     IOSActionDefinition("inspectElement", "inspect_element", IOSInspectElementParams, "observation"),
     IOSActionDefinition("inspectWithAI", "inspect_with_ai", IOSInspectWithAIParams, "observation"),
+    IOSActionDefinition("sampleColor", "sample_color", SampleColorParams, "observation"),
     IOSActionDefinition("assertState", "assert_state", IOSAssertStateParams, "assertion"),
     IOSActionDefinition("assertVisible", "assert_visible", IOSAssertVisibleParams, "assertion"),
     IOSActionDefinition("assertNotVisible", "assert_not_visible", IOSAssertNotVisibleParams, "assertion"),

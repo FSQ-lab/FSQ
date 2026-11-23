@@ -170,7 +170,9 @@ class FakeDevice:
         self.screen_width = 402
         self.screen_height = 874
         buf = io.BytesIO()
-        Image.new("RGB", (4, 4), color=(120, 130, 140)).save(buf, format="PNG")
+        with Image.new("RGB", (4, 4), color=(120, 130, 140)) as image:
+            image.putpixel((3, 3), (255, 255, 255))
+            image.save(buf, format="PNG")
         self.png_bytes = buf.getvalue()
 
     def display_size(self, *, control: object = None) -> Any:

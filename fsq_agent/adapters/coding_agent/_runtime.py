@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 from fsq_agent._capability_bootstrap import build_capability_registry
-from fsq_agent.adapters.coding_agent._harness_tools import HarnessToolAdapter, _validated_write_budget
+from fsq_agent.adapters.coding_agent._harness_tools import _RETRY_FIELD, HarnessToolAdapter, _validated_write_budget
 from fsq_agent.agent import CodingAgentPolicy
 from fsq_agent.agent_engine import (
     AgentEngine,
@@ -1206,14 +1206,17 @@ class DefaultCodingAgentRuntime:
         if event.kind == "tool_called":
             tool_name = event.tool_name
             tool_call_id = event.call_id
-            tool_arguments = self._redact(event.arguments)
+            schema = self._harness_tool_schemas.get(tool_name or "")
+            arguments = event.arguments
+            if schema is not None and isinstance(arguments, dict) and _RETRY_FIELD in arguments:
+                arguments = {key: value for key, value in arguments.items() if key != _RETRY_FIELD}
+            tool_arguments = self._redact(arguments)
             if tool_call_id:
                 self._stream_tool_calls[(run_id, task_id, tool_call_id)] = {
                     "tool_name": tool_name,
                     "tool_arguments": tool_arguments,
                 }
             payload = {"tool_origin": self._tool_origin(tool_name)}
-            schema = self._harness_tool_schemas.get(tool_name or "")
             if schema is not None:
                 payload.update(
                     {

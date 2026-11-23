@@ -10,13 +10,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from fsq_agent.harnesses._visual import _CaptureRejectedError, _png_image, _terminal_ref
+from fsq_agent.harnesses._visual import _CaptureRejectedError, _is_blank, _png_image, _terminal_ref
 from fsq_agent.models import AndroidVisualAssertionPolicy, HarnessArtifactRef, HarnessContext, HostCaptureEnvelopeV1
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from PIL import Image
     from pydantic import BaseModel
 
 
@@ -35,22 +34,6 @@ class _HostVisualAssertionCapture:
     invocation: _HostVisualAssertionInvocation
     policy: AndroidVisualAssertionPolicy
     artifact: HarnessArtifactRef
-
-
-def _is_blank(image: Image.Image) -> bool:
-    if image.mode not in {"RGB", "RGBA", "L", "LA"} or "transparency" in image.info:
-        with image.convert("RGBA") as converted:
-            return _is_blank_pixels(converted)
-    return _is_blank_pixels(image)
-
-
-def _is_blank_pixels(image: Image.Image) -> bool:
-    extrema = image.getextrema()
-    if image.mode == "L":
-        return extrema[0] == extrema[1]
-    if image.mode in {"LA", "RGBA"} and extrema[-1][1] == 0:
-        return True
-    return all(low == high for low, high in extrema)
 
 
 def _capture_host_visual(

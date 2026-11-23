@@ -62,7 +62,9 @@ from fsq_agent.models import (
 
 def _valid_png_bytes(width: int = 80, height: int = 60) -> bytes:
     buf = io.BytesIO()
-    Image.new("RGBA", (width, height), (30, 120, 200, 255)).save(buf, format="PNG")
+    with Image.new("RGBA", (width, height), (30, 120, 200, 255)) as image:
+        image.putpixel((width // 2, height // 2), (255, 255, 255, 255))
+        image.save(buf, format="PNG")
     return buf.getvalue()
 
 

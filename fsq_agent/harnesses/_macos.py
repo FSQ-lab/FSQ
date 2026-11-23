@@ -186,7 +186,8 @@ class MacOSHarness:
         invocation = context.metadata.get("capture_invocation", {})
         capability = self._capability_for(invocation.get("action_name", "")) if isinstance(invocation, dict) else None
         if kind == "screenshot" and capability is not None and capability.name == "assert_with_ai":
-            return self._visual.capture_assertion(context, invocation, step_id, phase)
+            inactive_reason = "macos_session_not_started" if self._session_not_started() else None
+            return self._visual.capture_assertion(context, invocation, step_id, phase, inactive_reason=inactive_reason)
         if self.artifact_store is None:
             raise RuntimeError("Artifact capture requires an ArtifactStore.")
         if kind in {"screenshot", "ui_snapshot"} and self._session_not_started():

@@ -165,7 +165,8 @@ class AndroidHarness:
         invocation = context.metadata.get("capture_invocation", {})
         capability = self._capability_for(invocation.get("action_name", ""))
         if kind == "screenshot" and capability is not None and capability.name == "assert_with_ai":
-            return self._visual.capture_assertion(context, invocation, step_id, phase)
+            inactive_reason = "android_session_not_started" if context.metadata.get("session_started") is False else None
+            return self._visual.capture_assertion(context, invocation, step_id, phase, inactive_reason=inactive_reason)
         if self.artifact_store is None:
             raise RuntimeError("Artifact capture requires an ArtifactStore.")
         if kind in {"screenshot", "ui_snapshot"} and context.metadata.get("session_started") is False:

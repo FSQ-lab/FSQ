@@ -142,12 +142,23 @@ class _ScopedVisualTools:
         }
         return context.model_copy(update={"metadata": {**context.metadata, "capture_invocation": identity}}), identity
 
-    def capture_assertion(self, context: HarnessContext, identity: dict, step_id: str, phase: StepPhase) -> HarnessArtifactRef:
+    def capture_assertion(self, context: HarnessContext, identity: dict, step_id: str, phase: StepPhase, *, inactive_reason: str | None = None) -> HarnessArtifactRef:
         self.discard_capture()
         context, identity = self._capture_context(context, identity, step_id)
         params = _ASSERTION_PARAMS[self.platform].model_validate(identity["params"])
         policy = self._frame_policy(context, identity["capture_sequence"])
-        artifact = _capture_visual(self.driver, self.store, context, identity, params, policy, callable(getattr(self.evaluator, "evaluate", None)), phase, platform=self.platform)
+        artifact = _capture_visual(
+            self.driver,
+            self.store,
+            context,
+            identity,
+            params,
+            policy,
+            callable(getattr(self.evaluator, "evaluate", None)),
+            phase,
+            platform=self.platform,
+            inactive_reason=inactive_reason,
+        )
         self._capture = _VisualAssertionCapture(identity["run_id"], step_id, identity["step_execution_id"], params, policy, artifact)
         return artifact
 
@@ -312,7 +323,23 @@ def _png_image(data, budget):
     return image
 
 
-def _capture_visual(driver, store, context, identity, params, policy, evaluator_available, phase, *, platform: str) -> HarnessArtifactRef:
+def _is_blank(image: Image.Image) -> bool:
+    if image.mode not in {"RGB", "RGBA", "L", "LA"} or "transparency" in image.info:
+        with image.convert("RGBA") as converted:
+            return _is_blank_pixels(converted)
+    return _is_blank_pixels(image)
+
+
+def _is_blank_pixels(image: Image.Image) -> bool:
+    extrema = image.getextrema()
+    if image.mode == "L":
+        return extrema[0] == extrema[1]
+    if image.mode in {"LA", "RGBA"} and extrema[-1][1] == 0:
+        return True
+    return all(low == high for low, high in extrema)
+
+
+def _capture_visual(driver, store, context, identity, params, policy, evaluator_available, phase, *, platform: str, inactive_reason: str | None) -> HarnessArtifactRef:
     step_id = identity["step_id"]
     run_id = identity["run_id"]
     check = context.cancellation_check
@@ -325,6 +352,8 @@ def _capture_visual(driver, store, context, identity, params, policy, evaluator_
         return _terminal_ref(step_id, "privacy_blocked")
     if not evaluator_available:
         return _terminal_ref(step_id, "provider_unavailable")
+    if inactive_reason is not None:
+        return _terminal_ref(step_id, "capture_failed", unavailable_reason=inactive_reason)
     if params.expect is not None and params.expect.kind in {"exact_color", "display_identity"}:
         return _terminal_ref(step_id, "color_semantics_unverified" if params.expect.kind == "exact_color" else "display_identity_unverified")
     if store is None:
@@ -350,6 +379,8 @@ def _capture_visual(driver, store, context, identity, params, policy, evaluator_
                     return _terminal_ref(step_id, "region_invalid")
                 if (rect.right - rect.left) * (rect.bottom - rect.top) > policy.budget.max_image_pixels:
                     return _terminal_ref(step_id, "region_too_large")
+            elif _is_blank(image):
+                return _terminal_ref(step_id, "capture_failed", capture_failed=True)
             if finished < started or finished - started > policy.budget.max_capture_span_ns:
                 return _terminal_ref(step_id, "capture_stale")
             envelope = HostCaptureEnvelopeV1(
@@ -373,6 +404,8 @@ def _capture_visual(driver, store, context, identity, params, policy, evaluator_
             if rect is not None:
                 output = io.BytesIO()
                 with image.crop((rect.left, rect.top, rect.right, rect.bottom)) as cropped:
+                    if _is_blank(cropped):
+                        return _terminal_ref(step_id, "region_empty", capture_failed=True)
                     cropped.save(output, format="PNG")
                 data = output.getvalue()
                 if len(data) > policy.budget.max_image_bytes:

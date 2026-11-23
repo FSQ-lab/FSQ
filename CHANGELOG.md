@@ -4,6 +4,13 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.4.0]
+
+- Pin `appium-connect-agent==0.1.5` from PyPI. Finder-anchored and other native-target macOS sessions use guarded SDK desktop input without dispatching through the WDA host; input delivery and document verification remain separate.
+- Read macOS display geometry without querying WDA source, preserve action diagnostics when evidence capture fails, and allow explicit owner-thread cleanup of pending or uncertain sessions.
+- Distinguish task categories from named variants, verify record edits and recalculated values after commit, and reuse healthy macOS sessions for multi-document work.
+- See the [release notes](docs/releases/v0.4.0.md) for upgrade guidance and verification scope.
+
 ## [0.3.9] - 2026-11-23
 
 - Pin `appium-connect-agent==0.1.4` from PyPI. Android, iOS, and macOS share SDK-backed visual capture with an explicit host Run eligibility signal and independent per-frame authorization. `sample_color` provides exact local RGB without provider upload.
@@ -196,7 +203,8 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.3.9...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/FSQ-lab/FSQ/compare/v0.3.9...v0.4.0
 [0.3.9]: https://github.com/FSQ-lab/FSQ/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/FSQ-lab/FSQ/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/FSQ-lab/FSQ/compare/v0.3.6...v0.3.7

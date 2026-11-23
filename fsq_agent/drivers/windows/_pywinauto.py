@@ -12,11 +12,22 @@ from contextlib import suppress
 from math import ceil, hypot
 from pathlib import Path
 from typing import Any, TypeVar
+from xml.etree import ElementTree
 
 from pydantic import BaseModel
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _windows_driver_tool
+from fsq_agent.drivers._tree_compaction import (
+    DEFAULT_SNAPSHOT_TEXT_LIMIT_CHARS,
+    TreeCompactionPolicy,
+    build_compacted_envelope,
+    compact_xml_element_tree,
+    empty_compacted_envelope,
+    sanitize_xml_tag,
+    sanitize_xml_text,
+    unparsed_fallback_envelope,
+)
 from fsq_agent.models import (
     ConfigurationError,
     WindowsAssertVisibleParams,
@@ -37,10 +48,12 @@ from fsq_agent.models import (
 DEFAULT_WINDOWS_WAIT_TIMEOUT_SECONDS = 10.0
 WINDOW_READY_TIMEOUT_SECONDS = 30.0
 WINDOW_LAUNCH_WAIT_FOR = "exists visible enabled"
-UI_SNAPSHOT_MAX_DEPTH = 20
-UI_SNAPSHOT_MAX_NODES = 1200
-UI_SNAPSHOT_MAX_CHILDREN = 60
-UI_SNAPSHOT_MAX_BYTES = 800000
+UI_SNAPSHOT_MAX_DEPTH = 48
+UI_SNAPSHOT_MAX_NODES = 2500
+UI_SNAPSHOT_MAX_CHILDREN = 250
+UI_SNAPSHOT_MAX_XML_CHARS = 80_000
+WINDOWS_COMPACT_DEPTH_STEPDOWNS = (24, 16, 12, 8, 6)
+WINDOWS_COMPACT_SIBLING_STEPDOWNS = (None, 120, 60, 30, 15)
 MOUSE_DRAG_STEP_PIXELS = 15
 SW_RESTORE = 9
 SW_SHOWNOACTIVATE = 4
@@ -50,6 +63,53 @@ DWMWA_CLOAKED = 14
 PW_RENDERFULLCONTENT = 0x00000002
 BI_RGB = 0
 DIB_RGB_COLORS = 0
+WINDOWS_INTERACTIVE_CONTROL_TYPES = frozenset(
+    {
+        "Button",
+        "CheckBox",
+        "ComboBox",
+        "DataItem",
+        "Document",
+        "Edit",
+        "Hyperlink",
+        "ListItem",
+        "MenuItem",
+        "PasswordBox",
+        "RadioButton",
+        "ScrollBar",
+        "Slider",
+        "Spinner",
+        "SplitButton",
+        "TabItem",
+        "TreeItem",
+    }
+)
+
+
+def _is_windows_password_tag_or_attrs(tag: str, attribs: Any) -> bool:
+    if tag == "PasswordBox" or attribs.get("control_type") == "PasswordBox":
+        return True
+    if str(attribs.get("_secure", "")).lower() == "true":
+        return True
+    return "password" in str(attribs.get("class_name", "")).lower()
+
+
+WINDOWS_SNAPSHOT_POLICY = TreeCompactionPolicy(
+    empty_root_tag="Window",
+    interactive_tags=WINDOWS_INTERACTIVE_CONTROL_TYPES,
+    identity_attribute_keys=frozenset({"automation_id", "title", "value"}),
+    semantic_attribute_keys=frozenset({"automation_id", "title", "value", "control_type"}),
+    text_attribute_keys=frozenset({"title", "value"}),
+    state_defaults={
+        "enabled": "true",
+        "visible": "true",
+        "selected": "false",
+        "checked": "false",
+        "focused": "false",
+    },
+    text_limit_chars=DEFAULT_SNAPSHOT_TEXT_LIMIT_CHARS,
+    secure_tag_predicate=_is_windows_password_tag_or_attrs,
+)
 _T = TypeVar("_T")
 _HOST_FRAME_EXECUTABLE = "applicationframehost.exe"
 
@@ -442,58 +502,133 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
 
     def _ui_snapshot(self) -> dict[str, object]:
         window = self._require_window()
-        state = {"count": 0, "bytes": 0, "truncated": False}
-        root = self._extract_element(window, depth=0, seen=set(), state=state)
-        return {
-            "snapshot_type": "control_tree",
-            "node_count": state["count"],
-            "byte_size": state["bytes"],
-            "truncated": state["truncated"],
-            "root": root,
-        }
+        state = {"count": 0, "truncated": False}
+        xml_root = self._extract_xml_element(window, depth=0, seen=set(), state=state)
+        if xml_root is None:
+            return empty_compacted_envelope(empty_root_tag="Window", max_depth=UI_SNAPSHOT_MAX_DEPTH)
+        serialized = ElementTree.tostring(xml_root, encoding="unicode", short_empty_elements=True)
+        try:
+            compacted = compact_xml_element_tree(
+                xml_root,
+                policy=WINDOWS_SNAPSHOT_POLICY,
+                max_depth=UI_SNAPSHOT_MAX_DEPTH,
+                max_xml_chars=UI_SNAPSHOT_MAX_XML_CHARS,
+                depth_stepdowns=WINDOWS_COMPACT_DEPTH_STEPDOWNS,
+                sibling_stepdowns=WINDOWS_COMPACT_SIBLING_STEPDOWNS,
+            )
+            return build_compacted_envelope(
+                compacted,
+                policy=WINDOWS_SNAPSHOT_POLICY,
+                requested_max_depth=UI_SNAPSHOT_MAX_DEPTH,
+                complete_for_scope=not bool(state["truncated"]),
+                upstream_reason="raw_scan_limit" if state["truncated"] else "requested_scope",
+            )
+        except Exception as exc:  # noqa: BLE001 - safe fallback on unexpected compaction failure.
+            return unparsed_fallback_envelope(
+                serialized_source=serialized,
+                source_nodes=int(state["count"]),
+                max_depth=UI_SNAPSHOT_MAX_DEPTH,
+                error=exc,
+            )
 
-    def _extract_element(self, element: Any, *, depth: int, seen: set, state: dict[str, Any]) -> dict[str, Any] | None:
-        if state["count"] >= UI_SNAPSHOT_MAX_NODES or state["bytes"] >= UI_SNAPSHOT_MAX_BYTES:
+    def _extract_xml_element(self, element: Any, *, depth: int, seen: set[Any], state: dict[str, Any]) -> ElementTree.Element | None:
+        if state["count"] >= UI_SNAPSHOT_MAX_NODES:
             state["truncated"] = True
             return None
         runtime_id = self._element_runtime_id(element)
         if runtime_id is not None and runtime_id in seen:
             return None
-        control_type = self._element_attr(element, "control_type")
-        info: dict[str, Any] = {
-            "title": self._safe_call(getattr(element, "window_text", None)),
-            "control_type": control_type,
-            "automation_id": self._element_attr(element, "automation_id"),
-            "class_name": self._element_attr(element, "class_name"),
-            "rectangle": self._element_rectangle(element),
-        }
-        value = self._safe_call(getattr(element, "get_value", None))
-        if isinstance(value, str) and value:
-            info["value"] = value
-        if control_type == "CheckBox":
-            toggle = self._safe_call(getattr(element, "get_toggle_state", None))
-            if isinstance(toggle, int):
-                info["is_checked"] = toggle == 1
-        node_bytes = len(json.dumps(info, ensure_ascii=False, default=str))
-        if state["bytes"] + node_bytes > UI_SNAPSHOT_MAX_BYTES:
-            state["truncated"] = True
-            return None
         if runtime_id is not None:
             seen.add(runtime_id)
         state["count"] += 1
-        state["bytes"] += node_bytes
-        children: list[dict[str, Any]] = []
+
+        raw_control_type = self._element_attr(element, "control_type")
+        tag, was_sanitized = sanitize_xml_tag(raw_control_type, fallback="Window" if depth == 0 else "Control")
+        attribs: dict[str, str] = {}
+        if was_sanitized and raw_control_type:
+            attribs["control_type"] = sanitize_xml_text(raw_control_type)
+
+        is_password = self._is_password_element(element, control_type=raw_control_type)
+        if is_password:
+            attribs["_secure"] = "true"
+
+        automation_id = self._element_attr(element, "automation_id")
+        if automation_id:
+            attribs["automation_id"] = sanitize_xml_text(automation_id)
+
+        raw_title = self._safe_call(getattr(element, "window_text", None))
+        if not is_password and isinstance(raw_title, str) and raw_title.strip():
+            attribs["title"] = sanitize_xml_text(raw_title)
+
+        class_name = self._element_attr(element, "class_name")
+        if class_name:
+            attribs["class_name"] = sanitize_xml_text(class_name)
+
+        if not is_password:
+            value = self._safe_call(getattr(element, "get_value", None))
+            if isinstance(value, str) and value.strip():
+                attribs["value"] = sanitize_xml_text(value)
+
+        is_enabled = self._safe_call(getattr(element, "is_enabled", None))
+        if type(is_enabled) is bool:
+            attribs["enabled"] = "true" if is_enabled else "false"
+
+        is_visible = self._safe_call(getattr(element, "is_visible", None))
+        if type(is_visible) is bool:
+            attribs["visible"] = "true" if is_visible else "false"
+
+        is_selected = self._safe_call(getattr(element, "is_selected", None))
+        if type(is_selected) is bool:
+            attribs["selected"] = "true" if is_selected else "false"
+
+        if raw_control_type in {"CheckBox", "RadioButton"} or hasattr(element, "get_toggle_state"):
+            toggle = self._safe_call(getattr(element, "get_toggle_state", None))
+            if type(toggle) is int:
+                attribs["checked"] = "true" if toggle == 1 else "false"
+
+        is_focused = self._safe_call(getattr(element, "has_keyboard_focus", None))
+        if type(is_focused) is bool:
+            attribs["focused"] = "true" if is_focused else "false"
+
+        rect = self._element_rectangle(element)
+        if rect is not None:
+            attribs["bounds"] = f"[{rect['left']},{rect['top']}][{rect['right']},{rect['bottom']}]"
+
+        xml_el = ElementTree.Element(tag, attribs)
         if depth < UI_SNAPSHOT_MAX_DEPTH:
-            child_elements = self._safe_call(getattr(element, "children", None)) or []
-            for child in list(child_elements)[:UI_SNAPSHOT_MAX_CHILDREN]:
-                if state["count"] >= UI_SNAPSHOT_MAX_NODES or state["bytes"] >= UI_SNAPSHOT_MAX_BYTES:
+            raw_children = self._safe_call(getattr(element, "children", None)) or []
+            child_list = list(raw_children)
+            if len(child_list) > UI_SNAPSHOT_MAX_CHILDREN:
+                state["truncated"] = True
+            for child in child_list[:UI_SNAPSHOT_MAX_CHILDREN]:
+                if state["count"] >= UI_SNAPSHOT_MAX_NODES:
                     state["truncated"] = True
                     break
-                child_info = self._extract_element(child, depth=depth + 1, seen=seen, state=state)
-                if child_info is not None:
-                    children.append(child_info)
-        info["children"] = children
-        return info
+                child_el = self._extract_xml_element(child, depth=depth + 1, seen=seen, state=state)
+                if child_el is not None:
+                    xml_el.append(child_el)
+        else:
+            raw_children = self._safe_call(getattr(element, "children", None)) or []
+            if raw_children:
+                state["truncated"] = True
+        return xml_el
+
+    def _is_password_element(self, element: Any, *, control_type: str | None) -> bool:
+        if control_type == "PasswordBox":
+            return True
+        class_name = self._element_attr(element, "class_name") or ""
+        if "password" in class_name.lower():
+            return True
+        info = getattr(element, "element_info", None)
+        for holder in (info, getattr(info, "element", None), element):
+            if holder is None:
+                continue
+            for attr_name in ("is_password", "CurrentIsPassword"):
+                attr = getattr(holder, attr_name, None)
+                val = self._safe_call(attr) if callable(attr) else attr
+                if val is True or val == 1:
+                    return True
+        return False
 
     def _safe_call(self, func: Any) -> Any:
         if not callable(func):

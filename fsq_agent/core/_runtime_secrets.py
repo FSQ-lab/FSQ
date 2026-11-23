@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+from fsq_agent.core._redaction import is_credential_key, redact_structure, redact_text, sanitize_urls
 from fsq_agent.models import ConfigurationError, RuntimeSecretSettings
 
 
@@ -36,6 +37,48 @@ class RuntimeSecretStore:
     def redaction_values(self) -> tuple[str, ...]:
         """Supply known private values only to in-process persistence sanitizers."""
         return tuple(value for value in self._values.values() if value)
+
+    @staticmethod
+    def is_credential_key(key: object) -> bool:
+        return is_credential_key(key)
+
+    @staticmethod
+    def sanitize_urls(text: str) -> str:
+        return sanitize_urls(text)
+
+    @staticmethod
+    def redact_text(
+        text: str,
+        secrets: tuple[str, ...] = (),
+        *,
+        replacement: str = "***",
+        auth_replacement: str | None = None,
+    ) -> str:
+        return redact_text(
+            text,
+            secrets,
+            replacement=replacement,
+            auth_replacement=auth_replacement,
+        )
+
+    @staticmethod
+    def redact_structure(
+        value: object,
+        secrets: tuple[str, ...] = (),
+        *,
+        replacement: str = "***",
+        auth_replacement: str | None = None,
+        depth: int = 0,
+        active_ids: set[int] | None = None,
+    ) -> object:
+        return redact_structure(
+            value,
+            secrets,
+            replacement=replacement,
+            auth_replacement=auth_replacement,
+            depth=depth,
+            active_ids=active_ids,
+        )
 
     def resolve(self, name: str) -> str:
         normalized = name.strip()

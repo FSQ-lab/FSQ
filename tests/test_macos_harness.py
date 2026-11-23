@@ -158,7 +158,7 @@ class FakeMacOSDriver(AIAssertionBackendToolMixin):
     def ui_snapshot(self, params: MacOSUiSnapshotParams) -> dict[str, object]:
         recorded = params.model_dump(mode="json", exclude_none=True)
         self.calls.append(("ui_snapshot", recorded))
-        return {"title": "Finder", "snapshot_type": "macos_accessibility_tree"}
+        return {"format": "xml", "xml": '<XCUIElementTypeApplication title="Finder" />'}
 
     @_macos_driver_tool("inspectElement", description="Inspect a macOS element.")
     def inspect_element(self, params: MacOSInspectElementParams) -> dict[str, object]:
@@ -1123,19 +1123,19 @@ def test_appium_connect_macos_driver_ui_snapshot_simplifies_tree_observation_to_
     snapshot = driver.ui_snapshot(MacOSUiSnapshotParams())
 
     assert "source" not in snapshot
-    assert snapshot["snapshot_type"] == "macos_accessibility_tree"
+    assert "page_source" not in snapshot
+    assert "snapshot_type" not in snapshot
+    assert snapshot["format"] == "xml"
     assert snapshot["max_depth"] == 2
-    page_source = snapshot["page_source"]
-    assert page_source["format"] == "xml"
-    assert page_source["node_count"] == 7
-    assert page_source["root"] == {
-        "type": "XCUIElementTypeApplication",
-        "attributes": {"identifier": "Root"},
-        "children": [
-            {"type": "XCUIElementTypeWindow", "attributes": {"label": "Main"}, "children_truncated": 1},
-            {"type": "XCUIElementTypeWindow", "attributes": {"label": "Other"}},
-        ],
-    }
+    assert snapshot["node_count"] == 7
+    assert snapshot["compaction"]["layout_nodes_removed"] == 2
+    parsed = ElementTree.fromstring(snapshot["xml"])  # noqa: S314
+    assert parsed.tag == "XCUIElementTypeApplication"
+    assert parsed.attrib == {"identifier": "Root"}
+    assert [(child.tag, child.attrib) for child in parsed] == [
+        ("XCUIElementTypeWindow", {"label": "Main", "children_truncated": "1"}),
+        ("XCUIElementTypeWindow", {"label": "Other"}),
+    ]
 
 
 def test_appium_connect_macos_driver_ui_snapshot_handles_empty_observation() -> None:
@@ -1143,11 +1143,14 @@ def test_appium_connect_macos_driver_ui_snapshot_handles_empty_observation() -> 
 
     snapshot = driver.ui_snapshot(MacOSUiSnapshotParams())
 
-    assert snapshot["page_source"] == {"format": "xml", "root": None, "source_length": 0}
+    assert snapshot["format"] == "xml"
+    assert snapshot["xml"] == "<XCUIElementTypeApplication />"
+    assert snapshot["node_count"] == 0
+    assert snapshot["coverage"]["reason"] == "empty_tree"
 
 
 def test_appium_connect_macos_driver_ui_snapshot_compacts_semantic_signals() -> None:
-    long_label = "Save " + ("document " * 8)
+    long_label = "Save " + ("document " * 20)
     driver = AppiumConnectMacOSDriver(
         session=FakeMacSession(
             {},
@@ -1155,6 +1158,7 @@ def test_appium_connect_macos_driver_ui_snapshot_compacts_semantic_signals() -> 
                 '<XCUIElementTypeApplication identifier="Root"><Wrapper>'
                 f'<XCUIElementTypeButton identifier="save" label="{long_label}" role="AXButton" enabled="true" visible="true" '
                 'selected="false" x="10" y="20" width="80" height="30" custom="drop" />'
+                '<XCUIElementTypeSecureTextField identifier="pwd" value="SUPER_SECRET_PASSWORD" placeholderValue="Enter password" enabled="true" visible="true" x="10" y="60" width="80" height="30">SUPER_SECRET_PASSWORD</XCUIElementTypeSecureTextField>'
                 '<Noise enabled="true" visible="true" x="0" y="0" width="0" height="0" />'
                 '<Hidden visible="false" x="0" y="0" width="0" height="0" />'
                 "</Wrapper></XCUIElementTypeApplication>"
@@ -1164,31 +1168,29 @@ def test_appium_connect_macos_driver_ui_snapshot_compacts_semantic_signals() -> 
 
     snapshot = driver.ui_snapshot(MacOSUiSnapshotParams(max_depth=4))
 
-    page_source = snapshot["page_source"]
-    assert page_source["node_count"] == 5
-    assert page_source["root"] == {
-        "type": "XCUIElementTypeApplication",
-        "attributes": {"identifier": "Root"},
-        "children": [
-            {
-                "type": "XCUIElementTypeButton",
-                "attributes": {
-                    "identifier": "save",
-                    "label": long_label[:50],
-                    "role": "AXButton",
-                    "x": "10",
-                    "y": "20",
-                    "width": "80",
-                    "height": "30",
-                },
-                "truncated_attributes": ["label"],
-            },
-            {
-                "type": "Hidden",
-                "attributes": {"visible": "false", "x": "0", "y": "0", "width": "0", "height": "0"},
-            },
-        ],
+    assert snapshot["format"] == "xml"
+    assert snapshot["node_count"] == 6
+    assert "SUPER_SECRET_PASSWORD" not in json.dumps(snapshot)
+    assert snapshot["compaction"]["offscreen_nodes_omitted"] == 2
+    assert snapshot["compaction"]["layout_nodes_removed"] == 1
+    assert snapshot["compaction"]["clipped_attributes"] == 1
+    parsed = ElementTree.fromstring(snapshot["xml"])  # noqa: S314
+    assert parsed.tag == "XCUIElementTypeApplication"
+    assert parsed.attrib == {"identifier": "Root"}
+    assert len(parsed) == 2
+    assert parsed[0].tag == "XCUIElementTypeButton"
+    assert parsed[0].attrib == {
+        "identifier": "save",
+        "label": long_label[:160],
+        "role": "AXButton",
+        "x": "10",
+        "y": "20",
+        "width": "80",
+        "height": "30",
     }
+    assert parsed[1].tag == "XCUIElementTypeSecureTextField"
+    assert "value" not in parsed[1].attrib
+    assert (parsed[1].text or "") == ""
 
 
 def test_appium_connect_macos_driver_ui_snapshot_reduces_noise_heavy_output() -> None:
@@ -1198,14 +1200,16 @@ def test_appium_connect_macos_driver_ui_snapshot_reduces_noise_heavy_output() ->
 
     snapshot = driver.ui_snapshot(MacOSUiSnapshotParams())
 
-    page_source = snapshot["page_source"]
-    assert page_source["node_count"] == 102
-    assert page_source["root"] == {"type": "XCUIElementTypeApplication", "attributes": {"identifier": "Root"}}
-    assert len(json.dumps(page_source)) < len(source) // 10
+    assert snapshot["format"] == "xml"
+    assert snapshot["node_count"] == 102
+    assert snapshot["compaction"]["offscreen_nodes_omitted"] == 100
+    assert snapshot["compaction"]["layout_nodes_removed"] == 1
+    assert snapshot["xml"] == '<XCUIElementTypeApplication identifier="Root" />'
+    assert len(snapshot["xml"]) < len(source) // 10
 
 
 def test_appium_connect_macos_driver_ui_snapshot_compacts_included_attributes_and_text() -> None:
-    long_text = "x" * 60
+    long_text = "x" * 180
     driver = AppiumConnectMacOSDriver(
         session=FakeMacSession(
             {},
@@ -1215,33 +1219,30 @@ def test_appium_connect_macos_driver_ui_snapshot_compacts_included_attributes_an
 
     snapshot = driver.ui_snapshot(MacOSUiSnapshotParams(max_depth=3, include_attributes=True))
 
-    assert snapshot["page_source"]["root"] == {
-        "type": "XCUIElementTypeApplication",
-        "attributes": {"identifier": "Root"},
-        "children": [
-            {
-                "type": "XCUIElementTypeButton",
-                "attributes": {"label": "Action", "custom": "keep"},
-                "text": long_text[:50],
-                "text_truncated": True,
-            }
-        ],
-    }
+    assert snapshot["format"] == "xml"
+    assert snapshot["compaction"]["clipped_attributes"] == 1
+    parsed = ElementTree.fromstring(snapshot["xml"])  # noqa: S314
+    assert parsed.tag == "XCUIElementTypeApplication"
+    assert parsed.attrib == {"identifier": "Root"}
+    assert len(parsed) == 1
+    assert parsed[0].tag == "XCUIElementTypeButton"
+    assert parsed[0].attrib == {"label": "Action", "custom": "keep"}
+    assert parsed[0].text == long_text[:160]
 
 
 def test_appium_connect_macos_driver_ui_snapshot_bounds_unexpected_compaction_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     source = '<XCUIElementTypeApplication identifier="Root" />'
     driver = AppiumConnectMacOSDriver(session=FakeMacSession({}, page_source=source))
 
-    def fail_compaction(*args: object, **kwargs: object) -> dict[str, object]:
+    def fail_compaction(*args: object, **kwargs: object) -> object:
         raise RuntimeError("SECRET compaction failed")
 
-    monkeypatch.setattr(driver, "_snapshot_attributes", fail_compaction)
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect.compact_xml_element_tree", fail_compaction)
 
     snapshot = driver.ui_snapshot(MacOSUiSnapshotParams())
 
-    assert snapshot["page_source"]["format"] == "unparsed_xml"
-    assert snapshot["page_source"]["parse_error"] == "RuntimeError"
+    assert snapshot["format"] == "unparsed_xml"
+    assert snapshot["parse_error"] == "RuntimeError"
     assert "SECRET" not in json.dumps(snapshot)
 
 
@@ -1775,7 +1776,7 @@ def test_macos_driver_ensure_alive_and_quit_unknown_settlement() -> None:
     owned_driver._last_operation_finished_at = time.monotonic() - 60.0
 
     snap = owned_driver.ui_snapshot(MacOSUiSnapshotParams())
-    assert snap["snapshot_type"] == "macos_accessibility_tree"
+    assert snap["format"] == "xml"
     assert ensure_alive_calls == 1
 
     # close() settles session_quit_unknown via dispose() without raising
@@ -2428,7 +2429,7 @@ def test_macos_ui_snapshot_falls_back_to_frontmost_window_and_adaptively_compact
     driver = AppiumConnectMacOSDriver(bundle_id="com.example.WideApp", session=session)
 
     snap = driver.ui_snapshot(MacOSUiSnapshotParams())
-    assert snap["snapshot_type"] == "macos_accessibility_tree"
+    assert snap["format"] == "xml"
     assert len(session.observe_parents) == 2
     assert session.observe_parents[0] is None
     assert session.observe_parents[1].value == "XCUIElementTypeWindow"
@@ -2436,9 +2437,9 @@ def test_macos_ui_snapshot_falls_back_to_frontmost_window_and_adaptively_compact
     assert snap["diagnostics"]["coverage"] == "frontmost_window_fallback"
     assert snap["diagnostics"]["complete_for_requested_scope"] is False
     assert snap["diagnostics"]["adaptive_compaction"] is True
-    root = snap["page_source"]["root"]
-    assert root["children_truncated"] > 0
-    assert len(json.dumps(root)) <= 28_000
+    parsed = ElementTree.fromstring(snap["xml"])  # noqa: S314
+    assert int(parsed.attrib["children_truncated"]) > 0
+    assert len(snap["xml"]) <= 28_000
 
 
 @pytest.mark.usefixtures("android_sdk")
@@ -2907,7 +2908,7 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
 
         # 3. ui_snapshot observes native AX tree for Notes; inspect_element reads unclipped attributes and protects SecureTextField.
         snap = driver.ui_snapshot(MacOSUiSnapshotParams())
-        assert snap["snapshot_type"] == "macos_accessibility_tree"
+        assert snap["format"] == "xml"
         assert snap["diagnostics"]["source"] == "macos_native_ax"
         assert observed_bundles[-1] == "com.apple.Notes"
 

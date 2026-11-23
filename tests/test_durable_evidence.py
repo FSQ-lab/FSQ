@@ -415,3 +415,51 @@ def test_recorder_incremental_validation_avoids_copying_prior_artifacts_and_fsyn
     fsynced_names.clear()
     recorder.write_manifest()
     assert fsynced_names[:2] == ["evidence-events.jsonl", "manifest.tmp"]
+
+
+def test_shared_redaction_preserves_35_deep_nested_structures_and_dag_siblings_while_guarding_cycles_and_128_limit(tmp_path):
+    from fsq_agent.core import ArtifactStore
+    from fsq_agent.execution import RunLifecycleService
+
+    # 1. Legitimate 35-level nested structure (previously corrupted at depth > 20)
+    leaf = {"label": "Deep Button", "password": "LEAF_SECRET_CANARY", "note": "Keep my_runtime_secret safe"}
+    nested_35: object = leaf
+    for level in range(35):
+        nested_35 = {"level": level, "child": [nested_35]}
+
+    store = ArtifactStore(run_dir=tmp_path, secret_values=("my_runtime_secret",))
+    ref = store.write_json(kind="ui_snapshot", step_id="s1", phase="finalize", name="deep", payload=nested_35)
+    persisted_text = (tmp_path / ref.path).read_text(encoding="utf-8")
+    assert "[REDACTED: nesting limit]" not in persisted_text
+    assert "LEAF_SECRET_CANARY" not in persisted_text
+    assert "my_runtime_secret" not in persisted_text
+    assert "Deep Button" in persisted_text
+
+    safe_exec = RunLifecycleService.safe_value(nested_35, ("my_runtime_secret",))
+    safe_exec_json = json.dumps(safe_exec)
+    assert "[REDACTED: nesting limit]" not in safe_exec_json
+    assert "LEAF_SECRET_CANARY" not in safe_exec_json
+    assert "my_runtime_secret" not in safe_exec_json
+    assert "Deep Button" in safe_exec_json
+
+    # 2. Shared non-cyclic DAG sibling reference is NOT flagged as a cycle
+    shared_node = {"title": "Shared Leaf", "apiKey": "DAG_SECRET"}
+    dag_payload = {"left": shared_node, "right": shared_node}
+    safe_dag = RunLifecycleService.safe_value(dag_payload)
+    assert safe_dag == {
+        "left": {"title": "Shared Leaf", "apiKey": "[REDACTED]"},
+        "right": {"title": "Shared Leaf", "apiKey": "[REDACTED]"},
+    }
+
+    # 3. Genuine ancestor cycle returns "[REDACTED: cycle]" without RecursionError
+    cyclic_dict: dict[str, object] = {"name": "root", "token": "CYCLE_SECRET"}
+    cyclic_dict["self"] = cyclic_dict
+    safe_cycle = RunLifecycleService.safe_value(cyclic_dict)
+    assert safe_cycle == {"name": "root", "token": "[REDACTED]", "self": "[REDACTED: cycle]"}
+
+    # 4. Pathological depth > 128 triggers "[REDACTED: nesting limit]"
+    deep_135: object = {"ok": True}
+    for _ in range(135):
+        deep_135 = [deep_135]
+    safe_deep_135 = RunLifecycleService.safe_value(deep_135)
+    assert "[REDACTED: nesting limit]" in json.dumps(safe_deep_135)

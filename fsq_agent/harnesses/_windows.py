@@ -131,6 +131,21 @@ class WindowsHarness:
     ) -> HarnessArtifactRef:
         if self.artifact_store is None:
             raise RuntimeError("Artifact capture requires an ArtifactStore.")
+        if kind in {"screenshot", "ui_snapshot"} and self._app_not_started(context):
+            return self._to_harness_artifact_ref(
+                self.artifact_store.write_json(
+                    kind="json",
+                    step_id=step_id,
+                    phase=phase,
+                    name=f"{reason}-{kind}-unavailable",
+                    payload={
+                        "status": "unavailable",
+                        "reason": "windows_app_not_launched",
+                        "message": "Windows target application is not started yet.",
+                        "requested_artifact_kind": kind,
+                    },
+                )
+            )
         if kind == "screenshot":
             return self._to_harness_artifact_ref(
                 self.artifact_store.write_bytes(
@@ -295,6 +310,13 @@ class WindowsHarness:
 
     def _dict_value(self, value: object) -> dict[str, object]:
         return value if isinstance(value, dict) else {}
+
+    def _app_not_started(self, context: HarnessContext) -> bool:
+        if getattr(self.driver, "app_path", None) is not None and getattr(self.driver, "_launched", None) is not None:
+            return not bool(getattr(self.driver, "_launched", True))
+        if context.metadata.get("app_launched") is False:
+            return True
+        return context.metadata.get("app_path_configured") is False and context.metadata.get("window_title_re_configured") is False
 
     def _metadata_str(self, metadata: dict[str, object], key: str) -> str | None:
         value = metadata.get(key)

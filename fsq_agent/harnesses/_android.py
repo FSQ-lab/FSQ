@@ -168,6 +168,21 @@ class AndroidHarness:
             return self._visual.capture_assertion(context, invocation, step_id, phase)
         if self.artifact_store is None:
             raise RuntimeError("Artifact capture requires an ArtifactStore.")
+        if kind in {"screenshot", "ui_snapshot"} and self._session_not_started(context):
+            return self._to_harness_artifact_ref(
+                self.artifact_store.write_json(
+                    kind="json",
+                    step_id=step_id,
+                    phase=phase,
+                    name=f"{reason}-{kind}-unavailable",
+                    payload={
+                        "status": "unavailable",
+                        "reason": "android_session_not_started",
+                        "message": "Android Appium session is not started yet.",
+                        "requested_artifact_kind": kind,
+                    },
+                )
+            )
         if kind == "screenshot":
             return self._to_harness_artifact_ref(
                 self.artifact_store.write_bytes(
@@ -234,6 +249,15 @@ class AndroidHarness:
 
     def classify_error(self, error: BaseException, phase: StepPhase, step: ExecutableStep) -> FailureCategory:
         return "harness_error"
+
+    def _session_not_started(self, context: HarnessContext) -> bool:
+        if context.metadata.get("session_started") is False or getattr(self.driver, "_closed", False) is True:
+            return True
+        if context.session_id:
+            return False
+        if getattr(self.driver, "_session", "unknown") is None:
+            return not (getattr(self.driver, "serial", None) or "").strip()
+        return context.metadata.get("session_started") is None and "session_id" in context.metadata and context.metadata.get("session_id") is None
 
     def _normalize_params(self, step: ExecutableStep) -> dict[str, object]:
         return step.params

@@ -493,14 +493,18 @@ def _bundle(bundle_id, run_id, events, steps, planned, sequence, metadata, *, in
         for phase in step.phase_reports:
             for ref in phase.artifact_refs:
                 _put_artifact(artifact_map, ref)
-    partial = any(step.status in {"incomplete", "pending", "running"} or step.evidence_errors for step in results)
+    partial = any((step.status == "incomplete" and step.metadata.get("recovered_incomplete")) or step.status in {"pending", "running"} or step.evidence_errors for step in results)
     partial = partial or any(ref.availability not in {"available", "not_applicable"} for ref in artifact_map.values())
     for result in results:
         if result.step_execution_id is None and result.status in {"skipped", "incomplete"}:
             continue
         policy = result.metadata.get("evidence_policy") or {}
+        entered_invoke = any(item.phase in {"invoke", "settle", "finalize"} for item in result.phase_reports)
+        prepare_aborted = any(item.phase == "prepare" and item.status != "passed" for item in result.phase_reports) and not entered_invoke
         for phase, requested in (("prepare", policy.get("capture_before")), ("finalize", policy.get("capture_after"))):
             if not requested:
+                continue
+            if phase == "finalize" and prepare_aborted:
                 continue
             captures = [ref for item in result.phase_reports if item.phase == phase for ref in item.artifact_refs]
             for kind in policy.get("artifact_kinds", []):

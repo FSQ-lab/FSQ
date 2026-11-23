@@ -17,14 +17,18 @@ from fsq_agent.core import (
 from fsq_agent.core.harness._ai_assertion_tool import AIAssertionBackendToolMixin
 from fsq_agent.core.harness._driver_tools import _windows_driver_tool
 from fsq_agent.core.harness._windows import WindowsHarness
+from fsq_agent.drivers._color_sample import _sample_local_png_color
 from fsq_agent.drivers._host_visual_inspection import _run_host_visual_inspection
 from fsq_agent.models import (
     AIAssertionRequest,
     AIAssertionResult,
+    AIVisualCandidate,
     AIVisualInspectionResult,
     AndroidVisualAssertionPolicy,
     ExecutableStep,
     HarnessContext,
+    SampleColorParams,
+    VisualImageBounds,
     WindowsAssertVisibleParams,
     WindowsAssertWithAIParams,
     WindowsClickOnParams,
@@ -128,6 +132,11 @@ class FakeWindowsDriver(AIAssertionBackendToolMixin):
     def inspect_with_ai(self, params: WindowsInspectWithAIParams) -> dict[str, object]:
         return _run_host_visual_inspection(self, params, platform="windows")
 
+    @_windows_driver_tool("sampleColor", description="Measure exact local RGB from a current Windows frame point or region.")
+    def sample_color(self, params: SampleColorParams) -> dict[str, object]:
+        self.calls.append(("sample_color", params.model_dump(mode="json", exclude_none=True)))
+        return {"status": "passed", "output": _sample_local_png_color(_valid_png_bytes(), params, window_rect=(100, 200, 180, 260), pointer_size=(1920, 1080))}
+
     @_windows_driver_tool("uiSnapshot", description="Return the current Windows window control tree snapshot.")
     def ui_snapshot(self, params: WindowsUiSnapshotParams) -> dict[str, object]:
         if hasattr(params, "model_dump"):
@@ -200,6 +209,7 @@ def test_windows_harness_action_space_returns_catalog_backed_schemas() -> None:
     assert "click_on" in schemas
     assert "ui_snapshot" in schemas
     assert "inspect_with_ai" in schemas
+    assert "sample_color" in schemas
     assert "assert_with_ai" in schemas
     assert set(schemas["launch_app"].params_json_schema["properties"]) == {"extra_args"}
     assert schemas["click_on"].driver_method == "click_on"
@@ -209,11 +219,14 @@ def test_windows_harness_action_space_returns_catalog_backed_schemas() -> None:
     assert schemas["click_on"].metadata["backend"] == "fake-pywinauto"
     assert schemas["click_on"].metadata["replay"] == {"kind": "fsq_command", "alias": "clickOn"}
     assert "locator" in schemas["click_on"].params_json_schema["properties"]
-    assert "locator" in schemas["click_on"].params_json_schema["required"]
+    assert "point" in schemas["click_on"].params_json_schema["properties"]
+    assert "required" not in schemas["click_on"].params_json_schema
     assert "target" in schemas["click_on"].params_json_schema["properties"]
-    assert "target" not in schemas["click_on"].params_json_schema["required"]
-    assert "non-empty locator" in schemas["click_on"].params_json_schema["description"]
+    assert "locator" in schemas["type_text"].params_json_schema["required"]
+    assert "point" not in schemas["type_text"].params_json_schema["properties"]
+    assert "exactly one of non-empty locator or explicit screen point" in schemas["click_on"].params_json_schema["description"]
     assert "descriptive" in schemas["click_on"].params_json_schema["properties"]["target"]["description"]
+    assert schemas["sample_color"].fsq_action_name == "sampleColor"
     assert schemas["drag_to"].fsq_action_name == "dragTo"
     assert schemas["ui_snapshot"].driver_method == "ui_snapshot"
     assert schemas["ui_snapshot"].fsq_action_name == "uiSnapshot"
@@ -273,10 +286,15 @@ def test_windows_harness_reports_none_locator() -> None:
     assert result.status == "failed"
     assert result.failure_category == "configuration_error"
     assert result.error_message is not None
-    assert "locator:" in result.error_message
-    assert "valid dictionary or instance of WindowsLocator" in result.error_message
-    assert result.metadata["validation_errors"][0]["loc"] == ("locator",)
+    assert "requires exactly one of locator or point" in result.error_message
+    assert result.metadata["validation_errors"][0]["loc"] == ()
     assert driver.calls == [("context", None)]
+
+    type_none = harness.invoke_action(_step("typeText", {"target": "Type Login", "locator": None, "text": "alice"}), harness.get_context())
+    assert type_none.status == "failed"
+    assert type_none.failure_category == "configuration_error"
+    assert "locator:" in (type_none.error_message or "")
+    assert type_none.metadata["validation_errors"][0]["loc"] == ("locator",)
 
 
 def test_windows_harness_allows_missing_target() -> None:
@@ -548,11 +566,93 @@ def test_windows_harness_inspect_with_ai_extract_locate_and_privacy(tmp_path) ->
     assert len(evaluator.inspect_requests) == 1
     assert evaluator.inspect_requests[0].platform == "windows"
 
-    locate_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Find chart legend", "mode": "locate"}), harness.get_context())
-    assert locate_res.status == "failed"
-    assert locate_res.output["reason"] == "pointer_mapping_unavailable"
+    locate_unmapped = harness.invoke_action(_step("inspectWithAI", {"prompt": "Find chart legend", "mode": "locate"}), harness.get_context())
+    assert locate_unmapped.status == "failed"
+    assert locate_unmapped.output["reason"] == "pointer_mapping_unavailable"
     assert len(evaluator.inspect_requests) == 1
 
+    class MappedInspectEvaluator:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def evaluate(self, request, *, cancellation_check=None):
+            raise AssertionError("inspect_with_ai must not call evaluate")
+
+        def inspect(self, request, *, cancellation_check=None) -> AIVisualInspectionResult:
+            self.requests.append(request)
+            return AIVisualInspectionResult(
+                summary="Located custom chart bar",
+                candidates=(
+                    AIVisualCandidate(
+                        label="Q4 Bar",
+                        image_bounds=VisualImageBounds(x=10, y=20, width=16, height=12),
+                        confidence=0.92,
+                    ),
+                ),
+            )
+
+    class MappedWindowsDriver(FakeWindowsDriver):
+        def __init__(self, rect: tuple[int, int, int, int], screen: tuple[int, int]) -> None:
+            super().__init__()
+            self._rect = rect
+            self._screen = screen
+
+        def capture_visual_frame_with_mapping(self):
+            self.calls.append(("capture_visual_frame_with_mapping", None))
+            return _valid_png_bytes(width=80, height=60), self._rect, self._screen
+
+    mapped_eval = MappedInspectEvaluator()
+    mapped_driver = MappedWindowsDriver((300, 150, 380, 210), (1920, 1080))
+    mapped_harness = WindowsHarness(
+        driver=mapped_driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "locate_ok"),
+        ai_assertion_evaluator=mapped_eval,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
+    locate_ok = mapped_harness.invoke_action(_step("inspectWithAI", {"prompt": "Find Q4 bar", "mode": "locate"}), mapped_harness.get_context())
+    assert locate_ok.status == "passed"
+    assert locate_ok.output["pointer_size"] == {"width": 1920, "height": 1080}
+    assert locate_ok.output["candidates"] == [
+        {
+            "label": "Q4 Bar",
+            "image_bounds": {"x": 10, "y": 20, "width": 16, "height": 12},
+            "pointer_bounds": {"x": 310, "y": 170, "width": 16, "height": 12},
+            "pointer_center": {"x": 318, "y": 176},
+            "confidence": 0.92,
+        }
+    ]
+
+    # Non-1:1 DPI scaling mismatch fails closed before provider upload.
+    scaled_driver = MappedWindowsDriver((300, 150, 420, 240), (1920, 1080))
+    scaled_harness = WindowsHarness(
+        driver=scaled_driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "locate_scaled"),
+        ai_assertion_evaluator=mapped_eval,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
+    locate_scaled = scaled_harness.invoke_action(_step("inspectWithAI", {"prompt": "Find Q4 bar", "mode": "locate"}), scaled_harness.get_context())
+    assert locate_scaled.status == "failed"
+    assert locate_scaled.output["reason"] == "pointer_mapping_unavailable"
+    assert len(mapped_eval.requests) == 1
+
+    # Local sampleColor succeeds offline without evaluator or upload policy.
+    sample_res = WindowsHarness(driver=FakeWindowsDriver(), artifact_store=ArtifactStore(run_dir=tmp_path / "sample"))
+    color_res = sample_res.invoke_action(
+        _step("sampleColor", {"point": {"x": 140, "y": 230}, "coordinate_space": "pointer"}),
+        sample_res.get_context(),
+    )
+    assert color_res.status == "passed"
+    assert color_res.output["hex"] == "#FFFFFF"
+    assert color_res.output["image_point"] == (40, 30)
+    assert color_res.output["pointer_point"] == (140, 230)
     blocked_driver = FakeWindowsDriver()
     blocked_harness = WindowsHarness(
         driver=blocked_driver,

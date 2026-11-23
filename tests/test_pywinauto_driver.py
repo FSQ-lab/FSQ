@@ -13,6 +13,7 @@ from PIL import Image, ImageGrab
 from fsq_agent.drivers.windows._pywinauto import PW_RENDERFULLCONTENT, PywinautoWindowsDriver
 from fsq_agent.models import (
     ConfigurationError,
+    SampleColorParams,
     WindowsClickOnParams,
     WindowsDoubleClickOnParams,
     WindowsDragToParams,
@@ -110,6 +111,12 @@ class _FakeMouse:
 
     def release(self, *, coords: tuple[int, int], button: str) -> None:
         self._events.append(f"mouse_release:{coords}:{button}")
+
+    def click(self, *, coords: tuple[int, int], button: str = "left") -> None:
+        self._events.append(f"mouse_click:{coords}:{button}")
+
+    def double_click(self, *, coords: tuple[int, int], button: str = "left") -> None:
+        self._events.append(f"mouse_double_click:{coords}:{button}")
 
 
 def test_launch_app_restores_iconic_hwnd_and_sets_focus_after_binding(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -919,3 +926,108 @@ def test_live_uia_minimized_window_resolves_for_lossless_screenshot_and_restores
         app_driver.close()
         stop.set()
         ui_thread.join(timeout=5.0)
+
+
+def test_pywinauto_driver_point_actions_enforce_bound_window_bounds_and_foreground(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    state = {"iconic": True, "focused": False}
+    hwnd = 6100
+    window = _FakeInteractiveWindow(hwnd, 8800, events, state)
+    mouse = _FakeMouse(events)
+    driver = PywinautoWindowsDriver(window_title_re=".*CanvasApp")
+    driver._bound_handle = hwnd
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: window)
+    monkeypatch.setattr(driver, "_mouse_module", lambda: mouse)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda candidate: candidate == hwnd)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda candidate: candidate == hwnd and state["iconic"])
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: hwnd if state["focused"] else 0)
+    monkeypatch.setattr(driver, "_win32_window_rect", lambda candidate: (100, 200, 500, 600) if candidate == hwnd else None)
+
+    def _restore(candidate: int, *, activate: bool = True) -> None:
+        assert candidate == hwnd
+        assert activate is True
+        state["iconic"] = False
+        events.append(f"restore:{candidate}")
+
+    monkeypatch.setattr(driver, "_restore_window", _restore)
+    try:
+        assert driver.click_on(WindowsClickOnParams(point={"x": 250, "y": 350}))["status"] == "passed"
+        assert driver.double_click_on(WindowsDoubleClickOnParams(point={"x": 260, "y": 360}))["status"] == "passed"
+        assert driver.right_click_on(WindowsRightClickOnParams(point={"x": 270, "y": 370}))["status"] == "passed"
+        assert driver.hover_on(WindowsHoverOnParams(point={"x": 280, "y": 380}))["status"] == "passed"
+        assert driver.scroll_on(WindowsScrollOnParams(point={"x": 290, "y": 390}, wheel_dist=-2))["status"] == "passed"
+        assert events == [
+            f"restore:{hwnd}",
+            f"set_focus:{hwnd}:iconic=False",
+            "mouse_click:(250, 350):left",
+            f"set_focus:{hwnd}:iconic=False",
+            "mouse_double_click:(260, 360):left",
+            f"set_focus:{hwnd}:iconic=False",
+            "mouse_click:(270, 370):right",
+            f"set_focus:{hwnd}:iconic=False",
+            "mouse_move:(280, 380)",
+            f"set_focus:{hwnd}:iconic=False",
+            "mouse_scroll:(290, 390):-2",
+        ]
+
+        # Out-of-bounds screen point raises LookupError without dispatching host mouse input.
+        events.clear()
+        with pytest.raises(LookupError, match="outside the bound window bounds"):
+            driver.click_on(WindowsClickOnParams(point={"x": 500, "y": 350}))
+        assert events == [f"set_focus:{hwnd}:iconic=False"]
+    finally:
+        driver.close()
+
+
+def test_pywinauto_driver_sample_color_supports_image_and_verified_pointer_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    hwnd = 6200
+    state = {"iconic": False, "focused": True}
+    events: list[str] = []
+    window = _FakeInteractiveWindow(hwnd, 8900, events, state)
+    driver = PywinautoWindowsDriver(window_title_re=".*ColorApp")
+    driver._bound_handle = hwnd
+
+    img = Image.new("RGB", (60, 40), (18, 52, 86))
+    for px in range(20, 30):
+        for py in range(10, 20):
+            img.putpixel((px, py), (220, 60, 40))
+
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: window)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda candidate: candidate == hwnd)
+    monkeypatch.setattr(driver, "_window_process_id", lambda candidate: 8900 if candidate == hwnd else None)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda candidate: state["iconic"])
+    monkeypatch.setattr(driver, "_win32_window_rect", lambda candidate: (100, 200, 160, 240))
+    monkeypatch.setattr(driver, "_primary_screen_size", lambda _w=None: (1920, 1080))
+    monkeypatch.setattr(driver, "_capture_window_via_print_window", lambda candidate: img.copy())
+
+    try:
+        ptr_res = driver.sample_color(SampleColorParams.model_validate({"region": {"left": 120, "top": 210, "right": 130, "bottom": 220}, "coordinate_space": "pointer"}))
+        assert ptr_res["status"] == "passed"
+        assert ptr_res["output"]["rgb"] == (220, 60, 40)
+        assert ptr_res["output"]["hex"] == "#DC3C28"
+        assert ptr_res["output"]["uniform"] is True
+        assert ptr_res["output"]["image_bounds"] == {"x": 20, "y": 10, "width": 10, "height": 10}
+        assert ptr_res["output"]["pointer_bounds"] == {"x": 120, "top": 210} or ptr_res["output"]["pointer_bounds"] == {
+            "x": 120,
+            "y": 210,
+            "width": 10,
+            "height": 10,
+        }
+
+        # Minimized window: image-space sampleColor succeeds, pointer-space sampleColor fails closed with pointer_mapping_unavailable.
+        state["iconic"] = True
+        monkeypatch.setattr(driver, "_restore_window", lambda candidate, *, activate=True: state.__setitem__("iconic", False))
+        monkeypatch.setattr(driver, "_minimize_window_no_activate", lambda candidate: state.__setitem__("iconic", True))
+
+        img_res = driver.sample_color(SampleColorParams.model_validate({"point": {"x": 25, "y": 15}, "coordinate_space": "image"}))
+        assert img_res["status"] == "passed"
+        assert img_res["output"]["hex"] == "#DC3C28"
+        assert img_res["output"]["pointer_point"] is None
+        assert state["iconic"] is True
+
+        minimized_ptr_res = driver.sample_color(SampleColorParams.model_validate({"point": {"x": 125, "y": 215}, "coordinate_space": "pointer"}))
+        assert minimized_ptr_res["status"] == "failed"
+        assert minimized_ptr_res["failure_category"] == "observation_error"
+        assert minimized_ptr_res["metadata"]["reason"] == "pointer_mapping_unavailable"
+    finally:
+        driver.close()

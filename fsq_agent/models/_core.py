@@ -60,6 +60,9 @@ ANDROID_TARGET_SCHEMA_DESCRIPTION = (
 )
 WEB_LOCATOR_SCHEMA_DESCRIPTION = "Provide one semantic locator using a role and optional name, within scope, or final-result index."
 WINDOWS_TARGET_SCHEMA_DESCRIPTION = "Provide a non-empty locator. The target field is descriptive only and is not used for Windows control lookup."
+WINDOWS_POINTER_TARGET_SCHEMA_DESCRIPTION = (
+    "Provide exactly one of non-empty locator or explicit screen point. Prefer locator for UIA controls and point only for custom-drawn or verified locate coordinates; target is descriptive only."
+)
 MACOS_TARGET_SCHEMA_DESCRIPTION = "Provide target, non-empty locator, or point. Prefer target or locator for UI elements and point only for coordinate-based actions."
 IOS_TARGET_SCHEMA_DESCRIPTION = (
     "Provide target or non-empty locator. A usable explicit locator is authoritative. "
@@ -913,6 +916,22 @@ class WindowsPoint(BaseModel):
     y: int = Field(ge=0, description="Vertical Windows screen coordinate in pixels.")
 
 
+class _WindowsPointerTargetParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": WINDOWS_POINTER_TARGET_SCHEMA_DESCRIPTION})
+
+    target: str | None = Field(default=None, description="Human-readable descriptive target. Windows lookup uses locator or point, not this field.")
+    locator: WindowsLocator | None = Field(default=None, description="Windows control locator used for lookup. Mutually exclusive with point.")
+    point: WindowsPoint | None = Field(default=None, description="Explicit Windows screen point in absolute pixels. Mutually exclusive with locator.")
+
+    @model_validator(mode="after")
+    def _require_locator_or_point(self) -> "_WindowsPointerTargetParams":
+        if sum(value is not None for value in (self.locator, self.point)) != 1:
+            raise ValueError("requires exactly one of locator or point")
+        if self.locator is not None and not self.locator.has_value():
+            raise ValueError("requires non-empty locator")
+        return self
+
+
 class WindowsOffset(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Non-zero relative Windows mouse offset."})
 
@@ -967,16 +986,16 @@ class WindowsKillAppParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Stop the launched Windows desktop application. No parameters are accepted."})
 
 
-class WindowsClickOnParams(_WindowsTargetParams):
+class WindowsClickOnParams(_WindowsPointerTargetParams):
     button: WindowsMouseButton | None = Field(default=None, description="Mouse button to click. Defaults to backend left-button behavior.")
     double: bool | None = Field(default=None, description="When true, perform a double click.")
 
 
-class WindowsDoubleClickOnParams(_WindowsTargetParams):
+class WindowsDoubleClickOnParams(_WindowsPointerTargetParams):
     button: WindowsMouseButton | None = Field(default=None, description="Mouse button to double-click. Defaults to backend left-button behavior.")
 
 
-class WindowsRightClickOnParams(_WindowsTargetParams):
+class WindowsRightClickOnParams(_WindowsPointerTargetParams):
     pass
 
 
@@ -1005,11 +1024,11 @@ class WindowsPressKeyParams(BaseModel):
         raise ValueError("requires non-empty key")
 
 
-class WindowsHoverOnParams(_WindowsTargetParams):
+class WindowsHoverOnParams(_WindowsPointerTargetParams):
     pass
 
 
-class WindowsScrollOnParams(_WindowsTargetParams):
+class WindowsScrollOnParams(_WindowsPointerTargetParams):
     wheel_dist: int = Field(description="Non-zero mouse wheel distance. Positive and negative values scroll opposite directions.")
 
     @model_validator(mode="after")
@@ -1049,8 +1068,8 @@ class WindowsInspectWithAIParams(_VisualInspectWithAIParams):
         str_strip_whitespace=True,
         json_schema_extra={
             "description": (
-                "Read pixel-only visual content in the current Windows window with mode='extract' without pass/fail verdicts or UI actions. "
-                "mode='locate' returns pointer_mapping_unavailable on Windows."
+                "Read pixel-only visual content in the current Windows window with mode='extract' without pass/fail verdicts or UI actions, "
+                "or locate candidate bounds in mode='locate' when 1:1 bound-window screen geometry is verified (otherwise pointer_mapping_unavailable)."
             )
         },
     )
@@ -1058,7 +1077,7 @@ class WindowsInspectWithAIParams(_VisualInspectWithAIParams):
     prompt: str = Field(
         min_length=1,
         max_length=4096,
-        description="Read pixel-only content in the current Windows image without performing an action. Locate mode returns pointer_mapping_unavailable on Windows.",
+        description="Read pixel-only content or locate visual targets in the current Windows window without performing an action.",
     )
 
 

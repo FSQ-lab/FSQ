@@ -127,7 +127,7 @@ Step kind mapping for known actions is owned by capability metadata:
 | `startBrowser` | `setup` |
 | `closeBrowser` | `teardown` |
 | `assert`, `assertVisible`, `assertNotVisible`, `assertText`, `assertElementsOrder`, `assertWithAI` | `assertion` |
-| `takeScreenshot`, `startRecording`, `stopRecording`, `uiSnapshot`, `inspectElement`, `inspectWithAI` | `observation` |
+| `takeScreenshot`, `startRecording`, `stopRecording`, `uiSnapshot`, `inspectElement`, `inspectWithAI`, `sampleColor` | `observation` |
 | `waitMs` | `action` |
 | all other commands | `action` |
 

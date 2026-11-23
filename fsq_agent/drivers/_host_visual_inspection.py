@@ -138,7 +138,7 @@ def _run_host_visual_inspection(driver: Any, params: Any, *, platform: str) -> d
     policy = invocation.visual_assertion_policy
     if policy is None or not policy.allow_provider_upload or policy.frame_sensitivity != "non_sensitive":
         return _failure("privacy_blocked", platform=platform)
-    if params.mode == "locate":
+    if params.mode == "locate" and platform != "windows":
         return _failure("pointer_mapping_unavailable", platform=platform)
     evaluator = runtime.ai_assertion_evaluator
     if policy.provider_available is False or not callable(getattr(evaluator, "inspect", None)):
@@ -168,8 +168,16 @@ def _run_host_visual_inspection(driver: Any, params: Any, *, platform: str) -> d
     try:
         check_on_caller()
         started = time.monotonic_ns()
+        capture_with_mapping = getattr(driver, "capture_visual_frame_with_mapping", None)
+        window_rect: tuple[int, int, int, int] | None = None
+        pointer_size_tuple: tuple[int, int] | None = None
+        if params.mode == "locate" and not callable(capture_with_mapping):
+            _reject("pointer_mapping_unavailable")
         try:
-            png_bytes = driver.screenshot()
+            if callable(capture_with_mapping):
+                png_bytes, window_rect, pointer_size_tuple = capture_with_mapping()
+            else:
+                png_bytes = driver.screenshot()
         except TimeoutError as error:
             raise _CaptureRejectedError("operation_timeout") from error
         except RuntimeError as error:
@@ -189,6 +197,14 @@ def _run_host_visual_inspection(driver: Any, params: Any, *, platform: str) -> d
         region = params.region
         if region is not None and not (0 <= region.left < region.right <= width and 0 <= region.top < region.bottom <= height):
             _reject("region_invalid")
+        mapping_valid = False
+        if window_rect is not None and pointer_size_tuple is not None:
+            win_left, win_top, win_right, win_bottom = window_rect
+            ptr_w, ptr_h = pointer_size_tuple
+            if ptr_w > 0 and ptr_h > 0 and win_left >= 0 and win_top >= 0 and (win_right - win_left) == width and (win_bottom - win_top) == height and win_right <= ptr_w and win_bottom <= ptr_h:
+                mapping_valid = True
+        if params.mode == "locate" and not mapping_valid:
+            _reject("pointer_mapping_unavailable")
         digest = hashlib.sha256(png_bytes).hexdigest()
         identity = invocation.context.metadata.get("capture_invocation")
         if not isinstance(identity, dict):
@@ -263,14 +279,46 @@ def _run_host_visual_inspection(driver: Any, params: Any, *, platform: str) -> d
         if not isinstance(result, AIVisualInspectionResult):
             _reject("invalid_output")
         check_on_caller()
+        candidates_out: list[dict[str, object]] = []
+        if params.mode == "extract":
+            if result.candidates:
+                _reject("invalid_output")
+            pointer_size_out: dict[str, int] | None = {"width": pointer_size_tuple[0], "height": pointer_size_tuple[1]} if mapping_valid and pointer_size_tuple is not None else None
+        else:
+            if not mapping_valid or window_rect is None or pointer_size_tuple is None or len(result.candidates) > params.max_candidates:
+                _reject("invalid_output")
+            win_left, win_top, win_right, win_bottom = window_rect
+            ptr_w, ptr_h = pointer_size_tuple
+            pointer_size_out = {"width": ptr_w, "height": ptr_h}
+            for candidate in result.candidates:
+                b = candidate.image_bounds
+                if b.width < 1 or b.height < 1 or b.x < 0 or b.y < 0 or (b.x + b.width) > width or (b.y + b.height) > height:
+                    _reject("invalid_output")
+                if region is not None and (b.x < region.left or b.y < region.top or (b.x + b.width) > region.right or (b.y + b.height) > region.bottom):
+                    _reject("invalid_output")
+                px = win_left + b.x
+                py = win_top + b.y
+                cx = px + b.width // 2
+                cy = py + b.height // 2
+                if not (win_left <= px < px + b.width <= win_right <= ptr_w and win_top <= py < py + b.height <= win_bottom <= ptr_h):
+                    _reject("pointer_mapping_unavailable")
+                candidates_out.append(
+                    {
+                        "label": candidate.label,
+                        "image_bounds": {"x": b.x, "y": b.y, "width": b.width, "height": b.height},
+                        "pointer_bounds": {"x": px, "y": py, "width": b.width, "height": b.height},
+                        "pointer_center": {"x": cx, "y": cy},
+                        "confidence": candidate.confidence,
+                    }
+                )
         output = {
             "summary": result.summary,
             "mode": params.mode,
             "image_size": {"width": width, "height": height},
-            "pointer_size": None,
+            "pointer_size": pointer_size_out,
             "png_sha256": digest,
             "region": region.model_dump(mode="json") if region is not None else None,
-            "candidates": [],
+            "candidates": candidates_out,
             "capture": capture,
         }
     except BaseException as error:

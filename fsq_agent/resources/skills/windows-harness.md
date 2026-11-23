@@ -11,14 +11,16 @@ Use when `harness.platform` is Windows. This skill contains Windows-specific sta
 - Treat screenshots as evidence artifacts. They can support debugging, but they do not replace `ui_snapshot` for action targeting.
 - If a target is stale or missing, refresh the snapshot once and retry the same semantic action with corrected schema-valid arguments.
 
-- Use `inspect_with_ai` (`inspectWithAI`) with `mode: "extract"` only to read genuinely pixel-only Canvas, chart, map, or rendered image content that `ui_snapshot` XML does not expose. It is a read-only observation, never an assertion or UI action; `mode: "locate"` is unavailable on Windows (`pointer_mapping_unavailable`). Host upload authorization defaults to `allow_provider_upload=False`; on `privacy_blocked` or `provider_unavailable`, stop all visual AI calls for this task and leave any required visual check unverified.
-## Control Locator Rules
+- Use `inspect_with_ai` (`inspectWithAI`) only for pixel-only Canvas, chart, map, or rendered image content (`mode: "extract"`), or custom-drawn targets without usable UIA child controls after fresh `ui_snapshot` refinement (`mode: "locate"`). `locate` returns validated screen `pointer_center` coordinates only when the bound window's `GetWindowRect` matches the `PrintWindow` PNG 1:1 on the primary screen; otherwise it returns `pointer_mapping_unavailable` without guessed coordinates. Host upload authorization defaults to `allow_provider_upload=False`; on `privacy_blocked` or `provider_unavailable`, stop all visual AI calls for this task and leave any required visual check unverified.
+- Measure exact RGB with authoritative application readback or local `sample_color` (`sampleColor`); prefer a small uniform interior region away from edges and text (`coordinate_space: "image"` or verified `"pointer"`). Never use a model estimate as a color value; `sample_color` does not upload an image.
+
+## Control Locator and Pointer Rules
 
 - A control locator may combine `title`, `control_type`, `automation_id`, `class_name`, and `index`.
 - `title` matches the control name; `control_type` is the UIA control type (for example `Button`, `Edit`, `Document`, `Tab`); `automation_id` is the stable UIA automation id; `class_name` is the native class.
 - Extract `control_type` from the actual `ui_snapshot` output. Do not assume a control type from the displayed text.
 - Prefer `automation_id` when available because it is the most stable. Fall back to `title` + `control_type` when it is not.
-
+- Pointer actions (`clickOn`, `doubleClickOn`, `rightClickOn`, `hoverOn`, `scrollOn`) accept mutually exclusive `locator` or explicit screen `point: {"x": ..., "y": ...}` within the active bound window (`typeText` and `assertVisible` remain `locator`-only; for custom-drawn text inputs, focus with `clickOn(point=...)` then `pressKey`). Always prefer `locator` when a UIA control exists; use `point` only for custom-drawn surfaces without UIA child controls, using a current validated `inspectWithAI(mode="locate")` `pointer_center` or verified `ui_snapshot` container `bounds`, never guessed offsets or raw image coordinates.
 ## Verification and Assertion Rules
 
 - Use `assert_visible` for required presence of a control.

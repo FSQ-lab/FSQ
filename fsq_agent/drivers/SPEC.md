@@ -34,7 +34,7 @@ Metadata-only composition has separate named importers: `core._default_capabilit
 - `windows/`: pywinauto backend and Windows application/window implementation.
 - `macos/`: `appium_connect_agent` Mac2 backend and session/control-tree implementation.
 - `ios/`: `appium_connect_agent` XCUITest backend and mobile session/observation/action implementation.
-- Private shared modules: driver capability declarations/discovery, semantic UI-tree compaction and XML serialization (`_tree_compaction.py`), provider-neutral tri-state AI assertion backend support (`_ai_assertion.py`), and read-only visual inspection support (`_visual_inspection.py`).
+- Private shared modules: driver capability declarations/discovery, semantic UI-tree compaction and XML serialization (`_tree_compaction.py`), local PNG/SDK color sampling (`_color_sample.py`), provider-neutral tri-state AI assertion backend support (`_ai_assertion.py`), and read-only SDK/host visual inspection support (`_visual_inspection.py`, `_host_visual_inspection.py`).
 
 ## Python Architecture
 

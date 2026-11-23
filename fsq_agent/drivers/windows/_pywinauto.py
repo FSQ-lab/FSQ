@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _windows_driver_tool
+from fsq_agent.drivers._color_sample import LocalColorSampleError, _sample_local_png_color
 from fsq_agent.drivers._host_visual_inspection import _run_host_visual_inspection
 from fsq_agent.drivers._tree_compaction import (
     DEFAULT_SNAPSHOT_TEXT_LIMIT_CHARS,
@@ -31,6 +32,7 @@ from fsq_agent.drivers._tree_compaction import (
 )
 from fsq_agent.models import (
     ConfigurationError,
+    SampleColorParams,
     WindowsAssertVisibleParams,
     WindowsAssertWithAIParams,
     WindowsClickOnParams,
@@ -399,14 +401,23 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._pre_existing_pids = set()
         self._owns_process = False
 
-    @_windows_driver_tool("clickOn", description="Click a Windows control resolved from the UI snapshot.")
+    @_windows_driver_tool("clickOn", description="Click a Windows control or explicit screen point.")
     def click_on(self, params: WindowsClickOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._click_on(params))
 
     def _click_on(self, params: WindowsClickOnParams) -> dict[str, object]:
         hwnd = self._ensure_window_foreground_if_configured()
-        control = self._control(params)
         button = params.button or "left"
+        if params.point is not None:
+            coords = self._validated_pointer_point(params.point.x, params.point.y, hwnd)
+            mouse = self._mouse_module()
+            self._require_foreground(hwnd)
+            if params.double:
+                mouse.double_click(coords=coords, button=button)
+            else:
+                mouse.click(coords=coords, button=button)
+            return self._passed()
+        control = self._control(params)
         self._require_foreground(hwnd)
         if params.double:
             control.double_click_input(button=button)
@@ -414,23 +425,36 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             control.click_input(button=button)
         return self._passed()
 
-    @_windows_driver_tool("doubleClickOn", description="Double-click a Windows control.")
+    @_windows_driver_tool("doubleClickOn", description="Double-click a Windows control or explicit screen point.")
     def double_click_on(self, params: WindowsDoubleClickOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._double_click_on(params))
 
     def _double_click_on(self, params: WindowsDoubleClickOnParams) -> dict[str, object]:
         hwnd = self._ensure_window_foreground_if_configured()
+        button = params.button or "left"
+        if params.point is not None:
+            coords = self._validated_pointer_point(params.point.x, params.point.y, hwnd)
+            mouse = self._mouse_module()
+            self._require_foreground(hwnd)
+            mouse.double_click(coords=coords, button=button)
+            return self._passed()
         control = self._control(params)
         self._require_foreground(hwnd)
-        control.double_click_input(button=params.button or "left")
+        control.double_click_input(button=button)
         return self._passed()
 
-    @_windows_driver_tool("rightClickOn", description="Right-click a Windows control.")
+    @_windows_driver_tool("rightClickOn", description="Right-click a Windows control or explicit screen point.")
     def right_click_on(self, params: WindowsRightClickOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._right_click_on(params))
 
     def _right_click_on(self, params: WindowsRightClickOnParams) -> dict[str, object]:
         hwnd = self._ensure_window_foreground_if_configured()
+        if params.point is not None:
+            coords = self._validated_pointer_point(params.point.x, params.point.y, hwnd)
+            mouse = self._mouse_module()
+            self._require_foreground(hwnd)
+            mouse.click(coords=coords, button="right")
+            return self._passed()
         control = self._control(params)
         self._require_foreground(hwnd)
         control.click_input(button="right")
@@ -464,25 +488,25 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         window.type_keys(params.key, with_spaces=True, set_foreground=hwnd is None)
         return self._passed({"key": params.key})
 
-    @_windows_driver_tool("hoverOn", description="Move the mouse over a Windows control.")
+    @_windows_driver_tool("hoverOn", description="Move the mouse over a Windows control or explicit screen point.")
     def hover_on(self, params: WindowsHoverOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._hover_on(params))
 
     def _hover_on(self, params: WindowsHoverOnParams) -> dict[str, object]:
         hwnd = self._ensure_window_foreground_if_configured()
-        point = self._control_center(self._control(params))
+        point = self._validated_pointer_point(params.point.x, params.point.y, hwnd) if params.point is not None else self._control_center(self._control(params))
         mouse = self._mouse_module()
         self._require_foreground(hwnd)
         mouse.move(coords=point)
         return self._passed()
 
-    @_windows_driver_tool("scrollOn", description="Scroll over a Windows control.")
+    @_windows_driver_tool("scrollOn", description="Scroll over a Windows control or explicit screen point.")
     def scroll_on(self, params: WindowsScrollOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._scroll_on(params))
 
     def _scroll_on(self, params: WindowsScrollOnParams) -> dict[str, object]:
         hwnd = self._ensure_window_foreground_if_configured()
-        point = self._control_center(self._control(params))
+        point = self._validated_pointer_point(params.point.x, params.point.y, hwnd) if params.point is not None else self._control_center(self._control(params))
         mouse = self._mouse_module()
         self._require_foreground(hwnd)
         mouse.scroll(coords=point, wheel_dist=params.wheel_dist)
@@ -494,9 +518,9 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
 
     def _drag_to(self, params: WindowsDragToParams) -> dict[str, object]:
         hwnd = self._ensure_window_foreground_if_configured()
-        start = self._mouse_source_point(params)
+        start = self._mouse_source_point(params, hwnd=hwnd)
         self._require_foreground(hwnd)
-        end = self._mouse_destination_point(params, start)
+        end = self._mouse_destination_point(params, start, hwnd=hwnd)
         mouse = self._mouse_module()
         self._require_foreground(hwnd)
         pressed = False
@@ -531,9 +555,38 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             return self._passed()
         return self._target_missing(params)
 
-    @_windows_driver_tool("inspectWithAI", description="Read pixel-only Windows visual content without performing an action.")
+    @_windows_driver_tool("inspectWithAI", description="Read pixel-only Windows visual content or locate visual candidates without performing an action.")
     def inspect_with_ai(self, params: WindowsInspectWithAIParams) -> dict[str, object]:
         return _run_host_visual_inspection(self, params, platform="windows")
+
+    @_windows_driver_tool("sampleColor", description="Measure exact local RGB from a current Windows frame point or region without uploading an image.")
+    def sample_color(self, params: SampleColorParams) -> dict[str, object]:
+        return self._run_sync(lambda: self._sample_color_impl(params))
+
+    def _sample_color_impl(self, params: SampleColorParams) -> dict[str, object]:
+        try:
+            png_bytes, window_rect, pointer_size = self._capture_visual_frame_with_mapping()
+            output = _sample_local_png_color(
+                png_bytes,
+                params,
+                window_rect=window_rect,
+                pointer_size=pointer_size,
+            )
+            return self._passed(output)
+        except ConfigurationError:
+            raise
+        except LocalColorSampleError as exc:
+            return self._failed(
+                "observation_error",
+                "Windows color sampling failed.",
+                metadata={"stage": "sample_color", "error_type": type(exc).__name__, "reason": exc.code},
+            )
+        except Exception as exc:  # noqa: BLE001 - observation failures are normalized without leaking raw buffers.
+            return self._failed(
+                "observation_error",
+                "Windows color sampling failed.",
+                metadata={"stage": "sample_color", "error_type": type(exc).__name__},
+            )
 
     @_windows_driver_tool("assertWithAI", description="Evaluate a scoped Windows image-space visual assertion with AI.")
     def assert_with_ai(self, params: WindowsAssertWithAIParams) -> dict[str, object]:
@@ -710,6 +763,9 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
     def screenshot(self, params: object | None = None) -> bytes:
         return self._run_sync(self._screenshot)
 
+    def capture_visual_frame_with_mapping(self) -> tuple[bytes, _WindowRect | None, tuple[int, int] | None]:
+        return self._run_sync(self._capture_visual_frame_with_mapping)
+
     def _screenshot(self) -> bytes:
         from io import BytesIO
 
@@ -748,6 +804,55 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             image.close()
             raise RuntimeError(f"Windows screenshot target disappeared or changed ownership (hwnd={hwnd}).")
         return image
+
+    def _capture_visual_frame_with_mapping(self) -> tuple[bytes, _WindowRect | None, tuple[int, int] | None]:
+        from io import BytesIO
+
+        window = self._require_window()
+        hwnd = self._real_window_handle(window)
+        if hwnd is None:
+            image = window.capture_as_image()
+            if image is None:
+                raise ConfigurationError(
+                    "Windows screenshot capture returned no image. Pillow is required for pywinauto screenshots.",
+                    context={"action": "Reinstall or repair fsq-agent."},
+                )
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            return buffer.getvalue(), self._wrapper_window_rect(window), self._primary_screen_size(window)
+
+        target_pid = self._window_process_id(hwnd)
+        if target_pid is None:
+            raise RuntimeError(f"Cannot verify the Windows screenshot target (hwnd={hwnd}).")
+
+        was_iconic = self._is_window_iconic(hwnd)
+        active_rect: _WindowRect | None = None
+        try:
+            if was_iconic:
+                self._restore_window(hwnd, activate=False)
+                if self._is_window_iconic(hwnd):
+                    raise RuntimeError(f"Cannot restore the minimized Windows screenshot target (hwnd={hwnd}).")
+            if self._window_process_id(hwnd) != target_pid:
+                raise RuntimeError(f"Windows screenshot target disappeared or changed ownership (hwnd={hwnd}).")
+            rect_before = self._win32_window_rect(hwnd)
+            image = self._capture_window_via_print_window(hwnd)
+            rect_after = self._win32_window_rect(hwnd)
+            if not was_iconic and rect_before is not None and rect_before == rect_after:
+                active_rect = rect_after
+        finally:
+            if was_iconic and self._window_process_id(hwnd) == target_pid:
+                self._minimize_window_no_activate(hwnd)
+                if not self._is_window_iconic(hwnd):
+                    raise RuntimeError(f"Cannot return the Windows screenshot target to its minimized state (hwnd={hwnd}).")
+        if self._window_process_id(hwnd) != target_pid:
+            image.close()
+            raise RuntimeError(f"Windows screenshot target disappeared or changed ownership (hwnd={hwnd}).")
+
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        png_bytes = buffer.getvalue()
+        pointer_size = self._primary_screen_size(window) if active_rect is not None else None
+        return png_bytes, active_rect, pointer_size
 
     def close(self) -> None:
         try:
@@ -834,25 +939,63 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         x, y = midpoint
         return int(x), int(y)
 
-    def _mouse_source_point(self, params: WindowsDragToParams) -> tuple[int, int]:
+    def _validated_pointer_point(self, x: int, y: int, hwnd: int | None) -> tuple[int, int]:
+        if not self._has_window_target():
+            return int(x), int(y)
+        window = self._require_window()
+        rect = self._win32_window_rect(hwnd) if hwnd is not None else self._wrapper_window_rect(window)
+        if rect is None:
+            raise LookupError("Cannot verify the active bound Windows rectangle for explicit pointer coordinates.")
+        left, top, right, bottom = rect
+        if right <= left or bottom <= top:
+            raise LookupError(f"Windows bound window has non-positive bounds ({left}, {top}, {right}, {bottom}).")
+        if not (left <= x < right and top <= y < bottom):
+            raise LookupError(f"Windows pointer coordinate ({x}, {y}) is outside the bound window bounds ({left}, {top}, {right}, {bottom}).")
+        return int(x), int(y)
+
+    def _wrapper_window_rect(self, window: Any) -> _WindowRect | None:
+        rect = self._element_rectangle(window)
+        if rect is None:
+            return None
+        return rect["left"], rect["top"], rect["right"], rect["bottom"]
+
+    def _primary_screen_size(self, window: Any = None) -> tuple[int, int] | None:
+        if os.name == "nt":
+            with suppress(Exception):
+                import ctypes
+
+                user32 = ctypes.windll.user32
+                width = int(user32.GetSystemMetrics(0))
+                height = int(user32.GetSystemMetrics(1))
+                if width > 0 and height > 0:
+                    return width, height
+        if window is not None:
+            rect = self._wrapper_window_rect(window)
+            if rect is not None and rect[2] > 0 and rect[3] > 0:
+                return max(rect[2], rect[2] - rect[0]), max(rect[3], rect[3] - rect[1])
+        return None
+
+    def _mouse_source_point(self, params: WindowsDragToParams, *, hwnd: int | None = None) -> tuple[int, int]:
         if params.source.locator is not None:
             locator = params.source.locator.model_dump(mode="python", exclude_none=True)
             return self._control_center(self._control_from_kwargs(locator))
         point = params.source.point
         if point is None:
             raise ValueError("Windows drag source is missing.")
-        return point.x, point.y
+        return self._validated_pointer_point(point.x, point.y, hwnd)
 
-    def _mouse_destination_point(self, params: WindowsDragToParams, start: tuple[int, int]) -> tuple[int, int]:
+    def _mouse_destination_point(self, params: WindowsDragToParams, start: tuple[int, int], *, hwnd: int | None = None) -> tuple[int, int]:
         destination = params.destination
         if destination.locator is not None:
             locator = destination.locator.model_dump(mode="python", exclude_none=True)
             return self._control_center(self._control_from_kwargs(locator))
         if destination.point is not None:
-            return destination.point.x, destination.point.y
+            return self._validated_pointer_point(destination.point.x, destination.point.y, hwnd)
         offset = destination.offset
         if offset is None:
             raise ValueError("Windows drag destination is missing.")
+        if params.source.point is not None:
+            return self._validated_pointer_point(start[0] + offset.x, start[1] + offset.y, hwnd)
         return start[0] + offset.x, start[1] + offset.y
 
     def _drag_path(self, start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:

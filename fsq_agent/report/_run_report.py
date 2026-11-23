@@ -557,7 +557,25 @@ class RunReportService:
         if accounting_complete and outcome == "success" and recorded_evidence.get("status") == "complete" and isinstance(recorded_recovery, list):
             failed_ids = {step["step_execution_id"] for step in steps if step["aggregate_status"] == "failed"}
             recovered_ids = {item for item in recorded_recovery if isinstance(item, str) and item in failed_ids}
-        execution["recovered_failures"] = [step for step in steps if step["step_execution_id"] in recovered_ids]
+        recovered_failures = []
+        if accounting_complete and outcome == "success":
+            for step in steps:
+                if step["step_execution_id"] in recovered_ids:
+                    recovered_failures.append(step)
+                elif metadata.get("mode") == "strict" and step["aggregate_status"] == "failed" and step["source_step_id"] and step["invocation_path"]:
+                    # A later Strict attempt explains the action outcome, not any missing evidence.
+                    replacement = logical_steps[(step["source_step_id"], str(step["invocation_path"]))] if not step["container"] else None
+                    if (
+                        replacement
+                        and replacement["aggregate_status"] == "passed"
+                        and replacement["step_execution_id"] != step["step_execution_id"]
+                        and replacement["action_name"] == step["action_name"]
+                        and type(replacement["attempt_index"]) is int
+                        and type(step["attempt_index"]) is int
+                        and replacement["attempt_index"] > step["attempt_index"]
+                    ):
+                        recovered_failures.append(step)
+        execution["recovered_failures"] = recovered_failures
         if outcome == "success":
             execution["first_failure"] = None
         execution["interpretations"] = self._interpretations(run_id, execution, documents, suggestions, projected_artifacts)

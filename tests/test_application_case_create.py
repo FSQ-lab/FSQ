@@ -3,26 +3,23 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
 from fsq_agent.application import ApplicationError, ApplicationErrorCode, CaseCreateRequest, create_case
 from fsq_agent.config import Settings
 from fsq_agent.execution import DynamicExecutionResult, RecordingResult
-from fsq_agent.models import DynamicAgentOutcome, ReportArtifact, Task, TaskResult, VerificationResult
+from fsq_agent.models import DynamicAgentOutcome, ReportArtifact, RunEvent, Task, TaskResult, VerificationResult
 
 
 class _FakeAgent:
     def __init__(self, result: TaskResult) -> None:
         self.result = result
         self.task: Task | None = None
-        self.event_sink: Any = None
         self.run_id: str | None = None
 
     async def run_in_context(self, task: Task, context, event_sink=None, **execution_context) -> DynamicAgentOutcome:
         self.task = task
-        self.event_sink = event_sink
         self.run_id = context.run_id
         from fsq_agent.models import ExecutableStep, RunnerEvent, RunnerStepResult
 
@@ -85,23 +82,39 @@ async def test_create_case_builds_goal_task_and_delegates_to_agent(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_create_case_forwards_transport_neutral_event_sink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_create_case_forwards_progress_and_publishes_only_frozen_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("fsq_agent.application.cases.require_initialized_workspace", lambda _request: type("Workspace", (), {"workspace": tmp_path.resolve()})())
-    agent = _FakeAgent(_task_result(tmp_path))
-    events: list[object] = []
-    sink = events.append
+
+    class ProgressAgent(_FakeAgent):
+        async def run_in_context(self, task, context, event_sink=None, **execution_context):
+            event_sink(RunEvent(run_id=context.run_id, task_id=task.id, type="planning_started", title="Planning", sequence=1))
+            event_sink(RunEvent(run_id=context.run_id, task_id=task.id, type="run_completed", title="Candidate", message="Unreconciled", sequence=2))
+            return await super().run_in_context(task, context, event_sink, **execution_context)
+
+    agent = ProgressAgent(_task_result(tmp_path))
+    events: list[RunEvent] = []
     settings = Settings()
     settings.workspace.root_dir = tmp_path
     settings.output.runs_dir = tmp_path / "runs"
 
-    await create_case(
+    def sink(event: RunEvent) -> None:
+        if event.type == "run_completed":
+            assert (settings.output.runs_dir / event.run_id / "execution-result.json").is_file()
+        events.append(event)
+
+    result = await create_case(
         CaseCreateRequest(current_directory=tmp_path, platform="web", goal="Verify product search"),
         event_sink=sink,
         settings_loader=lambda _platform, _path: settings,
         agent_factory=lambda _settings: agent,
     )
 
-    assert agent.event_sink == sink
+    progress, terminal = events
+    assert progress.type == "planning_started"
+    assert terminal.type == "run_completed"
+    assert terminal.run_id == result.run_id
+    assert terminal.payload["status"] == result.status
+    assert terminal.message == result.summary == "Search works."
 
 
 @pytest.mark.asyncio

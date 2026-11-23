@@ -153,8 +153,7 @@ def test_freeze_explore_mode_recovers_superseded_failed_step_capture_into_warnin
         RunnerEvent(
             event_type="artifact_failed",
             run_id=metadata.run_id,
-            step_id=attempt1.step_id,
-            step_execution_id=attempt1.step_execution_id,
+            **attempt1.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}),
             phase="finalize",
             payload={"artifact": failed_ref.model_dump(mode="json")},
         )
@@ -195,8 +194,7 @@ def test_freeze_explore_mode_recovers_superseded_failed_step_capture_into_warnin
         RunnerEvent(
             event_type="artifact_captured",
             run_id=metadata.run_id,
-            step_id=attempt2.step_id,
-            step_execution_id=attempt2.step_execution_id,
+            **attempt2.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}),
             phase="finalize",
             payload={"artifact": passed_ref.model_dump(mode="json")},
         )

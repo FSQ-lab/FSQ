@@ -7,7 +7,6 @@ import hashlib
 import io
 import struct
 import time
-import uuid
 import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from PIL import Image, UnidentifiedImageError
 
+from fsq_agent.harnesses._visual import _terminal_ref
 from fsq_agent.models import AndroidVisualAssertionPolicy, HarnessArtifactRef, HarnessContext, HostCaptureEnvelopeV1
 
 if TYPE_CHECKING:
@@ -41,32 +41,6 @@ class _HostVisualAssertionCapture:
 class _CaptureRejectedError(Exception):
     def __init__(self, code: str) -> None:
         self.code = code
-
-
-def _terminal_ref(
-    step_id: str,
-    code: str,
-    *,
-    diagnostics: dict[str, object] | None = None,
-) -> HarnessArtifactRef:
-    filtered = {key: value for key, value in (diagnostics or {}).items() if key in {"backend_code", "request_state", "session_state", "stage"}}
-    result = {
-        "status": "inconclusive",
-        "outcome": "inconclusive",
-        "passed": False,
-        "explanation": f"Visual assertion is unverified ({code}).",
-        "error_code": code,
-        "deterministic_conflict": False,
-        "capture": None,
-        "metadata": {"diagnostics": filtered or {}, "deterministic_evidence": [], "provider_upload_occurred": False},
-    }
-    return HarnessArtifactRef(
-        artifact_id=f"visual-{step_id}-{uuid.uuid4().hex}",
-        kind="screenshot",
-        availability="not_applicable",
-        unavailable_reason=code,
-        metadata={"visual_assertion": result, "capture_required": False},
-    )
 
 
 def _png_image(data: bytes, budget: Any) -> Image.Image:
@@ -153,7 +127,7 @@ def _capture_host_visual(
     try:
         raw = driver.screenshot()
         if not isinstance(raw, (bytes, bytearray)):
-            return _terminal_ref(step_id, "capture_failed")
+            return _terminal_ref(step_id, "capture_failed", capture_failed=True)
         data = bytes(raw)
         with _png_image(data, policy.budget) as image:
             finished = time.monotonic_ns()
@@ -193,12 +167,12 @@ def _capture_host_visual(
                 if len(data) > policy.budget.max_image_bytes:
                     return _terminal_ref(step_id, "budget_exceeded")
     except _CaptureRejectedError as error:
-        return _terminal_ref(step_id, error.code)
+        return _terminal_ref(step_id, error.code, capture_failed=error.code in {"capture_failed", "frame_not_single"})
     except Exception as error:
         if getattr(error, "fsq_evidence_fatal", False):
             raise
         diagnostics = getattr(error, "context", {}).get("capture_diagnostics", {}) if isinstance(getattr(error, "context", None), dict) else {}
-        return _terminal_ref(step_id, "capture_failed", diagnostics=diagnostics)
+        return _terminal_ref(step_id, "capture_failed", diagnostics=diagnostics, capture_failed=True)
     if check is not None:
         check()
     try:

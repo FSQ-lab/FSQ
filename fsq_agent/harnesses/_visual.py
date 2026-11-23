@@ -190,7 +190,7 @@ class _CaptureRejectedError(Exception):
         self.code = code
 
 
-def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=()):
+def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=(), capture_failed=False):
     diagnostics = {key: value for key, value in (diagnostics or {}).items() if key in {"backend_code", "request_state", "session_state", "stage"}}
     outcome = "failed" if conflict else "inconclusive"
     result = {
@@ -206,9 +206,9 @@ def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=()):
     return HarnessArtifactRef(
         artifact_id=f"visual-{step_id}-{uuid.uuid4().hex}",
         kind="screenshot",
-        availability="not_applicable",
+        availability="failed" if capture_failed else "not_applicable",
         unavailable_reason=code,
-        metadata={"visual_assertion": result, "capture_required": False},
+        metadata={"visual_assertion": result, "capture_required": capture_failed},
     )
 
 
@@ -372,10 +372,10 @@ def _capture_visual(driver, store, context, identity, params, policy, evaluator_
                 if len(data) > policy.budget.max_image_bytes:
                     return _terminal_ref(step_id, "budget_exceeded")
     except _CaptureRejectedError as error:
-        return _terminal_ref(step_id, error.code)
+        return _terminal_ref(step_id, error.code, capture_failed=error.code in {"capture_failed", "frame_not_single"})
     except Exception as error:  # noqa: BLE001 - Normalize optional backend failures without leaking SDK data.
         diagnostics = getattr(error, "context", {}).get("capture_diagnostics", {})
-        return _terminal_ref(step_id, "capture_failed", diagnostics=diagnostics)
+        return _terminal_ref(step_id, "capture_failed", diagnostics=diagnostics, capture_failed=True)
     if check is not None:
         check()
     try:

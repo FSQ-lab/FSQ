@@ -11,6 +11,7 @@ from fsq_agent.agent_engine import EngineError
 from fsq_agent.ai_services import CaseSuggestionAnalysis
 from fsq_agent.application import ApplicationError, ApplicationErrorCode, CaseTestRequest
 from fsq_agent.application import _case_test as case_test_module
+from fsq_agent.config import Settings
 
 
 @pytest.mark.parametrize("platform", ["android", "web", "windows", "macos"])
@@ -173,13 +174,9 @@ def test_suggest_runs_case_once_then_analyzes_and_returns_no_candidate(
         json.dumps({"run_id": "run-1", "summary": {"status": execution_status, "failed_steps": 0 if execution_status == "passed" else 1, "total_steps": 1}, "steps": [], "events": []}),
         encoding="utf-8",
     )
-    settings = SimpleNamespace(
-        cases=SimpleNamespace(dir=tmp_path),
-        output=SimpleNamespace(runs_dir=tmp_path / "runs"),
-        harness=SimpleNamespace(android=SimpleNamespace(app_id=None), macos=SimpleNamespace(bundle_id=None)),
-        runtime_secrets=SimpleNamespace(private_values=dict),
-        execution=SimpleNamespace(post_action_delay_seconds=0),
-    )
+    settings = Settings(harness={"platform": "web"})
+    settings.cases.dir = tmp_path
+    settings.output.runs_dir = tmp_path / "runs"
     order: list[str] = []
     transitions: list[tuple[str, dict]] = []
     monkeypatch.setattr(case_test_module, "require_initialized_workspace", lambda _request: SimpleNamespace(workspace=tmp_path))
@@ -317,13 +314,9 @@ def test_suggestion_status_disk_failure_preserves_completed_result(tmp_path, mon
 
     source = tmp_path / "case.fsq.yaml"
     source.write_text("schemaVersion: fsq.ai-test/v1\nname: demo\nplatform: web\n")
-    settings = SimpleNamespace(
-        cases=SimpleNamespace(dir=tmp_path),
-        output=SimpleNamespace(runs_dir=tmp_path),
-        harness=SimpleNamespace(android=SimpleNamespace(app_id=None)),
-        runtime_secrets=SimpleNamespace(private_values=dict),
-        execution=SimpleNamespace(post_action_delay_seconds=0),
-    )
+    settings = Settings(harness={"platform": "web"})
+    settings.cases.dir = tmp_path
+    settings.output.runs_dir = tmp_path
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "run.json").write_text("{}")
@@ -432,7 +425,7 @@ def test_legacy_report_projection_retains_unresolved_and_terminal_status(tmp_pat
 
 
 def test_strict_validation_does_not_require_provider_across_all_platforms(tmp_path):
-    from fsq_agent.config import Settings, validate_strict_core_settings
+    from fsq_agent.config import validate_strict_core_settings
 
     for platform in ("android", "ios", "macos", "web", "windows"):
         settings = Settings(harness={"platform": platform})
@@ -442,9 +435,16 @@ def test_strict_validation_does_not_require_provider_across_all_platforms(tmp_pa
             settings.harness.ios.bundle_id = "com.example.ios"
         elif platform == "macos":
             settings.harness.macos.bundle_id = "com.apple.TextEdit"
+        elif platform == "web":
+            browser = tmp_path / "Google Chrome" / "chrome.exe"
+            browser.parent.mkdir()
+            browser.touch(mode=0o700)
+            settings.harness.web.channel = "chrome"
+            settings.harness.web.browser_executable_path = browser
         elif platform == "windows":
-            settings.harness.windows.app_path = str(tmp_path / "app.exe")
-            (tmp_path / "app.exe").write_bytes(b"")
+            executable = tmp_path / "app.exe"
+            executable.touch()
+            settings.harness.windows.app_path = executable
         validate_strict_core_settings(settings, requires_ai_assertion=True)
 
 

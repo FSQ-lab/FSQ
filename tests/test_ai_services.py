@@ -262,26 +262,21 @@ def test_assertion_converted_inconclusive_wins_over_cleanup(primary, cleanup, tm
 
 
 @pytest.mark.parametrize("primary", [asyncio.CancelledError(), KeyboardInterrupt()])
-def test_assertion_primary_interruption_propagates_or_cancels_cleanly(primary, tmp_path: Path):
+def test_assertion_primary_interruption_propagates_despite_cleanup_failure(primary, tmp_path: Path):
     request, _ = _authorized_request(tmp_path, prompt="Check")
     session = _Session(primary, RuntimeError("cleanup failure"))
-    if isinstance(primary, KeyboardInterrupt):
-        with pytest.raises(KeyboardInterrupt) as failure:
-            AIAssertionEvaluator(session).evaluate(request)
-        assert failure.value is primary
-    else:
-        result = AIAssertionEvaluator(session).evaluate(request)
-        assert result.status == result.outcome == "inconclusive"
-        assert result.error_code == "cancelled"
+    with pytest.raises(type(primary)) as failure:
+        AIAssertionEvaluator(session).evaluate(request)
+    assert failure.value is primary
     assert session.closed
 
 
-def test_assertion_cleanup_only_failure_preserves_settled_verdict(tmp_path: Path):
+def test_assertion_reports_cleanup_only_failure(tmp_path: Path):
     request, _ = _authorized_request(tmp_path, prompt="Check")
     session = _Session(ModelResult('{"outcome":"passed","explanation":"Visible","confidence":null}'), EngineError("cleanup", "Cleanup failed."))
-    result = AIAssertionEvaluator(session).evaluate(request)
-    assert result.status == result.outcome == "passed"
-    assert result.metadata["cleanup_failed"] is True
+    with pytest.raises(EngineError) as failure:
+        AIAssertionEvaluator(session).evaluate(request)
+    assert failure.value.category == "cleanup"
     assert session.closed
 
 

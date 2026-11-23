@@ -63,7 +63,7 @@ def test_capture_context_failure_after_passed_action_is_evidence_error(tmp_path)
     assert result.evidence_errors
 
 
-def test_ai_invoke_failed_capture_is_acknowledged(tmp_path):
+def test_ai_prepare_capture_failure_is_acknowledged_without_retry(tmp_path):
     from test_web_harness import FakeWebDriver
 
     from fsq_agent._capability_bootstrap import build_capability_registry
@@ -104,4 +104,6 @@ def test_ai_invoke_failed_capture_is_acknowledged(tmp_path):
     )
     failed = [event for event in recorder.build_bundle().events if event.event_type == "artifact_failed" and event.phase == "prepare"]
     assert len(failed) == 1
-    assert result.evidence_errors
+    assert failed[0].payload["artifact"]["availability"] == "failed"
+    assert result.status == "incomplete"
+    assert harness.driver.calls_to_screenshot == 1

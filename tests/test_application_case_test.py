@@ -431,21 +431,20 @@ def test_legacy_report_projection_retains_unresolved_and_terminal_status(tmp_pat
     assert "failed with 0" not in summary
 
 
-def test_android_strict_validation_does_not_require_provider_but_web_still_does(tmp_path):
+def test_strict_validation_does_not_require_provider_across_all_platforms(tmp_path):
     from fsq_agent.config import Settings, validate_strict_core_settings
-    from fsq_agent.models import ConfigurationError
 
-    settings = Settings()
-    settings.harness.android.app_id = "com.example"
-    validate_strict_core_settings(settings, requires_ai_assertion=True)
-    settings.harness.platform = "web"
-    browser = tmp_path / "chrome" / "chrome"
-    browser.parent.mkdir()
-    browser.write_text("", encoding="utf-8")
-    browser.chmod(0o755)
-    settings.harness.web.channel = "chrome"
-    settings.harness.web.browser_executable_path = browser
-    with pytest.raises(ConfigurationError, match="Provider"):
+    for platform in ("android", "ios", "macos", "web", "windows"):
+        settings = Settings(harness={"platform": platform})
+        if platform == "android":
+            settings.harness.android.app_id = "com.example"
+        elif platform == "ios":
+            settings.harness.ios.bundle_id = "com.example.ios"
+        elif platform == "macos":
+            settings.harness.macos.bundle_id = "com.apple.TextEdit"
+        elif platform == "windows":
+            settings.harness.windows.app_path = str(tmp_path / "app.exe")
+            (tmp_path / "app.exe").write_bytes(b"")
         validate_strict_core_settings(settings, requires_ai_assertion=True)
 
 
@@ -480,7 +479,7 @@ def test_provider_free_android_case_runs_real_assertion_path_to_inconclusive(tmp
     monkeypatch.setattr(case_test_module, "require_initialized_workspace", lambda _request: SimpleNamespace(workspace=tmp_path))
     monkeypatch.setattr(case_test_module, "load_workspace_platform_settings", lambda *_args: settings)
     monkeypatch.setattr(case_test_module, "_registered_workspace_name", lambda _root: "offline")
-    monkeypatch.setattr(case_test_module, "build_ai_assertion_evaluator", lambda *_args: pytest.fail("Unavailable provider must not be built"))
+    monkeypatch.setattr("fsq_agent.ai_services._factory.build_model_provider_session", lambda *_args: pytest.fail("Unavailable provider must not be built"))
     monkeypatch.setattr(case_test_module.HarnessFactory, "create_harness", lambda _self, **kwargs: AndroidHarness(driver=OfflineDriver(app_id="com.example"), artifact_store=kwargs["artifact_store"]))
     result = case_test_module.execute_case_test(CaseTestRequest(current_directory=tmp_path, platform="android", case_path=source), suggestion_analyzer_factory=None)
     assert result.status == "inconclusive"
@@ -525,7 +524,7 @@ def test_unready_provider_macos_case_runs_real_assertion_path_to_inconclusive(tm
     monkeypatch.setattr(case_test_module, "require_initialized_workspace", lambda _request: SimpleNamespace(workspace=tmp_path))
     monkeypatch.setattr(case_test_module, "load_workspace_platform_settings", lambda *_args: settings)
     monkeypatch.setattr(case_test_module, "_registered_workspace_name", lambda _root: "offline")
-    monkeypatch.setattr(case_test_module, "build_ai_assertion_evaluator", lambda *_args: pytest.fail("Strict mobile/macOS must not construct evaluator eagerly"))
+    monkeypatch.setattr("fsq_agent.ai_services._factory.build_model_provider_session", lambda *_args: pytest.fail("Strict mobile/macOS must not construct evaluator eagerly"))
     monkeypatch.setattr(
         case_test_module.HarnessFactory,
         "create_harness",

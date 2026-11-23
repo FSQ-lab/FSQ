@@ -124,8 +124,9 @@ def test_loaded_platform_guidance_preserves_web_and_windows_assertions(platform:
     config = load_platform_settings(platform, workspace=tmp_path / "workspace", user_config_root=tmp_path / "user").agent_context.knowledge.skills
     bundles = SkillLoader(config.dir).load(config.items)
     platform_guidance = next(bundle.instructions for bundle in bundles if bundle.name == f"{platform}-harness")
+    assert "`inspect_with_ai`" in platform_guidance
     assert "`assert_with_ai`" in platform_guidance
-    assert "allow_provider_upload" not in platform_guidance
+    assert "`allow_provider_upload=False`" in platform_guidance
 
 
 def test_loaded_automation_skill_preserves_coverage_and_completion_reserves() -> None:

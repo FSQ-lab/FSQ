@@ -4,6 +4,11 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+- Windows restores and activates the bound window before input and captures background or occluded windows without including pixels from other applications.
+- Windows and macOS UI snapshots use bounded compact XML and withhold protected field values. Run evidence shares cycle- and depth-safe credential redaction.
+- Evidence distinguishes an unstarted target from a failed capture and does not require a post-action frame when preparation aborted. Recovered Explore capture failures remain warnings; the completion event reports the frozen result.
+- Windows and Web visual assertions now use the scoped five-platform `passed` / `failed` / `inconclusive` contract and reuse the authorized prepare frame. `assertWithAI` requires `assertion`, `surface`, and an image region or `full_screen_reason`; the old `prompt` form is rejected. Provider-free Strict replay records an unverified step instead of failing startup. Windows and Web also support read-only `inspectWithAI` extraction; coordinate lookup remains unavailable.
+
 ## [0.3.9] - 2026-11-23
 
 - Pin `appium-connect-agent==0.1.4` from PyPI. Android, iOS, and macOS share SDK-backed visual capture with an explicit host Run eligibility signal and independent per-frame authorization. `sample_color` provides exact local RGB without provider upload.

@@ -1,9 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import io
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from fsq_agent.core import (
     ArtifactStore,
@@ -15,9 +17,12 @@ from fsq_agent.core import (
 from fsq_agent.core.harness._ai_assertion_tool import AIAssertionBackendToolMixin
 from fsq_agent.core.harness._driver_tools import _windows_driver_tool
 from fsq_agent.core.harness._windows import WindowsHarness
+from fsq_agent.drivers._host_visual_inspection import _run_host_visual_inspection
 from fsq_agent.models import (
     AIAssertionRequest,
     AIAssertionResult,
+    AIVisualInspectionResult,
+    AndroidVisualAssertionPolicy,
     ExecutableStep,
     HarnessContext,
     WindowsAssertVisibleParams,
@@ -26,6 +31,7 @@ from fsq_agent.models import (
     WindowsDoubleClickOnParams,
     WindowsDragToParams,
     WindowsHoverOnParams,
+    WindowsInspectWithAIParams,
     WindowsKillAppParams,
     WindowsLaunchAppParams,
     WindowsPressKeyParams,
@@ -34,6 +40,12 @@ from fsq_agent.models import (
     WindowsTypeTextParams,
     WindowsUiSnapshotParams,
 )
+
+
+def _valid_png_bytes(width: int = 80, height: int = 60, color: str = "teal") -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 class FakeWindowsDriver(AIAssertionBackendToolMixin):
@@ -110,6 +122,10 @@ class FakeWindowsDriver(AIAssertionBackendToolMixin):
     def assert_with_ai(self, params: WindowsAssertWithAIParams) -> dict[str, object]:
         return self._run_ai_assertion_tool(params)
 
+    @_windows_driver_tool("inspectWithAI", description="Read pixel-only Windows visual content without performing an action.")
+    def inspect_with_ai(self, params: WindowsInspectWithAIParams) -> dict[str, object]:
+        return _run_host_visual_inspection(self, params, platform="windows")
+
     @_windows_driver_tool("uiSnapshot", description="Return the current Windows window control tree snapshot.")
     def ui_snapshot(self, params: WindowsUiSnapshotParams) -> dict[str, object]:
         if hasattr(params, "model_dump"):
@@ -121,7 +137,7 @@ class FakeWindowsDriver(AIAssertionBackendToolMixin):
 
     def screenshot(self, params: object | None = None) -> bytes:
         self.calls.append(("screenshot", None))
-        return b"fake-png"
+        return _valid_png_bytes()
 
 
 def _step(action_name: str, params: dict[str, Any] | None = None) -> ExecutableStep:
@@ -181,7 +197,8 @@ def test_windows_harness_action_space_returns_catalog_backed_schemas() -> None:
 
     assert "click_on" in schemas
     assert "ui_snapshot" in schemas
-    assert "assert_with_ai" not in schemas
+    assert "inspect_with_ai" in schemas
+    assert "assert_with_ai" in schemas
     assert set(schemas["launch_app"].params_json_schema["properties"]) == {"extra_args"}
     assert schemas["click_on"].driver_method == "click_on"
     assert schemas["click_on"].fsq_action_name == "clickOn"
@@ -332,7 +349,7 @@ def test_windows_harness_captures_screenshot_and_ui_snapshot_with_artifact_store
         phase="finalize",
     )
 
-    assert (tmp_path / screenshot_ref.path).read_bytes() == b"fake-png"
+    assert (tmp_path / screenshot_ref.path).read_bytes() == _valid_png_bytes()
     assert "Notepad" in (tmp_path / snapshot_ref.path).read_text(encoding="utf-8")
     assert driver.calls == [("context", None), ("screenshot", None), ("ui_snapshot", {})]
 
@@ -420,7 +437,10 @@ def test_windows_runner_lifecycle_captures_before_and_after_when_window_capture_
     assert all(ref.availability == "failed" for phase in result.phase_reports for ref in phase.artifact_refs)
 
 
-def test_windows_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> None:
+def test_windows_harness_assert_with_ai_uses_injected_evaluator_and_single_frame_prepare_reuse(tmp_path) -> None:
+    from fsq_agent._capability_bootstrap import build_capability_registry
+    from fsq_agent.core import EvidenceRecorder
+
     class FakeEvaluator:
         def __init__(self) -> None:
             self.requests: list[AIAssertionRequest] = []
@@ -429,36 +449,119 @@ def test_windows_harness_assert_with_ai_uses_injected_evaluator(tmp_path) -> Non
             self.requests.append(request)
             return AIAssertionResult(
                 status="passed",
+                outcome="passed",
                 passed=True,
-                explanation="The expected window is visible.",
+                explanation="The expected window chart is visible.",
                 provider="fake",
                 model="fake-model",
+                capture=request.capture,
                 artifact_refs=[request.screenshot_artifact_ref] if request.screenshot_artifact_ref else [],
             )
 
+    driver = FakeWindowsDriver()
     evaluator = FakeEvaluator()
     harness = WindowsHarness(
-        driver=FakeWindowsDriver(),
+        driver=driver,
         artifact_store=ArtifactStore(run_dir=tmp_path),
         ai_assertion_evaluator=evaluator,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
     )
 
-    result = harness.invoke_action(_step("assertWithAI", {"prompt": "The Save dialog is visible."}), harness.get_context())
+    recorder = EvidenceRecorder(run_id="run-win", output_dir=tmp_path)
+    runner = StepRunner(harness=harness, capability_registry=build_capability_registry(platform="windows"), evidence_sink=recorder)
+    step_result = runner.run_step(
+        run_id="run-win",
+        step=ExecutableStep(
+            step_id="step-win-visual",
+            kind="assertion",
+            action_name="assertWithAI",
+            params={
+                "assertion": "The preview chart is visible.",
+                "surface": "custom_canvas",
+                "region": {"kind": "image_rect", "rect": {"left": 4, "top": 4, "right": 60, "bottom": 45}},
+            },
+        ),
+    )
 
-    assert result.status == "passed"
-    assert result.action_name == "assertWithAI"
+    assert step_result.status == "passed"
     assert len(evaluator.requests) == 1
     assert evaluator.requests[0].platform == "windows"
-    assert evaluator.requests[0].prompt == "The Save dialog is visible."
+    assert evaluator.requests[0].prompt == "The preview chart is visible."
+    screenshot_calls = [call for call in driver.calls if call[0] == "screenshot"]
+    assert len(screenshot_calls) == 1
+    prepare_refs = step_result.phase_reports[0].artifact_refs
+    assert len(prepare_refs) == 1
+    assert evaluator.requests[0].screenshot_artifact_ref.artifact_id == prepare_refs[0].artifact_id
 
 
-def test_windows_harness_assert_with_ai_requires_evaluator() -> None:
-    harness = WindowsHarness(driver=FakeWindowsDriver())
+def test_windows_harness_assert_with_ai_without_evaluator_or_privacy_blocked_returns_incomplete(tmp_path) -> None:
+    driver = FakeWindowsDriver()
+    harness = WindowsHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path / "offline"))
 
-    result = harness.invoke_action(_step("assertWithAI", {"prompt": "anything"}), harness.get_context())
+    result = harness.invoke_action(
+        _step("assertWithAI", {"assertion": "Chart visible", "surface": "custom_canvas", "full_screen_reason": "Canvas fills window"}),
+        harness.get_context(),
+    )
 
-    assert result.status == "failed"
-    assert result.failure_category == "configuration_error"
+    assert result.status == "incomplete"
+    assert result.failure_category is None
+    assert result.output["outcome"] == "inconclusive"
+    assert result.output["error_code"] == "provider_unavailable"
+    assert [c for c in driver.calls if c[0] == "screenshot"] == []
+
+
+def test_windows_harness_inspect_with_ai_extract_locate_and_privacy(tmp_path) -> None:
+    class InspectEvaluator:
+        def __init__(self) -> None:
+            self.inspect_requests = []
+
+        def evaluate(self, request, *, cancellation_check=None):
+            raise AssertionError("inspect_with_ai must not call evaluate")
+
+        def inspect(self, request, *, cancellation_check=None) -> AIVisualInspectionResult:
+            self.inspect_requests.append(request)
+            return AIVisualInspectionResult(summary="Preview pane shows 98% pass rate", candidates=())
+
+    driver = FakeWindowsDriver()
+    evaluator = InspectEvaluator()
+    harness = WindowsHarness(
+        driver=driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "extract"),
+        ai_assertion_evaluator=evaluator,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
+    extract_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Read chart metric", "mode": "extract"}), harness.get_context())
+    assert extract_res.status == "passed"
+    assert extract_res.output["summary"] == "Preview pane shows 98% pass rate"
+    assert len(extract_res.artifact_refs) == 1
+    assert (tmp_path / "extract" / extract_res.artifact_refs[0].path).is_file()
+    assert len(evaluator.inspect_requests) == 1
+    assert evaluator.inspect_requests[0].platform == "windows"
+
+    locate_res = harness.invoke_action(_step("inspectWithAI", {"prompt": "Find chart legend", "mode": "locate"}), harness.get_context())
+    assert locate_res.status == "failed"
+    assert locate_res.output["reason"] == "pointer_mapping_unavailable"
+    assert len(evaluator.inspect_requests) == 1
+
+    blocked_driver = FakeWindowsDriver()
+    blocked_harness = WindowsHarness(
+        driver=blocked_driver,
+        artifact_store=ArtifactStore(run_dir=tmp_path / "privacy"),
+        ai_assertion_evaluator=evaluator,
+    )
+    privacy_res = blocked_harness.invoke_action(_step("inspectWithAI", {"prompt": "Read chart metric"}), blocked_harness.get_context())
+    assert privacy_res.status == "failed"
+    assert privacy_res.output["reason"] == "privacy_blocked"
+    assert privacy_res.artifact_refs == []
+    assert [c for c in blocked_driver.calls if c[0] == "screenshot"] == []
 
 
 def test_windows_harness_rejects_unknown_action() -> None:
@@ -723,16 +826,18 @@ def test_pywinauto_driver_launch_app_uses_launch_args_and_window_title_re(monkey
 
 
 def test_pywinauto_driver_main_window_timeout_includes_resolution_context(monkeypatch) -> None:
-    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
 
     class FailingApp:
         def connect(self, **kwargs: object) -> object:
             raise LookupError("window not found")
 
-    driver = PywinautoWindowsDriver(window_title_re=".*Edge Beta")
+    driver = _pywinauto.PywinautoWindowsDriver(window_title_re=".*Edge Beta")
     monkeypatch.setattr(driver, "_application_cls", lambda: lambda backend: FailingApp())
     monotonic_values = iter([100.0, 131.0])
-    monkeypatch.setattr("fsq_agent.core.harness._pywinauto_driver.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: next(monotonic_values, 131.0)))
 
     with pytest.raises(
         TimeoutError,

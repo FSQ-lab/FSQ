@@ -769,17 +769,47 @@ class WebAssertTextParams(BaseModel):
     optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
 
 
-class WebAssertWithAIParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Evaluate an explicit Web visual assertion with AI."})
+class WebInspectWithAIParams(_VisualInspectWithAIParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+        json_schema_extra={
+            "description": (
+                "Read pixel-only visual content in the current Web page with mode='extract' without pass/fail verdicts or UI actions. mode='locate' returns pointer_mapping_unavailable on Web."
+            )
+        },
+    )
 
-    prompt: str = Field(description="Non-empty visual assertion prompt to evaluate against current evidence.")
-    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+    prompt: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Read pixel-only content in the current Web page image without performing an action. Locate mode returns pointer_mapping_unavailable on Web.",
+    )
+
+
+class WebAssertWithAIParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Evaluate only an image-space Web visual assertion. Required assertion and surface; region is image_rect only, or omit it with full_screen_reason. Never locate/drive UI or replace exact accessibility facts."
+        },
+    )
+
+    assertion: str = Field(description="Pure visual appearance/image/Canvas expectation, not instructions or a UI action.")
+    surface: Literal["custom_canvas", "image_content", "map_view", "appearance"]
+    region: VisualRegion | None = None
+    expect: VisualExpectation | None = None
+    full_screen_reason: str | None = None
+    optional: bool | None = None
 
     @model_validator(mode="after")
     def _require_prompt(self) -> "WebAssertWithAIParams":
-        if self.prompt.strip():
-            return self
-        raise ValueError("requires non-empty prompt")
+        if not self.assertion.strip() or len(self.assertion.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank assertion of at most 4 KiB")
+        if self.region is None and not (self.full_screen_reason and self.full_screen_reason.strip()):
+            raise ValueError("full-image assertions require full_screen_reason")
+        return self
 
 
 @dataclass(frozen=True)
@@ -835,6 +865,7 @@ WEB_ACTION_DEFINITIONS: tuple[WebActionDefinition, ...] = (
     WebActionDefinition("waitFor", "wait_for", WebWaitForParams, "action"),
     WebActionDefinition("takeScreenshot", "take_screenshot", WebTakeScreenshotParams, "observation"),
     WebActionDefinition("uiSnapshot", "ui_snapshot", WebUiSnapshotParams, "observation"),
+    WebActionDefinition("inspectWithAI", "inspect_with_ai", WebInspectWithAIParams, "observation"),
     WebActionDefinition("assertVisible", "assert_visible", WebAssertVisibleParams, "assertion"),
     WebActionDefinition("assertNotVisible", "assert_not_visible", WebAssertNotVisibleParams, "assertion"),
     WebActionDefinition("assertText", "assert_text", WebAssertTextParams, "assertion"),
@@ -1011,17 +1042,48 @@ class WindowsUiSnapshotParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Read the current Windows control tree snapshot. No parameters are accepted."})
 
 
-class WindowsAssertWithAIParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Evaluate an explicit Windows visual assertion with AI."})
+class WindowsInspectWithAIParams(_VisualInspectWithAIParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+        json_schema_extra={
+            "description": (
+                "Read pixel-only visual content in the current Windows window with mode='extract' without pass/fail verdicts or UI actions. "
+                "mode='locate' returns pointer_mapping_unavailable on Windows."
+            )
+        },
+    )
 
-    prompt: str = Field(description="Non-empty visual assertion prompt to evaluate against current evidence.")
-    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+    prompt: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Read pixel-only content in the current Windows image without performing an action. Locate mode returns pointer_mapping_unavailable on Windows.",
+    )
+
+
+class WindowsAssertWithAIParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Evaluate only an image-space Windows visual assertion. Required assertion and surface; region is image_rect only, or omit it with full_screen_reason. Never locate/drive UI or replace exact accessibility facts."
+        },
+    )
+
+    assertion: str = Field(description="Pure visual appearance/image/Canvas expectation, not instructions or a UI action.")
+    surface: Literal["custom_canvas", "image_content", "map_view", "appearance"]
+    region: VisualRegion | None = None
+    expect: VisualExpectation | None = None
+    full_screen_reason: str | None = None
+    optional: bool | None = None
 
     @model_validator(mode="after")
     def _require_prompt(self) -> "WindowsAssertWithAIParams":
-        if self.prompt.strip():
-            return self
-        raise ValueError("requires non-empty prompt")
+        if not self.assertion.strip() or len(self.assertion.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank assertion of at most 4 KiB")
+        if self.region is None and not (self.full_screen_reason and self.full_screen_reason.strip()):
+            raise ValueError("full-image assertions require full_screen_reason")
+        return self
 
 
 class MacOSPoint(BaseModel):

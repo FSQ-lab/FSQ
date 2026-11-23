@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from collections.abc import Callable
 from contextlib import nullcontext
 from typing import ClassVar
 
@@ -10,8 +11,12 @@ from fsq_agent.core.evidence import ArtifactStore
 from fsq_agent.core.interfaces import AIAssertionEvaluatorProtocol, WebDriverInterface
 from fsq_agent.drivers._capabilities import _capability_matches, _discover_driver_capability_definitions, _schema_from_capability_definition, _with_driver_metadata
 from fsq_agent.harnesses._common_tools import CommonPlatformTools
+from fsq_agent.harnesses._host_visual import _capture_host_visual, _HostVisualAssertionCapture, _HostVisualAssertionInvocation
 from fsq_agent.harnesses._resources import OwnedResources
+from fsq_agent.harnesses._visual import _available_scoped_visual_tools, _resolve_scoped_visual_policy
 from fsq_agent.models import (
+    AndroidVisualAssertionPolicy,
+    AssertionBudget,
     CapabilityDefinition,
     ExecutableStep,
     FailureCategory,
@@ -21,13 +26,14 @@ from fsq_agent.models import (
     HarnessFunctionSchema,
     RuntimeSecretSettings,
     StepPhase,
+    WebAssertWithAIParams,
     WebTakeScreenshotParams,
     WebUiSnapshotParams,
 )
 
 
 class WebHarness:
-    _RUNNER_STATUSES: ClassVar[set[str]] = {"passed", "failed", "skipped", "cancelled"}
+    _RUNNER_STATUSES: ClassVar[set[str]] = {"passed", "failed", "skipped", "cancelled", "incomplete"}
     _FAILURE_CATEGORIES: ClassVar[set[str]] = {
         "configuration_error",
         "context_error",
@@ -48,15 +54,28 @@ class WebHarness:
         artifact_store: ArtifactStore | None = None,
         ai_assertion_evaluator: AIAssertionEvaluatorProtocol | None = None,
         runtime_secret_settings: RuntimeSecretSettings | None = None,
+        visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,
+        visual_assertion_budget: AssertionBudget | None = None,
+        visual_assertion_provider_available: bool | None = None,
+        visual_ai_eligible: bool | None = None,
     ) -> None:
         self.driver = driver
         self.artifact_store = artifact_store
         self.ai_assertion_evaluator = ai_assertion_evaluator
+        self.visual_ai_eligible = visual_ai_eligible
+        self._visual_assertion_policy_resolver = visual_assertion_policy_resolver
+        self._visual_assertion_budget = visual_assertion_budget or AssertionBudget()
+        self._visual_assertion_provider_available = visual_assertion_provider_available
+        self._visual_assertion_capture: _HostVisualAssertionCapture | None = None
         self._owned_resources = OwnedResources(driver, ai_assertion_evaluator)
         self.common_tools = CommonPlatformTools(
             platform="web",
         )
         self._configure_driver_ai_assertion_tool()
+
+    @property
+    def available_scoped_visual_tools(self) -> tuple[str, ...]:
+        return _available_scoped_visual_tools(self.artifact_store, self.ai_assertion_evaluator, self._visual_assertion_policy_resolver, self._visual_assertion_provider_available)
 
     def capture_scope(self, callback):
         return self.artifact_store.capture_scope(callback) if self.artifact_store is not None else nullcontext()
@@ -77,8 +96,6 @@ class WebHarness:
 
     def action_space(self) -> list[HarnessFunctionSchema]:
         definitions = self._capability_definitions()
-        if self.ai_assertion_evaluator is None:
-            definitions = [definition for definition in definitions if definition.name != "assert_with_ai"]
         return [*self.common_tools.common_action_space(), *[self._schema_from_capability(definition) for definition in definitions]]
 
     def before_action(self, step: ExecutableStep, context: HarnessContext) -> None:
@@ -100,6 +117,24 @@ class WebHarness:
             if isinstance(params, HarnessActionResult):
                 return params
             driver_method_name = str(capability.metadata.get("driver_method") or capability.name)
+            if capability.name == "assert_with_ai" and "prepared_artifacts" not in step.metadata:
+                capture_context = context.model_copy(
+                    update={
+                        "metadata": {
+                            **context.metadata,
+                            "capture_invocation": {
+                                "run_id": step.metadata.get("run_id") or (self.artifact_store.run_dir.name if self.artifact_store else "unallocated"),
+                                "step_execution_id": step.step_execution_id or step.step_id,
+                                "action_name": capability.name,
+                                "params": step.params,
+                            },
+                        }
+                    }
+                )
+                prepared = self.capture_artifact("screenshot", "assert-with-ai", capture_context, step.step_id, "invoke")
+                step = step.model_copy(
+                    update={"metadata": {**step.metadata, "prepared_artifacts": [prepared.model_dump(mode="json")], "run_id": capture_context.metadata["capture_invocation"]["run_id"]}}
+                )
             driver_method = getattr(self.driver, driver_method_name)
             self._prepare_driver_ai_assertion_tool_invocation(step, context)
             try:
@@ -120,7 +155,7 @@ class WebHarness:
         context: HarnessContext,
         action_result: HarnessActionResult | None,
     ) -> None:
-        return None
+        self._visual_assertion_capture = None
 
     def screenshot(self, params: WebTakeScreenshotParams | None = None) -> bytes:
         return self.driver.screenshot(params or WebTakeScreenshotParams())
@@ -133,6 +168,30 @@ class WebHarness:
         step_id: str,
         phase: StepPhase,
     ) -> HarnessArtifactRef:
+        invocation = context.metadata.get("capture_invocation", {})
+        capability = self._capability_for(invocation.get("action_name", "")) if isinstance(invocation, dict) else None
+        if kind == "screenshot" and capability is not None and capability.name == "assert_with_ai":
+            self._visual_assertion_capture = None
+            check = context.cancellation_check
+            if check is not None:
+                check()
+            run_id = invocation.get("run_id") or (self.artifact_store.run_dir.name if self.artifact_store else "unallocated")
+            execution_id = invocation.get("step_execution_id") or step_id
+            capture_context = context.model_copy(
+                update={"metadata": {**context.metadata, "capture_invocation": {**invocation, "run_id": run_id, "step_id": step_id, "step_execution_id": execution_id}}}
+            )
+            current = _HostVisualAssertionInvocation(
+                run_id=run_id,
+                step_id=step_id,
+                step_execution_id=execution_id,
+                capture_sequence=self.artifact_store.allocate_capture_sequence() if self.artifact_store is not None else 1,
+                params=WebAssertWithAIParams.model_validate(invocation["params"]),
+                context=capture_context,
+            )
+            policy = self._frame_policy(current.context, current.capture_sequence)
+            artifact = _capture_host_visual(self.driver, self.artifact_store, current, policy, callable(getattr(self.ai_assertion_evaluator, "evaluate", None)), phase)
+            self._visual_assertion_capture = _HostVisualAssertionCapture(current, policy, artifact)
+            return artifact
         if self.artifact_store is None:
             raise RuntimeError("Artifact capture requires an ArtifactStore.")
         if self._browser_not_started(context):
@@ -221,7 +280,39 @@ class WebHarness:
                 ai_assertion_evaluator=self.ai_assertion_evaluator,
             )
 
+    def _frame_policy(self, context: HarnessContext, sequence: int) -> AndroidVisualAssertionPolicy:
+        return _resolve_scoped_visual_policy(context, sequence, self._visual_assertion_policy_resolver, self._visual_assertion_budget, self._visual_assertion_provider_available)
+
     def _prepare_driver_ai_assertion_tool_invocation(self, step: ExecutableStep, context: HarnessContext) -> None:
+        binding, self._visual_assertion_capture = self._visual_assertion_capture, None
+        policy = None
+        capability = self._capability_for(step.action_name)
+        if capability is not None and capability.name == "inspect_with_ai":
+            sequence = self.artifact_store.allocate_capture_sequence() if self.artifact_store is not None else 1
+            identity = {
+                "run_id": step.metadata.get("run_id") or (self.artifact_store.run_dir.name if self.artifact_store else "unallocated"),
+                "step_id": step.step_id,
+                "step_execution_id": step.step_execution_id or step.step_id,
+                "action_name": capability.name,
+                "params": step.params,
+                "capture_sequence": sequence,
+            }
+            context = context.model_copy(update={"metadata": {**context.metadata, "capture_invocation": identity}})
+            policy = self._frame_policy(context, sequence)
+        elif capability is not None and capability.name == "assert_with_ai" and binding is not None:
+            current = binding.invocation
+            refs = step.metadata.get("prepared_artifacts", [])
+            screenshot = next((ref for ref in refs if ref.get("kind") == "screenshot"), None)
+            if (
+                current.run_id == step.metadata.get("run_id")
+                and current.step_id == step.step_id
+                and current.step_execution_id == (step.step_execution_id or step.step_id)
+                and current.params == WebAssertWithAIParams.model_validate(step.params)
+                and screenshot is not None
+                and screenshot.get("artifact_id") == binding.artifact.artifact_id
+                and screenshot.get("metadata", {}).get("capture") == binding.artifact.metadata.get("capture")
+            ):
+                policy = binding.policy
         prepare = getattr(self.driver, "prepare_ai_assertion_tool_invocation", None)
         if callable(prepare):
             prepare(
@@ -230,10 +321,12 @@ class WebHarness:
                 action_name=step.action_name,
                 metadata=step.metadata,
                 capture_artifact=self.capture_artifact,
+                visual_assertion_policy=policy,
             )
 
     def _clear_driver_ai_assertion_tool_invocation(self) -> None:
         clear = getattr(self.driver, "clear_ai_assertion_tool_invocation", None)
+        self._visual_assertion_capture = None
         if callable(clear):
             clear()
 
@@ -254,9 +347,9 @@ class WebHarness:
 
     def _validation_errors(self, error: ValidationError) -> list[dict[str, object]]:
         try:
-            return error.errors(include_url=False, include_context=False)
+            return error.errors(include_url=False, include_context=False, include_input=False)
         except TypeError:
-            return error.errors()
+            return [{key: value for key, value in item.items() if key != "input"} for item in error.errors()]
 
     def _result_from_driver_output(self, action_name: str, output: object, *, capability: CapabilityDefinition | None = None, step_id: str = "step") -> HarnessActionResult:
         persist_kind = capability.metadata.get("persist_artifact_kind") if capability is not None else None

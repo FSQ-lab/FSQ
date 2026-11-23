@@ -164,6 +164,8 @@ def redact_structure(
     if stripped.startswith(("{", "[", '"')):
         try:
             decoded = json.loads(redacted_str)
+        except RecursionError:
+            return "[REDACTED: nesting limit]"
         except ValueError:
             decoded = None
         if isinstance(decoded, (dict, list, str)) and decoded != redacted_str:

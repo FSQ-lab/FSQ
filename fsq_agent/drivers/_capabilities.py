@@ -23,6 +23,7 @@ from fsq_agent.models import (
     WindowsDoubleClickOnParams,
     WindowsDragToParams,
     WindowsHoverOnParams,
+    WindowsInspectWithAIParams,
     WindowsKillAppParams,
     WindowsLaunchAppParams,
     WindowsPressKeyParams,
@@ -114,6 +115,7 @@ WINDOWS_DRIVER_ACTION_CATALOG = {
         _windows_action("dragTo", "drag_to", WindowsDragToParams),
         _windows_action("assertVisible", "assert_visible", WindowsAssertVisibleParams, step_kind="assertion"),
         _windows_action("uiSnapshot", "ui_snapshot", WindowsUiSnapshotParams, step_kind="observation"),
+        _windows_action("inspectWithAI", "inspect_with_ai", WindowsInspectWithAIParams, step_kind="observation"),
         _windows_action("assertWithAI", "assert_with_ai", WindowsAssertWithAIParams, step_kind="assertion"),
     )
 }

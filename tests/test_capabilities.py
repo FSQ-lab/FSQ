@@ -73,9 +73,9 @@ def test_provider_requirement_is_derived_from_platform_registry_metadata(platfor
     snapshot = build_capability_registry(platform=platform).snapshot()
     required_names = provider_required_capability_names(platform)
 
-    assert required_names == (frozenset() if platform in {"android", "ios", "macos"} else frozenset({"assert_with_ai"}))
-    assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, required_names) is (platform not in {"android", "ios", "macos"})
-    assert steps_require_provider([SimpleNamespace(action_name="assert_with_ai")], snapshot, required_names) is (platform not in {"android", "ios", "macos"})
+    assert required_names == frozenset()
+    assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, required_names) is False
+    assert steps_require_provider([SimpleNamespace(action_name="assert_with_ai")], snapshot, required_names) is False
     assertion_names = ai_assertion_capability_names(platform)
     assert assertion_names == frozenset({"assert_with_ai"})
     assert steps_require_provider([SimpleNamespace(action_name="assertWithAI")], snapshot, assertion_names)

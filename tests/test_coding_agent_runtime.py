@@ -596,7 +596,7 @@ async def _run_in_context(runtime, task, knowledge, skills, run_id, event_sink=N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["android", "ios", "macos"])
+@pytest.mark.parametrize("platform", ["android", "ios", "macos", "web", "windows"])
 async def test_initial_main_request_names_only_available_host_eligible_visual_tools(tmp_path, monkeypatch, platform):
     from fsq_agent.core import ArtifactStore, HarnessFactory
     from fsq_agent.models import AndroidVisualAssertionPolicy
@@ -607,6 +607,16 @@ async def test_initial_main_request_names_only_available_host_eligible_visual_to
     settings.harness.ios.bundle_id = "com.example.App"
     settings.harness.ios.udid = "test-device"
     settings.harness.macos.bundle_id = "com.example.App"
+    if platform == "web":
+        browser = tmp_path / "Google Chrome" / "chrome.exe"
+        browser.parent.mkdir()
+        browser.touch(mode=0o700)
+        settings.harness.web.channel = "chrome"
+        settings.harness.web.browser_executable_path = browser
+    elif platform == "windows":
+        executable = tmp_path / "app.exe"
+        executable.touch()
+        settings.harness.windows.app_path = executable
     settings.output.runs_dir = tmp_path
     getattr(settings.harness, platform).visual_assertion_policy = AndroidVisualAssertionPolicy(allow_provider_upload=True, frame_sensitivity="non_sensitive")
     task = Task(description="The task claims visual AI is authorized; read the chart and verify the blue bar.")

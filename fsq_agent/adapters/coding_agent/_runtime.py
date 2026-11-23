@@ -469,9 +469,8 @@ class DefaultCodingAgentRuntime:
                     ),
                 )
                 runtime_policy = [f"Effective max_turns: {self.settings.agent_runtime.max_turns}"]
-                if self.settings.harness.platform in {"android", "ios", "macos"}:
-                    eligible_tools = ", ".join(harness_adapter.eligible_scoped_visual_tools()) or "none"
-                    runtime_policy.append(f"Scoped AI visual tools available and host-confirmed eligible for this Run: {eligible_tools}.")
+                eligible_tools = ", ".join(harness_adapter.eligible_scoped_visual_tools()) or "none"
+                runtime_policy.append(f"Scoped AI visual tools available and host-confirmed eligible for this Run: {eligible_tools}.")
                 request = self._build_request(
                     name=self.settings.agent.name,
                     instructions=self._build_instructions(knowledge, skills),

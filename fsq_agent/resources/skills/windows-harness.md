@@ -4,13 +4,14 @@ Use when `harness.platform` is Windows. This skill contains Windows-specific sta
 
 ## Snapshot-First Rules
 
-- Call `ui_snapshot` after launch and after state-changing actions when the next target is not already unambiguous.
+- Call `ui_snapshot` after launch and after state-changing actions when the next target is not already unambiguous. It returns a compact XML envelope (`format: "xml"`, `xml: "<Window ...>..."`, 160-character text clipping, and `offscreen_nodes_omitted` / `layout_nodes_removed` compaction metadata) whose XML tags (`control_type`) and attributes (`automation_id`, `title`, `class_name`, `value`, `bounds`) map directly to `WindowsLocator` fields.
 - Prefer stable control locators (`automation_id`, then `title` + `control_type`) over `index` or visual guessing.
 - Use `index` (1-based) only to disambiguate when multiple controls share the same locator fields.
 - Do not infer that the window changed from a screenshot path alone. Use a fresh `ui_snapshot` or assertion after the action.
 - Treat screenshots as evidence artifacts. They can support debugging, but they do not replace `ui_snapshot` for action targeting.
 - If a target is stale or missing, refresh the snapshot once and retry the same semantic action with corrected schema-valid arguments.
 
+- Use `inspect_with_ai` (`inspectWithAI`) with `mode: "extract"` only to read genuinely pixel-only Canvas, chart, map, or rendered image content that `ui_snapshot` XML does not expose. It is a read-only observation, never an assertion or UI action; `mode: "locate"` is unavailable on Windows (`pointer_mapping_unavailable`). Host upload authorization defaults to `allow_provider_upload=False`; on `privacy_blocked` or `provider_unavailable`, stop all visual AI calls for this task and leave any required visual check unverified.
 ## Control Locator Rules
 
 - A control locator may combine `title`, `control_type`, `automation_id`, `class_name`, and `index`.
@@ -21,7 +22,7 @@ Use when `harness.platform` is Windows. This skill contains Windows-specific sta
 ## Verification and Assertion Rules
 
 - Use `assert_visible` for required presence of a control.
-- Use `assert_with_ai` for required absence, visual judgment, window interpretation, or when a deterministic presence check would require a brittle complex locator.
+- Reserve `assert_with_ai` (`assertWithAI`) strictly for pure visual appearance, custom-canvas, map, or image-content checks that `ui_snapshot` and `assert_visible` do not expose, supplying `assertion`, `surface`, and either `region: {"kind": "image_rect", "rect": ...}` or `full_screen_reason`. Never use it to locate controls, guess coordinates, or override deterministic checks. Interpret tri-state `outcome` (`passed`, `failed`, or `inconclusive` when unverified) truthfully.
 - Use `ui_snapshot` to inspect, locate, or collect context before an assertion.
 
 ## Argument Rules
@@ -87,10 +88,28 @@ Use one payload from the matching semantic action. Do not combine unrelated fiel
 }
 ```
 
+### Scoped `assertWithAI`
+
+```json
+{
+  "assertion": "The preview pane renders a blue chart without clipping.",
+  "surface": "custom_canvas",
+  "region": {
+    "kind": "image_rect",
+    "rect": {
+      "left": 80,
+      "top": 100,
+      "right": 560,
+      "bottom": 420
+    }
+  }
+}
+```
+
 ## Tool Usage Error Recovery
 
 - If a Windows tool validation fails, rebuild the payload from the active schema and the requested semantic action.
 - If an action executes but the expected state is not present, take a fresh `ui_snapshot`, then decide whether retrying the same semantic action is justified.
 - If a key action returns the wrong window state, do not count it. Retry the requested key/action with a schema-valid payload or report the mismatch.
 - Before `assert_with_ai`, keep the window at the intended visual state.
-- For `assert_with_ai`, use the returned verdict rather than deciding from screenshot existence.
+- For `assert_with_ai`, use the returned tri-state verdict (`passed`, `failed`, or `inconclusive`) rather than deciding from screenshot existence.

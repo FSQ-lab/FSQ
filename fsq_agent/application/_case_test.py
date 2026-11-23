@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Never, Protocol
 
 from fsq_agent._capability_bootstrap import ai_assertion_capability_names, build_capability_registry, steps_require_provider
-from fsq_agent.ai_services import CaseSuggestionAnalysis, build_ai_assertion_evaluator
+from fsq_agent.ai_services import CaseSuggestionAnalysis
 from fsq_agent.application.contracts import (
     ApplicationError,
     ApplicationErrorCategory,
@@ -189,23 +189,25 @@ def execute_case_test(
     provider_available = bool(getattr(agent_runtime, "provider", None) and getattr(agent_runtime, "model", None))
     android_serial: str | None = None
     ios_udid: str | None = None
+    settings = settings.model_copy(deep=True)
     if request.platform == "android":
         android_serial = _resolve_android_run_serial(settings)
-        settings = settings.model_copy(deep=True)
         settings.harness.android.serial = android_serial
         settings.harness.android.app_id = settings.harness.android.app_id or case.config.app_id
         settings.harness.android.visual_assertion_policy = settings.harness.android.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
     elif request.platform == "ios":
         ios_udid = _resolve_ios_run_udid(settings, request.udid)
-        settings = settings.model_copy(deep=True)
         settings.harness.ios.udid = ios_udid
         settings.harness.ios.bundle_id = settings.harness.ios.bundle_id or case.config.app_id
         settings.harness.ios.visual_assertion_policy = settings.harness.ios.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
     elif request.platform == "macos":
-        settings = settings.model_copy(deep=True)
         configured_macos_bundle = settings.harness.macos.bundle_id
         settings.harness.macos.bundle_id = (case.config.app_id or configured_macos_bundle) if configured_macos_bundle in {None, "auto"} else configured_macos_bundle
         settings.harness.macos.visual_assertion_policy = settings.harness.macos.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
+    elif request.platform == "web":
+        settings.harness.web.visual_assertion_policy = settings.harness.web.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
+    elif request.platform == "windows":
+        settings.harness.windows.visual_assertion_policy = settings.harness.windows.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
     validate_strict_core_settings(settings, requires_ai_assertion=requires_ai)
     workspace_name = _registered_workspace_name(workspace.workspace)
     metadata = allocate_run(
@@ -219,18 +221,14 @@ def execute_case_test(
     )
     run_id = metadata.run_id
     run_dir = Path(settings.output.runs_dir) / run_id
-    evaluator = None
     harness = None
     execution_failed = False
     try:
         metadata = transition_run(run_dir, metadata, "running")
-        if requires_ai and request.platform not in {"android", "ios", "macos"}:
-            evaluator = build_ai_assertion_evaluator(settings)
         harness = HarnessFactory().create_harness(
             platform=request.platform,
             harness_settings=settings.harness,
             artifact_store=ArtifactStore(run_dir=run_dir, secret_values=tuple(settings.runtime_secrets.private_values().values())),
-            ai_assertion_evaluator=evaluator,
             runtime_secret_settings=settings.runtime_secrets,
             app_id=(settings.harness.android.app_id or case.config.app_id) if request.platform == "android" else None,
             serial=android_serial,
@@ -293,10 +291,6 @@ def execute_case_test(
                         action="Inspect the allocated Run evidence.",
                         details={"run_id": run_id, "platform": request.platform, "exception_type": type(cleanup_exc).__name__},
                     ) from cleanup_exc
-        elif evaluator is not None:
-            close_evaluator = getattr(evaluator, "close", None)
-            if callable(close_evaluator):
-                close_evaluator()
     if case_path.read_bytes() != source_before:
         raise ApplicationError(
             code=ApplicationErrorCode.RUN_SOURCE_CHANGED,

@@ -70,6 +70,42 @@ async def _run_main(runtime, task, run_id):
     )
 
 
+def _web_assertion_request(run_dir: Path) -> AIAssertionRequest:
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), "blue").save(buffer, format="PNG")
+    pixels = buffer.getvalue()
+    relative = Path("screen.png")
+    (run_dir / relative).write_bytes(pixels)
+    now = time.monotonic_ns()
+    digest = hashlib.sha256(pixels).hexdigest()
+    capture = HostCaptureEnvelopeV1(
+        run_id="assertion-run",
+        step_id="source",
+        step_execution_id="assertion-exec",
+        capture_sequence=1,
+        host_capture_started_monotonic_ns=now,
+        host_capture_finished_monotonic_ns=now,
+        captured_wall_clock="2026-01-01T00:00:00Z",
+        png_sha256=digest,
+        png_size_bytes=len(pixels),
+        image_width=8,
+        image_height=8,
+    )
+    return AIAssertionRequest(
+        platform="web",
+        prompt="Visible?",
+        surface="image_content",
+        run_id="assertion-run",
+        step_id="assertion-exec",
+        run_dir=run_dir,
+        screenshot_path=relative,
+        screenshot_artifact_ref=HarnessArtifactRef(artifact_id="sample", kind="screenshot", path=relative, sha256=digest, size_bytes=len(pixels)),
+        capture=capture,
+        upload_authorized=True,
+        frame_sensitivity="non_sensitive",
+    )
+
+
 def _inspection_request(mode: str) -> AIVisualInspectionRequest:
     buffer = io.BytesIO()
     Image.new("RGB", (40, 30), "white").save(buffer, format="PNG")
@@ -120,7 +156,7 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
         "pre_plan": GoalPrePlan(goal="Open the app.", verification_goal="The app is open.").model_dump_json(),
         "main": AgentFinalOutput(status="success", summary="Done.").model_dump_json(),
         "verification": AgentFinalOutput(status="success", summary="Verified.").model_dump_json(),
-        "assertion": '{"passed":true,"explanation":"Visible.","confidence":0.9}',
+        "assertion": '{"outcome":"passed","explanation":"Visible.","confidence":0.9}',
         "connection": "FSQ_OK",
         "suggestion": '{"summary":"No change needed.","suggestions":[],"candidate_case_yaml":null}',
         "quick_test": json.dumps(
@@ -248,11 +284,9 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
         else:
             assert payloads[0]["text"]["format"]["strict"] is True
     elif path == "assertion":
-        screenshot = tmp_path / "sample.png"
-        screenshot.write_bytes(b"synthetic-image")
-        result = build_ai_assertion_evaluator(settings).evaluate(AIAssertionRequest(platform="web", prompt="Visible?", screenshot_path=screenshot))
+        result = build_ai_assertion_evaluator(settings).evaluate(_web_assertion_request(tmp_path))
         assert result.passed is (failure_kind is None)
-        assert result.status == ("error" if failure_kind else "passed")
+        assert result.status == ("inconclusive" if failure_kind else "passed")
         assert payloads[0]["input"][0]["content"][1]["type"] == ("image" if provider == "google_gemini" else "input_image")
     elif path in {"inspection_extract", "inspection_locate"}:
         request = _inspection_request(path.removeprefix("inspection_"))
@@ -341,7 +375,7 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
             assert output_format is not None
             schema = output_format["schema"]
             expected = {
-                "assertion": {"passed", "explanation", "confidence"},
+                "assertion": {"outcome", "explanation", "confidence"},
                 "suggestion": {"summary", "suggestions", "candidate_case_yaml"},
                 "quick_test": {"sufficient", "reason", "application_name", "explicit_reference", "inferred_hint"},
                 "inspection_extract": {"summary", "candidates"},
@@ -583,19 +617,19 @@ def structured_session(request, monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("service", ["assertion", "suggestion"])
 @pytest.mark.parametrize("effort,next_effort", [("low", "high"), ("high", "low")])
-def test_reasoning_effort_service_factory_captures_value_before_source_settings_change(structured_session, monkeypatch, service, effort, next_effort):
+def test_reasoning_effort_service_factory_captures_value_before_source_settings_change(structured_session, monkeypatch, tmp_path, service, effort, next_effort):
     session, control, payloads = structured_session
     settings = Settings(agent_runtime=AgentRuntimeSettings(reasoning_effort=effort))
     monkeypatch.setattr("fsq_agent.ai_services._factory.build_model_provider_session", lambda configured: session)
     if service == "assertion":
         service_instance = build_ai_assertion_evaluator(settings)
-        control["text"] = '{"passed":true,"explanation":"Visible.","confidence":null}'
+        control["text"] = '{"outcome":"passed","explanation":"Visible.","confidence":null}'
     else:
         service_instance = build_case_suggestion_analyzer(settings)
         control["text"] = '{"summary":"No changes.","suggestions":[],"candidate_case_yaml":null}'
     settings.agent_runtime.reasoning_effort = next_effort
     if service == "assertion":
-        assert service_instance.evaluate(AIAssertionRequest(platform="web", prompt="Visible?")).status == "passed"
+        assert service_instance.evaluate(_web_assertion_request(tmp_path)).outcome == "passed"
     else:
         assert service_instance.analyze(parsed_case={}, execution_report={}).summary == "No changes."
     assert len(payloads) == 1
@@ -607,14 +641,14 @@ def test_reasoning_effort_service_factory_captures_value_before_source_settings_
 
 @pytest.mark.parametrize("service", ["assertion", "suggestion"])
 @pytest.mark.parametrize("effort", [None, "low", "high", "auto"])
-def test_services_reasoning_effort_constructor_compatibility(structured_session, service, effort):
+def test_services_reasoning_effort_constructor_compatibility(structured_session, tmp_path, service, effort):
     session, control, payloads = structured_session
     options = {} if effort is None else {"reasoning_effort": effort}
     if service == "assertion":
-        control["text"] = '{"passed":true,"explanation":"Visible.","confidence":null}'
-        result = AIAssertionEvaluator(session, **options).evaluate(AIAssertionRequest(platform="web", prompt="Visible?"))
+        control["text"] = '{"outcome":"passed","explanation":"Visible.","confidence":null}'
+        result = AIAssertionEvaluator(session, **options).evaluate(_web_assertion_request(tmp_path))
         if effort == "auto":
-            assert result.status == "error"
+            assert result.outcome == "inconclusive"
             assert result.metadata["engine_error"]["category"] == "configuration"
         else:
             assert result.status == "passed"
@@ -714,26 +748,27 @@ def test_single_unsupported_schema_fails_before_request(structured_session):
         "null",
         "[]",
         "not JSON",
-        '{"passed":false,"explanation":"Absent"}',
-        '{"passed":"false","explanation":"Absent","confidence":null}',
-        '{"passed":1,"explanation":"Absent","confidence":null}',
-        '{"passed":true,"explanation":1,"confidence":null}',
-        '{"passed":true,"explanation":" ","confidence":null}',
-        '{"passed":true,"explanation":"Visible","confidence":true}',
-        '{"passed":true,"explanation":"Visible","confidence":"0.9"}',
-        '{"passed":true,"explanation":"Visible","confidence":1.1}',
-        '{"passed":true,"explanation":"Visible","confidence":NaN}',
-        '{"passed":true,"explanation":"Visible","confidence":Infinity}',
-        '{"passed":true,"explanation":"Visible","confidence":null,"extra":true}',
-        '```json\n{"passed":true,"explanation":"Visible","confidence":null}\n```',
-        'prose {"passed":true,"explanation":"Visible","confidence":null}',
+        '{"passed":true,"explanation":"Visible","confidence":null}',
+        '{"outcome":"failed","explanation":"Absent"}',
+        '{"outcome":"unknown","explanation":"Absent","confidence":null}',
+        '{"outcome":false,"explanation":"Absent","confidence":null}',
+        '{"outcome":"passed","explanation":1,"confidence":null}',
+        '{"outcome":"passed","explanation":" ","confidence":null}',
+        '{"outcome":"passed","explanation":"Visible","confidence":true}',
+        '{"outcome":"passed","explanation":"Visible","confidence":"0.9"}',
+        '{"outcome":"passed","explanation":"Visible","confidence":1.1}',
+        '{"outcome":"passed","explanation":"Visible","confidence":NaN}',
+        '{"outcome":"passed","explanation":"Visible","confidence":Infinity}',
+        '{"outcome":"passed","explanation":"Visible","confidence":null,"extra":true}',
+        '```json\n{"outcome":"passed","explanation":"Visible","confidence":null}\n```',
+        'prose {"outcome":"passed","explanation":"Visible","confidence":null}',
     ],
 )
-def test_assertion_invalid_output_through_real_clients(structured_session, text):
+def test_assertion_invalid_output_through_real_clients(structured_session, tmp_path, text):
     session, control, payloads = structured_session
     control["text"] = text
-    result = AIAssertionEvaluator(session).evaluate(AIAssertionRequest(platform="web", prompt="Check"))
-    assert result.status == "error"
+    result = AIAssertionEvaluator(session).evaluate(_web_assertion_request(tmp_path))
+    assert result.outcome == "inconclusive"
     assert result.passed is False
     assert result.metadata["engine_error"]["category"] == "invalid_output"
     assert len(payloads) == 1

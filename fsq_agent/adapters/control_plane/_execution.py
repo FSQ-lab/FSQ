@@ -14,7 +14,6 @@ from typing import Any, Never
 from fsq_agent._capability_bootstrap import steps_require_provider
 from fsq_agent.adapters.coding_agent import create_coding_agent_runtime
 from fsq_agent.agent import CodingAgentPolicy, FsqAgent
-from fsq_agent.ai_services import build_ai_assertion_evaluator
 from fsq_agent.application import ApplicationError, QuickTestPrepareResult, execute_prepared_quick_test
 from fsq_agent.case_dsl import FsqCaseLoader, FsqExecutableStepAdapter
 from fsq_agent.config import Settings, validate_runtime_settings, validate_strict_core_settings, workspace_revision
@@ -162,14 +161,18 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         run_settings.harness.macos.visual_assertion_policy = run_settings.harness.macos.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
         require_macos_preflight(run_settings, "strict", requires_provider=False)
     else:
-        require_macos_preflight(run_settings, "strict", requires_provider=requires_ai)
+        require_macos_preflight(run_settings, "strict", requires_provider=False)
     if platform == "android":
         run_settings.harness.android.app_id = _android_app_id(run_settings, case)
         run_settings.harness.android.visual_assertion_policy = run_settings.harness.android.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
         require_android_preflight(run_settings, "strict", requires_provider=False)
+    elif platform == "ios":
+        run_settings.harness.ios.visual_assertion_policy = run_settings.harness.ios.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
+    elif platform == "web":
+        run_settings.harness.web.visual_assertion_policy = run_settings.harness.web.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
+    elif platform == "windows":
+        run_settings.harness.windows.visual_assertion_policy = run_settings.harness.windows.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
     validate_strict_core_settings(run_settings, requires_ai_assertion=requires_ai)
-    if requires_ai and platform not in {"android", "macos"}:
-        require_provider(run_settings)
     return PreparedRun(
         request_id=request_id,
         settings=run_settings,
@@ -349,7 +352,6 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
     request_id = prepared.request_id
     metadata = None
     run_dir = None
-    evaluator = None
     harness = None
     try:
         workspace_root = settings.workspace.root_dir
@@ -380,14 +382,10 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         state.raise_if_cancelled(request_id)
         state.transition(request_id, "running", summary="Strict replay is executing.")
         metadata = transition_run(run_dir, metadata, "running")
-        evaluator = None
-        if prepared.requires_ai_assertion and settings.harness.platform not in {"android", "macos"}:
-            evaluator = build_ai_assertion_evaluator(settings)
         harness = HarnessFactory().create_harness(
             platform=settings.harness.platform,
             harness_settings=settings.harness,
             artifact_store=ArtifactStore(run_dir=run_dir, secret_values=configured_secret_values(settings)),
-            ai_assertion_evaluator=evaluator,
             runtime_secret_settings=settings.runtime_secrets,
             app_id=_android_app_id(settings, prepared.case) if settings.harness.platform == "android" else None,
             serial=prepared.target_id if settings.harness.platform == "android" else None,
@@ -419,7 +417,6 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         )
         close_harness = getattr(harness, "close", None)
         harness = None
-        evaluator = None
         if callable(close_harness):
             close_harness()
         state.transition(request_id, "finalizing", summary="Finalizing strict evidence and report.")
@@ -458,11 +455,6 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
                     fallback_close()
                 except Exception as cleanup_exc:  # noqa: BLE001 - preserve already-published failure/cancel state.
                     logging.getLogger(__name__).warning("Fallback strict harness cleanup failed (%s)", type(cleanup_exc).__name__)
-        elif evaluator is not None:
-            try:
-                evaluator.close()
-            except Exception as cleanup_exc:  # noqa: BLE001
-                logging.getLogger(__name__).warning("Fallback strict evaluator cleanup failed (%s)", type(cleanup_exc).__name__)
 
 
 class _ProjectionEvidenceRecorder(EvidenceRecorder):

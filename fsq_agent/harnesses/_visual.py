@@ -53,6 +53,43 @@ _INSPECT_PROPERTIES = {
 }
 
 
+def _available_scoped_visual_tools(
+    store: ArtifactStore | None,
+    evaluator: object,
+    resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None,
+    provider_available: bool | None,
+) -> tuple[str, ...]:
+    if provider_available is False or store is None or not callable(resolver):
+        return ()
+    return tuple(name for name, method in (("assert_with_ai", "evaluate"), ("inspect_with_ai", "inspect")) if callable(getattr(evaluator, method, None)))
+
+
+def _resolve_scoped_visual_policy(
+    context: HarnessContext,
+    sequence: int,
+    resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None,
+    budget: AssertionBudget,
+    provider_available: bool | None,
+) -> AndroidVisualAssertionPolicy:
+    check = context.cancellation_check
+    if check is not None:
+        check()
+    try:
+        resolved = resolver(context, sequence) if resolver is not None else None
+    except Exception:  # noqa: BLE001 - incompatible host decisions fail closed without exposing resolver errors.
+        resolved = None
+    if check is not None:
+        check()
+    policy = resolved if isinstance(resolved, AndroidVisualAssertionPolicy) else AndroidVisualAssertionPolicy()
+    available = policy.provider_available if policy.provider_available is not None else provider_available
+    return policy.model_copy(
+        update={
+            "provider_available": False if provider_available is False else available,
+            "budget": AssertionBudget(**{name: min(getattr(policy.budget, name), getattr(budget, name)) for name in AssertionBudget.model_fields}),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class _VisualAssertionCapture:
     run_id: str
@@ -90,27 +127,10 @@ class _ScopedVisualTools:
 
     @property
     def available_tools(self) -> tuple[str, ...]:
-        if self.provider_available is False or self.store is None or not callable(self.resolver):
-            return ()
-        return tuple(name for name, method in (("assert_with_ai", "evaluate"), ("inspect_with_ai", "inspect")) if callable(getattr(self.evaluator, method, None)))
+        return _available_scoped_visual_tools(self.store, self.evaluator, self.resolver, self.provider_available)
 
     def _frame_policy(self, context: HarnessContext, sequence: int) -> AndroidVisualAssertionPolicy:
-        if context.cancellation_check is not None:
-            context.cancellation_check()
-        try:
-            resolved = self.resolver(context, sequence) if self.resolver is not None else None
-        except Exception:  # noqa: BLE001 - incompatible host decisions fail closed without disclosing resolver errors.
-            resolved = None
-        if context.cancellation_check is not None:
-            context.cancellation_check()
-        policy = resolved if isinstance(resolved, AndroidVisualAssertionPolicy) else AndroidVisualAssertionPolicy()
-        available = policy.provider_available if policy.provider_available is not None else self.provider_available
-        return policy.model_copy(
-            update={
-                "provider_available": False if self.provider_available is False else available,
-                "budget": AssertionBudget(**{name: min(getattr(policy.budget, name), getattr(self.budget, name)) for name in AssertionBudget.model_fields}),
-            }
-        )
+        return _resolve_scoped_visual_policy(context, sequence, self.resolver, self.budget, self.provider_available)
 
     def _capture_context(self, context: HarnessContext, identity: dict, step_id: str) -> tuple[HarnessContext, dict]:
         identity = {

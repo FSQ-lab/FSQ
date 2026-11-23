@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -463,3 +464,9 @@ def test_shared_redaction_preserves_35_deep_nested_structures_and_dag_siblings_w
         deep_135 = [deep_135]
     safe_deep_135 = RunLifecycleService.safe_value(deep_135)
     assert "[REDACTED: nesting limit]" in json.dumps(safe_deep_135)
+
+    depth = sys.getrecursionlimit() + 64
+    encoded = "[" * depth + '{"token":"oversized-json-canary"}' + "]" * depth
+    safe_encoded = RunLifecycleService.safe_value({"json": encoded}, ())["json"]
+    assert "[REDACTED: nesting limit]" in safe_encoded
+    assert "oversized-json-canary" not in safe_encoded

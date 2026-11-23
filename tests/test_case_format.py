@@ -108,7 +108,7 @@ def test_static_format_does_not_use_workspace_or_provider(tmp_path, monkeypatch)
     monkeypatch.setattr("fsq_agent.application.workspace.require_initialized_workspace", forbidden)
     monkeypatch.setattr("fsq_agent.ai_services.build_ai_assertion_evaluator", forbidden)
     path = tmp_path / "case.fsq.yaml"
-    path.write_text(HEADER + "onCaseStart: {runCase: missing.fsq.yaml}\n---\n- assertWithAI: {prompt: verify}\n")
+    path.write_text(HEADER + "onCaseStart: {runCase: missing.fsq.yaml}\n---\n- assertWithAI: {assertion: verify, surface: appearance, full_screen_reason: Whole page}\n")
     result = format_case(CaseFormatRequest(current_directory=tmp_path, case_path=path))
     assert result.valid
 

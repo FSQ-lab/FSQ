@@ -558,7 +558,7 @@ class RunReportService:
         execution["interpretations"] = self._interpretations(run_id, execution, documents, suggestions, projected_artifacts)
         if isinstance(execution.get("first_failure"), dict):
             execution["first_failure"].update(provenance="recorded_fact", references=[{"run_id": run_id, "step_execution_id": execution["first_failure"].get("step_execution_id")}])
-        evidence = self._coverage(steps, projected_artifacts, frozen.get("evidence") or metadata.get("evidence") or {}, bundle, warnings)
+        evidence = self._coverage(steps, projected_artifacts, frozen.get("evidence") or metadata.get("evidence") or {}, bundle, warnings, mode=metadata.get("mode"), outcome=outcome)
         blocking_steps = list(logical_steps.values()) if outcome != "success" else []
         execution["infrastructure_failures"] = [
             {"step_execution_id": step.get("step_execution_id"), "failure_category": step.get("failure_category")}
@@ -758,6 +758,8 @@ class RunReportService:
         if status not in {"passed", "failed", "skipped", "cancelled", "incomplete"}:
             status = "incomplete"
         timing = {"duration_ms": metric(raw.get("duration_ms"), measured=_duration_measured(raw), reason=raw.get("unavailable_reason") or "unmeasured")}
+        entered_invoke = any(item.get("phase") in {"invoke", "settle", "finalize"} for item in phases)
+        prepare_aborted = any(item.get("phase") == "prepare" and item.get("status") != "passed" for item in phases) and not entered_invoke
         for name in ("prepare", "invoke", "settle", "finalize"):
             phase = next((item for item in phases if item.get("phase") == name), {})
             measured = _duration_measured(phase)
@@ -804,6 +806,7 @@ class RunReportService:
             "metrics": timing,
             "evidence_policy": metadata.get("evidence_policy") or {},
             "required_evidence": metadata.get("required_evidence") or [],
+            "prepare_aborted": prepare_aborted,
             "container": bool((source.get("metadata") or {}).get("hook_action_name") == "runCase" or metadata.get("hook_action_name") == "runCase"),
             "assertion": assertion,
             "assertion_details": assertion_details,
@@ -953,15 +956,28 @@ class RunReportService:
             values[artifact_id] = artifact
         return list(values.values())
 
-    def _coverage(self, steps, artifacts, recorded, bundle, warnings):
+    def _coverage(self, steps, artifacts, recorded, bundle, warnings, *, mode=None, outcome=None):
         missing = list(recorded.get("required_missing") or [])
-        for step in steps:
+        last_passed = max((index for index, item in enumerate(steps) if (item.get("aggregate_status") or item.get("status")) == "passed"), default=-1)
+        bundle_warnings = bundle.get("warnings") or []
+        recovered_indices = (
+            {index for index, item in enumerate(steps) if (item.get("aggregate_status") or item.get("status")) == "failed" and index < last_passed}
+            if mode == "explore" and outcome == "success" and recorded.get("status") == "complete" and not bundle_warnings and bundle.get("completeness") != "unavailable"
+            else set()
+        )
+        for index, step in enumerate(steps):
+            if index in recovered_indices:
+                continue
             required = list(step.get("required_evidence") or [])
             policy = step.get("evidence_policy") or {}
             for phase, key in (("prepare", "capture_before"), ("finalize", "capture_after")):
+                if phase == "finalize" and step.get("prepare_aborted"):
+                    continue
                 if policy.get(key):
                     required.extend({"kind": kind, "phase": phase} for kind in policy.get("artifact_kinds", ("screenshot", "ui_snapshot")))
             for expected in required:
+                if expected.get("phase") == "finalize" and step.get("prepare_aborted"):
+                    continue
                 found = any(
                     item.get("step_execution_id") == step["step_execution_id"]
                     and (item.get("requested_kind") or item.get("kind")) == expected.get("kind")
@@ -971,9 +987,18 @@ class RunReportService:
                 )
                 if not found:
                     missing.append({"run_id": step["run_id"], "step_execution_id": step["step_execution_id"], **expected})
-        errors = [error for step in steps for error in step.get("evidence_errors", [])]
+        errors = [error for index, step in enumerate(steps) if index not in recovered_indices for error in step.get("evidence_errors", [])]
         unknown_legacy = bundle.get("schema_version") != "fsq.evidence/v2" and (bundle.get("metadata") or {}).get("legacy_coverage_unknown", False)
-        incomplete = (not unknown_legacy and bundle.get("completeness") in {"partial", "unavailable"}) or any(item.get("unavailable_reason") == "identity_conflict" for item in artifacts)
+        unrecovered_artifact_failure = any(
+            item.get("availability") not in {None, "available", "not_applicable"} and item.get("step_execution_id") not in {steps[i].get("step_execution_id") for i in recovered_indices}
+            for item in artifacts
+            if item.get("step_execution_id") is not None
+        )
+        bundle_incomplete = bundle.get("completeness") == "unavailable" or (
+            bundle.get("completeness") == "partial" and (not recovered_indices or bool(bundle_warnings) or unrecovered_artifact_failure)
+        )
+        incomplete = (not unknown_legacy and bundle_incomplete) or any(item.get("unavailable_reason") == "identity_conflict" for item in artifacts)
+        combined_warnings = list(dict.fromkeys([*(recorded.get("warnings") or []), *warnings]))
         status = "partial" if missing or errors or incomplete else recorded.get("status") or ("complete" if bundle and not unknown_legacy else "unavailable")
         return {
             "status": status,
@@ -981,7 +1006,7 @@ class RunReportService:
             "errors": [*recorded.get("errors", []), *errors],
             "artifact_count": len(artifacts),
             "availability": "known" if recorded or (bundle and not unknown_legacy) else "unknown",
-            "warnings": list(warnings),
+            "warnings": combined_warnings,
         }
 
     def _gate(self, execution, verification, evidence, metadata, frozen):

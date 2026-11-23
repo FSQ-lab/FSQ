@@ -499,27 +499,6 @@ class RunLifecycleService:
             counts[str(step["status"]) if step["status"] in counts else "incomplete"] += 1
         counted = RunStepCounts(total=len(leaves), attempt_count=attempts, **counts)
         first = next((step for step in leaves.values() if step["status"] == "failed" or (step["status"] == "skipped" and (step.get("failure_category") or step.get("step_execution_id")))), None)
-        evidence_errors = [error for step in step_values for error in step.get("evidence_errors", [])]
-        capture_failed = bool(evidence_errors) or any(step.get("failure_category") == "artifact_error" for step in step_values)
-        evidence_failed = capture_failed
-        evidence_failed = evidence_failed or bundle.completeness in {"partial", "unavailable"} or any(ref.availability not in {"available", "not_applicable"} for ref in bundle.artifacts)
-        for step in bundle.steps:
-            policy = step.metadata.get("evidence_policy") or {}
-            if step.step_execution_id is None and step.status in {"skipped", "incomplete"}:
-                continue
-            for phase, enabled in (("prepare", policy.get("capture_before")), ("finalize", policy.get("capture_after"))):
-                if not enabled:
-                    continue
-                refs = [ref for item in step.phase_reports if item.phase == phase for ref in item.artifact_refs]
-                for kind in policy.get("artifact_kinds", []):
-                    if not any(
-                        (ref.kind == kind or ref.metadata.get("requested_kind") == kind or ref.metadata.get("requested_artifact_kind") == kind) and ref.availability in {"available", "not_applicable"}
-                        for ref in refs
-                    ):
-                        evidence_failed = True
-                        capture_failed = True
-                        evidence_errors.append({"step_id": step.step_id, "phase": phase, "kind": kind, "reason": "required_capture_missing"})
-        evidence = {"status": "partial" if evidence_failed else "complete" if step_values else "not_applicable", "errors": evidence_errors, "warnings": bundle.warnings}
         verdict = verification.model_dump(mode="json") if hasattr(verification, "model_dump") else dict(verification or {"status": "not_requested"})
         unverified_assertion = False
         if verdict.get("status") in {"success", "failed", "inconclusive", "not_requested"}:
@@ -552,6 +531,81 @@ class RunLifecycleService:
             outcome = "error"
         elif (counts["incomplete"] and outcome == "success") or (not attempts and verdict.get("status") not in {"success", "passed"} and outcome == "success"):
             outcome = "inconclusive"
+        last_passed_index = max((index for index, item in enumerate(bundle.steps) if item.status == "passed"), default=-1)
+        journal_clean = (
+            bundle.completeness != "unavailable"
+            and not bundle.warnings
+            and not any((step.status == "incomplete" and step.metadata.get("recovered_incomplete")) or step.status in {"pending", "running"} for step in bundle.steps)
+            and bool(bundle.steps or any(event.event_type == "session_finish" and event.payload.get("capability_execution") == "not_requested" for event in bundle.events))
+        )
+        recovered_step_indices: set[int] = (
+            {index for index, item in enumerate(bundle.steps) if item.status == "failed" and index < last_passed_index}
+            if metadata.mode == "explore" and outcome == "success" and journal_clean
+            else set()
+        )
+        recovered_step_ids = {identity for index in recovered_step_indices for identity in (bundle.steps[index].step_execution_id, bundle.steps[index].step_id) if identity}
+        evidence_errors: list[dict[str, object]] = []
+        recovered_capture_reasons: list[tuple[str, str]] = []
+        capture_failed = False
+        evidence_failed = bundle.completeness in {"partial", "unavailable"} if not recovered_step_indices else not journal_clean
+        for index, step in enumerate(step_values):
+            step_id = str(step.get("step_id") or "")
+            step_errors = list(step.get("evidence_errors", []))
+            has_artifact_error = step.get("failure_category") == "artifact_error"
+            if index in recovered_step_indices:
+                for err in step_errors:
+                    reason = str(err.get("message") or err.get("reason") or "capture_failed") if isinstance(err, dict) else str(err)
+                    recovered_capture_reasons.append((step_id, reason))
+                if has_artifact_error and not step_errors:
+                    recovered_capture_reasons.append((step_id, str(step.get("error_message") or "artifact_error")))
+            else:
+                evidence_errors.extend(step_errors)
+                if step_errors or has_artifact_error:
+                    capture_failed = True
+                    evidence_failed = True
+        for ref in bundle.artifacts:
+            if ref.availability in {"available", "not_applicable"}:
+                continue
+            owner_id = ref.step_execution_id or ref.step_id
+            if owner_id and owner_id in recovered_step_ids:
+                reason = str(ref.unavailable_reason or ref.availability)
+                if not any(existing_step == owner_id for existing_step, _ in recovered_capture_reasons):
+                    recovered_capture_reasons.append((str(owner_id), reason))
+            else:
+                evidence_failed = True
+        for index, step in enumerate(bundle.steps):
+            policy = step.metadata.get("evidence_policy") or {}
+            if step.step_execution_id is None and step.status in {"skipped", "incomplete"}:
+                continue
+            entered_invoke = any(item.phase in {"invoke", "settle", "finalize"} for item in step.phase_reports)
+            prepare_aborted = any(item.phase == "prepare" and item.status != "passed" for item in step.phase_reports) and not entered_invoke
+            for phase, enabled in (("prepare", policy.get("capture_before")), ("finalize", policy.get("capture_after"))):
+                if not enabled:
+                    continue
+                if phase == "finalize" and prepare_aborted:
+                    continue
+                refs = [ref for item in step.phase_reports if item.phase == phase for ref in item.artifact_refs]
+                for kind in policy.get("artifact_kinds", []):
+                    if not any(
+                        (ref.kind == kind or ref.metadata.get("requested_kind") == kind or ref.metadata.get("requested_artifact_kind") == kind) and ref.availability in {"available", "not_applicable"}
+                        for ref in refs
+                    ):
+                        if index in recovered_step_indices:
+                            if not any(existing_step in {step.step_id, step.step_execution_id} for existing_step, _ in recovered_capture_reasons):
+                                recovered_capture_reasons.append((step.step_id, f"{phase} {kind} required_capture_missing"))
+                        else:
+                            evidence_failed = True
+                            capture_failed = True
+                            evidence_errors.append({"step_id": step.step_id, "phase": phase, "kind": kind, "reason": "required_capture_missing"})
+        evidence_warnings = list(bundle.warnings)
+        if recovered_capture_reasons and not evidence_failed:
+            seen_warnings: set[str] = set()
+            for step_id, reason in recovered_capture_reasons:
+                warning = _safe_text(f"Recovered intermediate step {step_id} had capture failure ({reason}); final verified steps have complete evidence.", secret_values)
+                if warning not in seen_warnings:
+                    seen_warnings.add(warning)
+                    evidence_warnings.append(warning)
+        evidence = {"status": "partial" if evidence_failed else "complete" if step_values else "not_applicable", "errors": evidence_errors, "warnings": evidence_warnings}
         # A search evidence gap can lower a positive verifier conclusion, but
         # must not erase an error that recorded required-capture failures would
         # have produced. An unverified visual assertion cannot hide independent

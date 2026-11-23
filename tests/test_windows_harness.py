@@ -1371,3 +1371,43 @@ def test_pywinauto_driver_drag_releases_mouse_after_move_failure(monkeypatch) ->
         )
 
     assert mouse.releases == [((40, 20), "left")]
+
+
+@pytest.mark.parametrize("kind", ["screenshot", "ui_snapshot"])
+def test_windows_harness_records_not_applicable_when_app_not_launched_or_killed(tmp_path, kind: str) -> None:
+    class UnlaunchedDriver(FakeWindowsDriver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.app_path = "C:/Windows/System32/notepad.exe"
+            self._launched = False
+
+        def screenshot(self, params=None) -> bytes:
+            raise AssertionError("screenshot() must not run before launch or after kill")
+
+        def ui_snapshot(self, params: WindowsUiSnapshotParams) -> dict[str, object]:
+            raise AssertionError("ui_snapshot() must not run before launch or after kill")
+
+    driver = UnlaunchedDriver()
+    store = ArtifactStore(run_dir=tmp_path)
+    harness = WindowsHarness(driver=driver, artifact_store=store)
+    context = HarnessContext(
+        platform="windows",
+        session_id="pywinauto:uia",
+        metadata={"app_path_configured": True, "window_title_re_configured": False},
+    )
+
+    ref = harness.capture_artifact(kind=kind, reason="before launchApp", context=context, step_id="step-1", phase="prepare")
+    assert ref.availability == "not_applicable"
+    assert ref.unavailable_reason == "windows_app_not_launched"
+    assert ref.metadata["requested_artifact_kind"] == kind
+
+    # Once launched, an active capture exception must still propagate so StepRunner records availability="failed".
+    driver._launched = True
+    with pytest.raises(AssertionError):
+        harness.capture_artifact(kind=kind, reason="active window", context=context, step_id="step-2", phase="finalize")
+
+    # After killApp / rollback resets _launched = False, capture returns to objective not_applicable.
+    driver._launched = False
+    after_kill_ref = harness.capture_artifact(kind=kind, reason="after killApp", context=context, step_id="step-3", phase="finalize")
+    assert after_kill_ref.availability == "not_applicable"
+    assert after_kill_ref.unavailable_reason == "windows_app_not_launched"

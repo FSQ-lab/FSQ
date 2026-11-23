@@ -125,7 +125,11 @@ class DynamicExecutionService:
             heartbeat = asyncio.create_task(self._heartbeat(run_dir))
             recorder = EvidenceRecorder(run_id=metadata.run_id, output_dir=run_dir, secret_values=secret_values)
             context = lifecycle.context(run_dir, metadata)
-            outcome = await self._agent.run_in_context(safe_task, context, request.event_sink, evidence_sink=recorder, cancellation_check=check_cancellation)
+            defer_completion = bool(getattr(self._agent, "_supports_deferred_completion_event", False) and callable(getattr(self._agent, "emit_deferred_run_completed", None)))
+            run_kwargs: dict[str, object] = {"evidence_sink": recorder, "cancellation_check": check_cancellation}
+            if defer_completion:
+                run_kwargs["_defer_completion_event"] = True
+            outcome = await self._agent.run_in_context(safe_task, context, request.event_sink, **run_kwargs)
             _validate_outcome_identity(outcome, safe_task)
             check_cancellation()
             in_memory_bundle = recorder.build_bundle()
@@ -162,6 +166,14 @@ class DynamicExecutionService:
                 secret_values=secret_values,
                 duration_ms=int((time.perf_counter() - started) * 1000),
             )
+            if defer_completion:
+                await self._agent.emit_deferred_run_completed(
+                    run_id=metadata.run_id,
+                    task_id=outcome.task.id,
+                    status=frozen.outcome,
+                    summary=frozen.summary,
+                    verification_status=outcome.verification.status,
+                )
             active_processing = "report"
             processing[active_processing] = {"status": "pending"}
             try:
@@ -243,6 +255,9 @@ class DynamicExecutionService:
                 raise
             raise ToolExecutionError("Run execution failed.", context={"run_id": metadata.run_id, "platform": metadata.platform, "exception_type": type(exc).__name__}) from exc
         finally:
+            discard_completion = getattr(self._agent, "discard_deferred_run_completed", None)
+            if callable(discard_completion):
+                discard_completion(metadata.run_id)
             if heartbeat is not None:
                 heartbeat.cancel()
                 try:

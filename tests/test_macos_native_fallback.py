@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import ctypes
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,18 @@ from fsq_agent.drivers.macos import _appium_connect as appium
 from fsq_agent.drivers.macos import _native_fallback as native
 from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
 from fsq_agent.drivers.macos._native_fallback import _read_ax_identity_and_value
-from fsq_agent.models import MacOSAssertNotVisibleParams, MacOSClickOnParams
+from fsq_agent.models import (
+    ConfigurationError,
+    MacOSAssertNotVisibleParams,
+    MacOSClickOnParams,
+    MacOSDoubleClickOnParams,
+    MacOSDragToParams,
+    MacOSHoverOnParams,
+    MacOSPressKeyParams,
+    MacOSRightClickOnParams,
+    MacOSScrollOnParams,
+    MacOSTypeTextParams,
+)
 
 
 @pytest.mark.parametrize(
@@ -231,13 +243,15 @@ def test_keynote_toolbar_metadata_failure_does_not_hide_canvas(capture, monkeypa
     assert (6, "AXSubrole") in calls
     assert all(name != "AXValue" for _, name, *_ in calls)
     clicks = []
-    session = SimpleNamespace(device=SimpleNamespace(click_at=lambda *args, **kwargs: clicks.append((args, kwargs))))
+    automation = pytest.importorskip("appium_connect_agent.automation")
+    monkeypatch.setattr(automation, "NativeMacOSDesktop", lambda **_: SimpleNamespace(click_at=lambda *args, **kwargs: clicks.append((args, kwargs))), raising=False)
+    session = SimpleNamespace(device=SimpleNamespace(click_at=lambda *a, **kw: pytest.fail("WDA click used")))
     driver = AppiumConnectMacOSDriver(session=session, action_timeout_seconds=1)
     monkeypatch.setattr(driver, "_native_ax_mode", True)
     monkeypatch.setattr(driver, "_active_bundle_id", "example.app")
     monkeypatch.setattr(driver, "_native_ax_candidate_bundles", lambda **_: ("example.app",))
     monkeypatch.setattr(driver, "_observe_native_ax_tree_for_bundle", lambda _: run())
-    monkeypatch.setattr(appium, "_verify_ax_point_hit", lambda handle, x, y: (handle.element, x, y) == (7, 320, 240))
+    monkeypatch.setattr(appium, "_verify_ax_point_hit", lambda handle, x, y, **_: (handle.element, x, y) == (7, 320, 240))
     monkeypatch.setattr(appium, "_frontmost_pid", lambda _, **_kw: 42)
     result = driver.click_on(MacOSClickOnParams(locator=canvas_locator))
     assert result["status"] == "passed", result
@@ -324,3 +338,185 @@ def test_finder_search_menu_with_unknown_geometry_does_not_prove_absence(capture
     run, attributes, _, _ = capture
     attributes.update({(1, "AXChildren"): [4], (4, "AXRole"): "AXMenu", (4, "AXPosition"): -25200})
     assert not run("com.apple.finder").complete_for_requested_scope
+
+
+@pytest.fixture
+def desktop(monkeypatch):
+    automation = pytest.importorskip("appium_connect_agent.automation")
+    calls = []
+    hit_checks = []
+    foreground_checks = []
+    state = SimpleNamespace(pid=42, pre_dispatch_pid=None, post_dispatch_pid=None, hit=True, focus=True)
+    bundle = "com.apple.iWork.Keynote"
+
+    class Desktop:
+        def __init__(self, *, foreground_check):
+            self.foreground_check = foreground_check
+
+        def __getattr__(self, operation):
+            def dispatch(*args, **kwargs):
+                if state.pre_dispatch_pid is not None:
+                    state.pid = state.pre_dispatch_pid
+                if self.foreground_check() is not True:
+                    raise native._NativeForegroundError("target_not_foreground", "Untrusted details", request_state="not_sent")
+                calls.append((operation, args, kwargs))
+                if state.post_dispatch_pid is not None:
+                    state.pid = state.post_dispatch_pid
+                if self.foreground_check() is not True:
+                    raise native._NativeForegroundError("target_not_foreground", "Untrusted details", request_state="response_unknown")
+
+            return dispatch
+
+    def foreground(bundle_id, *, app_path, **kwargs):
+        foreground_checks.append((bundle_id, app_path))
+        assert bundle_id == bundle
+        return state.pid
+
+    def hit(handle, x, y, *, pid, **kwargs):
+        hit_checks.append((handle, pid, x, y))
+        return state.hit and (x, y) != (999, 999)
+
+    def focus(pid, **kwargs):
+        return SimpleNamespace(pid=pid, element=1) if state.focus else None
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Logical target input must not use the WDA host")
+
+    monkeypatch.setattr(automation, "NativeMacOSDesktop", Desktop, raising=False)
+    monkeypatch.setattr(appium, "_frontmost_pid", foreground)
+    monkeypatch.setattr(appium, "_verify_ax_point_hit", hit)
+    monkeypatch.setattr(appium, "_focused_ax_handle", focus)
+    monkeypatch.setattr(appium, "_verify_ax_focus", lambda *args, **kwargs: state.focus)
+    driver = AppiumConnectMacOSDriver(bundle_id=bundle, app_path="/Applications/Keynote.app", session=SimpleNamespace(device=object(), observe_tree=unexpected, element=unexpected))
+    driver._wda_host_bundle_id = "com.apple.finder"
+    return driver, calls, hit_checks, foreground_checks, state
+
+
+@pytest.mark.parametrize(
+    ("method", "params", "operation", "args", "options"),
+    [
+        ("click_on", MacOSClickOnParams(point={"x": -5, "y": 7}), "click_at", (-5, 7), {"button": "left", "click_count": 1, "modifier_flags": 0}),
+        ("double_click_on", MacOSDoubleClickOnParams(point={"x": -5, "y": 7}), "click_at", (-5, 7), {"button": "left", "click_count": 2, "modifier_flags": 0}),
+        ("right_click_on", MacOSRightClickOnParams(point={"x": -5, "y": 7}), "click_at", (-5, 7), {"button": "right", "click_count": 1, "modifier_flags": 0}),
+        ("hover_on", MacOSHoverOnParams(point={"x": -5, "y": 7}), "hover_at", (-5, 7), {}),
+        ("scroll_on", MacOSScrollOnParams(point={"x": 5, "y": 7}, delta_x=8, delta_y=-120, modifiers=["SHIFT"]), "scroll_at", (5, 7, 8, -120), {"unit": "pixel", "modifier_flags": 2}),
+        ("drag_to", MacOSDragToParams(source={"point": {"x": 5, "y": 7}}, destination={"point": {"x": 8, "y": 9}}, duration_ms=100), "drag_between", (5, 7, 8, 9), {"duration_ms": 100}),
+        ("drag_to", MacOSDragToParams(source={"point": {"x": 5, "y": 7}}, destination={"point": {"x": 8, "y": 9}}, duration_ms=10), "drag_between", (5, 7, 8, 9), {"duration_ms": 50}),
+        ("drag_to", MacOSDragToParams(source={"point": {"x": 5, "y": 7}}, destination={"point": {"x": 8, "y": 9}}, duration_ms=6000), "drag_between", (5, 7, 8, 9), {"duration_ms": 5000}),
+    ],
+)
+def test_native_pointer_actions_guarded_and_dispatch_only(desktop, method, params, operation, args, options):
+    driver, calls, hit_checks, foreground_checks, _ = desktop
+    result = getattr(driver, method)(params)
+    assert result["status"] == "passed", result
+    assert result["output"]["effect_verified"] is False
+    assert len(calls) == 1
+    name, actual_args, kwargs = calls[0]
+    assert (name, actual_args) == (operation, args)
+    assert kwargs.pop("control").timeout_seconds > 0
+    assert kwargs == options
+    expected_hits = {(42, *args[:2])}
+    if operation == "drag_between":
+        expected_hits.add((42, *args[2:]))
+    assert {(pid, x, y) for _, pid, x, y in hit_checks} == expected_hits
+    assert len(foreground_checks) >= 3
+    assert {str(path) for _, path in foreground_checks} == {"/Applications/Keynote.app"}
+
+
+@pytest.mark.parametrize(("key", "modifiers"), [("CapsLock", []), ("Insert", []), ("/", []), ("s", ["FUNCTION"])])
+def test_native_unsupported_key_or_modifier_is_not_a_locator_error(monkeypatch, desktop, key, modifiers):
+    automation = pytest.importorskip("appium_connect_agent.automation")
+
+    class InvalidKeyDesktop:
+        def __init__(self, *, foreground_check):
+            assert foreground_check() is True
+
+        def send_keys(self, keys, *, control):
+            raise automation.InvalidRequestError("invalid_argument", "0" * 32, "not_sent")
+
+    monkeypatch.setattr(automation, "NativeMacOSDesktop", InvalidKeyDesktop)
+    driver, _, _, _, _ = desktop
+    with pytest.raises(ConfigurationError, match="key or modifier"):
+        driver.press_key(MacOSPressKeyParams(key=key, modifiers=modifiers))
+
+
+def test_native_foreign_drag_destination_rejects_entire_gesture(desktop):
+    driver, calls, _, _, _ = desktop
+    result = driver.drag_to(MacOSDragToParams(source={"point": {"x": 5, "y": 7}}, destination={"point": {"x": 999, "y": 999}}))
+    assert result["status"] == "failed"
+    assert not calls
+
+
+@pytest.mark.parametrize(("switch", "request_state"), [("pre_dispatch_pid", "not_sent"), ("post_dispatch_pid", "response_unknown")])
+def test_native_sdk_pid_guard_preserves_delivery_and_recovery_guidance(desktop, switch, request_state):
+    driver, calls, _, _, state = desktop
+    setattr(state, switch, 43)
+    result = driver.press_key(MacOSPressKeyParams(key="s", modifiers=["COMMAND"]))
+    assert result["status"] == "failed"
+    assert result["metadata"]["request_state"] == request_state
+    assert "Untrusted details" not in result["error_message"]
+    assert driver._active_bundle_id in result["error_message"]
+    assert "new_session=false" in result["error_message"]
+    assert len(calls) == int(request_state == "response_unknown")
+
+
+@pytest.mark.parametrize(("point", "clear", "expected"), [(None, False, ["type_text"]), ({"x": 5, "y": 7}, False, ["click_at", "type_text"]), ({"x": 5, "y": 7}, True, [])])
+def test_native_untargeted_text_preserves_current_editing_focus(desktop, point, clear, expected):
+    driver, calls, _, _, _ = desktop
+    text = "A\r\n文😀"
+    result = driver.type_text(MacOSTypeTextParams(text=text, point=point, clear=clear))
+    assert result["status"] == ("passed" if expected else "failed")
+    assert [operation for operation, _, _ in calls] == expected
+    if expected:
+        assert calls[-1][1] == (text,)
+        assert result["output"]["effect_verified"] is False
+    assert text not in str(result)
+
+
+def test_native_text_rejects_unattributed_focus(desktop):
+    driver, calls, _, _, state = desktop
+    state.focus = False
+    result = driver.type_text(MacOSTypeTextParams(text="private"))
+    assert result["status"] == "failed"
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    ("semantic_ref", "hit_pid", "parent_pid", "expected"),
+    [(11, 42, 42, True), (12, 42, 42, False), (11, 99, 42, False), (11, 42, 99, False), (None, 42, 42, True), (None, 99, 42, False)],
+)
+def test_live_system_hit_requires_target_pid_and_semantic_identity(monkeypatch, semantic_ref, hit_pid, parent_pid, expected):
+    def set_hit(system, x, y, out):
+        assert (system, x, y) == (1, -20, 40)
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = 10
+        return 0
+
+    def pid(ref, out):
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_int))[0] = hit_pid if ref == 10 else parent_pid
+        return 0
+
+    ax = SimpleNamespace(
+        system=lambda: 1,
+        timeout=lambda *args: 0,
+        hit=set_hit,
+        pid=pid,
+        attribute=lambda ref, name: (0, 11) if (ref, name) == (10, "AXParent") else (-25205, None),
+        equal=lambda a, b: a == b,
+        release=lambda _: None,
+    )
+    monkeypatch.setattr(native, "_macos_ax_process_trusted", lambda: True)
+    monkeypatch.setattr(native, "_AX", lambda: ax)
+    handle = SimpleNamespace(pid=42, element=semantic_ref, backend=ax) if semantic_ref is not None else None
+    assert native._verify_ax_point_hit(handle, -20, 40, pid=42, deadline=native.time.monotonic() + 1, cancellation=None) is expected
+
+
+def test_native_semantic_miss_never_uses_supplied_point(desktop, monkeypatch):
+    driver, calls, hit_checks, _, _ = desktop
+    observation = SimpleNamespace(roots=(SimpleNamespace(children=()),), complete_for_requested_scope=True)
+    monkeypatch.setattr(driver, "_observe_native_ax_tree_for_bundle", lambda bundle: observation)
+    monkeypatch.setattr(driver, "_match_native_ax_nodes_in_observation", lambda obs, locator: ([], False, None))
+    result = driver.click_on(MacOSClickOnParams(target="Missing", point={"x": 5, "y": 7}))
+    assert result["failure_category"] == "target_resolution_error"
+    assert result["metadata"]["resolution_reason"] == "not_found"
+    assert not calls
+    assert not hit_checks

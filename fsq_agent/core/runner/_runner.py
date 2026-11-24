@@ -33,6 +33,7 @@ from fsq_agent.models import (
     RunnerStepResult,
     StepPhase,
     StepPhaseReport,
+    ToolExecutionError,
 )
 
 
@@ -240,7 +241,9 @@ class StepRunner:
         except BaseException as exc:
             diagnostics = getattr(exc, "fsq_capture_diagnostics", None)
             if isinstance(diagnostics, dict):
-                metadata["capture_diagnostics"] = {key: value for key, value in diagnostics.items() if key in {"backend_code", "request_state", "session_state", "stage"}}
+                metadata["capture_diagnostics"] = {
+                    key: self._safe_text(value) for key, value in diagnostics.items() if key in {"backend_code", "request_state", "session_state", "reason", "stage"} and isinstance(value, str)
+                }
             provenance = getattr(exc, "fsq_provider_provenance", None)
             if (
                 isinstance(provenance, dict)
@@ -655,6 +658,16 @@ class StepRunner:
                 if self._is_cancelled(exc, step, phase) or self._classify(exc, phase, step) == "cancelled":
                     raise
                 message = self._safe_text(_safe_exception_message(exc))
+                diagnostics = getattr(exc, "fsq_capture_diagnostics", None)
+                if diagnostics is None and isinstance(exc, ToolExecutionError):
+                    diagnostics = exc.context.get("capture_diagnostics")
+                capture_metadata = {}
+                if isinstance(diagnostics, dict):
+                    safe_diagnostics = {
+                        key: self._safe_text(value) for key, value in diagnostics.items() if key in {"backend_code", "request_state", "session_state", "reason", "stage"} and isinstance(value, str)
+                    }
+                    if safe_diagnostics:
+                        capture_metadata["capture_diagnostics"] = safe_diagnostics
                 ref = EvidenceArtifactRef(
                     artifact_id=f"{kind}-{step.step_id}-{phase}-{uuid.uuid4().hex[:12]}",
                     kind=kind,
@@ -663,6 +676,7 @@ class StepRunner:
                     phase=phase,
                     availability="failed",
                     unavailable_reason=message,
+                    metadata=capture_metadata,
                 )
             ref.metadata.update({"capture_reason": reason, "capture_duration_ms": self._duration_ms(started), "timing_measured": True, "requested_kind": kind})
             if ref.availability not in {"available", "not_applicable"}:

@@ -80,11 +80,11 @@ def test_default_distribution_contract() -> None:
     metadata = project["project"]
 
     assert metadata["name"] == "fsq-agent"
-    assert metadata["version"] == "0.3.9"
+    assert metadata["version"] == "0.4.0"
     version = Version(metadata["version"])
     assert version.local is None
     dependencies = metadata["dependencies"]
-    assert "appium-connect-agent==0.1.4" in dependencies
+    assert "appium-connect-agent==0.1.5" in dependencies
     for name in ("appium-connect-agent", "playwright", "pywinauto", "pillow"):
         assert any(dependency.startswith(f"{name}==") for dependency in dependencies)
     for retired in ("uiautomator2", "Appium-Python-Client", "selenium"):

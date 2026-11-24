@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
  
 [project]
 name = "fsq-agent"
-version = "0.3.9"
+version = "0.4.0"
 description = "Goal-driven FSQ automated testing agent with a local agent engine, OpenAI-compatible model access, harness actions, local utilities, observation, and reporting."
 readme = "README.md"
 license = "MIT"
@@ -36,7 +36,7 @@ dependencies = [
     "ruamel.yaml==0.18.16",
     "jinja2==3.1.6",
     "lxml==6.1.0",
-    "appium-connect-agent==0.1.4",
+    "appium-connect-agent==0.1.5",
     "playwright==1.60.0",
     "pywinauto==0.6.9",
     "pillow==13.0.0",

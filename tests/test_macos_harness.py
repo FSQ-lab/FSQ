@@ -20,7 +20,8 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
-from fsq_agent.core import ArtifactStore, HarnessInterface
+from fsq_agent._capability_bootstrap import build_capability_registry
+from fsq_agent.core import ArtifactStore, HarnessInterface, StepRunner
 from fsq_agent.core.harness._ai_assertion_tool import AIAssertionBackendToolMixin
 from fsq_agent.core.harness._appium_connect_macos_driver import AppiumConnectMacOSDriver
 from fsq_agent.core.harness._driver_tools import _macos_driver_tool
@@ -56,6 +57,7 @@ from fsq_agent.models import (
     MacOSTakeScreenshotParams,
     MacOSTypeTextParams,
     MacOSUiSnapshotParams,
+    ToolExecutionError,
     VisualImageBounds,
 )
 
@@ -335,6 +337,46 @@ def test_macos_harness_reports_unlaunched_session_without_implicit_creation(monk
     assert result.failure_category == "configuration_error"
     assert result.error_message == "Appium Mac2 session is not available. Call launchApp before macOS Appium actions."
     assert called is False
+
+
+@pytest.mark.parametrize("metadata", [{"session_state": "uncertain"}, {"reason": "cleanup_pending"}])
+def test_macos_runner_explicit_close_does_not_capture_an_unusable_session(tmp_path, metadata) -> None:
+    class UnusableSession(FakeMacOSDriver):
+        def context(self) -> dict[str, object]:
+            return {"metadata": metadata}
+
+        def screenshot(self, params=None) -> bytes:
+            pytest.fail("Closing an unusable session must not attempt a screenshot")
+
+    driver = UnusableSession()
+    runner = StepRunner(MacOSHarness(driver, ArtifactStore(tmp_path)), capability_registry=build_capability_registry(platform="macos"))
+    result = runner.run_step("run", ExecutableStep(step_id="close", action_name="killApp", kind="teardown", params={"close_session": True}))
+
+    assert result.status == result.action_status == "passed"
+    assert result.phase_reports[0].artifact_refs[0].availability == "not_applicable"
+    assert any(name == "kill_app" for name, _ in driver.calls)
+
+
+def test_macos_runner_keeps_capture_timeout_provenance_separate(tmp_path) -> None:
+    class TimedOutCapture(FakeMacOSDriver):
+        def screenshot(self, params=None) -> bytes:
+            raise ToolExecutionError(
+                "Mac2 screenshot capture failed.",
+                context={"capture_diagnostics": {"backend_code": "operation_timeout", "request_state": "response_unknown", "session_state": "uncertain", "stage": "screenshot", "private": "SECRET"}},
+            )
+
+    runner = StepRunner(MacOSHarness(TimedOutCapture(), ArtifactStore(tmp_path)), capability_registry=build_capability_registry(platform="macos"))
+    result = runner.run_step("run", ExecutableStep(step_id="launch", action_name="launchApp", kind="setup"))
+
+    assert result.action_status == "passed"
+    assert result.failure_category == "artifact_error"
+    assert result.phase_reports[3].artifact_refs[0].metadata["capture_diagnostics"] == {
+        "backend_code": "operation_timeout",
+        "request_state": "response_unknown",
+        "session_state": "uncertain",
+        "stage": "screenshot",
+    }
+    assert "SECRET" not in result.model_dump_json()
 
 
 def test_macos_harness_records_unavailable_artifact_before_launch(tmp_path) -> None:
@@ -2746,6 +2788,27 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
     sessions: list[FakeMacSession] = []
     current_frontmost = {"bundle_id": "com.apple.iWork.Keynote"}
     notes_body_value = {"text": "Initial line"}
+    native_clicks: list[tuple[int, int]] = []
+
+    class NativeDesktop:
+        def __init__(self, *, foreground_check: Any) -> None:
+            self.foreground_check = foreground_check
+
+        def click_at(self, x: int, y: int, **kwargs: Any) -> None:
+            assert self.foreground_check() is True
+            native_clicks.append((x, y))
+            assert self.foreground_check() is True
+
+        def send_keys(self, keys: list[Any], **kwargs: Any) -> None:
+            assert self.foreground_check() is True
+            assert [keys[0].key, keys[0].modifier_flags, keys[1]] == ["a", 16, "XCUIKeyboardKeyDelete"]
+            notes_body_value["text"] = ""
+            assert self.foreground_check() is True
+
+        def type_text(self, text: str, **kwargs: Any) -> None:
+            assert self.foreground_check() is True
+            notes_body_value["text"] += text
+            assert self.foreground_check() is True
 
     class FakeScope:
         def __enter__(self) -> object:
@@ -2777,21 +2840,7 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
     ) -> FakeMacSession:
         del connection, kwargs
         sess = FakeMacSession({}, session_id=f"mac2:finder-{len(sessions) + 1}")
-        orig_send_keys = sess.device.send_keys
-
-        def tracking_send_keys(keys: list[Any], *, control: Any = None) -> None:
-            orig_send_keys(keys, control=control)
-            normalized_last = sess.device_keys[-1]
-            if normalized_last == [{"key": "a", "modifierFlags": 16}]:
-                return
-            if normalized_last == ["XCUIKeyboardKeyDelete"]:
-                notes_body_value["text"] = ""
-                return
-            typed_chars = "".join(item for item in normalized_last if isinstance(item, str) and len(item) == 1)
-            if typed_chars:
-                notes_body_value["text"] += typed_chars
-
-        sess.device.send_keys = tracking_send_keys  # type: ignore[method-assign]
+        sess.device.send_keys = lambda *args, **kwargs: pytest.fail("Finder-host keyboard input")  # type: ignore[method-assign]
         sessions.append(sess)
         created_calls.append(
             {
@@ -2857,6 +2906,11 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
                 "</XCUIElementTypeApplication>"
             )
         root = _xml_to_tree_node(ElementTree.fromstring(xml))  # noqa: S314 - local fixture XML.
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            node.handle = SimpleNamespace(pid=9001, element=(node.type.value, node.id.value), backend=SimpleNamespace(equal=lambda a, b: a == b))
+            pending.extend(node.children)
         return SimpleNamespace(
             roots=(root,),
             coverage="requested_scope",
@@ -2867,6 +2921,7 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
 
     monkeypatch.setattr("sys.platform", "darwin")
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._macos_ax_process_trusted", lambda: True, raising=False)
+    monkeypatch.setattr("appium_connect_agent.automation.NativeMacOSDesktop", NativeDesktop, raising=False)
     monkeypatch.setattr("appium_connect_agent.runtime.Runtime", FakeRuntime)
     monkeypatch.setattr("appium_connect_agent.automation.create_mac2_session", fake_create_mac2_session)
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._activate_macos_app_native", lambda bid, **_kw: fake_activate_macos_app_native(bid))
@@ -2880,8 +2935,8 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
 
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._frontmost_pid", fake_frontmost_pid)
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._observe_macos_ax_tree", fake_observe_macos_ax_tree)
-    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._verify_ax_point_hit", lambda *_args: True)
-    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._verify_ax_focus", lambda *_args: True)
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._verify_ax_point_hit", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._verify_ax_focus", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("fsq_agent.drivers.macos._appium_connect._detect_frontmost_macos_bundle_id", lambda **_kw: current_frontmost["bundle_id"])
 
     driver = AppiumConnectMacOSDriver(bundle_id="auto", skip_app_kill=True, native_ax_fallback_bundles=("com.apple.iWork.Keynote", "com.apple.Notes"))
@@ -2945,7 +3000,7 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
             assert invalid["failure_category"] == "configuration_error"
         assert not sessions[0].pointer_calls
         with monkeypatch.context() as occluded:
-            occluded.setattr("fsq_agent.drivers.macos._appium_connect._verify_ax_point_hit", lambda *_args: False)
+            occluded.setattr("fsq_agent.drivers.macos._appium_connect._verify_ax_point_hit", lambda *_args, **_kwargs: False)
             blocked = driver.click_on(MacOSClickOnParams(locator=MacOSLocator(accessibilityId="note_editor")))
             assert blocked["status"] == "failed"
             assert not sessions[0].pointer_calls
@@ -2963,7 +3018,9 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
         )
         assert typed["status"] == "passed", typed
         assert notes_body_value["text"] == "Updated via Native AX"
-        assert sessions[0].pointer_calls[0] == ("click_at", {"x": 350, "y": 270, "button": "left", "double": False, "modifiers": None})
+        assert typed["output"]["effect_verified"] is True
+        assert native_clicks == [(350, 270)]
+        assert sessions[0].pointer_calls == []
 
         # A foreign helper must not receive semantic actions from the logical app session.
         current_frontmost["bundle_id"] = "com.apple.quicklook.QuickLookUIService"
@@ -2981,7 +3038,8 @@ def test_macos_finder_anchored_native_ax_lifecycle_cross_app_actions_and_kill_is
         )
         assert dialog_click["status"] == "passed", dialog_click
         assert observed_bundles[-1] == "com.apple.Notes"
-        assert sessions[0].pointer_calls[-1] == ("click_at", {"x": 720, "y": 464, "button": "left", "double": False, "modifiers": None})
+        assert native_clicks[-1] == (720, 464)
+        assert sessions[0].pointer_calls == []
 
         # 7. kill_app(close_session=False) terminates the logical Notes app, never com.apple.finder!
         killed = driver.kill_app(MacOSKillAppParams(close_session=False))

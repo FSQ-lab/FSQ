@@ -10,7 +10,7 @@ import pytest
 
 from fsq_agent.drivers.macos import _appium_connect as appium
 from fsq_agent.drivers.macos import _native_fallback as native
-from fsq_agent.models import ConfigurationError, MacOSClickOnParams, MacOSLaunchAppParams, MacOSPressKeyParams, MacOSUiSnapshotParams
+from fsq_agent.models import ConfigurationError, MacOSClickOnParams, MacOSKillAppParams, MacOSLaunchAppParams, MacOSPressKeyParams, MacOSUiSnapshotParams
 
 FINDER = "com.apple.finder"
 PAGES = "com.apple.iWork.Pages"
@@ -99,7 +99,8 @@ class _FinderAX:
 
 @pytest.fixture
 def finder(monkeypatch):
-    pytest.importorskip("appium_connect_agent.automation")
+    automation = pytest.importorskip("appium_connect_agent.automation")
+    monkeypatch.setattr(automation, "NativeMacOSDesktop", lambda **kwargs: pytest.fail("Direct Finder input must not use the native desktop"), raising=False)
     events = []
     ax = _FinderAX(events)
     state = SimpleNamespace(role="XCUIElementTypeMenuItem", width=1533, enabled=True, delivery_error=None)
@@ -342,7 +343,7 @@ def test_pages_bundle_bound_session_checks_running_installation_before_replaceme
 
 
 @pytest.mark.parametrize("skip_app_kill, arguments", [(False, None), (True, ["--fixture"])])
-def test_pages_direct_path_honors_skip_app_kill_and_arguments(pages, skip_app_kill, arguments):
+def test_pages_direct_path_honors_skip_app_kill_and_arguments(pages, monkeypatch, skip_app_kill, arguments):
     make_app, _, _, events = pages
     installation = make_app("direct")
     driver = appium.AppiumConnectMacOSDriver(skip_app_kill=skip_app_kill)
@@ -351,6 +352,15 @@ def test_pages_direct_path_honors_skip_app_kill_and_arguments(pages, skip_app_ki
         assert result["status"] == "passed", result
         assert events[1] == ("create", None, installation, arguments, skip_app_kill)
         assert not driver._native_ax_mode
+        driver._session.observe_tree = lambda **kwargs: pytest.fail("Context must not request a WDA tree")
+        automation = pytest.importorskip("appium_connect_agent.automation")
+        # The public SDK viewport query is metadata-only and does not trigger a session operation.
+        monkeypatch.setattr(automation, "macos_main_display_bounds", lambda **kwargs: automation.Bounds(0, 0, 1512, 982), raising=False)
+        assert driver.context()["screen_size"] == (1512, 982)
+        monkeypatch.delattr(automation, "macos_main_display_bounds")
+        assert driver.context()["screen_size"] is None
+        driver._session.device.take_screenshot = lambda **kwargs: b"test PNG"
+        assert driver.screenshot() == b"test PNG"
     finally:
         driver.close()
 
@@ -469,3 +479,78 @@ def test_native_pages_activation_distinguishes_permission_dialog_without_input(m
         native._activate_macos_app_native(PAGES, timeout_seconds=2, cancellation=None)
     assert outcome.value.code == "permission_modal"
     assert commands == [["/usr/bin/open", "-b", PAGES]]
+
+
+@pytest.mark.parametrize("has_session", [False, True])
+def test_explicit_close_settles_pending_owned_resources_on_owner_worker(pages, has_session):
+    from threading import get_ident
+
+    make_app, _, sessions, events = pages
+    driver = appium.AppiumConnectMacOSDriver()
+    installation = make_app("dispose")
+    try:
+        assert driver.launch_app(MacOSLaunchAppParams(app_path=str(installation)))["status"] == "passed"
+        owner = driver._run_sync(get_ident)
+        session = sessions[0]
+        state = SimpleNamespace(value="uncertain")
+        session.session_info = lambda: SimpleNamespace(state=state.value, id="safe-session")
+        session.ensure_alive = lambda **kwargs: pytest.fail("Explicit close must not probe liveness")
+        session.quit = lambda **kwargs: pytest.fail("Uncertain owned session must be disposed")
+
+        def dispose(**kwargs):
+            events.append(("dispose", get_ident()))
+            state.value = "disposed"
+
+        session.dispose = dispose
+        driver._cleanup_pending = True
+        if not has_session:
+            driver._session = None
+        metadata = driver.context()["metadata"]
+        assert metadata["reason"] == "cleanup_pending"
+        assert metadata.get("session_state") == ("uncertain" if has_session else None)
+        assert driver.kill_app(MacOSKillAppParams(close_session=True))["status"] == "passed"
+        assert [event for event in events if isinstance(event, tuple) and event[0] == "dispose"] == ([("dispose", owner)] if has_session else [])
+        assert events[-1] == "stop"
+        assert driver.context()["session_id"] is None
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("window_fallback", [False, True])
+def test_explicit_snapshot_retains_actual_sdk_timeout(pages, window_fallback):
+    _, _, sessions, _ = pages
+    driver = appium.AppiumConnectMacOSDriver(bundle_id=FINDER)
+    try:
+        assert driver.launch_app(MacOSLaunchAppParams())["status"] == "passed"
+        session = sessions[0]
+        state = SimpleNamespace(value="active")
+        session.session_info = lambda: SimpleNamespace(state=state.value, id="fixed")
+        session.element = lambda *args: object()
+
+        def observe(*, parent=None, **kwargs):
+            error = RuntimeError("private SDK details")
+            if parent is None and window_fallback:
+                error.code = "observation_too_large"
+            else:
+                error.code = "operation_timeout"
+                error.request_state = "response_unknown"
+                state.value = "uncertain"
+            raise error
+
+        def dispose(**kwargs):
+            state.value = "disposed"
+
+        session.observe_tree = observe
+        session.dispose = dispose
+        result = driver.ui_snapshot(MacOSUiSnapshotParams())
+        assert result["failure_category"] == "observation_error"
+        assert result["metadata"] == {
+            "backend_code": "operation_timeout",
+            "request_state": "response_unknown",
+            "session_state": "uncertain",
+            "stage": "ui_snapshot_window" if window_fallback else "ui_snapshot",
+        }
+        assert driver._uncertain_from_timeout
+        assert "private SDK details" not in str(result)
+    finally:
+        driver.close()

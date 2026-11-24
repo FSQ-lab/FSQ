@@ -970,6 +970,30 @@ def test_pywinauto_driver_main_window_immediate_failure_includes_resolution_cont
     assert isinstance(error.value.__cause__, LookupError)
 
 
+def test_pywinauto_driver_main_window_failure_preserves_lookup_error_when_findwindows_unavailable(monkeypatch) -> None:
+    from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
+    from fsq_agent.models import ConfigurationError
+
+    class FailingApp:
+        def connect(self, **kwargs: object) -> object:
+            raise LookupError("window not found")
+
+    def _missing_pywinauto(**kwargs: object) -> list[object]:
+        raise ConfigurationError("pywinauto is required for PywinautoWindowsDriver.")
+
+    driver = PywinautoWindowsDriver(window_title_re=".*Edge Beta")
+    monkeypatch.setattr(driver, "_application_cls", lambda: lambda backend: FailingApp())
+    monkeypatch.setattr(driver, "_list_top_windows", _missing_pywinauto)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Failed to resolve Windows main window.*title_re='\.\*Edge Beta'.*wait_for='exists visible'",
+    ) as error:
+        driver._resolve_main_window()  # type: ignore[attr-defined]
+
+    assert isinstance(error.value.__cause__, LookupError)
+
+
 def test_pywinauto_driver_issue_27_never_attaches_to_or_kills_edge_stable_without_title_re(monkeypatch) -> None:
     from fsq_agent.core.harness._pywinauto_driver import PywinautoWindowsDriver
 

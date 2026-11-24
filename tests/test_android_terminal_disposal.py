@@ -283,7 +283,7 @@ def _assert_account_lock(environment: _IsolatedManagedDriver, *, held: bool) -> 
 
 def _create_unknown(environment: _IsolatedManagedDriver) -> _ObservedOwner:
     with pytest.raises(aca_automation.ResourceStateError) as failed:
-        environment.driver.context()
+        environment.driver.ui_snapshot({})
     assert failed.value.code == "session_create_unknown"
     owner = _observe_owner(environment)
     assert failed.value.session is owner.session

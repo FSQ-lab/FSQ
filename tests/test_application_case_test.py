@@ -553,7 +553,7 @@ def test_web_strict_distinguishes_provider_readiness_and_frame_authorization(tmp
 
     browser = tmp_path / "Google Chrome" / "chrome.exe"
     browser.parent.mkdir()
-    browser.touch()
+    browser.touch(mode=0o700)
     source = tmp_path / "visual.fsq.yaml"
     source.write_text(
         "schemaVersion: fsq.ai-test/v1\nname: Visual\nplatform: web\n---\n- assertWithAI:\n    assertion: The page chart is visible\n    surface: custom_canvas\n    full_screen_reason: The chart spans the page\n"

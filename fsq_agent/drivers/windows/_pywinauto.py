@@ -5,6 +5,7 @@ import json
 import ntpath
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -303,10 +304,13 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             connected = application_cls(backend=self.backend_kind).connect(title_re=self.window_title_re)
             window = connected.window(**window_kwargs)
             window.wait(wait_for, timeout=timeout)
-        except Exception:
-            if self.backend_kind != "uia":
+        except Exception as primary_error:
+            if self.backend_kind != "uia" or sys.platform != "win32":
                 raise
-            iconic_candidates = [getattr(elem, "handle", None) for elem in self._list_top_windows(title_re=self.window_title_re, control_type="Window", visible_only=False)]
+            try:
+                iconic_candidates = [getattr(elem, "handle", None) for elem in self._list_top_windows(title_re=self.window_title_re, control_type="Window", visible_only=False)]
+            except ConfigurationError:
+                raise primary_error from None
             for hwnd in iconic_candidates:
                 if isinstance(hwnd, int) and self._is_win32_window(hwnd) and self._is_window_iconic(hwnd) and self._is_win32_window_visible(hwnd):
                     resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for, timeout=timeout)

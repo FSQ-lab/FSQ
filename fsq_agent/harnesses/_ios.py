@@ -195,10 +195,11 @@ class IOSHarness:
         invocation = context.metadata.get("capture_invocation", {})
         capability = self._capability_for(invocation.get("action_name", ""))
         if kind == "screenshot" and capability is not None and capability.name == "assert_with_ai":
-            return self._visual.capture_assertion(context, invocation, step_id, phase)
+            inactive_reason = "ios_session_not_started" if self._session_not_started(context) else None
+            return self._visual.capture_assertion(context, invocation, step_id, phase, inactive_reason=inactive_reason)
         if self.artifact_store is None:
             raise RuntimeError("Artifact capture requires an ArtifactStore.")
-        if kind in {"screenshot", "ui_snapshot"} and self._session_not_started():
+        if kind in {"screenshot", "ui_snapshot"} and self._session_not_started(context):
             return self._to_harness_artifact_ref(
                 self.artifact_store.write_json(
                     kind="json",
@@ -235,12 +236,18 @@ class IOSHarness:
             )
         raise RuntimeError(f"Unsupported iOS artifact kind: {kind}")
 
-    def _session_not_started(self) -> bool:
+    def _session_not_started(self, context: HarnessContext) -> bool:
+        if context.metadata.get("session_started") is False or getattr(self.driver, "_closed", False) is True:
+            return True
         try:
-            context = self.driver.context()
+            driver_context = self.driver.context()
         except Exception:  # noqa: BLE001
+            driver_context = {}
+        if "session_id" in driver_context:
+            return self._optional_str(driver_context.get("session_id")) is None
+        if context.session_id:
             return False
-        return self._optional_str(context.get("session_id")) is None
+        return getattr(self.driver, "_session", "unknown") is None
 
     def _to_harness_artifact_ref(self, ref: object) -> HarnessArtifactRef:
         if isinstance(ref, HarnessArtifactRef):

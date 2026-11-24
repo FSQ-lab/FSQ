@@ -63,6 +63,9 @@ class MacOSHarness:
         self.artifact_store = artifact_store
         self.ai_assertion_evaluator = ai_assertion_evaluator
         self.visual_ai_eligible = visual_ai_eligible
+        configure_redaction = getattr(self.driver, "configure_snapshot_redaction", None)
+        if runtime_secret_settings is not None and callable(configure_redaction):
+            configure_redaction(tuple(runtime_secret_settings.private_values().values()))
         self._visual = _ScopedVisualTools("macos", driver, artifact_store, ai_assertion_evaluator, visual_assertion_policy_resolver, visual_assertion_budget, visual_assertion_provider_available)
         self._owned_resources = OwnedResources(driver, ai_assertion_evaluator)
         self.common_tools = CommonPlatformTools(
@@ -183,7 +186,8 @@ class MacOSHarness:
         invocation = context.metadata.get("capture_invocation", {})
         capability = self._capability_for(invocation.get("action_name", "")) if isinstance(invocation, dict) else None
         if kind == "screenshot" and capability is not None and capability.name == "assert_with_ai":
-            return self._visual.capture_assertion(context, invocation, step_id, phase)
+            inactive_reason = "macos_session_not_started" if self._session_not_started() else None
+            return self._visual.capture_assertion(context, invocation, step_id, phase, inactive_reason=inactive_reason)
         params = invocation.get("params") if isinstance(invocation, dict) else None
         if (
             kind == "screenshot"

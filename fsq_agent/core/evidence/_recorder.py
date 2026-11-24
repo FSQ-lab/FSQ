@@ -4,12 +4,12 @@
 import hashlib
 import json
 import os
-import re
 import tempfile
 import threading
 import uuid
 from pathlib import Path
 
+from fsq_agent.core.runtime_secrets import RuntimeSecretStore
 from fsq_agent.models import EvidenceArtifactRef, EvidenceBundle, EvidenceJournalRecord, ExecutableStep, RunnerEvent, RunnerStepResult, SourceRef, StepPhaseReport
 
 
@@ -121,7 +121,7 @@ class EvidenceRecorder:
         self._sequence = record.sequence
 
     def _sanitize(self, value):
-        return _credential_safe(value, self._secret_values)
+        return RuntimeSecretStore.redact_structure(value, self._secret_values)
 
     def _validate_incremental_event(self, event: RunnerEvent) -> EvidenceArtifactRef | None:
         artifact_ref: EvidenceArtifactRef | None = None
@@ -493,14 +493,18 @@ def _bundle(bundle_id, run_id, events, steps, planned, sequence, metadata, *, in
         for phase in step.phase_reports:
             for ref in phase.artifact_refs:
                 _put_artifact(artifact_map, ref)
-    partial = any(step.status in {"incomplete", "pending", "running"} or step.evidence_errors for step in results)
+    partial = any((step.status == "incomplete" and step.metadata.get("recovered_incomplete")) or step.status in {"pending", "running"} or step.evidence_errors for step in results)
     partial = partial or any(ref.availability not in {"available", "not_applicable"} for ref in artifact_map.values())
     for result in results:
         if result.step_execution_id is None and result.status in {"skipped", "incomplete"}:
             continue
         policy = result.metadata.get("evidence_policy") or {}
+        entered_invoke = any(item.phase in {"invoke", "settle", "finalize"} for item in result.phase_reports)
+        prepare_aborted = any(item.phase == "prepare" and item.status != "passed" for item in result.phase_reports) and not entered_invoke
         for phase, requested in (("prepare", policy.get("capture_before")), ("finalize", policy.get("capture_after"))):
             if not requested:
+                continue
+            if phase == "finalize" and prepare_aborted:
                 continue
             captures = [ref for item in result.phase_reports if item.phase == phase for ref in item.artifact_refs]
             for kind in policy.get("artifact_kinds", []):
@@ -526,29 +530,6 @@ def _bundle(bundle_id, run_id, events, steps, planned, sequence, metadata, *, in
 
 def _with_snapshot(bundle, files, checkpoint, journal):
     return bundle.model_copy(update={"metadata": {**bundle.metadata, "recovery_snapshot": {"checkpoint_sequence": checkpoint, "journal_sequence": journal, "files": files}}})
-
-
-def _sanitize_urls(text: str) -> str:
-    """Persist safe URL copies; callers retain the original invocation values in memory."""
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-    sensitive = re.compile(r"^(?:token|access_token|refresh_token|id_token|password|passwd|api[_-]?key|client[_-]?secret|secret|signature|sig|authorization|cookie)$", re.I)
-
-    def replace(match):
-        original = match.group(0)
-        try:
-            parsed = urlsplit(original)
-            query = parse_qsl(parsed.query, keep_blank_values=True)
-            changed = "@" in parsed.netloc or any(sensitive.fullmatch(key) for key, _ in query)
-            if not changed:
-                return original
-            host = parsed.netloc.rsplit("@", 1)[-1]
-            safe_query = urlencode([(key, "[REDACTED]" if sensitive.fullmatch(key) else value) for key, value in query])
-            return urlunsplit((parsed.scheme, host, parsed.path, safe_query, parsed.fragment))
-        except ValueError:
-            return "[REDACTED_URL]"
-
-    return re.sub(r"https?://[^\s<>\"']+", replace, text, flags=re.I)
 
 
 def _put_artifact(artifacts, ref):
@@ -672,55 +653,3 @@ def _legacy_dynamic(payload: dict) -> EvidenceBundle:
         metadata={"legacy_artifacts": payload.get("artifacts", []), "legacy_coverage_unknown": "completeness" not in payload},
         warnings=["Historical dynamic manifest has incomplete capability evidence."],
     )
-
-
-def _credential_safe(value, secrets=(), depth=0):
-    import json
-    from urllib.parse import unquote
-
-    if depth > 20:
-        return "[REDACTED: nesting limit]"
-    keys = {
-        "password",
-        "passwd",
-        "pwd",
-        "api_key",
-        "apikey",
-        "token",
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "client_secret",
-        "secret",
-        "authorization",
-        "proxy_authorization",
-        "cookie",
-        "set_cookie",
-        "private_values",
-        "credentials",
-    }
-    if isinstance(value, dict):
-        return {
-            key: "***" if re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", unquote(str(key)).strip()).lower().replace("-", "_") in keys else _credential_safe(item, secrets, depth + 1)
-            for key, item in value.items()
-        }
-    if isinstance(value, (tuple, list)):
-        return [_credential_safe(item, secrets, depth + 1) for item in value]
-    if not isinstance(value, str):
-        return value
-    for secret in sorted((item for item in secrets if item), key=len, reverse=True):
-        value = value.replace(secret, "***")
-    stripped = value.strip()
-    if stripped.startswith(("{", "[", '"')):
-        try:
-            decoded = json.loads(value)
-        except ValueError:
-            decoded = None
-        if isinstance(decoded, (dict, list, str)) and decoded != value:
-            safe = _credential_safe(decoded, secrets, depth + 1)
-            if safe != decoded:
-                return json.dumps(safe, ensure_ascii=False)
-    value = re.sub(r"(?im)((?:proxy[-_]authorization|authorization|set[-_]cookie|cookie)\s*[:=]\s*)[^\r\n]+", r"\1***", value)
-    value = re.sub(r"(?i)\b(?:Bearer|Basic)\s+[^\s,;\r\n]+", "Bearer ***", value)
-    value = re.sub(r"(?i)(\b(?:password|passwd|pwd|api[_-]?key|client[_-]?secret|secret|(?:access[_-]?|refresh[_-]?|id[_-]?)?token)\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", r"\1***", value)
-    return _sanitize_urls(value)

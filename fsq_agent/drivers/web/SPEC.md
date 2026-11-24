@@ -16,6 +16,10 @@ Instances satisfy `WebDriverInterface`; the concrete backend class is private ou
 
 `close()` is the runtime-owner disposal operation. In launch mode it releases the owned browser/Playwright session; in attach mode it closes the FSQ-owned page and disconnects Playwright without closing the borrowed browser context, unrelated pages, or operator-owned browser process. It shuts down the owned executor, is safe to repeat after successful disposal, and does not initialize an unopened browser. This is not the recordable `close_browser` capability and produces no Case command or evidence of an authored action.
 
+`inspect_with_ai` (`inspectWithAI`) is a read-only observation capability reusing `visual_assertion_policy_resolver(context, capture_sequence)` and `AndroidVisualAssertionPolicy`. `mode="extract"` validates single-frame PNG and `AssertionBudget`, writes the authorized page PNG once to `ArtifactStore`, and returns the extracted summary without UI actions; `mode="locate"` fails closed with `pointer_mapping_unavailable` without guessed CSS/viewport coordinate mapping.
+
+`assert_with_ai` (`assertWithAI`) evaluates scoped `image_rect` or reasoned full-page visual assertions under the unified tri-state (`passed | failed | inconclusive`) contract, reusing the single privacy-approved prepare screenshot artifact when supplied by `WebHarness` (capturing once only on standalone invocation) and returning `inconclusive` (`provider_unavailable` / `privacy_blocked` / `capture_failed`) when offline or unauthorized.
+
 ## Internal Structure
 
 - `_playwright.py`: Private Playwright lifecycle, semantic locator compilation, action execution, default ARIA snapshot normalization, text fallback, and safe failure normalization.

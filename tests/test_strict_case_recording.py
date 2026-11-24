@@ -346,7 +346,15 @@ def test_record_dynamic_run_does_not_infer_replay_from_fsq_action_name(tmp_path:
     assert recording.skipped_tool_calls == ({"tool_name": "tap_on", "reason": "platform tool did not include fsq_command replay metadata"},)
 
 
-def test_record_dynamic_run_skips_observation_capabilities(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("platform", "action", "action_alias", "params", "observation", "observation_alias", "observation_params"),
+    [
+        ("android", "tap_on", "tapOn", {"target": "Login"}, "ui_snapshot", "uiTree", {}),
+        ("web", "start_browser", "startBrowser", {}, "inspect_with_ai", "inspectWithAI", {"prompt": "Read chart"}),
+        ("windows", "launch_app", "launchApp", {}, "inspect_with_ai", "inspectWithAI", {"prompt": "Read chart"}),
+    ],
+)
+def test_record_dynamic_run_skips_observation_capabilities(tmp_path: Path, platform, action, action_alias, params, observation, observation_alias, observation_params) -> None:
     run_dir = tmp_path / "runs" / "recorded-observation-run"
     run_dir.mkdir(parents=True)
     events_path = run_dir / "events.jsonl"
@@ -362,7 +370,7 @@ def test_record_dynamic_run_skips_observation_capabilities(tmp_path: Path) -> No
     output_settings.runs_dir = tmp_path / "runs"
     android_settings = AndroidHarnessSettings()
     android_settings.app_id = "com.example"
-    settings = Settings(output=output_settings, harness=HarnessSettings(android=android_settings))
+    settings = Settings(output=output_settings, harness=HarnessSettings(platform=platform, android=android_settings))
 
     _write_event(
         events_path,
@@ -371,14 +379,14 @@ def test_record_dynamic_run_skips_observation_capabilities(tmp_path: Path) -> No
             task_id="task-1",
             type="tool_call_started",
             title="Tool call started",
-            tool_name="tap_on",
+            tool_name=action,
             tool_call_id="call-1",
-            tool_arguments={"target": "Login"},
+            tool_arguments=params,
             payload={
                 "tool_origin": "platform",
-                "capability_name": "tap_on",
+                "capability_name": action,
                 "step_kind": "action",
-                "replay": {"kind": "fsq_command", "alias": "tapOn"},
+                "replay": {"kind": "fsq_command", "alias": action_alias},
             },
         ),
     )
@@ -389,13 +397,13 @@ def test_record_dynamic_run_skips_observation_capabilities(tmp_path: Path) -> No
             task_id="task-1",
             type="tool_call_completed",
             title="Tool call completed",
-            tool_name="tap_on",
+            tool_name=action,
             tool_call_id="call-1",
             payload={
                 "tool_origin": "platform",
-                "capability_name": "tap_on",
+                "capability_name": action,
                 "step_kind": "action",
-                "replay": {"kind": "fsq_command", "alias": "tapOn"},
+                "replay": {"kind": "fsq_command", "alias": action_alias},
                 "status": "passed",
             },
         ),
@@ -407,14 +415,14 @@ def test_record_dynamic_run_skips_observation_capabilities(tmp_path: Path) -> No
             task_id="task-1",
             type="tool_call_started",
             title="Tool call started",
-            tool_name="ui_snapshot",
+            tool_name=observation,
             tool_call_id="call-2",
-            tool_arguments={},
+            tool_arguments=observation_params,
             payload={
                 "tool_origin": "platform",
-                "capability_name": "ui_snapshot",
+                "capability_name": observation,
                 "step_kind": "observation",
-                "replay": {"kind": "fsq_command", "alias": "uiTree"},
+                "replay": {"kind": "fsq_command", "alias": observation_alias},
             },
         ),
     )
@@ -425,13 +433,13 @@ def test_record_dynamic_run_skips_observation_capabilities(tmp_path: Path) -> No
             task_id="task-1",
             type="tool_call_completed",
             title="Tool call completed",
-            tool_name="ui_snapshot",
+            tool_name=observation,
             tool_call_id="call-2",
             payload={
                 "tool_origin": "platform",
-                "capability_name": "ui_snapshot",
+                "capability_name": observation,
                 "step_kind": "observation",
-                "replay": {"kind": "fsq_command", "alias": "uiTree"},
+                "replay": {"kind": "fsq_command", "alias": observation_alias},
                 "status": "passed",
             },
         ),
@@ -442,11 +450,11 @@ def test_record_dynamic_run_skips_observation_capabilities(tmp_path: Path) -> No
     assert recording.status == "recorded"
     docs = list(yaml.safe_load_all((run_dir / "recorded.fsq.yaml").read_text(encoding="utf-8")))
     assert list(recording.warnings) == []
-    assert docs[1] == [{"tapOn": {"target": "Login"}}]
-    assert recording.skipped_tool_calls == ({"tool_name": "ui_snapshot", "reason": "observation tool is not recorded"},)
+    assert docs[1] == [{action_alias: params}]
+    assert recording.skipped_tool_calls == ({"tool_name": observation, "reason": "observation tool is not recorded"},)
     manifest = json.loads((run_dir / "recording.json").read_text(encoding="utf-8"))
     assert manifest["warnings"] == []
-    assert manifest["skipped_tool_calls"] == [{"tool_name": "ui_snapshot", "reason": "observation tool is not recorded"}]
+    assert manifest["skipped_tool_calls"] == [{"tool_name": observation, "reason": "observation tool is not recorded"}]
 
 
 def test_record_dynamic_android_tap_at_includes_reference_screen_size(tmp_path: Path) -> None:

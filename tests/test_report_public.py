@@ -351,7 +351,7 @@ def test_export_does_not_reintroduce_redacted_snapshot_values(tmp_path):
         assert all(b"hidden-credential" not in archive.read(name) for name in archive.namelist())
 
 
-def test_dynamic_runtime_fallback_is_not_an_action_and_recovered_failure_is_not_blocking(tmp_path):
+def test_historical_runtime_fallback_does_not_claim_unproven_recovery(tmp_path):
     run, facts = _run(tmp_path, mode="explore")
     raw = _bundle(run.name, status="failed")["steps"][0]
     (run / "events.jsonl").write_text(json.dumps({"type": "tool_call_completed", "payload": {"runner_result": raw}}) + chr(10))
@@ -359,7 +359,8 @@ def test_dynamic_runtime_fallback_is_not_an_action_and_recovered_failure_is_not_
     report = RunReportService().project(run, facts)
     assert len(report.steps) == 1
     assert report.execution["first_failure"] is None
-    assert len(report.execution["recovered_failures"]) == 1
+    assert report.steps[0]["status"] == "failed"
+    assert not report.execution["recovered_failures"]
     assert report.run["gate"]["status"] == "incomplete"
 
 

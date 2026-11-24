@@ -18,7 +18,6 @@ from fsq_agent.models._core import (
     VisualRegion,
 )
 
-AIAssertionStatus = Literal["passed", "failed", "error", "inconclusive"]
 AIAssertionOutcome = Literal["passed", "failed", "inconclusive"]
 AIAssertionReason = Literal[
     "provider_unavailable",
@@ -73,7 +72,7 @@ class AIAssertionRequest(BaseModel):
 class AIAssertionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: AIAssertionStatus
+    status: AIAssertionOutcome
     passed: bool = False
     explanation: str
     confidence: float | None = Field(default=None, ge=0, le=1)
@@ -84,21 +83,19 @@ class AIAssertionResult(BaseModel):
     artifact_refs: list[HarnessArtifactRef] = Field(default_factory=list)
     error: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-    outcome: AIAssertionOutcome | None = None
+    outcome: AIAssertionOutcome
     error_code: AIAssertionReason | None = None
     deterministic_conflict: bool = False
     capture: HostCaptureEnvelopeV1 | None = None
 
     @model_validator(mode="before")
     @classmethod
-    def derive_android_verdict(cls, value: Any) -> Any:
+    def derive_verdict(cls, value: Any) -> Any:
         if isinstance(value, dict) and value.get("outcome") is not None:
             value = dict(value)
             if value.get("status") != value["outcome"]:
-                raise ValueError("Assertion status must agree with the Android outcome.")
+                raise ValueError("Assertion status must agree with the visual outcome.")
             if value["outcome"] != "inconclusive" and value.get("error_code") is not None:
                 raise ValueError("A visual verdict cannot carry an inconclusive reason.")
             value["passed"] = value["outcome"] == "passed"
-        elif isinstance(value, dict) and value.get("status") == "inconclusive":
-            raise ValueError("An inconclusive assertion requires an Android outcome.")
         return value

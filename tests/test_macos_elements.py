@@ -6,20 +6,24 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from xml.etree import ElementTree
 
 import pytest
 from pydantic import ValidationError
 
+from fsq_agent.drivers.macos import _appium_connect
 from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
 from fsq_agent.models import (
     ConfigurationError,
+    ExecutableStep,
     MacOSAssertVisibleParams,
     MacOSClickOnParams,
     MacOSLocator,
     MacOSPoint,
     MacOSRightClickOnParams,
     MacOSUiSnapshotParams,
+    RuntimeSecretSettings,
 )
 
 
@@ -223,14 +227,16 @@ def test_xpath_locator_literal_apostrophe_and_quotes_are_encoded() -> None:
 
 
 def test_title_is_preserved_and_supported_by_locators() -> None:
-    title = "Save Link As" + "x" * 50
+    title = "Save Link As" + "x" * 170
     source = f'<XCUIElementTypeApplication><XCUIElementTypeMenuItem identifier="a" title="{title}"/><XCUIElementTypeMenuItem identifier="b" title="{title}"/></XCUIElementTypeApplication>'
     driver = AppiumConnectMacOSDriver(session=SessionStub(source=source))
     assert "title" in MacOSLocator.model_json_schema()["properties"]
 
     tree = driver.ui_snapshot(MacOSUiSnapshotParams())
-    assert tree["page_source"]["root"]["children"][0]["attributes"]["title"] == title[:50]
-
+    assert tree["format"] == "xml"
+    parsed = ElementTree.fromstring(tree["xml"])  # noqa: S314
+    assert parsed[0].attrib["title"] == title[:160]
+    assert tree["compaction"]["clipped_attributes"] == 2
     locator_session = SessionStub([ElementStub("one")])
     AppiumConnectMacOSDriver(session=locator_session).assert_visible(MacOSAssertVisibleParams(locator=MacOSLocator(title=title)))
     assert f'title == "{title}"' in locator_session.calls[0][1]
@@ -264,11 +270,82 @@ def test_backend_error_not_disguised_as_missing_target() -> None:
 
 
 def test_tree_clipping_is_explicit() -> None:
-    source = '<XCUIElementTypeApplication><XCUIElementTypeButton label="' + "x" * 60 + '"/></XCUIElementTypeApplication>'
+    source = '<XCUIElementTypeApplication><XCUIElementTypeButton label="' + "x" * 180 + '"/></XCUIElementTypeApplication>'
     driver = AppiumConnectMacOSDriver(session=SessionStub(source=source))
     tree = driver.ui_snapshot(MacOSUiSnapshotParams())
-    node = tree["page_source"]["root"]["children"][0]
-    assert node["truncated_attributes"] == ["label"]
+    assert tree["format"] == "xml"
+    assert tree["compaction"]["clipped_attributes"] == 1
+    assert tree["compaction"]["text_attribute_limit"] == 160
+    parsed = ElementTree.fromstring(tree["xml"])  # noqa: S314
+    assert parsed[0].attrib["label"] == "x" * 160
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_snapshot_redacts_workspace_values_and_credential_patterns_before_serialization(monkeypatch: pytest.MonkeyPatch, fallback: bool) -> None:
+    from fsq_agent.harnesses._macos import MacOSHarness
+
+    private_value = 'private<&"value'
+    prefix = "x" * 150
+    root = ElementTree.Element("XCUIElementTypeApplication")
+    button = ElementTree.SubElement(
+        root,
+        "XCUIElementTypeButton",
+        {
+            "label": f"{prefix}{private_value} tail",
+            "title": "password=ASSIGNMENT_CANARY",
+            "apiKey": "ATTRIBUTE_CANARY",
+            "url": "https://example.test/?scope=notes&sig=URL_CANARY&view=full",
+        },
+    )
+    button.text = f"Click & choose {private_value}"
+    driver = AppiumConnectMacOSDriver(session=SessionStub(source=ElementTree.tostring(root, encoding="unicode")))
+    settings = RuntimeSecretSettings()
+    settings.set_values({"ACTIVE_SECRET": private_value})
+    harness = MacOSHarness(driver, runtime_secret_settings=settings)
+    if fallback:
+
+        def fail_compaction(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("COMP_FAIL_CANARY")
+
+        monkeypatch.setattr(_appium_connect, "compact_xml_element_tree", fail_compaction)
+
+    step = ExecutableStep(step_id="snapshot", kind="observation", action_name="ui_snapshot", params={"include_attributes": True})
+    result = harness.invoke_action(step, harness.get_context())
+    assert result.status == "passed"
+    snapshot = result.output
+    assert snapshot["format"] == ("unparsed_xml" if fallback else "xml")
+    xml = snapshot["xml"]
+    assert not any(canary in json.dumps(snapshot) for canary in ("private", "ASSIGNMENT_CANARY", "ATTRIBUTE_CANARY", "URL_CANARY", "COMP_FAIL_CANARY"))
+    parsed = ElementTree.fromstring(xml)  # noqa: S314
+    assert parsed[0].attrib["label"] == f"{prefix}*** tail"
+    assert parsed[0].attrib["title"] == "password=***"
+    assert parsed[0].attrib["apiKey"] == "***"
+    assert parse_qs(urlsplit(parsed[0].attrib["url"]).query) == {"scope": ["notes"], "sig": ["[REDACTED]"], "view": ["full"]}
+    assert parsed[0].text == "Click & choose ***"
+
+
+def test_snapshot_hard_character_cap_preserves_complete_xml_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_appium_connect, "DEFAULT_MACOS_SNAPSHOT_MAX_XML_CHARS", 140)
+    root = ElementTree.Element("XCUIElementTypeApplication", {"identifier": "&" * 40})
+    ElementTree.SubElement(root, "XCUIElementTypeButton", {"label": "Keep"})
+    ElementTree.SubElement(root, "XCUIElementTypeButton", {"identifier": "<" * 40})
+    driver = AppiumConnectMacOSDriver(session=SessionStub(source=ElementTree.tostring(root, encoding="unicode")))
+
+    snapshot = driver.ui_snapshot(MacOSUiSnapshotParams(max_depth=3, include_attributes=True))
+    assert snapshot["format"] == "xml"
+    assert len(snapshot["xml"]) <= 140
+    parsed = ElementTree.fromstring(snapshot["xml"])  # noqa: S314
+    assert parsed.tag == root.tag
+    assert [child.attrib for child in parsed] == [{"label": "Keep"}]
+    assert snapshot["coverage"] == {
+        "status": "partial",
+        "reason": "semantic_compaction",
+        "source_nodes": 3,
+        "retained_nodes": 2,
+        "retained_characters": len(snapshot["xml"]),
+    }
+    assert snapshot["compaction"]["size_limit_applied"] is True
+    assert snapshot["compaction"]["children_truncated"] == 1
 
 
 @pytest.mark.parametrize(
@@ -384,7 +461,10 @@ def test_interactive_unlabelled_node_preserved() -> None:
     result = AppiumConnectMacOSDriver(session=SessionStub(source='<XCUIElementTypeApplication><Wrapper><XCUIElementTypeButton enabled="true"/></Wrapper></XCUIElementTypeApplication>')).ui_snapshot(
         MacOSUiSnapshotParams()
     )
-    assert result["page_source"]["root"]["children"][0]["type"] == "XCUIElementTypeButton"
+    assert result["format"] == "xml"
+    parsed = ElementTree.fromstring(result["xml"])  # noqa: S314
+    assert parsed[0].tag == "XCUIElementTypeButton"
+    assert result["compaction"]["layout_nodes_removed"] == 1
 
 
 def test_ui_snapshot_schema_rejects_query() -> None:

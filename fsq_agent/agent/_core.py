@@ -170,7 +170,6 @@ class FsqAgent:
             if cancellation_check is not None:
                 cancellation_check()
             verification = await self.verifier.verify(task, results, events_path=events_path)
-            await emitter.emit(RunEvent(run_id=run_id, task_id=task.id, type="run_completed", title="Execution completed", message=verification.summary, payload={"status": verification.status}))
             return DynamicAgentOutcome(
                 task=task,
                 steps=results,

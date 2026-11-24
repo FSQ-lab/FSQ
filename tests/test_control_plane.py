@@ -368,11 +368,7 @@ def test_case_discovery_limit_and_contained_resolution(tmp_path: Path) -> None:
 @pytest.mark.parametrize("platform", ["android", "web"])
 def test_case_discovery_retains_authored_ai_assertion_obligation(tmp_path: Path, platform: str) -> None:
     settings = _settings(tmp_path, platform=platform)
-    command = (
-        "assertWithAI:\n    assertion: The logo is blue\n    surface: appearance\n    full_screen_reason: Logo fills the screen"
-        if platform == "android"
-        else "assertWithAI:\n    prompt: Verify the page"
-    )
+    command = "assertWithAI:\n    assertion: The logo is blue\n    surface: appearance\n    full_screen_reason: Logo fills the screen"
     _case(settings.cases.dir / "ai.fsq.yaml", platform=platform, command=command)
 
     entry = discover_cases(settings)["cases"][0]
@@ -1653,7 +1649,7 @@ def test_provider_free_android_strict_dispatches_unverified_assertion_and_freeze
     source = settings.cases.dir / "visual.fsq.yaml"
     _case(source, command="assertWithAI:\n    assertion: The logo is blue\n    surface: appearance\n    full_screen_reason: Logo fills the screen")
     monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.require_android_preflight", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.build_ai_assertion_evaluator", lambda *_args: pytest.fail("Absent provider must not be constructed"))
+    monkeypatch.setattr("fsq_agent.ai_services._factory.build_model_provider_session", lambda *_args: pytest.fail("Absent provider must not be constructed"))
     dispatched = []
 
     class Harness:
@@ -1677,7 +1673,6 @@ def test_provider_free_android_strict_dispatches_unverified_assertion_and_freeze
             return "harness_error"
 
     def create_harness(*_args, **kwargs):
-        assert kwargs["ai_assertion_evaluator"] is None
         assert kwargs["harness_settings"].android.visual_assertion_policy.provider_available is False
         return Harness()
 
@@ -1713,7 +1708,7 @@ def test_provider_free_macos_strict_skips_provider_checks_and_freezes_inconclusi
             )
         ),
     )
-    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.build_ai_assertion_evaluator", lambda *_args: pytest.fail("Absent provider must not be constructed"))
+    monkeypatch.setattr("fsq_agent.ai_services._factory.build_model_provider_session", lambda *_args: pytest.fail("Absent provider must not be constructed"))
     dispatched = []
 
     class Harness:
@@ -1737,7 +1732,6 @@ def test_provider_free_macos_strict_skips_provider_checks_and_freezes_inconclusi
             return "harness_error"
 
     def create_harness(*_args, **kwargs):
-        assert kwargs["ai_assertion_evaluator"] is None
         assert kwargs["harness_settings"].macos.visual_assertion_policy.provider_available is False
         return Harness()
 

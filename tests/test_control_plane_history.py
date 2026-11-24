@@ -328,6 +328,45 @@ def test_failed_pathless_captures_keep_identity_and_reason(tmp_path):
     assert result["artifacts"][0]["unavailableReason"] == "capture_timeout"
 
 
+def test_selected_pathless_json_captures_project_the_requested_kind(tmp_path):
+    import json
+
+    from fsq_agent.adapters.control_plane._evidence import read_step_artifacts
+
+    (tmp_path / "evidence-manifest.json").write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "artifact_id": f"not-applicable-{kind}",
+                        "step_execution_id": "attempt-3",
+                        "kind": "json",
+                        "path": None,
+                        "phase": "prepare",
+                        "mime_type": "application/json",
+                        "availability": "not_applicable",
+                        "unavailable_reason": "android_session_not_started",
+                        "metadata": {requested_field: kind, "attempt_index": 3},
+                    }
+                    for requested_field, kind in (("requested_kind", "ui_snapshot"), ("requested_artifact_kind", "screenshot"))
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = read_step_artifacts(tmp_path, "attempt-3")
+    assert result["available"] is True
+    assert [(item["kind"], item["mimeType"]) for item in result["artifacts"]] == [("screenshot", "image/png"), ("ui_snapshot", "application/json")]
+    for item in result["artifacts"]:
+        assert item["artifactId"] == f"not-applicable-{item['kind']}"
+        assert item["availability"] == "not_applicable"
+        assert item["unavailableReason"] == "android_session_not_started"
+        assert item["phase"] == "before"
+        assert item["stepExecutionId"] == "attempt-3"
+        assert item["attemptIndex"] == 3
+        assert not {"content", "contentBase64", "error"} & item.keys()
+
+
 def test_step_projection_preserves_skipped_invocation_and_attempt(tmp_path):
     from fsq_agent.adapters.control_plane._evidence import EvidenceProjection
     from fsq_agent.adapters.control_plane._state import ControlPlaneState

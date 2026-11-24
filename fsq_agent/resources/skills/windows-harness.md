@@ -4,24 +4,27 @@ Use when `harness.platform` is Windows. This skill contains Windows-specific sta
 
 ## Snapshot-First Rules
 
-- Call `ui_snapshot` after launch and after state-changing actions when the next target is not already unambiguous.
+- Call `ui_snapshot` after launch and after state-changing actions when the next target is not already unambiguous. It returns a compact XML envelope (`format: "xml"`, `xml: "<Window ...>..."`, 160-character text clipping, and `offscreen_nodes_omitted` / `layout_nodes_removed` compaction metadata) whose XML tags (`control_type`) and attributes (`automation_id`, `title`, `class_name`, `value`, `bounds`) map directly to `WindowsLocator` fields.
 - Prefer stable control locators (`automation_id`, then `title` + `control_type`) over `index` or visual guessing.
 - Use `index` (1-based) only to disambiguate when multiple controls share the same locator fields.
 - Do not infer that the window changed from a screenshot path alone. Use a fresh `ui_snapshot` or assertion after the action.
 - Treat screenshots as evidence artifacts. They can support debugging, but they do not replace `ui_snapshot` for action targeting.
 - If a target is stale or missing, refresh the snapshot once and retry the same semantic action with corrected schema-valid arguments.
 
-## Control Locator Rules
+- Use `inspect_with_ai` (`inspectWithAI`) only for pixel-only Canvas, chart, map, or rendered image content (`mode: "extract"`), or custom-drawn targets without usable UIA child controls after fresh `ui_snapshot` refinement (`mode: "locate"`). `locate` returns validated screen `pointer_center` coordinates only when the bound window's `GetWindowRect` matches the `PrintWindow` PNG 1:1 on the primary screen; otherwise it returns `pointer_mapping_unavailable` without guessed coordinates. Host upload authorization defaults to `allow_provider_upload=False`; on `privacy_blocked` or `provider_unavailable`, stop all visual AI calls for this task and leave any required visual check unverified.
+- Measure exact RGB with authoritative application readback or local `sample_color` (`sampleColor`); prefer a small uniform interior region away from edges and text (`coordinate_space: "image"` or verified `"pointer"`). Never use a model estimate as a color value; `sample_color` does not upload an image.
+
+## Control Locator and Pointer Rules
 
 - A control locator may combine `title`, `control_type`, `automation_id`, `class_name`, and `index`.
 - `title` matches the control name; `control_type` is the UIA control type (for example `Button`, `Edit`, `Document`, `Tab`); `automation_id` is the stable UIA automation id; `class_name` is the native class.
 - Extract `control_type` from the actual `ui_snapshot` output. Do not assume a control type from the displayed text.
 - Prefer `automation_id` when available because it is the most stable. Fall back to `title` + `control_type` when it is not.
-
+- Pointer actions (`clickOn`, `doubleClickOn`, `rightClickOn`, `hoverOn`, `scrollOn`) accept mutually exclusive `locator` or explicit screen `point: {"x": ..., "y": ...}` within the active bound window (`typeText` and `assertVisible` remain `locator`-only; for custom-drawn text inputs, focus with `clickOn(point=...)` then `pressKey`). Always prefer `locator` when a UIA control exists; use `point` only for custom-drawn surfaces without UIA child controls, using a current validated `inspectWithAI(mode="locate")` `pointer_center` or verified `ui_snapshot` container `bounds`, never guessed offsets or raw image coordinates.
 ## Verification and Assertion Rules
 
 - Use `assert_visible` for required presence of a control.
-- Use `assert_with_ai` for required absence, visual judgment, window interpretation, or when a deterministic presence check would require a brittle complex locator.
+- Reserve `assert_with_ai` (`assertWithAI`) strictly for pure visual appearance, custom-canvas, map, or image-content checks that `ui_snapshot` and `assert_visible` do not expose, supplying `assertion`, `surface`, and either `region: {"kind": "image_rect", "rect": ...}` or `full_screen_reason`. Never use it to locate controls, guess coordinates, or override deterministic checks. Interpret tri-state `outcome` (`passed`, `failed`, or `inconclusive` when unverified) truthfully.
 - Use `ui_snapshot` to inspect, locate, or collect context before an assertion.
 
 ## Argument Rules
@@ -87,10 +90,28 @@ Use one payload from the matching semantic action. Do not combine unrelated fiel
 }
 ```
 
+### Scoped `assertWithAI`
+
+```json
+{
+  "assertion": "The preview pane renders a blue chart without clipping.",
+  "surface": "custom_canvas",
+  "region": {
+    "kind": "image_rect",
+    "rect": {
+      "left": 80,
+      "top": 100,
+      "right": 560,
+      "bottom": 420
+    }
+  }
+}
+```
+
 ## Tool Usage Error Recovery
 
 - If a Windows tool validation fails, rebuild the payload from the active schema and the requested semantic action.
 - If an action executes but the expected state is not present, take a fresh `ui_snapshot`, then decide whether retrying the same semantic action is justified.
 - If a key action returns the wrong window state, do not count it. Retry the requested key/action with a schema-valid payload or report the mismatch.
 - Before `assert_with_ai`, keep the window at the intended visual state.
-- For `assert_with_ai`, use the returned verdict rather than deciding from screenshot existence.
+- For `assert_with_ai`, use the returned tri-state verdict (`passed`, `failed`, or `inconclusive`) rather than deciding from screenshot existence.

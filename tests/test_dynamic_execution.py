@@ -12,7 +12,7 @@ import pytest
 
 from fsq_agent.config import Settings
 from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService, load_run_metadata
-from fsq_agent.models import DynamicAgentOutcome, ExecutableStep, ReportArtifact, RunnerEvent, RunnerStepResult, StepPhaseReport, Task, ToolExecutionError, VerificationResult
+from fsq_agent.models import DynamicAgentOutcome, ExecutableStep, ReportArtifact, RunEvent, RunnerEvent, RunnerStepResult, StepPhaseReport, Task, ToolExecutionError, VerificationResult
 
 
 def _settings(root: Path) -> Settings:
@@ -310,7 +310,8 @@ async def test_real_core_capture_failure_retains_precedence_through_terminal(tmp
     frozen = json.loads((directory / "execution-result.json").read_text())
     assert frozen["outcome"] == load_run_metadata(directory).status == status
     assert frozen["verification"]["status"] == verification_status
-    assert result.report.path.read_text() == result.verification.summary == snapshot["summary"]
+    assert result.report.path.read_text() == result.verification.summary
+    assert snapshot["summary"] == (frozen["summary"] if status in {"error", "cancelled"} else result.verification.summary)
     if required and model_status == "success":
         assert "web_search_evidence_missing" in result.verification.diagnostics
         assert "Model verification fixture" not in snapshot["summary"]
@@ -374,6 +375,38 @@ async def test_execution_allocates_one_identity_and_finalizes_after_agent(tmp_pa
     assert metadata.result.summary == "Execution evidence reviewed."
     assert metadata.artifacts.report_markdown == "report.md"
     assert len(list(settings.output.runs_dir.glob("*/run.json"))) == 1
+
+
+@pytest.mark.parametrize("fatal", [False, True])
+async def test_public_agent_signature_cannot_publish_a_provisional_completion(tmp_path: Path, fatal: bool) -> None:
+    settings = _settings(tmp_path)
+    observed = []
+
+    class PublicAgent(_Agent):
+        async def run_in_context(self, task, context, event_sink=None, *, evidence_sink, cancellation_check=None):
+            assert event_sink is not None
+            event_sink(RunEvent(run_id=context.run_id, task_id=task.id, type="run_completed", title="Unfrozen", message="Provisional success", payload={"status": "success"}))
+            assert observed == []
+            assert not (context.run_dir / "execution-result.json").exists()
+            outcome = await super().run_in_context(task, context, event_sink, evidence_sink=evidence_sink, cancellation_check=cancellation_check)
+            return outcome.model_copy(update={"errors": [{"category": "agent_runtime_error", "message": "Fatal run error"}]}) if fatal else outcome
+
+    def observe(event: RunEvent) -> None:
+        run_dir = settings.output.runs_dir / event.run_id
+        frozen = json.loads((run_dir / "execution-result.json").read_text(encoding="utf-8"))
+        assert event.payload["status"] == frozen["outcome"] == ("error" if fatal else "success")
+        assert event.message == frozen["summary"]
+        observed.append(event)
+
+    result = await DynamicExecutionService(agent=PublicAgent(settings)).execute(DynamicExecutionRequest(task=Task(description="Task"), settings=settings, event_sink=observe))
+    assert len(observed) == 1
+    assert observed[0].type == "run_completed"
+    assert "Provisional success" not in observed[0].message
+    if fatal:
+        assert observed[0].payload["verification_status"] == "success"
+        assert observed[0].message == "Execution failed before it could be completed."
+    timeline_path = settings.output.runs_dir / result.task_result.report.run_id / "events.jsonl"
+    assert [json.loads(line) for line in timeline_path.read_text(encoding="utf-8").splitlines()] == [observed[0].model_dump(mode="json")]
 
 
 async def test_execution_repeated_tasks_allocate_distinct_runs(tmp_path: Path) -> None:
@@ -1016,3 +1049,210 @@ async def test_real_android_unavailable_assertion_sequences_to_effective_dynamic
     assert not visual["evidence_errors"]
     assert "provider_unavailable" in " ".join(result.verification.diagnostics)
     assert result.report.path.read_text() == result.verification.summary
+
+
+async def test_dynamic_execution_emits_terminal_run_completed_aligned_with_frozen_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fsq_agent.agent._core as agent_core
+    from fsq_agent.agent import FsqAgent, Verifier
+    from fsq_agent.observation import ExecutionLogger
+
+    class _NoopSession:
+        def close_sync(self) -> None:
+            return None
+
+    monkeypatch.setattr(agent_core, "refresh_model_provider_session", lambda _settings: _NoopSession())
+
+    class _Knowledge:
+        def load_for_task(self, _task):
+            from fsq_agent.models import KnowledgeBundle
+
+            return KnowledgeBundle(items={})
+
+    class _Skills:
+        def load(self, _cfg):
+            return []
+
+    class _Runtime:
+        async def run_pre_plan(self, *_args, **_kwargs):
+            from fsq_agent.models import GoalPrePlan
+
+            return GoalPrePlan(key_actions=["Check visual"], verification_goal="Visual checked.")
+
+        async def run_task(self, _task, _knowledge, _skills, _run_id, _emit, *, context=None, evidence_sink=None, **_kwargs):
+            assert evidence_sink is not None
+            step = evidence_sink.allocate_step_identity(ExecutableStep(step_id="visual", action_name="assert_with_ai", kind="assertion"))
+            evidence_sink.record_event(
+                RunnerEvent(event_type="step_start", run_id=_run_id, **step.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}))
+            )
+            evidence_sink.record_step_result(
+                RunnerStepResult(
+                    step_id=step.step_id,
+                    step_execution_id=step.step_execution_id,
+                    source_step_id=step.source_step_id,
+                    invocation_path=step.invocation_path,
+                    action_name=step.action_name,
+                    kind="assertion",
+                    status="incomplete",
+                    action_status="incomplete",
+                    phase_reports=[
+                        StepPhaseReport(
+                            step_id=step.step_id,
+                            phase="invoke",
+                            status="incomplete",
+                            metadata={
+                                "harness_metadata": {"ai_assertion": {"outcome": "inconclusive", "passed": False, "error_code": "provider_unavailable", "reason": "Visual evaluator unavailable"}}
+                            },
+                        )
+                    ],
+                )
+            )
+            return []
+
+        async def run_verification(self, *_args, **_kwargs):
+            from fsq_agent.models import StepResult
+
+            return [
+                StepResult(
+                    step_id=1,
+                    status="success",
+                    actual_outcome='{"status":"success","summary":"Model prematurely claimed success","pre_plan":[],"plan_updates":[],"satisfied_criteria":["Visual checked."],"unmet_criteria":[],"evidence":[],"errors":[]}',
+                    tool_name="agent_runtime.verifier",
+                )
+            ]
+
+    settings = _settings(tmp_path)
+    settings.agent_runtime.verification_enabled = True
+    event_logger = ExecutionLogger(settings.output.runs_dir)
+    fsq_agent = FsqAgent(settings, Verifier(), None, _Knowledge(), _Skills(), _Runtime(), event_logger)
+    emitted_events = []
+
+    result = (
+        await DynamicExecutionService(agent=fsq_agent).execute(
+            DynamicExecutionRequest(
+                task=Task(description="Check visual", key_actions=["Check"], verification_goal="Visual checked."),
+                settings=settings,
+                event_sink=emitted_events.append,
+            )
+        )
+    ).task_result
+
+    run_dir = settings.output.runs_dir / result.report.run_id
+    frozen = json.loads((run_dir / "execution-result.json").read_text(encoding="utf-8"))
+    persisted_events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    completed_events = [event for event in emitted_events if event.type == "run_completed"]
+    persisted_completed = [event for event in persisted_events if event["type"] == "run_completed"]
+
+    assert frozen["outcome"] == "inconclusive"
+    assert result.status == "inconclusive"
+    assert len(completed_events) == 1
+    assert len(persisted_completed) == 1
+    assert completed_events[0].payload["status"] == "inconclusive"
+    assert persisted_completed[0]["payload"]["status"] == "inconclusive"
+    assert completed_events[0].message == frozen["summary"]
+    assert "Visual assertion remains unverified" in completed_events[0].message
+
+
+async def test_dynamic_execution_emits_terminal_run_completed_error_when_freeze_detects_evidence_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fsq_agent.agent._core as agent_core
+    from fsq_agent.agent import FsqAgent, Verifier
+    from fsq_agent.models import EvidenceArtifactRef, StepPhaseReport
+    from fsq_agent.observation import ExecutionLogger
+
+    class _NoopSession:
+        def close_sync(self) -> None:
+            return None
+
+    monkeypatch.setattr(agent_core, "refresh_model_provider_session", lambda _settings: _NoopSession())
+
+    class _Knowledge:
+        def load_for_task(self, _task):
+            from fsq_agent.models import KnowledgeBundle
+
+            return KnowledgeBundle(items={})
+
+    class _Skills:
+        def load(self, _cfg):
+            return []
+
+    class _Runtime:
+        async def run_pre_plan(self, *_args, **_kwargs):
+            from fsq_agent.models import GoalPrePlan
+
+            return GoalPrePlan(key_actions=["Verify page"], verification_goal="Page verified.")
+
+        async def run_task(self, _task, _knowledge, _skills, _run_id, _emit, *, context=None, evidence_sink=None, **_kwargs):
+            assert evidence_sink is not None
+            step = evidence_sink.allocate_step_identity(ExecutableStep(step_id="final-check", action_name="assert_visible", kind="assertion"))
+            evidence_sink.record_event(
+                RunnerEvent(event_type="step_start", run_id=_run_id, **step.model_dump(include={"step_id", "source_step_id", "step_execution_id", "invocation_path", "attempt_index"}))
+            )
+            failed_ref = EvidenceArtifactRef(
+                artifact_id="art-fail",
+                kind="json",
+                path=Path("artifacts/data/0001-failed.json"),
+                availability="failed",
+                unavailable_reason="screenshot failed",
+                step_id=step.step_id,
+                phase="finalize",
+                metadata={"requested_kind": "screenshot"},
+            )
+            evidence_sink.record_step_result(
+                RunnerStepResult(
+                    step_id=step.step_id,
+                    step_execution_id=step.step_execution_id,
+                    source_step_id=step.source_step_id,
+                    invocation_path=step.invocation_path,
+                    action_name=step.action_name,
+                    status="passed",
+                    phase_reports=[
+                        StepPhaseReport(step_id=step.step_id, phase="prepare", status="passed"),
+                        StepPhaseReport(step_id=step.step_id, phase="invoke", status="passed"),
+                        StepPhaseReport(step_id=step.step_id, phase="finalize", status="passed", artifact_refs=[failed_ref]),
+                    ],
+                    evidence_refs=[failed_ref.artifact_id],
+                    evidence_errors=[{"phase": "finalize", "kind": "screenshot", "message": "screenshot failed"}],
+                    metadata={"evidence_policy": {"capture_before": False, "capture_after": True, "artifact_kinds": ["screenshot"]}},
+                )
+            )
+            return []
+
+        async def run_verification(self, *_args, **_kwargs):
+            from fsq_agent.models import StepResult
+
+            return [
+                StepResult(
+                    step_id=1,
+                    status="success",
+                    actual_outcome='{"status":"success","summary":"Verifier claimed success","pre_plan":[],"plan_updates":[],"satisfied_criteria":["Page verified."],"unmet_criteria":[],"evidence":[],"errors":[]}',
+                    tool_name="agent_runtime.verifier",
+                )
+            ]
+
+    settings = _settings(tmp_path)
+    settings.agent_runtime.verification_enabled = True
+    event_logger = ExecutionLogger(settings.output.runs_dir)
+    fsq_agent = FsqAgent(settings, Verifier(), None, _Knowledge(), _Skills(), _Runtime(), event_logger)
+    emitted_events = []
+
+    result = (
+        await DynamicExecutionService(agent=fsq_agent).execute(
+            DynamicExecutionRequest(
+                task=Task(description="Verify page", key_actions=["Verify"], verification_goal="Page verified."),
+                settings=settings,
+                event_sink=emitted_events.append,
+            )
+        )
+    ).task_result
+
+    run_dir = settings.output.runs_dir / result.report.run_id
+    frozen = json.loads((run_dir / "execution-result.json").read_text(encoding="utf-8"))
+    completed_events = [event for event in emitted_events if event.type == "run_completed"]
+
+    assert frozen["outcome"] == "error"
+    assert result.status == "error"
+    assert len(completed_events) == 1
+    assert completed_events[0].payload["status"] == "error"
+    assert completed_events[0].payload["verification_status"] == "success"
+    assert completed_events[0].message == frozen["summary"]
+    assert "required evidence" in completed_events[0].message
+    assert "Verifier claimed success" not in completed_events[0].message

@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from fsq_agent.core.runtime_secrets import RuntimeSecretStore
 from fsq_agent.models import EvidenceArtifactKind, EvidenceArtifactRef, StepPhase
 
 _ARTIFACT_DIRS: dict[EvidenceArtifactKind, str] = {
@@ -109,7 +110,7 @@ class ArtifactStore:
         return self._acknowledge(ref)
 
     def _sanitize(self, value):
-        return _credential_safe(value, self._secret_values)
+        return RuntimeSecretStore.redact_structure(value, self._secret_values)
 
     def write_text(
         self,
@@ -136,11 +137,8 @@ class ArtifactStore:
     def _write(self, *, kind, step_id, phase, name, extension, data, structured=False) -> EvidenceArtifactRef:
         with self._lock:
             transformed = False
-            if kind not in {"screenshot", "other"}:
-                if structured:
-                    safe_data = json.dumps(self._sanitize(json.loads(data)), indent=2, ensure_ascii=False).encode("utf-8")
-                else:
-                    safe_data = self._sanitize(data.decode("utf-8")).encode("utf-8")
+            if not structured and kind not in {"screenshot", "other"}:
+                safe_data = self._sanitize(data.decode("utf-8")).encode("utf-8")
                 transformed = safe_data != data
                 data = safe_data
             key = f"{kind}-{self._artifact_id(step_id=step_id, phase=phase, name=name)}"
@@ -201,78 +199,3 @@ class ArtifactStore:
     def _slug(self, value: str) -> str:
         slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
         return slug or "artifact"
-
-
-def _sanitize_urls(text: str) -> str:
-    """Persist safe URL copies; callers retain the original invocation values in memory."""
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-    sensitive = re.compile(r"^(?:token|access_token|refresh_token|id_token|password|passwd|api[_-]?key|client[_-]?secret|secret|signature|sig|authorization|cookie)$", re.I)
-
-    def replace(match):
-        original = match.group(0)
-        try:
-            parsed = urlsplit(original)
-            query = parse_qsl(parsed.query, keep_blank_values=True)
-            changed = "@" in parsed.netloc or any(sensitive.fullmatch(key) for key, _ in query)
-            if not changed:
-                return original
-            host = parsed.netloc.rsplit("@", 1)[-1]
-            safe_query = urlencode([(key, "[REDACTED]" if sensitive.fullmatch(key) else value) for key, value in query])
-            return urlunsplit((parsed.scheme, host, parsed.path, safe_query, parsed.fragment))
-        except ValueError:
-            return "[REDACTED_URL]"
-
-    return re.sub(r"https?://[^\s<>\"']+", replace, text, flags=re.I)
-
-
-def _credential_safe(value, secrets=(), depth=0):
-    import json
-    from urllib.parse import unquote
-
-    if depth > 20:
-        return "[REDACTED: nesting limit]"
-    keys = {
-        "password",
-        "passwd",
-        "pwd",
-        "api_key",
-        "apikey",
-        "token",
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "client_secret",
-        "secret",
-        "authorization",
-        "proxy_authorization",
-        "cookie",
-        "set_cookie",
-        "private_values",
-        "credentials",
-    }
-    if isinstance(value, dict):
-        return {
-            key: "***" if re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", unquote(str(key)).strip()).lower().replace("-", "_") in keys else _credential_safe(item, secrets, depth + 1)
-            for key, item in value.items()
-        }
-    if isinstance(value, (tuple, list)):
-        return [_credential_safe(item, secrets, depth + 1) for item in value]
-    if not isinstance(value, str):
-        return value
-    for secret in sorted((item for item in secrets if item), key=len, reverse=True):
-        value = value.replace(secret, "***")
-    stripped = value.strip()
-    if stripped.startswith(("{", "[", '"')):
-        try:
-            decoded = json.loads(value)
-        except ValueError:
-            decoded = None
-        if isinstance(decoded, (dict, list, str)) and decoded != value:
-            safe = _credential_safe(decoded, secrets, depth + 1)
-            if safe != decoded:
-                return json.dumps(safe, ensure_ascii=False)
-    value = re.sub(r"(?im)((?:proxy[-_]authorization|authorization|set[-_]cookie|cookie)\s*[:=]\s*)[^\r\n]+", r"\1***", value)
-    value = re.sub(r"(?i)\b(?:Bearer|Basic)\s+[^\s,;\r\n]+", "Bearer ***", value)
-    value = re.sub(r"(?i)(\b(?:password|passwd|pwd|api[_-]?key|client[_-]?secret|secret|(?:access[_-]?|refresh[_-]?|id[_-]?)?token)\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", r"\1***", value)
-    return _sanitize_urls(value)

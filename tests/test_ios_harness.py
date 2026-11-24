@@ -170,7 +170,9 @@ class FakeDevice:
         self.screen_width = 402
         self.screen_height = 874
         buf = io.BytesIO()
-        Image.new("RGB", (4, 4), color=(120, 130, 140)).save(buf, format="PNG")
+        with Image.new("RGB", (4, 4), color=(120, 130, 140)) as image:
+            image.putpixel((3, 3), (255, 255, 255))
+            image.save(buf, format="PNG")
         self.png_bytes = buf.getvalue()
 
     def display_size(self, *, control: object = None) -> Any:
@@ -1956,3 +1958,17 @@ def test_ios_page_source_exclusions_normalize_to_ordered_tuple(value: list[str] 
 def test_ios_page_source_exclusions_reject_borrowed_session() -> None:
     with pytest.raises(ConfigurationError, match="borrowed iOS Session"):
         AppiumConnectIOSDriver(session=FakeSession(), xcuitest_page_source_excluded_attributes=["visible", "accessible"])
+
+
+@pytest.mark.parametrize("kind", ["screenshot", "ui_snapshot"])
+def test_ios_harness_records_not_applicable_when_session_not_started(tmp_path, kind: str) -> None:
+    driver = AppiumConnectIOSDriver(bundle_id="com.apple.Preferences", udid="00008110-0011223344556677")
+    harness = IOSHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path))
+    try:
+        context = harness.get_context()
+        ref = harness.capture_artifact(kind=kind, reason="before launchApp", context=context, step_id="step-1", phase="prepare")
+        assert ref.availability == "not_applicable"
+        assert ref.unavailable_reason == "ios_session_not_started"
+        assert ref.metadata["requested_artifact_kind"] == kind
+    finally:
+        harness.close()

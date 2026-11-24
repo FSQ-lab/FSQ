@@ -252,8 +252,7 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
     ? goal.trim().length > 0 && readiness.data?.provider.status === 'ready'
     : cases.state === 'ready'
       && selectedCase?.selectable === true
-      && readiness.data?.strict.status === 'ready'
-      && (platform === 'android' || platform === 'macos' || !selectedCase.requiresAiAssertion || readiness.data.provider.status === 'ready');
+      && readiness.data?.strict.status === 'ready';
   const macosVerdict = mode==='explore'?readiness.data?.commands?.caseCreate:readiness.data?.commands?.caseTest;
   const canStart = Boolean(commonReady && sourceReady && !active && !starting && bootstrap.state === 'ready' && !bootstrap.data?.busy && (!['macos','android'].includes(platform)||macosVerdict?.status==='ready'));
   const blockedReason = (() => {
@@ -270,7 +269,7 @@ export function useDeviceWorkspace(context: DeviceWorkspaceContext, client: Cont
       if (cases.state !== 'ready') return cases.error?.message || 'Refresh Case discovery.';
       if (!selectedCase?.selectable) return 'Select a validated Case.';
     } else if (!goal.trim()) return 'Enter a Goal.';
-    if ((mode === 'explore' || (platform !== 'android' && platform !== 'macos' && selectedCase?.requiresAiAssertion)) && readiness.data?.provider.status !== 'ready') return readiness.data?.provider.message || 'Configure the required Provider.';
+    if (mode === 'explore' && readiness.data?.provider.status !== 'ready') return readiness.data?.provider.message || 'Configure the required Provider.';
     if (bootstrap.state !== 'ready') return 'Wait for Control Plane to become ready.';
     if (active || bootstrap.data?.busy) return 'Another test is active.';
     return '';

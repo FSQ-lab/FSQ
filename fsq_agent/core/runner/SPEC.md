@@ -9,6 +9,7 @@ Own platform-neutral capability execution for one canonical step and ordered seq
 - `models`: canonical steps, capability definitions, events, results, evidence references, and execution settings.
 - `capabilities`: resolved neutral declaration metadata only where registry construction requires it.
 - `core.interfaces`: harness, capability-executor, observation, runtime-secret, evidence-recorder, and cancellation boundaries.
+- `core.runtime_secrets.RuntimeSecretStore`: public shared credential sanitizer for runner events and results.
 
 Runner must not import adapters, Application, Agent SDK types, concrete harnesses, concrete drivers, or report renderers.
 
@@ -34,7 +35,7 @@ Both symbols are exported from `core.runner` and re-exported from `core` with id
 - Internal modules: `_runner.py` and `_sequence.py`.
 - Domain boundaries: capability execution policy and ordering only.
 - Boundary models: public execution models come from `models`; collaborator protocols come from `core.interfaces`.
-- Dependency direction: Execution depends on Runner; Runner depends on Interfaces; concrete implementations point inward to Interfaces.
+- Dependency direction: Execution depends on Runner; Runner consumes public Interfaces and the shared Core sanitizer; concrete implementations point inward to Interfaces.
 - Rationale: execution coordinates validation, secrets, timing, evidence, and side effects, requiring Level 3 without a domain framework.
 
 ## Error Handling
@@ -47,6 +48,8 @@ The harness may mark an automatic teardown screenshot not applicable when the se
 An action result with `status="incomplete"` remains incomplete in phase, step, capability, event, and durable evidence projections. A safe assertion reason and `ai_assertion` block survive normalization without an `assertion_error` category. Ordered sequences stop dependent normal work after an incomplete step, retain explicit blocked/unexecuted facts, and still run eligible teardown. No optional flag converts incomplete to passed.
 
 Capability-neutral evidence coordination permits the active harness to supply one privacy-approved assertion screenshot as the step's before evidence without an earlier unsafe or duplicate capture. This does not add a Runner action-name switch or a public `CapabilityDefinition.capture_evidence` policy. Other step-kind capture behavior remains unchanged; missing/omitted evidence carries its actual requirement and reason rather than a fabricated artifact.
+
+Runner event/output credential redaction delegates to Core's single shared cycle-safe (`active_ids`) sanitizer with a 128-level container ceiling rather than maintaining a local depth-20 copy. Steps that fail or abort in `prepare` before entering `invoke` record no synthetic post-action (`finalize`) required-capture obligation.
 
 ## Current Invariants
 

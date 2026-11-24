@@ -348,3 +348,30 @@ def test_android_harness_requires_artifact_store_for_capture() -> None:
             step_id="step-1",
             phase="finalize",
         )
+
+
+@pytest.mark.parametrize("kind", ["screenshot", "ui_snapshot"])
+def test_android_harness_uses_explicit_context_applicability_for_capture(tmp_path, kind: str) -> None:
+    class UnstartedAndroidDriver(FakeAndroidDriver):
+        def context(self) -> dict[str, object]:
+            return {"session_id": None, "metadata": {"session_started": False}}
+
+        def screenshot(self, params=None) -> bytes:
+            raise AssertionError("screenshot() must not run on unstarted Android session")
+
+        def ui_snapshot(self, params=None) -> dict[str, object]:
+            raise AssertionError("ui_snapshot() must not run on unstarted Android session")
+
+    driver = UnstartedAndroidDriver()
+    harness = AndroidHarness(driver=driver, artifact_store=ArtifactStore(run_dir=tmp_path))
+    context = harness.get_context()
+
+    ref = harness.capture_artifact(kind=kind, reason="teardown", context=context, step_id="step-1", phase="prepare")
+    assert ref.availability == "not_applicable"
+    assert ref.unavailable_reason == "android_session_not_started"
+    assert ref.metadata["requested_artifact_kind"] == kind
+
+    # Active session capture failure must still propagate as failed capture, not not_applicable.
+    active_context = HarnessContext(platform="android", session_id="android-active-1")
+    with pytest.raises(AssertionError):
+        harness.capture_artifact(kind=kind, reason="active", context=active_context, step_id="step-2", phase="finalize")

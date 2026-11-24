@@ -60,6 +60,9 @@ ANDROID_TARGET_SCHEMA_DESCRIPTION = (
 )
 WEB_LOCATOR_SCHEMA_DESCRIPTION = "Provide one semantic locator using a role and optional name, within scope, or final-result index."
 WINDOWS_TARGET_SCHEMA_DESCRIPTION = "Provide a non-empty locator. The target field is descriptive only and is not used for Windows control lookup."
+WINDOWS_POINTER_TARGET_SCHEMA_DESCRIPTION = (
+    "Provide exactly one of non-empty locator or explicit screen point. Prefer locator for UIA controls and point only for custom-drawn or verified locate coordinates; target is descriptive only."
+)
 MACOS_TARGET_SCHEMA_DESCRIPTION = "Provide target, non-empty locator, or point. Prefer target or locator for UI elements and point only for coordinate-based actions."
 IOS_TARGET_SCHEMA_DESCRIPTION = (
     "Provide target or non-empty locator. A usable explicit locator is authoritative. "
@@ -769,17 +772,47 @@ class WebAssertTextParams(BaseModel):
     optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
 
 
-class WebAssertWithAIParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Evaluate an explicit Web visual assertion with AI."})
+class WebInspectWithAIParams(_VisualInspectWithAIParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+        json_schema_extra={
+            "description": (
+                "Read pixel-only visual content in the current Web page with mode='extract' without pass/fail verdicts or UI actions. mode='locate' returns pointer_mapping_unavailable on Web."
+            )
+        },
+    )
 
-    prompt: str = Field(description="Non-empty visual assertion prompt to evaluate against current evidence.")
-    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+    prompt: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Read pixel-only content in the current Web page image without performing an action. Locate mode returns pointer_mapping_unavailable on Web.",
+    )
+
+
+class WebAssertWithAIParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Evaluate only an image-space Web visual assertion. Required assertion and surface; region is image_rect only, or omit it with full_screen_reason. Never locate/drive UI or replace exact accessibility facts."
+        },
+    )
+
+    assertion: str = Field(description="Pure visual appearance/image/Canvas expectation, not instructions or a UI action.")
+    surface: Literal["custom_canvas", "image_content", "map_view", "appearance"]
+    region: VisualRegion | None = None
+    expect: VisualExpectation | None = None
+    full_screen_reason: str | None = None
+    optional: bool | None = None
 
     @model_validator(mode="after")
     def _require_prompt(self) -> "WebAssertWithAIParams":
-        if self.prompt.strip():
-            return self
-        raise ValueError("requires non-empty prompt")
+        if not self.assertion.strip() or len(self.assertion.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank assertion of at most 4 KiB")
+        if self.region is None and not (self.full_screen_reason and self.full_screen_reason.strip()):
+            raise ValueError("full-image assertions require full_screen_reason")
+        return self
 
 
 @dataclass(frozen=True)
@@ -835,6 +868,7 @@ WEB_ACTION_DEFINITIONS: tuple[WebActionDefinition, ...] = (
     WebActionDefinition("waitFor", "wait_for", WebWaitForParams, "action"),
     WebActionDefinition("takeScreenshot", "take_screenshot", WebTakeScreenshotParams, "observation"),
     WebActionDefinition("uiSnapshot", "ui_snapshot", WebUiSnapshotParams, "observation"),
+    WebActionDefinition("inspectWithAI", "inspect_with_ai", WebInspectWithAIParams, "observation"),
     WebActionDefinition("assertVisible", "assert_visible", WebAssertVisibleParams, "assertion"),
     WebActionDefinition("assertNotVisible", "assert_not_visible", WebAssertNotVisibleParams, "assertion"),
     WebActionDefinition("assertText", "assert_text", WebAssertTextParams, "assertion"),
@@ -880,6 +914,22 @@ class WindowsPoint(BaseModel):
 
     x: int = Field(ge=0, description="Horizontal Windows screen coordinate in pixels.")
     y: int = Field(ge=0, description="Vertical Windows screen coordinate in pixels.")
+
+
+class _WindowsPointerTargetParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": WINDOWS_POINTER_TARGET_SCHEMA_DESCRIPTION})
+
+    target: str | None = Field(default=None, description="Human-readable descriptive target. Windows lookup uses locator or point, not this field.")
+    locator: WindowsLocator | None = Field(default=None, description="Windows control locator used for lookup. Mutually exclusive with point.")
+    point: WindowsPoint | None = Field(default=None, description="Explicit Windows screen point in absolute pixels. Mutually exclusive with locator.")
+
+    @model_validator(mode="after")
+    def _require_locator_or_point(self) -> "_WindowsPointerTargetParams":
+        if sum(value is not None for value in (self.locator, self.point)) != 1:
+            raise ValueError("requires exactly one of locator or point")
+        if self.locator is not None and not self.locator.has_value():
+            raise ValueError("requires non-empty locator")
+        return self
 
 
 class WindowsOffset(BaseModel):
@@ -936,16 +986,16 @@ class WindowsKillAppParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Stop the launched Windows desktop application. No parameters are accepted."})
 
 
-class WindowsClickOnParams(_WindowsTargetParams):
+class WindowsClickOnParams(_WindowsPointerTargetParams):
     button: WindowsMouseButton | None = Field(default=None, description="Mouse button to click. Defaults to backend left-button behavior.")
     double: bool | None = Field(default=None, description="When true, perform a double click.")
 
 
-class WindowsDoubleClickOnParams(_WindowsTargetParams):
+class WindowsDoubleClickOnParams(_WindowsPointerTargetParams):
     button: WindowsMouseButton | None = Field(default=None, description="Mouse button to double-click. Defaults to backend left-button behavior.")
 
 
-class WindowsRightClickOnParams(_WindowsTargetParams):
+class WindowsRightClickOnParams(_WindowsPointerTargetParams):
     pass
 
 
@@ -974,11 +1024,11 @@ class WindowsPressKeyParams(BaseModel):
         raise ValueError("requires non-empty key")
 
 
-class WindowsHoverOnParams(_WindowsTargetParams):
+class WindowsHoverOnParams(_WindowsPointerTargetParams):
     pass
 
 
-class WindowsScrollOnParams(_WindowsTargetParams):
+class WindowsScrollOnParams(_WindowsPointerTargetParams):
     wheel_dist: int = Field(description="Non-zero mouse wheel distance. Positive and negative values scroll opposite directions.")
 
     @model_validator(mode="after")
@@ -1011,17 +1061,48 @@ class WindowsUiSnapshotParams(BaseModel):
     model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Read the current Windows control tree snapshot. No parameters are accepted."})
 
 
-class WindowsAssertWithAIParams(BaseModel):
-    model_config = ConfigDict(extra="forbid", json_schema_extra={"description": "Evaluate an explicit Windows visual assertion with AI."})
+class WindowsInspectWithAIParams(_VisualInspectWithAIParams):
+    model_config = ConfigDict(
+        extra="forbid",
+        strict=True,
+        str_strip_whitespace=True,
+        json_schema_extra={
+            "description": (
+                "Read pixel-only visual content in the current Windows window with mode='extract' without pass/fail verdicts or UI actions, "
+                "or locate candidate bounds in mode='locate' when 1:1 bound-window screen geometry is verified (otherwise pointer_mapping_unavailable)."
+            )
+        },
+    )
 
-    prompt: str = Field(description="Non-empty visual assertion prompt to evaluate against current evidence.")
-    optional: bool | None = Field(default=None, description="When true, treat assertion uncertainty as optional.")
+    prompt: str = Field(
+        min_length=1,
+        max_length=4096,
+        description="Read pixel-only content or locate visual targets in the current Windows window without performing an action.",
+    )
+
+
+class WindowsAssertWithAIParams(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "description": "Evaluate only an image-space Windows visual assertion. Required assertion and surface; region is image_rect only, or omit it with full_screen_reason. Never locate/drive UI or replace exact accessibility facts."
+        },
+    )
+
+    assertion: str = Field(description="Pure visual appearance/image/Canvas expectation, not instructions or a UI action.")
+    surface: Literal["custom_canvas", "image_content", "map_view", "appearance"]
+    region: VisualRegion | None = None
+    expect: VisualExpectation | None = None
+    full_screen_reason: str | None = None
+    optional: bool | None = None
 
     @model_validator(mode="after")
     def _require_prompt(self) -> "WindowsAssertWithAIParams":
-        if self.prompt.strip():
-            return self
-        raise ValueError("requires non-empty prompt")
+        if not self.assertion.strip() or len(self.assertion.encode("utf-8")) > 4096:
+            raise ValueError("requires a nonblank assertion of at most 4 KiB")
+        if self.region is None and not (self.full_screen_reason and self.full_screen_reason.strip()):
+            raise ValueError("full-image assertions require full_screen_reason")
+        return self
 
 
 class MacOSPoint(BaseModel):

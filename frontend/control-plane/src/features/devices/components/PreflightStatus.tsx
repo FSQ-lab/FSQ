@@ -12,7 +12,6 @@ interface PreflightStatusProps {
   provider?: ReadinessRecord;
   target?: ReadinessRecord;
   strict?: ReadinessRecord;
-  requiresProvider?: boolean;
   loading: boolean;
   diagnostics?: ReadinessResponse | null;
   macos?: boolean;
@@ -32,7 +31,7 @@ function PreflightItem({ label, record, loading }: { label: string; record?: Rea
   </li>;
 }
 
-export function PreflightStatus({ mode, workspace, provider, target, strict, requiresProvider, loading, diagnostics, macos, android, onRecheck, onRepair, locked, pendingContext }: PreflightStatusProps) {
+export function PreflightStatus({ mode, workspace, provider, target, strict, loading, diagnostics, macos, android, onRecheck, onRepair, locked, pendingContext }: PreflightStatusProps) {
   const titleId = useId();
   if (macos || android || pendingContext) {
     const labels: Record<PlatformId, string> = { android: 'Android', macos: 'macOS', web: 'Web', windows: 'Windows' };
@@ -42,12 +41,11 @@ export function PreflightStatus({ mode, workspace, provider, target, strict, req
     const currentProvider = pendingContext ? current?.provider : provider;
     const verdict = mode === 'explore' ? current?.commands?.caseCreate : current?.commands?.caseTest;
     const prepare = pendingContext?.diagnostics?.commands.prepare;
-    const ready = verdict?.status === 'ready' && (!requiresProvider || currentProvider?.status === 'ready') && (!pendingContext || prepare?.status === 'ready');
+    const ready = verdict?.status === 'ready' && (!pendingContext || prepare?.status === 'ready');
     // The shared Doctor's prepare verdict governs identification, not executable Case readiness.
     const pending = Boolean(pendingContext && ((prepare?.status === 'ready' && verdict?.status === 'pending') || prepare?.status === 'pending'));
-    const message = pendingContext ? (pending ? verdict?.message : prepare?.message)
-      : requiresProvider && currentProvider?.status !== 'ready' ? currentProvider?.message : verdict?.message;
-    const guide = selectedPlatform === 'android' ? androidGuide : prerequisiteGuide.split(`## ${label}\n`)[1]?.split('\n## ')[0];
+    const message = pendingContext ? (pending ? verdict?.message : prepare?.message) : verdict?.message;
+    const guide = selectedPlatform === 'android' ? androidGuide : prerequisiteGuide.replaceAll('\r\n', '\n').split(`## ${label}\n`)[1]?.split('\n## ')[0];
     return <section className="preflight preflight--macos" aria-labelledby={titleId} aria-busy={loading}>
       <div className="preflight-heading"><h3 id={titleId}>{label ? `${label} environment` : 'Preflight'}</h3><button type="button" className="button" disabled={loading||locked||!onRecheck} onClick={onRecheck}>{loading?'Checking…':'Recheck environment'}</button></div>
       <div className={`preflight-summary${ready && !loading ? ' preflight-summary--ready' : pending ? ' preflight-summary--pending' : ''}`} role="status">
@@ -59,7 +57,7 @@ export function PreflightStatus({ mode, workspace, provider, target, strict, req
       {!loading && current && <ul>
         {pendingContext && <PreflightItem label="Target" record={current.target} loading={false}/>}
         <PreflightItem label="Workspace" record={pendingContext ? current.workspace : workspace} loading={false}/>
-        <PreflightItem label={mode==='explore'||requiresProvider?'Provider':'Strict runner'} record={mode==='explore'||requiresProvider?currentProvider:strict} loading={false}/>
+        <PreflightItem label={mode === 'explore' ? 'Provider' : 'Strict runner'} record={mode === 'explore' ? currentProvider : strict} loading={false}/>
       </ul>}
       {onRepair && <button className="button prerequisite-repair" type="button" disabled={locked||loading} onClick={onRepair}>Edit target configuration</button>}
       {guide && <details className="prerequisite-guide"><summary>{label} installation and troubleshooting</summary><ReactMarkdown>{guide}</ReactMarkdown></details>}
@@ -72,7 +70,7 @@ export function PreflightStatus({ mode, workspace, provider, target, strict, req
     <ul>
       <PreflightItem label="Target" record={target} loading={loading} />
       <PreflightItem label="Workspace" record={workspace} loading={loading} />
-      <PreflightItem label={mode === 'explore' || requiresProvider ? 'Provider' : 'Strict runner'} record={mode === 'explore' || requiresProvider ? provider : strict} loading={loading} />
+      <PreflightItem label={mode === 'explore' ? 'Provider' : 'Strict runner'} record={mode === 'explore' ? provider : strict} loading={loading} />
     </ul>
   </section>;
 }

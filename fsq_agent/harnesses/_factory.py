@@ -133,6 +133,10 @@ class _HarnessFactoryImplementation:
                 if platform == "ios"
                 else harness_settings.macos.visual_assertion_policy
                 if platform == "macos"
+                else harness_settings.web.visual_assertion_policy
+                if platform == "web"
+                else harness_settings.windows.visual_assertion_policy
+                if platform == "windows"
                 else None
             )
             return harness_type(

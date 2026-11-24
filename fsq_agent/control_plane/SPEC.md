@@ -27,7 +27,7 @@ The module must not import `cli`, `capabilities`, module-private `_*.py` files f
 Current `__init__.py` exports via explicit `__all__`:
 
 - `ControlPlaneServer`: Local HTTP/static server wrapper with registry-backed workspace management and one workspace-aware Devices in-memory task state.
-- `ControlPlaneServerOptions`: Host, port, open-browser flag, optional static-path override, and optional user-config-root override used by tests.
+- `ControlPlaneServerOptions`: Host, port, open-browser flag, optional static-path override, optional user-config-root override used by tests, and optional trusted in-process `visual_assertion_policy_resolver(context, capture_sequence)` for Strict Runs. The resolver is not accepted from HTTP, YAML, or user Provider configuration. Absent or negative frame authorization allows no image upload.
 - `run_control_plane(options: ControlPlaneServerOptions) -> None`: Blocking server entry used by CLI.
 
 The public HTTP prefix is `/api/control-plane`.
@@ -267,7 +267,7 @@ Static serving rejects path traversal and cross-entry fallback. Missing generate
 - Each Case Manager Devices run request names a registered workspace and explicit configured platform; Quick Test obtains its registered identity and selected platform from Application preparation. Exact platform settings and roots are reloaded and frozen per run. Later browser selection or platform configuration changes do not mutate active state.
 - Exactly one task may be active across preparation, execution, and finalization.
 - Run-start validation is authoritative even when discovery/readiness data was previously returned to a client.
-- Provider readiness blocks Explore on every platform and Web/Windows Strict cases containing `assertWithAI`, while Android and macOS Strict cases containing `assertWithAI` remain runnable without Provider readiness and record recognized incomplete `provider_unavailable` steps; provider-free Strict cases never require Provider readiness.
+- Provider readiness blocks Explore on every platform, while Strict cases containing `assertWithAI` across all five platforms remain runnable without Provider readiness and record recognized incomplete `provider_unavailable` steps; provider-free Strict cases never require Provider readiness.
 - Automatic live evidence uses `screenshot` (with normalized `ui_snapshot` projected when explicitly captured); UI labels do not change artifact semantics.
 - Per-step comparison and replay use persisted artifact metadata without changing automatic capture policy or inventing evidence.
 - Control Plane stores browser-generated replay videos but does not generate or transcode media in Python.

@@ -4,6 +4,11 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+- Windows verifies foreground ownership before sending input. Screenshots render only the bound window, without reading the desktop or separate top-level popups.
+- Windows and macOS UI snapshots redact credentials before XML escaping, withhold protected values, and enforce their output caps. Run evidence shares cycle- and depth-safe redaction.
+- Evidence distinguishes unstarted targets from capture failures and does not require a post-action frame when preparation aborted. Explore downgrades a capture failure to a warning only after an explicitly linked retry of the same operation with complete evidence; no operation retries automatically. Managed completion reports the frozen status and summary.
+- Visual assertions reject blank frames before sending images to a Provider. Windows and Web use the scoped five-platform `passed` / `failed` / `inconclusive` contract and reuse the authorized prepare frame. Web reasoned full-page assertions capture below the fold. `assertWithAI` requires `assertion`, `surface`, and an image region or `full_screen_reason`; the old `prompt` form is rejected. Strict replay, including Devices, runs without a provider and records visual assertions as unverified. Windows and Web support read-only `inspectWithAI` extraction; Windows also supports bound-window `point` pointer actions (`clickOn`, `doubleClickOn`, `rightClickOn`, `hoverOn`, `scrollOn`), verified 1:1 `inspectWithAI(mode="locate")`, and local `sampleColor`, while Web coordinate lookup remains unavailable.
+
 ## [0.4.0]
 
 - Pin `appium-connect-agent==0.1.5` from PyPI. Finder-anchored and other native-target macOS sessions use guarded SDK desktop input without dispatching through the WDA host; input delivery and document verification remain separate.

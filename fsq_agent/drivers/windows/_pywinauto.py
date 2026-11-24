@@ -5,26 +5,42 @@ import json
 import ntpath
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from functools import cache
 from math import ceil, hypot
 from pathlib import Path
 from typing import Any, TypeVar
+from xml.etree import ElementTree
 
 from pydantic import BaseModel
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _windows_driver_tool
+from fsq_agent.drivers._color_sample import LocalColorSampleError, _sample_local_png_color
+from fsq_agent.drivers._host_visual_inspection import _run_host_visual_inspection
+from fsq_agent.drivers._tree_compaction import (
+    DEFAULT_SNAPSHOT_TEXT_LIMIT_CHARS,
+    TreeCompactionPolicy,
+    build_compacted_envelope,
+    compact_xml_element_tree,
+    empty_compacted_envelope,
+    sanitize_xml_tag,
+    unparsed_fallback_envelope,
+)
 from fsq_agent.models import (
     ConfigurationError,
+    SampleColorParams,
     WindowsAssertVisibleParams,
     WindowsAssertWithAIParams,
     WindowsClickOnParams,
     WindowsDoubleClickOnParams,
     WindowsDragToParams,
     WindowsHoverOnParams,
+    WindowsInspectWithAIParams,
     WindowsKillAppParams,
     WindowsLaunchAppParams,
     WindowsPressKeyParams,
@@ -37,12 +53,69 @@ from fsq_agent.models import (
 DEFAULT_WINDOWS_WAIT_TIMEOUT_SECONDS = 10.0
 WINDOW_READY_TIMEOUT_SECONDS = 30.0
 WINDOW_LAUNCH_WAIT_FOR = "exists visible enabled"
-UI_SNAPSHOT_MAX_DEPTH = 20
-UI_SNAPSHOT_MAX_NODES = 1200
-UI_SNAPSHOT_MAX_CHILDREN = 60
-UI_SNAPSHOT_MAX_BYTES = 800000
+UI_SNAPSHOT_MAX_DEPTH = 48
+UI_SNAPSHOT_MAX_NODES = 2500
+UI_SNAPSHOT_MAX_CHILDREN = 250
+UI_SNAPSHOT_MAX_XML_CHARS = 80_000
+WINDOWS_COMPACT_DEPTH_STEPDOWNS = (24, 16, 12, 8, 6)
+WINDOWS_COMPACT_SIBLING_STEPDOWNS = (None, 120, 60, 30, 15)
 MOUSE_DRAG_STEP_PIXELS = 15
+SW_RESTORE = 9
+SW_SHOWNOACTIVATE = 4
+SW_SHOWMINNOACTIVE = 7
+GW_OWNER = 4
+PW_RENDERFULLCONTENT = 0x00000002
+BI_RGB = 0
+DIB_RGB_COLORS = 0
+WINDOWS_INTERACTIVE_CONTROL_TYPES = frozenset(
+    {
+        "Button",
+        "CheckBox",
+        "ComboBox",
+        "DataItem",
+        "Document",
+        "Edit",
+        "Hyperlink",
+        "ListItem",
+        "MenuItem",
+        "PasswordBox",
+        "RadioButton",
+        "ScrollBar",
+        "Slider",
+        "Spinner",
+        "SplitButton",
+        "TabItem",
+        "TreeItem",
+    }
+)
+
+
+def _is_windows_password_tag_or_attrs(tag: str, attribs: Any) -> bool:
+    if tag == "PasswordBox" or attribs.get("control_type") == "PasswordBox":
+        return True
+    if str(attribs.get("_secure", "")).lower() == "true":
+        return True
+    return "password" in str(attribs.get("class_name", "")).lower()
+
+
+WINDOWS_SNAPSHOT_POLICY = TreeCompactionPolicy(
+    empty_root_tag="Window",
+    interactive_tags=WINDOWS_INTERACTIVE_CONTROL_TYPES,
+    identity_attribute_keys=frozenset({"automation_id", "title", "value"}),
+    semantic_attribute_keys=frozenset({"automation_id", "title", "value", "control_type"}),
+    text_attribute_keys=frozenset({"title", "value"}),
+    state_defaults={
+        "enabled": "true",
+        "visible": "true",
+        "selected": "false",
+        "checked": "false",
+        "focused": "false",
+    },
+    text_limit_chars=DEFAULT_SNAPSHOT_TEXT_LIMIT_CHARS,
+    secure_tag_predicate=_is_windows_password_tag_or_attrs,
+)
 _T = TypeVar("_T")
+_WindowRect = tuple[int, int, int, int]
 _HOST_FRAME_EXECUTABLE = "applicationframehost.exe"
 
 
@@ -52,6 +125,17 @@ def _normalize_windows_executable_path(raw_path: str) -> str:
         with suppress(OSError):
             expanded = os.path.realpath(expanded)
     return ntpath.normpath(expanded.replace("/", "\\")).casefold()
+
+
+@cache
+def _get_window_api() -> Any:
+    import ctypes
+    from ctypes import wintypes
+
+    get_window = ctypes.WinDLL("user32", use_last_error=True).GetWindow
+    get_window.argtypes = [wintypes.HWND, wintypes.UINT]
+    get_window.restype = wintypes.HWND
+    return get_window
 
 
 class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
@@ -77,7 +161,11 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._pre_existing_handles: set[int] = set()
         self._pre_existing_pids: set[int] = set()
         self._owns_process: bool = False
+        self._snapshot_secret_values: tuple[str, ...] = ()
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fsq-pywinauto")
+
+    def configure_snapshot_redaction(self, private_values: tuple[str, ...]) -> None:
+        self._snapshot_secret_values = private_values
 
     def context(self) -> dict[str, object]:
         return self._run_sync(self._context_payload)
@@ -92,6 +180,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 "backend_kind": self.backend_kind,
                 "app_path_configured": self.app_path is not None,
                 "window_title_re_configured": self.window_title_re is not None,
+                "app_launched": self._launched or (self.app_path is None and self.window_title_re is not None),
             },
         }
 
@@ -123,7 +212,8 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._pre_existing_pids = pre_matching_pids
         self._owns_process = len(pre_matching_pids) == 0
         try:
-            self._resolve_main_window(wait=True, wait_for=WINDOW_LAUNCH_WAIT_FOR)
+            window = self._resolve_main_window(wait=True, wait_for=WINDOW_LAUNCH_WAIT_FOR)
+            self._ensure_window_foreground(window)
         except BaseException:
             with suppress(Exception):
                 self._cleanup_owned_target()
@@ -170,13 +260,15 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             target_norm = _normalize_windows_executable_path(self.app_path)
             direct_candidates: list[tuple[int, int, bool]] = []
             host_frame_candidates: list[int] = []
-            top_query: dict[str, Any] = {"title_re": self.window_title_re, "visible_only": True}
+            top_query: dict[str, Any] = {"title_re": self.window_title_re, "visible_only": self.backend_kind != "uia"}
             if self.backend_kind == "uia":
                 top_query["control_type"] = "Window"
             for elem in self._list_top_windows(**top_query):
                 hwnd = getattr(elem, "handle", None)
                 pid = getattr(elem, "process_id", None)
                 if not isinstance(hwnd, int) or not isinstance(pid, int):
+                    continue
+                if self.backend_kind == "uia" and not self._is_candidate_top_window_visible_or_minimized(elem, hwnd):
                     continue
                 is_started_pid = self._launched_pid is not None and pid == self._launched_pid
                 exe_norm = self._safe_normalized_process_path(pid)
@@ -199,20 +291,56 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             raise LookupError("No visible top-level window matched the configured Windows executable.")
 
         if self.window_title_re:
+            connected, window = self._connect_window_by_title_re(application_cls, wait_for=wait_for, timeout=timeout)
+            resolved_handle = self._extract_window_handle(window)
+            return connected, window, resolved_handle, False
+        raise LookupError("Neither Windows app_path nor window_title_re is configured.")
+
+    def _connect_window_by_title_re(self, application_cls: Any, *, wait_for: str, timeout: int) -> tuple[object, object]:
+        window_kwargs: dict[str, Any] = {"title_re": self.window_title_re}
+        if self.backend_kind == "uia":
+            window_kwargs["control_type"] = "Window"
+        try:
             connected = application_cls(backend=self.backend_kind).connect(title_re=self.window_title_re)
-            window_kwargs: dict[str, Any] = {"title_re": self.window_title_re}
-            if self.backend_kind == "uia":
-                window_kwargs["control_type"] = "Window"
             window = connected.window(**window_kwargs)
             window.wait(wait_for, timeout=timeout)
-            return connected, window, None, False
-        raise LookupError("Neither Windows app_path nor window_title_re is configured.")
+        except Exception as primary_error:
+            if self.backend_kind != "uia" or sys.platform != "win32":
+                raise
+            try:
+                iconic_candidates = [getattr(elem, "handle", None) for elem in self._list_top_windows(title_re=self.window_title_re, control_type="Window", visible_only=False)]
+            except ConfigurationError:
+                raise primary_error from None
+            for hwnd in iconic_candidates:
+                if isinstance(hwnd, int) and self._is_win32_window(hwnd) and self._is_window_iconic(hwnd) and self._is_win32_window_visible(hwnd):
+                    resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for, timeout=timeout)
+                    if resolved is not None:
+                        return resolved
+            raise
+        return connected, window
+
+    def _is_candidate_top_window_visible_or_minimized(self, elem: Any, hwnd: int) -> bool:
+        elem_visible = getattr(elem, "visible", None)
+        if callable(elem_visible):
+            elem_visible = self._safe_call(elem_visible)
+        if elem_visible is True:
+            return True
+        if self._is_win32_window(hwnd):
+            return self._is_window_iconic(hwnd) or self._is_win32_window_visible(hwnd)
+        return elem_visible is not False
+
+    def _effective_wait_for(self, wait_for: str, hwnd: int) -> str:
+        if self._is_win32_window(hwnd) and self._is_window_iconic(hwnd):
+            parts = [state_name for state_name in wait_for.split() if state_name != "visible"]
+            return " ".join(parts) or "exists"
+        return wait_for
 
     def _try_connect_window_handle(self, application_cls: Any, handle: int, *, wait_for: str, timeout: int) -> tuple[object, object] | None:
         try:
             connected = application_cls(backend=self.backend_kind).connect(handle=handle)
             window = connected.window(handle=handle)
-            window.wait(wait_for, timeout=timeout)
+            effective_wait = self._effective_wait_for(wait_for, handle)
+            window.wait(effective_wait, timeout=timeout)
         except Exception:  # noqa: BLE001 - candidate handle may have closed or become hidden mid-probe.
             return None
         return connected, window
@@ -277,34 +405,62 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._pre_existing_pids = set()
         self._owns_process = False
 
-    @_windows_driver_tool("clickOn", description="Click a Windows control resolved from the UI snapshot.")
+    @_windows_driver_tool("clickOn", description="Click a Windows control or explicit screen point.")
     def click_on(self, params: WindowsClickOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._click_on(params))
 
     def _click_on(self, params: WindowsClickOnParams) -> dict[str, object]:
-        control = self._control(params)
+        hwnd = self._ensure_window_foreground_if_configured()
         button = params.button or "left"
+        if params.point is not None:
+            coords = self._validated_pointer_point(params.point.x, params.point.y, hwnd)
+            mouse = self._mouse_module()
+            self._require_foreground(hwnd)
+            if params.double:
+                mouse.double_click(coords=coords, button=button)
+            else:
+                mouse.click(coords=coords, button=button)
+            return self._passed()
+        control = self._control(params)
+        self._require_foreground(hwnd)
         if params.double:
             control.double_click_input(button=button)
         else:
             control.click_input(button=button)
         return self._passed()
 
-    @_windows_driver_tool("doubleClickOn", description="Double-click a Windows control.")
+    @_windows_driver_tool("doubleClickOn", description="Double-click a Windows control or explicit screen point.")
     def double_click_on(self, params: WindowsDoubleClickOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._double_click_on(params))
 
     def _double_click_on(self, params: WindowsDoubleClickOnParams) -> dict[str, object]:
+        hwnd = self._ensure_window_foreground_if_configured()
+        button = params.button or "left"
+        if params.point is not None:
+            coords = self._validated_pointer_point(params.point.x, params.point.y, hwnd)
+            mouse = self._mouse_module()
+            self._require_foreground(hwnd)
+            mouse.double_click(coords=coords, button=button)
+            return self._passed()
         control = self._control(params)
-        control.double_click_input(button=params.button or "left")
+        self._require_foreground(hwnd)
+        control.double_click_input(button=button)
         return self._passed()
 
-    @_windows_driver_tool("rightClickOn", description="Right-click a Windows control.")
+    @_windows_driver_tool("rightClickOn", description="Right-click a Windows control or explicit screen point.")
     def right_click_on(self, params: WindowsRightClickOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._right_click_on(params))
 
     def _right_click_on(self, params: WindowsRightClickOnParams) -> dict[str, object]:
+        hwnd = self._ensure_window_foreground_if_configured()
+        if params.point is not None:
+            coords = self._validated_pointer_point(params.point.x, params.point.y, hwnd)
+            mouse = self._mouse_module()
+            self._require_foreground(hwnd)
+            mouse.click(coords=coords, button="right")
+            return self._passed()
         control = self._control(params)
+        self._require_foreground(hwnd)
         control.click_input(button="right")
         return self._passed()
 
@@ -313,11 +469,18 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         return self._run_sync(lambda: self._type_text(params))
 
     def _type_text(self, params: WindowsTypeTextParams) -> dict[str, object]:
+        hwnd = self._ensure_window_foreground_if_configured()
         control = self._control(params)
+        self._require_foreground(hwnd)
         control.click_input()
+        if hwnd is not None:
+            self._require_foreground(hwnd)
+            control.set_focus()
         if params.clear:
-            control.type_keys("^a{BACKSPACE}", with_spaces=True)
-        control.type_keys(params.text, with_spaces=True)
+            self._require_foreground(hwnd)
+            control.type_keys("^a{BACKSPACE}", with_spaces=True, set_foreground=hwnd is None)
+        self._require_foreground(hwnd)
+        control.type_keys(params.text, with_spaces=True, set_foreground=hwnd is None)
         return self._passed()
 
     @_windows_driver_tool("pressKey", description="Send a keyboard key sequence to the active Windows window.")
@@ -325,26 +488,32 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         return self._run_sync(lambda: self._press_key(params))
 
     def _press_key(self, params: WindowsPressKeyParams) -> dict[str, object]:
-        window = self._require_window()
-        window.type_keys(params.key, with_spaces=True, set_foreground=True)
+        window, hwnd = self._ensure_window_foreground()
+        window.type_keys(params.key, with_spaces=True, set_foreground=hwnd is None)
         return self._passed({"key": params.key})
 
-    @_windows_driver_tool("hoverOn", description="Move the mouse over a Windows control.")
+    @_windows_driver_tool("hoverOn", description="Move the mouse over a Windows control or explicit screen point.")
     def hover_on(self, params: WindowsHoverOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._hover_on(params))
 
     def _hover_on(self, params: WindowsHoverOnParams) -> dict[str, object]:
-        point = self._control_center(self._control(params))
-        self._mouse_module().move(coords=point)
+        hwnd = self._ensure_window_foreground_if_configured()
+        point = self._validated_pointer_point(params.point.x, params.point.y, hwnd) if params.point is not None else self._control_center(self._control(params))
+        mouse = self._mouse_module()
+        self._require_foreground(hwnd)
+        mouse.move(coords=point)
         return self._passed()
 
-    @_windows_driver_tool("scrollOn", description="Scroll over a Windows control.")
+    @_windows_driver_tool("scrollOn", description="Scroll over a Windows control or explicit screen point.")
     def scroll_on(self, params: WindowsScrollOnParams) -> dict[str, object]:
         return self._run_sync(lambda: self._scroll_on(params))
 
     def _scroll_on(self, params: WindowsScrollOnParams) -> dict[str, object]:
-        point = self._control_center(self._control(params))
-        self._mouse_module().scroll(coords=point, wheel_dist=params.wheel_dist)
+        hwnd = self._ensure_window_foreground_if_configured()
+        point = self._validated_pointer_point(params.point.x, params.point.y, hwnd) if params.point is not None else self._control_center(self._control(params))
+        mouse = self._mouse_module()
+        self._require_foreground(hwnd)
+        mouse.scroll(coords=point, wheel_dist=params.wheel_dist)
         return self._passed()
 
     @_windows_driver_tool("dragTo", description="Drag between Windows controls or points.")
@@ -352,22 +521,32 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         return self._run_sync(lambda: self._drag_to(params))
 
     def _drag_to(self, params: WindowsDragToParams) -> dict[str, object]:
-        start = self._mouse_source_point(params)
-        end = self._mouse_destination_point(params, start)
+        hwnd = self._ensure_window_foreground_if_configured()
+        start = self._mouse_source_point(params, hwnd=hwnd)
+        self._require_foreground(hwnd)
+        end = self._mouse_destination_point(params, start, hwnd=hwnd)
         mouse = self._mouse_module()
+        self._require_foreground(hwnd)
         pressed = False
         try:
             mouse.press(coords=start, button=params.mouse_button)
             pressed = True
             for point in self._drag_path(start, end):
+                self._require_foreground(hwnd)
                 mouse.move(coords=point)
+            self._require_foreground(hwnd)
             mouse.release(coords=end, button=params.mouse_button)
             pressed = False
         finally:
             if pressed:
-                # Best-effort mouse cleanup crosses pywinauto and injected fake backends with no shared error type.
+                # Release an already pressed button without moving to the drag destination on failure.
                 with suppress(Exception):
-                    mouse.release(coords=end, button=params.mouse_button)
+                    cleanup_point = end
+                    if hwnd is not None:
+                        from win32api import GetCursorPos
+
+                        cleanup_point = GetCursorPos()
+                    mouse.release(coords=cleanup_point, button=params.mouse_button)
         return self._passed()
 
     @_windows_driver_tool("assertVisible", description="Assert that a Windows control is visible.")
@@ -380,7 +559,40 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             return self._passed()
         return self._target_missing(params)
 
-    @_windows_driver_tool("assertWithAI", description="Evaluate an explicit Windows visual assertion with AI.")
+    @_windows_driver_tool("inspectWithAI", description="Read pixel-only Windows visual content or locate visual candidates without performing an action.")
+    def inspect_with_ai(self, params: WindowsInspectWithAIParams) -> dict[str, object]:
+        return _run_host_visual_inspection(self, params, platform="windows")
+
+    @_windows_driver_tool("sampleColor", description="Measure exact local RGB from a current Windows frame point or region without uploading an image.")
+    def sample_color(self, params: SampleColorParams) -> dict[str, object]:
+        return self._run_sync(lambda: self._sample_color_impl(params))
+
+    def _sample_color_impl(self, params: SampleColorParams) -> dict[str, object]:
+        try:
+            png_bytes, window_rect, pointer_size = self._capture_visual_frame_with_mapping()
+            output = _sample_local_png_color(
+                png_bytes,
+                params,
+                window_rect=window_rect,
+                pointer_size=pointer_size,
+            )
+            return self._passed(output)
+        except ConfigurationError:
+            raise
+        except LocalColorSampleError as exc:
+            return self._failed(
+                "observation_error",
+                "Windows color sampling failed.",
+                metadata={"stage": "sample_color", "error_type": type(exc).__name__, "reason": exc.code},
+            )
+        except Exception as exc:  # noqa: BLE001 - observation failures are normalized without leaking raw buffers.
+            return self._failed(
+                "observation_error",
+                "Windows color sampling failed.",
+                metadata={"stage": "sample_color", "error_type": type(exc).__name__},
+            )
+
+    @_windows_driver_tool("assertWithAI", description="Evaluate a scoped Windows image-space visual assertion with AI.")
     def assert_with_ai(self, params: WindowsAssertWithAIParams) -> dict[str, object]:
         return self._run_ai_assertion_tool(params)
 
@@ -390,58 +602,137 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
 
     def _ui_snapshot(self) -> dict[str, object]:
         window = self._require_window()
-        state = {"count": 0, "bytes": 0, "truncated": False}
-        root = self._extract_element(window, depth=0, seen=set(), state=state)
-        return {
-            "snapshot_type": "control_tree",
-            "node_count": state["count"],
-            "byte_size": state["bytes"],
-            "truncated": state["truncated"],
-            "root": root,
-        }
+        state = {"count": 0, "truncated": False}
+        xml_root = self._extract_xml_element(window, depth=0, seen=set(), state=state)
+        if xml_root is None:
+            return empty_compacted_envelope(empty_root_tag="Window", max_depth=UI_SNAPSHOT_MAX_DEPTH, max_xml_chars=UI_SNAPSHOT_MAX_XML_CHARS)
+        try:
+            compacted = compact_xml_element_tree(
+                xml_root,
+                policy=WINDOWS_SNAPSHOT_POLICY,
+                secret_values=self._snapshot_secret_values,
+                max_depth=UI_SNAPSHOT_MAX_DEPTH,
+                max_xml_chars=UI_SNAPSHOT_MAX_XML_CHARS,
+                depth_stepdowns=WINDOWS_COMPACT_DEPTH_STEPDOWNS,
+                sibling_stepdowns=WINDOWS_COMPACT_SIBLING_STEPDOWNS,
+            )
+            return build_compacted_envelope(
+                compacted,
+                policy=WINDOWS_SNAPSHOT_POLICY,
+                requested_max_depth=UI_SNAPSHOT_MAX_DEPTH,
+                complete_for_scope=not bool(state["truncated"]),
+                upstream_reason="raw_scan_limit" if state["truncated"] else "requested_scope",
+            )
+        except Exception as exc:  # noqa: BLE001 - safe fallback on unexpected compaction failure.
+            return unparsed_fallback_envelope(
+                xml_root=xml_root,
+                policy=WINDOWS_SNAPSHOT_POLICY,
+                secret_values=self._snapshot_secret_values,
+                max_depth=UI_SNAPSHOT_MAX_DEPTH,
+                max_xml_chars=UI_SNAPSHOT_MAX_XML_CHARS,
+                error=exc,
+            )
 
-    def _extract_element(self, element: Any, *, depth: int, seen: set, state: dict[str, Any]) -> dict[str, Any] | None:
-        if state["count"] >= UI_SNAPSHOT_MAX_NODES or state["bytes"] >= UI_SNAPSHOT_MAX_BYTES:
+    def _extract_xml_element(self, element: Any, *, depth: int, seen: set[Any], state: dict[str, Any]) -> ElementTree.Element | None:
+        if state["count"] >= UI_SNAPSHOT_MAX_NODES:
             state["truncated"] = True
             return None
         runtime_id = self._element_runtime_id(element)
         if runtime_id is not None and runtime_id in seen:
             return None
-        control_type = self._element_attr(element, "control_type")
-        info: dict[str, Any] = {
-            "title": self._safe_call(getattr(element, "window_text", None)),
-            "control_type": control_type,
-            "automation_id": self._element_attr(element, "automation_id"),
-            "class_name": self._element_attr(element, "class_name"),
-            "rectangle": self._element_rectangle(element),
-        }
-        value = self._safe_call(getattr(element, "get_value", None))
-        if isinstance(value, str) and value:
-            info["value"] = value
-        if control_type == "CheckBox":
-            toggle = self._safe_call(getattr(element, "get_toggle_state", None))
-            if isinstance(toggle, int):
-                info["is_checked"] = toggle == 1
-        node_bytes = len(json.dumps(info, ensure_ascii=False, default=str))
-        if state["bytes"] + node_bytes > UI_SNAPSHOT_MAX_BYTES:
-            state["truncated"] = True
-            return None
         if runtime_id is not None:
             seen.add(runtime_id)
         state["count"] += 1
-        state["bytes"] += node_bytes
-        children: list[dict[str, Any]] = []
+
+        raw_control_type = self._element_attr(element, "control_type")
+        fallback_tag = "Window" if depth == 0 else "Control"
+        private_type = bool(raw_control_type and any(secret in raw_control_type for secret in self._snapshot_secret_values if secret))
+        tag, was_sanitized = (fallback_tag, True) if private_type else sanitize_xml_tag(raw_control_type, fallback=fallback_tag)
+        attribs: dict[str, str] = {}
+        if was_sanitized and raw_control_type:
+            attribs["control_type"] = raw_control_type
+
+        is_password = self._is_password_element(element, control_type=raw_control_type)
+        if is_password:
+            attribs["_secure"] = "true"
+
+        automation_id = self._element_attr(element, "automation_id")
+        if automation_id:
+            attribs["automation_id"] = automation_id
+
+        raw_title = self._safe_call(getattr(element, "window_text", None))
+        if not is_password and isinstance(raw_title, str) and raw_title.strip():
+            attribs["title"] = raw_title
+
+        class_name = self._element_attr(element, "class_name")
+        if class_name:
+            attribs["class_name"] = class_name
+
+        if not is_password:
+            value = self._safe_call(getattr(element, "get_value", None))
+            if isinstance(value, str) and value.strip():
+                attribs["value"] = value
+
+        is_enabled = self._safe_call(getattr(element, "is_enabled", None))
+        if type(is_enabled) is bool:
+            attribs["enabled"] = "true" if is_enabled else "false"
+
+        is_visible = self._safe_call(getattr(element, "is_visible", None))
+        if type(is_visible) is bool:
+            attribs["visible"] = "true" if is_visible else "false"
+
+        is_selected = self._safe_call(getattr(element, "is_selected", None))
+        if type(is_selected) is bool:
+            attribs["selected"] = "true" if is_selected else "false"
+
+        if raw_control_type in {"CheckBox", "RadioButton"} or hasattr(element, "get_toggle_state"):
+            toggle = self._safe_call(getattr(element, "get_toggle_state", None))
+            if type(toggle) is int:
+                attribs["checked"] = "true" if toggle == 1 else "false"
+
+        is_focused = self._safe_call(getattr(element, "has_keyboard_focus", None))
+        if type(is_focused) is bool:
+            attribs["focused"] = "true" if is_focused else "false"
+
+        rect = self._element_rectangle(element)
+        if rect is not None:
+            attribs["bounds"] = f"[{rect['left']},{rect['top']}][{rect['right']},{rect['bottom']}]"
+
+        xml_el = ElementTree.Element(tag, attribs)
         if depth < UI_SNAPSHOT_MAX_DEPTH:
-            child_elements = self._safe_call(getattr(element, "children", None)) or []
-            for child in list(child_elements)[:UI_SNAPSHOT_MAX_CHILDREN]:
-                if state["count"] >= UI_SNAPSHOT_MAX_NODES or state["bytes"] >= UI_SNAPSHOT_MAX_BYTES:
+            raw_children = self._safe_call(getattr(element, "children", None)) or []
+            child_list = list(raw_children)
+            if len(child_list) > UI_SNAPSHOT_MAX_CHILDREN:
+                state["truncated"] = True
+            for child in child_list[:UI_SNAPSHOT_MAX_CHILDREN]:
+                if state["count"] >= UI_SNAPSHOT_MAX_NODES:
                     state["truncated"] = True
                     break
-                child_info = self._extract_element(child, depth=depth + 1, seen=seen, state=state)
-                if child_info is not None:
-                    children.append(child_info)
-        info["children"] = children
-        return info
+                child_el = self._extract_xml_element(child, depth=depth + 1, seen=seen, state=state)
+                if child_el is not None:
+                    xml_el.append(child_el)
+        else:
+            raw_children = self._safe_call(getattr(element, "children", None)) or []
+            if raw_children:
+                state["truncated"] = True
+        return xml_el
+
+    def _is_password_element(self, element: Any, *, control_type: str | None) -> bool:
+        if control_type == "PasswordBox":
+            return True
+        class_name = self._element_attr(element, "class_name") or ""
+        if "password" in class_name.lower():
+            return True
+        info = getattr(element, "element_info", None)
+        for holder in (info, getattr(info, "element", None), element):
+            if holder is None:
+                continue
+            for attr_name in ("is_password", "CurrentIsPassword"):
+                attr = getattr(holder, attr_name, None)
+                val = self._safe_call(attr) if callable(attr) else attr
+                if val is True or val == 1:
+                    return True
+        return False
 
     def _safe_call(self, func: Any) -> Any:
         if not callable(func):
@@ -476,11 +767,15 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
     def screenshot(self, params: object | None = None) -> bytes:
         return self._run_sync(self._screenshot)
 
+    def capture_visual_frame_with_mapping(self) -> tuple[bytes, _WindowRect | None, tuple[int, int] | None]:
+        return self._run_sync(self._capture_visual_frame_with_mapping)
+
     def _screenshot(self) -> bytes:
         from io import BytesIO
 
         window = self._require_window()
-        image = window.capture_as_image()
+        hwnd = self._real_window_handle(window)
+        image = self._capture_bound_window(hwnd) if hwnd is not None else window.capture_as_image()
         if image is None:
             raise ConfigurationError(
                 "Windows screenshot capture returned no image. Pillow is required for pywinauto screenshots.",
@@ -489,6 +784,79 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         buffer = BytesIO()
         image.save(buffer, format="PNG")
         return buffer.getvalue()
+
+    def _capture_bound_window(self, hwnd: int) -> Any:
+        target_pid = self._window_process_id(hwnd)
+        if target_pid is None:
+            raise RuntimeError(f"Cannot verify the Windows screenshot target (hwnd={hwnd}).")
+
+        was_iconic = self._is_window_iconic(hwnd)
+        try:
+            if was_iconic:
+                self._restore_window(hwnd, activate=False)
+                if self._is_window_iconic(hwnd):
+                    raise RuntimeError(f"Cannot restore the minimized Windows screenshot target (hwnd={hwnd}).")
+            if self._window_process_id(hwnd) != target_pid:
+                raise RuntimeError(f"Windows screenshot target disappeared or changed ownership (hwnd={hwnd}).")
+            image = self._capture_window_via_print_window(hwnd)
+        finally:
+            if was_iconic and self._window_process_id(hwnd) == target_pid:
+                self._minimize_window_no_activate(hwnd)
+                if not self._is_window_iconic(hwnd):
+                    raise RuntimeError(f"Cannot return the Windows screenshot target to its minimized state (hwnd={hwnd}).")
+        if self._window_process_id(hwnd) != target_pid:
+            image.close()
+            raise RuntimeError(f"Windows screenshot target disappeared or changed ownership (hwnd={hwnd}).")
+        return image
+
+    def _capture_visual_frame_with_mapping(self) -> tuple[bytes, _WindowRect | None, tuple[int, int] | None]:
+        from io import BytesIO
+
+        window = self._require_window()
+        hwnd = self._real_window_handle(window)
+        if hwnd is None:
+            image = window.capture_as_image()
+            if image is None:
+                raise ConfigurationError(
+                    "Windows screenshot capture returned no image. Pillow is required for pywinauto screenshots.",
+                    context={"action": "Reinstall or repair fsq-agent."},
+                )
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            return buffer.getvalue(), self._wrapper_window_rect(window), self._primary_screen_size(window)
+
+        target_pid = self._window_process_id(hwnd)
+        if target_pid is None:
+            raise RuntimeError(f"Cannot verify the Windows screenshot target (hwnd={hwnd}).")
+
+        was_iconic = self._is_window_iconic(hwnd)
+        active_rect: _WindowRect | None = None
+        try:
+            if was_iconic:
+                self._restore_window(hwnd, activate=False)
+                if self._is_window_iconic(hwnd):
+                    raise RuntimeError(f"Cannot restore the minimized Windows screenshot target (hwnd={hwnd}).")
+            if self._window_process_id(hwnd) != target_pid:
+                raise RuntimeError(f"Windows screenshot target disappeared or changed ownership (hwnd={hwnd}).")
+            rect_before = self._win32_window_rect(hwnd)
+            image = self._capture_window_via_print_window(hwnd)
+            rect_after = self._win32_window_rect(hwnd)
+            if not was_iconic and rect_before is not None and rect_before == rect_after:
+                active_rect = rect_after
+        finally:
+            if was_iconic and self._window_process_id(hwnd) == target_pid:
+                self._minimize_window_no_activate(hwnd)
+                if not self._is_window_iconic(hwnd):
+                    raise RuntimeError(f"Cannot return the Windows screenshot target to its minimized state (hwnd={hwnd}).")
+        if self._window_process_id(hwnd) != target_pid:
+            image.close()
+            raise RuntimeError(f"Windows screenshot target disappeared or changed ownership (hwnd={hwnd}).")
+
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        png_bytes = buffer.getvalue()
+        pointer_size = self._primary_screen_size(window) if active_rect is not None else None
+        return png_bytes, active_rect, pointer_size
 
     def close(self) -> None:
         try:
@@ -557,6 +925,8 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             win32api.CloseHandle(handle)
 
     def _mouse_module(self) -> Any:
+        if not self._has_window_target():
+            raise RuntimeError("Windows mouse actions require a configured target window.")
         try:
             from pywinauto import mouse
         except ImportError as exc:
@@ -573,25 +943,63 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         x, y = midpoint
         return int(x), int(y)
 
-    def _mouse_source_point(self, params: WindowsDragToParams) -> tuple[int, int]:
+    def _validated_pointer_point(self, x: int, y: int, hwnd: int | None) -> tuple[int, int]:
+        if not self._has_window_target():
+            return int(x), int(y)
+        window = self._require_window()
+        rect = self._win32_window_rect(hwnd) if hwnd is not None else self._wrapper_window_rect(window)
+        if rect is None:
+            raise LookupError("Cannot verify the active bound Windows rectangle for explicit pointer coordinates.")
+        left, top, right, bottom = rect
+        if right <= left or bottom <= top:
+            raise LookupError(f"Windows bound window has non-positive bounds ({left}, {top}, {right}, {bottom}).")
+        if not (left <= x < right and top <= y < bottom):
+            raise LookupError(f"Windows pointer coordinate ({x}, {y}) is outside the bound window bounds ({left}, {top}, {right}, {bottom}).")
+        return int(x), int(y)
+
+    def _wrapper_window_rect(self, window: Any) -> _WindowRect | None:
+        rect = self._element_rectangle(window)
+        if rect is None:
+            return None
+        return rect["left"], rect["top"], rect["right"], rect["bottom"]
+
+    def _primary_screen_size(self, window: Any = None) -> tuple[int, int] | None:
+        if os.name == "nt":
+            with suppress(Exception):
+                import ctypes
+
+                user32 = ctypes.windll.user32
+                width = int(user32.GetSystemMetrics(0))
+                height = int(user32.GetSystemMetrics(1))
+                if width > 0 and height > 0:
+                    return width, height
+        if window is not None:
+            rect = self._wrapper_window_rect(window)
+            if rect is not None and rect[2] > 0 and rect[3] > 0:
+                return max(rect[2], rect[2] - rect[0]), max(rect[3], rect[3] - rect[1])
+        return None
+
+    def _mouse_source_point(self, params: WindowsDragToParams, *, hwnd: int | None = None) -> tuple[int, int]:
         if params.source.locator is not None:
             locator = params.source.locator.model_dump(mode="python", exclude_none=True)
             return self._control_center(self._control_from_kwargs(locator))
         point = params.source.point
         if point is None:
             raise ValueError("Windows drag source is missing.")
-        return point.x, point.y
+        return self._validated_pointer_point(point.x, point.y, hwnd)
 
-    def _mouse_destination_point(self, params: WindowsDragToParams, start: tuple[int, int]) -> tuple[int, int]:
+    def _mouse_destination_point(self, params: WindowsDragToParams, start: tuple[int, int], *, hwnd: int | None = None) -> tuple[int, int]:
         destination = params.destination
         if destination.locator is not None:
             locator = destination.locator.model_dump(mode="python", exclude_none=True)
             return self._control_center(self._control_from_kwargs(locator))
         if destination.point is not None:
-            return destination.point.x, destination.point.y
+            return self._validated_pointer_point(destination.point.x, destination.point.y, hwnd)
         offset = destination.offset
         if offset is None:
             raise ValueError("Windows drag destination is missing.")
+        if params.source.point is not None:
+            return self._validated_pointer_point(start[0] + offset.x, start[1] + offset.y, hwnd)
         return start[0] + offset.x, start[1] + offset.y
 
     def _drag_path(self, start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
@@ -604,6 +1012,341 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             )
             for index in range(1, steps + 1)
         ]
+
+    def _extract_window_handle(self, window: Any = None) -> int | None:
+        if window is not None:
+            direct = getattr(window, "handle", None)
+            if isinstance(direct, int) and direct > 0:
+                return direct
+            info = getattr(window, "element_info", None)
+            info_handle = getattr(info, "handle", None)
+            if isinstance(info_handle, int) and info_handle > 0:
+                return info_handle
+            wrapper_fn = getattr(window, "wrapper_object", None)
+            if callable(wrapper_fn):
+                wrapper = self._safe_call(wrapper_fn)
+                if wrapper is not None and wrapper is not window:
+                    wrapped_handle = getattr(wrapper, "handle", None)
+                    if isinstance(wrapped_handle, int) and wrapped_handle > 0:
+                        return wrapped_handle
+                    wrapped_info = getattr(getattr(wrapper, "element_info", None), "handle", None)
+                    if isinstance(wrapped_info, int) and wrapped_info > 0:
+                        return wrapped_info
+        if isinstance(self._bound_handle, int) and self._bound_handle > 0:
+            return self._bound_handle
+        return None
+
+    def _real_window_handle(self, window: Any) -> int | None:
+        hwnd = self._extract_window_handle(window)
+        if hwnd is not None and self._is_win32_window(hwnd):
+            return hwnd
+        if type(window).__module__.startswith("pywinauto."):
+            raise RuntimeError(f"The Windows target no longer has a valid native window handle (hwnd={hwnd}).")
+        # Injected wrappers may not have a native window at all.
+        return None
+
+    def _has_window_target(self) -> bool:
+        if self.app_path is not None or self.window_title_re is not None or self._bound_handle is not None:
+            return True
+        return "_resolve_main_window" in self.__dict__ or "_require_window" in self.__dict__
+
+    def _ensure_window_foreground_if_configured(self) -> int | None:
+        if not self._has_window_target():
+            return None
+        _, hwnd = self._ensure_window_foreground()
+        return hwnd
+
+    def _ensure_window_foreground(self, window: Any = None) -> tuple[Any, int | None]:
+        if window is None:
+            window = self._require_window()
+        hwnd = self._real_window_handle(window)
+        if hwnd is not None:
+            if self._is_window_iconic(hwnd):
+                self._restore_window(hwnd)
+        else:
+            is_minimized = getattr(window, "is_minimized", None)
+            restore = getattr(window, "restore", None)
+            minimized = bool(is_minimized()) if callable(is_minimized) else bool(is_minimized)
+            if minimized and callable(restore):
+                restore()
+        set_focus = getattr(window, "set_focus", None)
+        if callable(set_focus):
+            set_focus()
+        self._require_foreground(hwnd)
+        return window, hwnd
+
+    def _require_foreground(self, hwnd: int | None) -> None:
+        if hwnd is None:
+            return
+        if self._bound_handle in (None, hwnd) and not self._is_window_iconic(hwnd):
+            foreground = self._foreground_window_handle()
+            if foreground == hwnd:
+                return
+            target_pid = self._window_process_id(hwnd)
+            if target_pid is not None and self._is_owned_popup(foreground, hwnd, target_pid) and self._foreground_window_handle() == foreground:
+                return
+        raise RuntimeError(f"Could not verify the Windows target or an owned popup as the foreground window (hwnd={hwnd}).")
+
+    def _is_win32_window(self, hwnd: int) -> bool:
+        if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:
+            return False
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        is_window = user32.IsWindow
+        is_window.argtypes = [wintypes.HWND]
+        is_window.restype = wintypes.BOOL
+        return bool(is_window(hwnd))
+
+    def _is_win32_window_visible(self, hwnd: int) -> bool:
+        if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:
+            return False
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        is_visible = user32.IsWindowVisible
+        is_visible.argtypes = [wintypes.HWND]
+        is_visible.restype = wintypes.BOOL
+        return bool(is_visible(hwnd))
+
+    def _is_window_iconic(self, hwnd: int) -> bool:
+        if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:
+            return False
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        is_iconic = user32.IsIconic
+        is_iconic.argtypes = [wintypes.HWND]
+        is_iconic.restype = wintypes.BOOL
+        return bool(is_iconic(hwnd))
+
+    def _restore_window(self, hwnd: int, *, activate: bool = True) -> None:
+        if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        show_window = user32.ShowWindow
+        show_window.argtypes = [wintypes.HWND, ctypes.c_int]
+        show_window.restype = wintypes.BOOL
+        show_window(hwnd, SW_RESTORE if activate else SW_SHOWNOACTIVATE)
+
+    def _minimize_window_no_activate(self, hwnd: int) -> None:
+        if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        show_window = user32.ShowWindow
+        show_window.argtypes = [wintypes.HWND, ctypes.c_int]
+        show_window.restype = wintypes.BOOL
+        show_window(hwnd, SW_SHOWMINNOACTIVE)
+
+    def _foreground_window_handle(self) -> int:
+        if os.name != "nt":
+            return 0
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        get_fg = user32.GetForegroundWindow
+        get_fg.argtypes = []
+        get_fg.restype = wintypes.HWND
+        fg = get_fg()
+        return int(fg) if fg else 0
+
+    def _window_process_id(self, hwnd: int) -> int | None:
+        if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:
+            return None
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        get_pid = user32.GetWindowThreadProcessId
+        get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        get_pid.restype = wintypes.DWORD
+        pid = wintypes.DWORD(0)
+        thread_id = get_pid(hwnd, ctypes.byref(pid))
+        if not thread_id or pid.value <= 0:
+            return None
+        return int(pid.value)
+
+    def _win32_window_rect(self, hwnd: int) -> _WindowRect | None:
+        if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:
+            return None
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        get_rect = user32.GetWindowRect
+        get_rect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        get_rect.restype = wintypes.BOOL
+        rect = wintypes.RECT()
+        if not get_rect(hwnd, ctypes.byref(rect)):
+            return None
+        return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+
+    def _window_owner_handle(self, hwnd: int) -> int:
+        import ctypes
+
+        get_window = _get_window_api()
+        ctypes.set_last_error(0)
+        owner = get_window(hwnd, GW_OWNER)
+        if not owner:
+            error = ctypes.get_last_error()
+            if error:
+                raise ctypes.WinError(error)
+            if not self._is_win32_window(hwnd):
+                raise RuntimeError(f"Window disappeared during Win32 popup ownership check (hwnd={hwnd}).")
+            return 0
+        return int(owner)
+
+    def _is_owned_popup(self, candidate: int, hwnd: int, target_pid: int) -> bool:
+        seen: set[int] = set()
+        while candidate != hwnd:
+            if not candidate or candidate in seen or len(seen) >= 2048 or self._window_process_id(candidate) != target_pid:
+                return False
+            seen.add(candidate)
+            candidate = self._window_owner_handle(candidate)
+        return True
+
+    def _capture_window_via_print_window(self, hwnd: int) -> Any:
+        if os.name != "nt":
+            raise RuntimeError(f"Win32 PrintWindow capture is only supported on Windows (hwnd={hwnd}).")
+        import ctypes
+        from ctypes import wintypes
+
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise ConfigurationError(
+                "Pillow is required for Windows PrintWindow screenshots.",
+                context={"action": "Reinstall or repair fsq-agent."},
+            ) from exc
+
+        class _BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", wintypes.LONG),
+                ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        rect = self._win32_window_rect(hwnd)
+        if rect is None:
+            raise RuntimeError(f"Failed to read window bounds for Win32 PrintWindow capture (hwnd={hwnd}).")
+        width = rect[2] - rect[0]
+        height = rect[3] - rect[1]
+        if width <= 0 or height <= 0:
+            raise RuntimeError(f"Window has non-positive dimensions ({width}x{height}) for Win32 PrintWindow capture (hwnd={hwnd}).")
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        get_window_dc = user32.GetWindowDC
+        get_window_dc.argtypes = [wintypes.HWND]
+        get_window_dc.restype = wintypes.HDC
+
+        release_dc = user32.ReleaseDC
+        release_dc.argtypes = [wintypes.HWND, wintypes.HDC]
+        release_dc.restype = ctypes.c_int
+
+        print_window = user32.PrintWindow
+        print_window.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+        print_window.restype = wintypes.BOOL
+
+        create_compatible_dc = gdi32.CreateCompatibleDC
+        create_compatible_dc.argtypes = [wintypes.HDC]
+        create_compatible_dc.restype = wintypes.HDC
+
+        delete_dc = gdi32.DeleteDC
+        delete_dc.argtypes = [wintypes.HDC]
+        delete_dc.restype = wintypes.BOOL
+
+        create_compatible_bitmap = gdi32.CreateCompatibleBitmap
+        create_compatible_bitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+        create_compatible_bitmap.restype = wintypes.HBITMAP
+
+        select_object = gdi32.SelectObject
+        select_object.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+        select_object.restype = wintypes.HGDIOBJ
+
+        delete_object = gdi32.DeleteObject
+        delete_object.argtypes = [wintypes.HGDIOBJ]
+        delete_object.restype = wintypes.BOOL
+
+        get_di_bits = gdi32.GetDIBits
+        get_di_bits.argtypes = [
+            wintypes.HDC,
+            wintypes.HBITMAP,
+            wintypes.UINT,
+            wintypes.UINT,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            wintypes.UINT,
+        ]
+        get_di_bits.restype = ctypes.c_int
+
+        wnd_dc = None
+        mem_dc = None
+        bitmap = None
+        prev_obj = None
+        try:
+            wnd_dc = get_window_dc(hwnd)
+            if not wnd_dc:
+                raise RuntimeError(f"GetWindowDC failed for Win32 PrintWindow capture (hwnd={hwnd}).")
+            mem_dc = create_compatible_dc(wnd_dc)
+            if not mem_dc:
+                raise RuntimeError(f"CreateCompatibleDC failed for Win32 PrintWindow capture (hwnd={hwnd}).")
+            bitmap = create_compatible_bitmap(wnd_dc, width, height)
+            if not bitmap:
+                raise RuntimeError(f"CreateCompatibleBitmap failed for Win32 PrintWindow capture (hwnd={hwnd}).")
+            prev_obj = select_object(mem_dc, bitmap)
+            if not prev_obj:
+                raise RuntimeError(f"SelectObject failed for Win32 PrintWindow capture (hwnd={hwnd}).")
+            if not print_window(hwnd, mem_dc, PW_RENDERFULLCONTENT):
+                raise RuntimeError(f"Win32 PrintWindow(PW_RENDERFULLCONTENT) failed for the bound window (hwnd={hwnd}).")
+
+            bmi = _BITMAPINFOHEADER()
+            bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+            bmi.biWidth = width
+            bmi.biHeight = -height
+            bmi.biPlanes = 1
+            bmi.biBitCount = 32
+            bmi.biCompression = BI_RGB
+            buf_size = width * height * 4
+            raw_buf = ctypes.create_string_buffer(buf_size)
+            scanlines = get_di_bits(mem_dc, bitmap, 0, height, raw_buf, ctypes.byref(bmi), DIB_RGB_COLORS)
+            if scanlines != height:
+                raise RuntimeError(f"GetDIBits returned {scanlines}/{height} scanlines for Win32 PrintWindow capture (hwnd={hwnd}).")
+            raw_bytes = raw_buf.raw
+        finally:
+            if mem_dc and prev_obj:
+                with suppress(Exception):
+                    select_object(mem_dc, prev_obj)
+            if bitmap:
+                with suppress(Exception):
+                    delete_object(bitmap)
+            if mem_dc:
+                with suppress(Exception):
+                    delete_dc(mem_dc)
+            if wnd_dc:
+                with suppress(Exception):
+                    release_dc(hwnd, wnd_dc)
+
+        return Image.frombuffer("RGBA", (width, height), raw_bytes, "raw", "BGRA", 0, 1).convert("RGB")
 
     def _require_window(self) -> Any:
         return self._resolve_main_window()
@@ -627,14 +1370,15 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         kwargs["found_index"] = (index - 1) if isinstance(index, int) and index >= 1 else 0
         if not kwargs:
             raise LookupError("Windows control query is empty. query_dict={}")
-        control = self._child_window(**kwargs)
+        window = self._require_window()
+        control = self._child_window(window=window, **kwargs)
         if control is not None and control.exists():
             return control.wrapper_object()
         if not isinstance(title, str):
             raise self._control_not_found(kwargs)
         regex_kwargs = {key: value for key, value in kwargs.items() if key != "title"}
         regex_kwargs["title_re"] = title
-        control = self._child_window(**regex_kwargs)
+        control = self._child_window(window=window, **regex_kwargs)
         if control is not None and control.exists():
             return control.wrapper_object()
         raise self._control_not_found(regex_kwargs)
@@ -643,8 +1387,9 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         query_dict = json.dumps(query, ensure_ascii=False, sort_keys=True)
         return LookupError(f"Windows control was not found. query_dict={query_dict}")
 
-    def _child_window(self, **kwargs: Any) -> Any:
-        window = self._require_window()
+    def _child_window(self, *, window: Any = None, **kwargs: Any) -> Any:
+        if window is None:
+            window = self._require_window()
         return window.child_window(**kwargs)
 
     def _window_size(self) -> tuple[int, int] | None:

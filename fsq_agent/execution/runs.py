@@ -8,10 +8,12 @@ import secrets
 import tempfile
 import threading
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fsq_agent.models import RunArtifactIndex, RunMetadata, RunResultSummary, RunRuntime, RunSource, RunStepCounts
+from fsq_agent.core import RuntimeSecretStore
+from fsq_agent.models import RunArtifactIndex, RunMetadata, RunnerStepResult, RunResultSummary, RunRuntime, RunSource, RunStepCounts
 from fsq_agent.report import RunReportService
 
 _TERMINAL = {"success", "failed", "inconclusive", "cancelled", "error"}
@@ -499,27 +501,6 @@ class RunLifecycleService:
             counts[str(step["status"]) if step["status"] in counts else "incomplete"] += 1
         counted = RunStepCounts(total=len(leaves), attempt_count=attempts, **counts)
         first = next((step for step in leaves.values() if step["status"] == "failed" or (step["status"] == "skipped" and (step.get("failure_category") or step.get("step_execution_id")))), None)
-        evidence_errors = [error for step in step_values for error in step.get("evidence_errors", [])]
-        capture_failed = bool(evidence_errors) or any(step.get("failure_category") == "artifact_error" for step in step_values)
-        evidence_failed = capture_failed
-        evidence_failed = evidence_failed or bundle.completeness in {"partial", "unavailable"} or any(ref.availability not in {"available", "not_applicable"} for ref in bundle.artifacts)
-        for step in bundle.steps:
-            policy = step.metadata.get("evidence_policy") or {}
-            if step.step_execution_id is None and step.status in {"skipped", "incomplete"}:
-                continue
-            for phase, enabled in (("prepare", policy.get("capture_before")), ("finalize", policy.get("capture_after"))):
-                if not enabled:
-                    continue
-                refs = [ref for item in step.phase_reports if item.phase == phase for ref in item.artifact_refs]
-                for kind in policy.get("artifact_kinds", []):
-                    if not any(
-                        (ref.kind == kind or ref.metadata.get("requested_kind") == kind or ref.metadata.get("requested_artifact_kind") == kind) and ref.availability in {"available", "not_applicable"}
-                        for ref in refs
-                    ):
-                        evidence_failed = True
-                        capture_failed = True
-                        evidence_errors.append({"step_id": step.step_id, "phase": phase, "kind": kind, "reason": "required_capture_missing"})
-        evidence = {"status": "partial" if evidence_failed else "complete" if step_values else "not_applicable", "errors": evidence_errors, "warnings": bundle.warnings}
         verdict = verification.model_dump(mode="json") if hasattr(verification, "model_dump") else dict(verification or {"status": "not_requested"})
         unverified_assertion = False
         if verdict.get("status") in {"success", "failed", "inconclusive", "not_requested"}:
@@ -542,23 +523,91 @@ class RunLifecycleService:
         outcome = status or ("cancelled" if counts["cancelled"] else "failed" if counts["failed"] else "inconclusive" if counts["incomplete"] or not leaves or not attempts else "success")
         if metadata.mode == "explore" and not status and not counts["cancelled"] and not counts["incomplete"]:
             outcome = verdict.get("status", "inconclusive")
+        cancelled_attempt = any(step.status == "cancelled" or step.action_status == "cancelled" for step in bundle.steps)
         if metadata.mode == "strict" and outcome == "success" and (first is not None or counts["skipped"] or verdict.get("status") == "failed"):
             outcome = "failed" if first is not None or verdict.get("status") == "failed" else "inconclusive"
         if fatal_errors or status == "error":
             outcome = "error"
-        if status == "cancelled" or counts["cancelled"] or verdict.get("status") == "cancelled":
+        if status == "cancelled" or cancelled_attempt or verdict.get("status") == "cancelled":
             outcome = "cancelled"
         elif verdict.get("status") == "error":
             outcome = "error"
         elif (counts["incomplete"] and outcome == "success") or (not attempts and verdict.get("status") not in {"success", "passed"} and outcome == "success"):
             outcome = "inconclusive"
-        # A search evidence gap can lower a positive verifier conclusion, but
-        # must not erase an error that recorded required-capture failures would
-        # have produced. An unverified visual assertion cannot hide independent
-        # capture failures; other incomplete actions retain their existing policy.
+        attempt_counts = Counter(step.step_execution_id for step in bundle.steps if step.step_execution_id)
+        owner_indices = {step.step_execution_id: index for index, step in enumerate(bundle.steps) if step.step_execution_id and attempt_counts[step.step_execution_id] == 1}
+        session_errors = []
+        for event in bundle.events:
+            if event.step_id or event.step_execution_id:
+                continue
+            session_errors.extend(error for error in (event.payload.get("evidence_errors") or []) if isinstance(error, dict))
+            if event.payload.get("failure_category") == "artifact_error" or (event.event_type == "artifact_failed" and not isinstance(event.payload.get("artifact"), dict)):
+                session_errors.append({"phase": event.phase, "reason": "session_evidence_failed"})
+        step_errors = {}
+        explained_partial = False
+        recorded_failed_refs = set()
+        for index, step in enumerate(bundle.steps):
+            errors = list(step.evidence_errors)
+            explained_partial |= bool(errors)
+            for error in errors:
+                if isinstance(error.get("artifact_id"), str):
+                    recorded_failed_refs.add((index, error["artifact_id"]))
+            if not errors and step.failure_category == "artifact_error":
+                errors.append({"step_id": step.step_id, "reason": "artifact_error", "message": step.error_message})
+            if step.step_execution_id is not None or step.status not in {"skipped", "incomplete"}:
+                missing_captures = _missing_captures(step)
+                errors.extend(missing_captures)
+                explained_partial |= bool(missing_captures)
+            if errors:
+                step_errors[index] = errors
+        for ref in bundle.artifacts:
+            if ref.availability == "available" or (ref.availability == "not_applicable" and ref.unavailable_reason):
+                continue
+            explained_partial |= ref.availability not in {"available", "not_applicable"}
+            index = owner_indices.get(ref.step_execution_id or ref.step_id)
+            if index is not None and (index, ref.artifact_id) in recorded_failed_refs:
+                continue
+            error = {"artifact_id": ref.artifact_id, "phase": ref.phase, "kind": ref.kind, "reason": ref.unavailable_reason or ref.availability}
+            if index is None:
+                session_errors.append(error)
+            else:
+                step_errors.setdefault(index, []).append({"step_id": bundle.steps[index].step_id, **error})
+
+        journal_clean = (
+            bundle.completeness in {"complete", "partial"}
+            and not bundle.warnings
+            and not any(step.status in {"pending", "running"} or step.metadata.get("recovered_incomplete") for step in bundle.steps)
+        )
+        recovered_indices: set[int] = set()
+        if metadata.mode == "explore" and outcome == "success" and journal_clean and not session_errors:
+            recovered_indices = _recovered_attempts(bundle.steps, owner_indices)
+        recovery_is_complete = bool(step_errors) and step_errors.keys() <= recovered_indices and (bundle.completeness == "complete" or (bundle.completeness == "partial" and explained_partial))
+        evidence_errors = [*session_errors, *(error for errors in step_errors.values() for error in errors)] if not recovery_is_complete else []
+        capture_failed = bool(evidence_errors)
+        evidence_failed = capture_failed or (bundle.completeness in {"partial", "unavailable"} and not recovery_is_complete)
+        evidence_warnings = list(bundle.warnings)
+        if recovery_is_complete:
+            for index, errors in step_errors.items():
+                reason = next((error.get("message") or error.get("reason") for error in errors if error.get("message") or error.get("reason")), "capture_failed")
+                evidence_warnings.append(f"Recovered intermediate step {bundle.steps[index].step_id} had capture failure ({reason}); final verified steps have complete evidence.")
+        evidence = {
+            "status": "partial" if evidence_failed else "complete" if step_values else "not_applicable",
+            "errors": evidence_errors,
+            "warnings": evidence_warnings,
+        }
+        if not evidence_failed and recovered_indices:
+            evidence["recovered_step_execution_ids"] = [step.step_execution_id for index, step in enumerate(bundle.steps) if index in recovered_indices]
+        evidence = RunLifecycleService.safe_value(evidence, secret_values)
+        # A search evidence gap or an unverified visual assertion must not
+        # hide a recorded capture failure that would otherwise block success.
         downgraded_capture_error = capture_failed and outcome == "inconclusive" and (unverified_assertion or (preserve_evidence_error and not counts["incomplete"]))
-        if evidence_failed and (outcome == "success" or downgraded_capture_error):
+        if evidence_failed and (outcome == "success" or downgraded_capture_error or (metadata.mode == "strict" and capture_failed and outcome == "failed")):
             outcome = "error"
+            summary = "Execution could not be confirmed because required evidence is missing or unavailable."
+        elif outcome == "error" and status != "error":
+            summary = "Execution failed before it could be completed."
+        elif outcome == "cancelled" and status != "cancelled":
+            summary = "Execution cancelled."
         if outcome not in {"success", "failed", "inconclusive", "cancelled", "error"}:
             outcome = "inconclusive"
         if metadata.mode == "explore" and outcome == "success":
@@ -644,6 +693,61 @@ class RunLifecycleService:
             os.fsync(stream.fileno())
 
 
+def _recovered_attempts(steps: list[RunnerStepResult], owner_indices: dict[str, int]) -> set[int]:
+    # A later independent call to the same capability is not a retry.
+    identities = Counter((step.source_step_id, step.invocation_path, step.attempt_index) for step in steps)
+    effective: dict[tuple[str, tuple[str, ...]], RunnerStepResult] = {}
+    recovered = set()
+    for index in range(len(steps) - 1, -1, -1):
+        step = steps[index]
+        if not step.source_step_id or not step.invocation_path:
+            continue
+        key = (step.source_step_id, step.invocation_path)
+        retry = effective.setdefault(key, step)
+        if (
+            step.status == "failed"
+            and step.action_status not in {"cancelled", "incomplete"}
+            and step.step_execution_id == step.step_id
+            and step.step_execution_id in owner_indices
+            and identities[(*key, step.attempt_index)] == 1
+            and retry.attempt_index > step.attempt_index
+            and identities[(*key, retry.attempt_index)] == 1
+            and retry.step_execution_id == retry.step_id
+            and retry.step_execution_id in owner_indices
+            and step.action_name
+            and retry.action_name == step.action_name
+            and retry.status == "passed"
+            and retry.action_status in {None, "passed"}
+            and any(phase.phase == "invoke" and phase.status == "passed" for phase in retry.phase_reports)
+            and all(phase.status == "passed" for phase in retry.phase_reports)
+        ):
+            recovered.add(index)
+    return recovered
+
+
+def _missing_captures(step: RunnerStepResult) -> list[dict[str, object]]:
+    policy = step.metadata.get("evidence_policy") or {}
+    required = [item for item in (step.metadata.get("required_evidence") or []) if isinstance(item, dict) and "phase" in item and "kind" in item]
+    for phase, enabled in (("prepare", policy.get("capture_before")), ("finalize", policy.get("capture_after"))):
+        if enabled:
+            required.extend({"phase": phase, "kind": kind} for kind in policy.get("artifact_kinds", []))
+    entered_invoke = any(item.phase in {"invoke", "settle", "finalize"} for item in step.phase_reports)
+    prepare_aborted = not entered_invoke and any(item.phase == "prepare" and item.status != "passed" for item in step.phase_reports)
+    return [
+        {"step_id": step.step_id, "phase": item["phase"], "kind": item["kind"], "reason": "required_capture_missing"}
+        for item in required
+        if not (item["phase"] == "finalize" and prepare_aborted)
+        and not any(
+            (ref.step_execution_id or ref.step_id) == (step.step_execution_id or step.step_id)
+            and (ref.kind == item["kind"] or ref.metadata.get("requested_kind") == item["kind"] or ref.metadata.get("requested_artifact_kind") == item["kind"])
+            and (ref.availability == "available" or (ref.availability == "not_applicable" and ref.unavailable_reason))
+            for phase in step.phase_reports
+            if phase.phase == item["phase"]
+            for ref in phase.artifact_refs
+        )
+    ]
+
+
 def _process_start(pid: int) -> str | None:
     import subprocess
     import sys
@@ -673,12 +777,12 @@ def _process_start(pid: int) -> str | None:
 
 
 def _safe_text(text: str, secrets_to_remove: tuple[str, ...] = ()) -> str:
-    for value in sorted((item for item in secrets_to_remove if item), key=len, reverse=True):
-        text = text.replace(value, "[REDACTED]")
-    text = re.sub(r"(?i)\b(?:Bearer|Basic)\s+[^\s,;]+", "[REDACTED_AUTH]", text)
-    text = re.sub(r"(?im)((?:authorization|cookie|password|passwd|api[_-]?key|client[_-]?secret|secret|(?:access_|refresh_|id_)?token)[\"']?\s*[:=]\s*)[^\r\n]+", r"\1[REDACTED]", text)
-    text = re.sub(r"(?i)([?&](?:token|access_token|api[_-]?key|secret|password|signature|sig|authorization)=)[^&#\s\"']*", r"\1[REDACTED]", text)
-    return _safe_urls(text)
+    return RuntimeSecretStore.redact_text(
+        text,
+        secrets_to_remove,
+        replacement="[REDACTED]",
+        auth_replacement="[REDACTED_AUTH]",
+    )
 
 
 def _safe_source_text(text: str, secret_values: tuple[str, ...] = ()) -> str:
@@ -732,82 +836,22 @@ def _safe_source_text(text: str, secret_values: tuple[str, ...] = ()) -> str:
     return _safe_urls(text)
 
 
-def _safe_urls(text):
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-    def safe_parameters(value):
-        parameters = parse_qsl(value, keep_blank_values=True)
-        if not any(_credential_key(key) or key.casefold() in {"signature", "sig"} for key, _ in parameters):
-            return value
-        return urlencode([(key, "[REDACTED]" if _credential_key(key) or key.casefold() in {"signature", "sig"} else item) for key, item in parameters])
-
-    def replace(match):
-        raw = match.group(0)
-        try:
-            parsed = urlsplit(raw)
-            safe_query = safe_parameters(parsed.query)
-            safe_fragment = parsed.fragment
-            if "=" in parsed.fragment:
-                # A '?' before the first assignment separates a route query;
-                # after an assignment it may be part of the credential value.
-                route, separator, parameters = parsed.fragment.partition("?")
-                safe_fragment = route + separator + safe_parameters(parameters) if separator and "=" not in route else safe_parameters(parsed.fragment)
-            if "@" not in parsed.netloc and safe_query == parsed.query and safe_fragment == parsed.fragment:
-                return raw
-            return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, safe_query, safe_fragment))
-        except ValueError:
-            return "[REDACTED_URL]"
-
-    return re.sub(r"https?://[^\s<>\"']+", replace, text, flags=re.I)
+def _safe_urls(text: str) -> str:
+    return RuntimeSecretStore.sanitize_urls(text)
 
 
-def _credential_key(key):
-    from urllib.parse import unquote
-
-    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", unquote(str(key)).strip()).lower().replace("-", "_")
-    return normalized in {
-        "password",
-        "passwd",
-        "pwd",
-        "api_key",
-        "apikey",
-        "token",
-        "access_token",
-        "refresh_token",
-        "id_token",
-        "client_secret",
-        "secret",
-        "authorization",
-        "proxy_authorization",
-        "cookie",
-        "set_cookie",
-        "private_values",
-        "credentials",
-    }
+def _credential_key(key: object) -> bool:
+    return RuntimeSecretStore.is_credential_key(key)
 
 
-def _safe_structure(value, secret_values=(), depth=0):
-    if depth > 20:
-        return "[REDACTED: nesting limit]"
-    if isinstance(value, dict):
-        return {key: "[REDACTED]" if _credential_key(key) else _safe_structure(item, secret_values, depth + 1) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_safe_structure(item, secret_values, depth + 1) for item in value]
-    if not isinstance(value, str):
-        return value
-    for secret in sorted((item for item in secret_values if item), key=len, reverse=True):
-        value = value.replace(secret, "[REDACTED]")
-    if value.strip().startswith(("{", "[", '"')):
-        try:
-            decoded = json.loads(value)
-        except ValueError:
-            decoded = None
-        if isinstance(decoded, (dict, list, str)) and decoded != value:
-            safe = _safe_structure(decoded, secret_values, depth + 1)
-            if safe != decoded:
-                return json.dumps(safe, ensure_ascii=False)
-    value = re.sub(r"(?im)((?:proxy[-_]authorization|authorization|set[-_]cookie|cookie)\s*[:=]\s*)[^\r\n]+", r"\1[REDACTED]", value)
-    return _safe_text(value, secret_values)
+def _safe_structure(value: object, secret_values: tuple[str, ...] = (), depth: int = 0) -> object:
+    return RuntimeSecretStore.redact_structure(
+        value,
+        secret_values,
+        replacement="[REDACTED]",
+        auth_replacement="[REDACTED_AUTH]",
+        depth=depth,
+    )
 
 
 def _contained_destination(root: Path, destination: Path) -> None:

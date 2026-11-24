@@ -5,12 +5,14 @@ from typing import Protocol, runtime_checkable
 
 from fsq_agent.core.interfaces._harness import DriverObservationInterface
 from fsq_agent.models import (
+    SampleColorParams,
     WindowsAssertVisibleParams,
     WindowsAssertWithAIParams,
     WindowsClickOnParams,
     WindowsDoubleClickOnParams,
     WindowsDragToParams,
     WindowsHoverOnParams,
+    WindowsInspectWithAIParams,
     WindowsKillAppParams,
     WindowsLaunchAppParams,
     WindowsPressKeyParams,
@@ -50,5 +52,9 @@ class WindowsDriverInterface(DriverObservationInterface, Protocol):
     def assert_with_ai(self, params: WindowsAssertWithAIParams) -> dict[str, object]: ...
 
     def ui_snapshot(self, params: WindowsUiSnapshotParams) -> dict[str, object]: ...
+
+    def inspect_with_ai(self, params: WindowsInspectWithAIParams) -> dict[str, object]: ...
+
+    def sample_color(self, params: SampleColorParams) -> dict[str, object]: ...
 
     def screenshot(self, params: object | None = None) -> bytes: ...

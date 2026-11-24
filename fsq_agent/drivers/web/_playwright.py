@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from fsq_agent.drivers._ai_assertion import AIAssertionBackendToolMixin
 from fsq_agent.drivers._capabilities import _web_driver_tool
+from fsq_agent.drivers._host_visual_inspection import _run_host_visual_inspection
 from fsq_agent.models import (
     ConfigurationError,
     WebAssertNotVisibleParams,
@@ -23,6 +24,7 @@ from fsq_agent.models import (
     WebClickOnParams,
     WebCloseBrowserParams,
     WebHoverOnParams,
+    WebInspectWithAIParams,
     WebLocator,
     WebNavigateBackParams,
     WebNavigateToParams,
@@ -299,6 +301,10 @@ class PlaywrightWebDriver(AIAssertionBackendToolMixin):
     def ui_snapshot(self, params: WebUiSnapshotParams) -> dict[str, object]:
         return self._run_sync(lambda: self._ui_snapshot(params))
 
+    @_web_driver_tool("inspectWithAI", description="Read pixel-only Web page visual content without performing an action.")
+    def inspect_with_ai(self, params: WebInspectWithAIParams) -> dict[str, object]:
+        return _run_host_visual_inspection(self, params, platform="web")
+
     def _ui_snapshot(self, params: WebUiSnapshotParams) -> dict[str, object]:
         if self.page is None:
             return self._browser_not_started()
@@ -402,7 +408,7 @@ class PlaywrightWebDriver(AIAssertionBackendToolMixin):
             return self._passed(self._bounded_text_output(actual))
         return self._failed("assertion_error", "Text assertion failed.", output=self._bounded_text_output(actual))
 
-    @_web_driver_tool("assertWithAI", description="Evaluate an explicit Web visual assertion with AI.")
+    @_web_driver_tool("assertWithAI", description="Evaluate a scoped Web image-space visual assertion with AI.")
     def assert_with_ai(self, params: WebAssertWithAIParams) -> dict[str, object]:
         return self._run_ai_assertion_tool(params)
 

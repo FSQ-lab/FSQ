@@ -28,9 +28,12 @@ from fsq_agent.models import (
 from fsq_agent.report import CoreEvidenceReportGenerator, RunReportService
 
 
-def _png(color=(0, 120, 240)):
+def _png(color=(0, 120, 240), *, blank=False):
     stream = io.BytesIO()
-    Image.new("RGB", (8, 6), color).save(stream, format="PNG")
+    with Image.new("RGB", (8, 6), color) as image:
+        if not blank:
+            image.putpixel((3, 3), (255, 255, 255))
+        image.save(stream, format="PNG")
     return stream.getvalue()
 
 
@@ -96,6 +99,66 @@ def test_runner_shares_one_current_capture_and_records_original_identity(tmp_pat
     refs = [event.payload["artifact"] for event in runner.events if event.event_type == "artifact_captured" and event.payload.get("kind") == "screenshot"]
     assert {ref["artifact_id"] for ref in refs} == {request.screenshot_artifact_ref.artifact_id}
     assert _assertion(result)["capture"]["run_id"] == "run-1"
+
+
+@pytest.mark.parametrize("region", [None, {"kind": "image_rect", "rect": {"left": 0, "top": 0, "right": 2, "bottom": 2}}])
+def test_mobile_visual_assertion_rejects_blank_input_before_provider_or_persistence(tmp_path, region):
+    result, _, model, _ = _run(tmp_path, data=_png(blank=region is None), region=region)
+    assert result.status == "incomplete"
+    assert _assertion(result)["error_code"] == ("capture_failed" if region is None else "region_empty")
+    assert not model.requests
+    assert not list(tmp_path.rglob("*.png"))
+
+
+@pytest.mark.parametrize("platform", ["android", "ios", "macos"])
+def test_authorized_assertion_before_sdk_session_does_not_start_it_or_capture(tmp_path, monkeypatch, platform):
+    from fsq_agent.drivers.android._appium_connect import AppiumConnectAndroidDriver
+    from fsq_agent.drivers.ios._appium_connect import AppiumConnectIOSDriver
+    from fsq_agent.drivers.macos._appium_connect import AppiumConnectMacOSDriver
+    from fsq_agent.harnesses._ios import IOSHarness
+    from fsq_agent.harnesses._macos import MacOSHarness
+
+    match platform:
+        case "android":
+            driver = AppiumConnectAndroidDriver(app_id="com.example.app")
+            harness_type = AndroidHarness
+        case "ios":
+            driver = AppiumConnectIOSDriver(bundle_id="com.example.app")
+            harness_type = IOSHarness
+        case _:
+            driver = AppiumConnectMacOSDriver(bundle_id="com.example.app")
+            harness_type = MacOSHarness
+
+    def unexpected_capture(*args, **kwargs):
+        pytest.fail("Unstarted session must not capture or create a session")
+
+    monkeypatch.setattr(driver, "capture_visual_screenshot" if platform == "macos" else "screenshot", unexpected_capture)
+    evaluator = Evaluator()
+    harness = harness_type(
+        driver,
+        ArtifactStore(tmp_path),
+        evaluator,
+        visual_assertion_policy_resolver=lambda *_: AndroidVisualAssertionPolicy(allow_provider_upload=True, frame_sensitivity="non_sensitive"),
+    )
+    with_context = StepRunner(harness, capability_registry=build_capability_registry(platform=platform))
+    try:
+        result = with_context.run_step(
+            "inactive",
+            ExecutableStep(
+                step_id="visual",
+                kind="assertion",
+                action_name="assertWithAI",
+                params={"assertion": "Chart visible", "surface": "custom_canvas", "full_screen_reason": "Inspect the chart"},
+            ),
+        )
+    finally:
+        harness.close()
+    assert result.status == "incomplete"
+    [artifact] = result.phase_reports[0].artifact_refs
+    assert artifact.availability == "not_applicable"
+    assert artifact.unavailable_reason == f"{platform}_session_not_started"
+    assert not result.evidence_errors
+    assert not evaluator.requests
 
 
 @pytest.mark.parametrize(

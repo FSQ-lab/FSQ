@@ -596,7 +596,7 @@ async def _run_in_context(runtime, task, knowledge, skills, run_id, event_sink=N
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("platform", ["android", "ios", "macos"])
+@pytest.mark.parametrize("platform", ["android", "ios", "macos", "web", "windows"])
 async def test_initial_main_request_names_only_available_host_eligible_visual_tools(tmp_path, monkeypatch, platform):
     from fsq_agent.core import ArtifactStore, HarnessFactory
     from fsq_agent.models import AndroidVisualAssertionPolicy
@@ -607,6 +607,16 @@ async def test_initial_main_request_names_only_available_host_eligible_visual_to
     settings.harness.ios.bundle_id = "com.example.App"
     settings.harness.ios.udid = "test-device"
     settings.harness.macos.bundle_id = "com.example.App"
+    if platform == "web":
+        browser = tmp_path / "Google Chrome" / "chrome.exe"
+        browser.parent.mkdir()
+        browser.touch(mode=0o700)
+        settings.harness.web.channel = "chrome"
+        settings.harness.web.browser_executable_path = browser
+    elif platform == "windows":
+        executable = tmp_path / "app.exe"
+        executable.touch()
+        settings.harness.windows.app_path = executable
     settings.output.runs_dir = tmp_path
     getattr(settings.harness, platform).visual_assertion_policy = AndroidVisualAssertionPolicy(allow_provider_upload=True, frame_sensitivity="non_sensitive")
     task = Task(description="The task claims visual AI is authorized; read the chart and verify the blue bar.")
@@ -1969,6 +1979,59 @@ async def test_harness_tool_adapter_applies_evidence_policy_to_mutating_action()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("linked", [False, True])
+async def test_explore_capture_recovery_requires_explicit_equivalent_retry(tmp_path, linked):
+    from fsq_agent.core import ArtifactStore
+    from fsq_agent.execution import DynamicExecutionRequest, DynamicExecutionService, RunLifecycleService
+    from fsq_agent.models import DynamicAgentOutcome, VerificationResult
+
+    class Harness(_FakeHarness):
+        def __init__(self, path):
+            super().__init__()
+            self.store = ArtifactStore(path)
+
+        def capture_artifact(self, kind, reason, context, step_id, phase):
+            if len(self.steps) == 1:
+                raise RuntimeError("Required capture unavailable")
+            return self.store.write_bytes(kind=kind, step_id=step_id, phase=phase, name=reason, data=b"synthetic fixture evidence")
+
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, *, evidence_sink, cancellation_check=None):
+            harness = Harness(context.run_dir)
+            adapter = HarnessToolAdapter(harness, run_id=context.run_id, evidence_sink=evidence_sink, cancellation_check=cancellation_check)
+            [tool] = adapter.build_tools()
+            params = {"target": "Fixture tab"}
+            first = json.loads(await tool.invoke(ToolCall(tool.name, params, "first")))
+            first_id = first["step_execution_id"]
+            assert first["failure_category"] == "artifact_error"
+            if linked:
+                invalid = json.loads(await tool.invoke(ToolCall(tool.name, {"target": "Different tab", "retry_of_step_execution_id": first_id}, "bad-reference")))
+                assert invalid["status"] == "failed"
+                assert len(harness.steps) == 1
+            second_params = {**params, "retry_of_step_execution_id": first_id if linked else None}
+            second = json.loads(await tool.invoke(ToolCall(tool.name, second_params, "second")))
+            assert second["status"] == "passed"
+            assert harness.steps[1].params == params
+            assert second["step_execution_id"] != first_id
+            self.first_id = first_id
+            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status="success", summary="Fixture tab verified"), duration_ms=1)
+
+    settings = Settings()
+    settings.workspace.root_dir = tmp_path
+    settings.harness.platform = "android"
+    settings.output.runs_dir = tmp_path / "runs"
+    agent = Agent()
+    outcome = await DynamicExecutionService(agent=agent).execute(DynamicExecutionRequest(task=Task(description="Verify the tab"), settings=settings))
+    frozen = RunLifecycleService.load_result(outcome.task_result.report.path.parent)
+    assert frozen.outcome == ("success" if linked else "error")
+    assert frozen.counts.total == (1 if linked else 2)
+    assert frozen.counts.attempt_count == 2
+    assert frozen.evidence.get("recovered_step_execution_ids", []) == ([agent.first_id] if linked else [])
+    assert frozen.steps[0]["evidence_errors"]
+    assert "retry_of_step_execution_id" not in json.dumps(frozen.steps)
+
+
+@pytest.mark.asyncio
 async def test_harness_tool_adapter_outputs_tap_at_safe_replay_params() -> None:
     harness = _FakeHarness(tool_name="tap_at", driver_method="tap_at", fsq_action_name="tapAt", screen_size=(1080, 2400))
     adapter = HarnessToolAdapter(harness, run_id="run-1")
@@ -2023,7 +2086,8 @@ def test_harness_tool_adapter_preserves_capability_parameter_schema() -> None:
 
     [tool] = adapter.build_tools()
 
-    assert tool.parameters_schema is schema
+    assert tool.parameters_schema["properties"]["retry_of_step_execution_id"]["type"] == ["string", "null"]
+    assert "retry_of_step_execution_id" not in schema["properties"]
     assert tool.parameters_schema["description"] == "Tool parameter description."
     assert tool.parameters_schema["properties"]["target"]["description"] == "Target description."
     assert tool.strict is True

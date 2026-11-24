@@ -53,6 +53,43 @@ _INSPECT_PROPERTIES = {
 }
 
 
+def _available_scoped_visual_tools(
+    store: ArtifactStore | None,
+    evaluator: object,
+    resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None,
+    provider_available: bool | None,
+) -> tuple[str, ...]:
+    if provider_available is False or store is None or not callable(resolver):
+        return ()
+    return tuple(name for name, method in (("assert_with_ai", "evaluate"), ("inspect_with_ai", "inspect")) if callable(getattr(evaluator, method, None)))
+
+
+def _resolve_scoped_visual_policy(
+    context: HarnessContext,
+    sequence: int,
+    resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None,
+    budget: AssertionBudget,
+    provider_available: bool | None,
+) -> AndroidVisualAssertionPolicy:
+    check = context.cancellation_check
+    if check is not None:
+        check()
+    try:
+        resolved = resolver(context, sequence) if resolver is not None else None
+    except Exception:  # noqa: BLE001 - incompatible host decisions fail closed without exposing resolver errors.
+        resolved = None
+    if check is not None:
+        check()
+    policy = resolved if isinstance(resolved, AndroidVisualAssertionPolicy) else AndroidVisualAssertionPolicy()
+    available = policy.provider_available if policy.provider_available is not None else provider_available
+    return policy.model_copy(
+        update={
+            "provider_available": False if provider_available is False else available,
+            "budget": AssertionBudget(**{name: min(getattr(policy.budget, name), getattr(budget, name)) for name in AssertionBudget.model_fields}),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class _VisualAssertionCapture:
     run_id: str
@@ -90,27 +127,10 @@ class _ScopedVisualTools:
 
     @property
     def available_tools(self) -> tuple[str, ...]:
-        if self.provider_available is False or self.store is None or not callable(self.resolver):
-            return ()
-        return tuple(name for name, method in (("assert_with_ai", "evaluate"), ("inspect_with_ai", "inspect")) if callable(getattr(self.evaluator, method, None)))
+        return _available_scoped_visual_tools(self.store, self.evaluator, self.resolver, self.provider_available)
 
     def _frame_policy(self, context: HarnessContext, sequence: int) -> AndroidVisualAssertionPolicy:
-        if context.cancellation_check is not None:
-            context.cancellation_check()
-        try:
-            resolved = self.resolver(context, sequence) if self.resolver is not None else None
-        except Exception:  # noqa: BLE001 - incompatible host decisions fail closed without disclosing resolver errors.
-            resolved = None
-        if context.cancellation_check is not None:
-            context.cancellation_check()
-        policy = resolved if isinstance(resolved, AndroidVisualAssertionPolicy) else AndroidVisualAssertionPolicy()
-        available = policy.provider_available if policy.provider_available is not None else self.provider_available
-        return policy.model_copy(
-            update={
-                "provider_available": False if self.provider_available is False else available,
-                "budget": AssertionBudget(**{name: min(getattr(policy.budget, name), getattr(self.budget, name)) for name in AssertionBudget.model_fields}),
-            }
-        )
+        return _resolve_scoped_visual_policy(context, sequence, self.resolver, self.budget, self.provider_available)
 
     def _capture_context(self, context: HarnessContext, identity: dict, step_id: str) -> tuple[HarnessContext, dict]:
         identity = {
@@ -122,12 +142,23 @@ class _ScopedVisualTools:
         }
         return context.model_copy(update={"metadata": {**context.metadata, "capture_invocation": identity}}), identity
 
-    def capture_assertion(self, context: HarnessContext, identity: dict, step_id: str, phase: StepPhase) -> HarnessArtifactRef:
+    def capture_assertion(self, context: HarnessContext, identity: dict, step_id: str, phase: StepPhase, *, inactive_reason: str | None = None) -> HarnessArtifactRef:
         self.discard_capture()
         context, identity = self._capture_context(context, identity, step_id)
         params = _ASSERTION_PARAMS[self.platform].model_validate(identity["params"])
         policy = self._frame_policy(context, identity["capture_sequence"])
-        artifact = _capture_visual(self.driver, self.store, context, identity, params, policy, callable(getattr(self.evaluator, "evaluate", None)), phase, platform=self.platform)
+        artifact = _capture_visual(
+            self.driver,
+            self.store,
+            context,
+            identity,
+            params,
+            policy,
+            callable(getattr(self.evaluator, "evaluate", None)),
+            phase,
+            platform=self.platform,
+            inactive_reason=inactive_reason,
+        )
         self._capture = _VisualAssertionCapture(identity["run_id"], step_id, identity["step_execution_id"], params, policy, artifact)
         return artifact
 
@@ -170,14 +201,20 @@ class _CaptureRejectedError(Exception):
         self.code = code
 
 
-def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=()):
+def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=(), capture_failed=False, unavailable_reason=None):
     diagnostics = {key: value for key, value in (diagnostics or {}).items() if key in {"backend_code", "request_state", "session_state", "stage"}}
     outcome = "failed" if conflict else "inconclusive"
     result = {
         "status": outcome,
         "outcome": outcome,
         "passed": False,
-        "explanation": "Deterministic evidence contradicts the expectation." if conflict else f"Visual assertion is unverified ({code}).",
+        "explanation": (
+            "Deterministic evidence contradicts the expectation."
+            if conflict
+            else "An available Provider is required; visual assertions cannot be verified offline."
+            if code == "provider_unavailable"
+            else f"Visual assertion is unverified ({unavailable_reason or code})."
+        ),
         "error_code": None if conflict else code,
         "deterministic_conflict": conflict,
         "capture": None,
@@ -186,9 +223,9 @@ def _terminal_ref(step_id, code, *, diagnostics=None, conflict=False, facts=()):
     return HarnessArtifactRef(
         artifact_id=f"visual-{step_id}-{uuid.uuid4().hex}",
         kind="screenshot",
-        availability="not_applicable",
-        unavailable_reason=code,
-        metadata={"visual_assertion": result, "capture_required": False},
+        availability="failed" if capture_failed else "not_applicable",
+        unavailable_reason=unavailable_reason or code,
+        metadata={"visual_assertion": result, "capture_required": capture_failed},
     )
 
 
@@ -286,7 +323,23 @@ def _png_image(data, budget):
     return image
 
 
-def _capture_visual(driver, store, context, identity, params, policy, evaluator_available, phase, *, platform: str) -> HarnessArtifactRef:
+def _is_blank(image: Image.Image) -> bool:
+    if image.mode not in {"RGB", "RGBA", "L", "LA"} or "transparency" in image.info:
+        with image.convert("RGBA") as converted:
+            return _is_blank_pixels(converted)
+    return _is_blank_pixels(image)
+
+
+def _is_blank_pixels(image: Image.Image) -> bool:
+    extrema = image.getextrema()
+    if image.mode == "L":
+        return extrema[0] == extrema[1]
+    if image.mode in {"LA", "RGBA"} and extrema[-1][1] == 0:
+        return True
+    return all(low == high for low, high in extrema)
+
+
+def _capture_visual(driver, store, context, identity, params, policy, evaluator_available, phase, *, platform: str, inactive_reason: str | None) -> HarnessArtifactRef:
     step_id = identity["step_id"]
     run_id = identity["run_id"]
     check = context.cancellation_check
@@ -299,6 +352,8 @@ def _capture_visual(driver, store, context, identity, params, policy, evaluator_
         return _terminal_ref(step_id, "privacy_blocked")
     if not evaluator_available:
         return _terminal_ref(step_id, "provider_unavailable")
+    if inactive_reason is not None:
+        return _terminal_ref(step_id, "capture_failed", unavailable_reason=inactive_reason)
     if params.expect is not None and params.expect.kind in {"exact_color", "display_identity"}:
         return _terminal_ref(step_id, "color_semantics_unverified" if params.expect.kind == "exact_color" else "display_identity_unverified")
     if store is None:
@@ -324,6 +379,8 @@ def _capture_visual(driver, store, context, identity, params, policy, evaluator_
                     return _terminal_ref(step_id, "region_invalid")
                 if (rect.right - rect.left) * (rect.bottom - rect.top) > policy.budget.max_image_pixels:
                     return _terminal_ref(step_id, "region_too_large")
+            elif _is_blank(image):
+                return _terminal_ref(step_id, "capture_failed", capture_failed=True)
             if finished < started or finished - started > policy.budget.max_capture_span_ns:
                 return _terminal_ref(step_id, "capture_stale")
             envelope = HostCaptureEnvelopeV1(
@@ -347,15 +404,17 @@ def _capture_visual(driver, store, context, identity, params, policy, evaluator_
             if rect is not None:
                 output = io.BytesIO()
                 with image.crop((rect.left, rect.top, rect.right, rect.bottom)) as cropped:
+                    if _is_blank(cropped):
+                        return _terminal_ref(step_id, "region_empty", capture_failed=True)
                     cropped.save(output, format="PNG")
                 data = output.getvalue()
                 if len(data) > policy.budget.max_image_bytes:
                     return _terminal_ref(step_id, "budget_exceeded")
     except _CaptureRejectedError as error:
-        return _terminal_ref(step_id, error.code)
+        return _terminal_ref(step_id, error.code, capture_failed=error.code in {"capture_failed", "frame_not_single"})
     except Exception as error:  # noqa: BLE001 - Normalize optional backend failures without leaking SDK data.
         diagnostics = getattr(error, "context", {}).get("capture_diagnostics", {})
-        return _terminal_ref(step_id, "capture_failed", diagnostics=diagnostics)
+        return _terminal_ref(step_id, "capture_failed", diagnostics=diagnostics, capture_failed=True)
     if check is not None:
         check()
     try:

@@ -608,6 +608,10 @@ def test_android_result_derives_boolean_and_rejects_contradictory_status():
         AIAssertionResult(status="passed", outcome="inconclusive", explanation="Unknown")
     with pytest.raises(ValidationError):
         AIAssertionResult(status="inconclusive", outcome="inconclusive", explanation="Unknown", error_code="arbitrary")
+    with pytest.raises(ValidationError):
+        AIAssertionResult(status="passed", explanation="Missing visual outcome")
+    with pytest.raises(ValidationError):
+        AIAssertionResult(status="error", outcome="inconclusive", explanation="Legacy status")
 
 
 @pytest.mark.parametrize("control", ["deadline", "cancellation"])

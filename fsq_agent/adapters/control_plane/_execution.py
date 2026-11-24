@@ -9,12 +9,12 @@ import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Never
+from typing import TYPE_CHECKING, Any, Never
 
 from fsq_agent._capability_bootstrap import steps_require_provider
+from fsq_agent._strict_visual import prepare_strict_visual_evaluator
 from fsq_agent.adapters.coding_agent import create_coding_agent_runtime
 from fsq_agent.agent import CodingAgentPolicy, FsqAgent
-from fsq_agent.ai_services import build_ai_assertion_evaluator
 from fsq_agent.application import ApplicationError, QuickTestPrepareResult, execute_prepared_quick_test
 from fsq_agent.case_dsl import FsqCaseLoader, FsqExecutableStepAdapter
 from fsq_agent.config import Settings, validate_runtime_settings, validate_strict_core_settings, workspace_revision
@@ -33,13 +33,16 @@ from fsq_agent.execution import (
     run_strict_lifecycle_case,
     transition_run,
 )
-from fsq_agent.models import EvidenceBundle, ExecutableStep, FsqCase, RunEvent, RunnerEvent, RunnerStepResult, Task
+from fsq_agent.models import AndroidVisualAssertionPolicy, EvidenceBundle, ExecutableStep, FsqCase, HarnessContext, RunEvent, RunnerEvent, RunnerStepResult, Task
 
 from ._cases import build_strict_registry_context, resolve_case
 from ._evidence import EvidenceProjection, _safe_details, configured_secret_values, safe_exception_message
 from ._readiness import require_android_preflight, require_macos_preflight, require_provider
 from ._state import ControlPlaneState, TaskCancelledError
 from ._targets import validate_target
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @dataclass
@@ -59,6 +62,7 @@ class PreparedRun:
     resolved_steps_by_path: dict[Path, list[ExecutableStep]] = field(default_factory=dict)
     requires_ai_assertion: bool = False
     requires_web_search_evidence: bool = False
+    visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None
     quick_test_preparation: QuickTestPrepareResult | None = None
 
 
@@ -83,7 +87,14 @@ class ExecutionHandle:
             loop.call_soon_threadsafe(task.cancel)
 
 
-def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], frozen_revision: str | None = None) -> PreparedRun:
+def prepare_run(
+    *,
+    request_id: str,
+    settings: Settings,
+    body: dict[str, Any],
+    frozen_revision: str | None = None,
+    visual_assertion_policy_resolver: Callable[[HarnessContext, int], AndroidVisualAssertionPolicy | None] | None = None,
+) -> PreparedRun:
     mode = body.get("mode")
     workspace_name = body.get("workspaceName")
     platform = body.get("platform")
@@ -156,20 +167,13 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         _preflight_steps(steps, snapshot, secret_store)
         resolved_steps[lifecycle_path.resolve()] = steps
         requires_ai = requires_ai or steps_require_provider(steps, snapshot, assertion_names)
-    provider_available = bool(run_settings.agent_runtime.provider and run_settings.agent_runtime.model)
     if platform == "macos":
         run_settings.harness.macos.bundle_id = _macos_bundle_id(run_settings, case)
-        run_settings.harness.macos.visual_assertion_policy = run_settings.harness.macos.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
-        require_macos_preflight(run_settings, "strict", requires_provider=False)
-    else:
-        require_macos_preflight(run_settings, "strict", requires_provider=requires_ai)
+    require_macos_preflight(run_settings, "strict", requires_provider=False)
     if platform == "android":
         run_settings.harness.android.app_id = _android_app_id(run_settings, case)
-        run_settings.harness.android.visual_assertion_policy = run_settings.harness.android.visual_assertion_policy.model_copy(update={"provider_available": provider_available})
         require_android_preflight(run_settings, "strict", requires_provider=False)
     validate_strict_core_settings(run_settings, requires_ai_assertion=requires_ai)
-    if requires_ai and platform not in {"android", "macos"}:
-        require_provider(run_settings)
     return PreparedRun(
         request_id=request_id,
         settings=run_settings,
@@ -184,6 +188,7 @@ def prepare_run(*, request_id: str, settings: Settings, body: dict[str, Any], fr
         lifecycle_cases=lifecycle_cases,
         resolved_steps_by_path=resolved_steps,
         requires_ai_assertion=requires_ai,
+        visual_assertion_policy_resolver=visual_assertion_policy_resolver,
     )
 
 
@@ -284,6 +289,8 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
         runner = next((step for step in reversed(result.steps) if step.tool_name == "agent_runtime.runner"), None)
         main_output = CodingAgentPolicy().coerce_agent_final_output(runner.tool_output or runner.actual_outcome) if runner else None
         summary = main_output.summary if main_output and main_output.summary.strip() else result.verification.summary
+        if result.status in {"error", "cancelled"}:
+            summary = RunLifecycleService().load_result(result.report.path.parent).summary
         projection.bind_run(result.report.run_id)
         state.transition(request_id, "finalizing", summary="Finalizing evidence, report, and recording.")
         projection.load_persisted_manifest()
@@ -349,7 +356,6 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
     request_id = prepared.request_id
     metadata = None
     run_dir = None
-    evaluator = None
     harness = None
     try:
         workspace_root = settings.workspace.root_dir
@@ -380,14 +386,14 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         state.raise_if_cancelled(request_id)
         state.transition(request_id, "running", summary="Strict replay is executing.")
         metadata = transition_run(run_dir, metadata, "running")
-        evaluator = None
-        if prepared.requires_ai_assertion and settings.harness.platform not in {"android", "macos"}:
-            evaluator = build_ai_assertion_evaluator(settings)
+        artifact_store = ArtifactStore(run_dir=run_dir, secret_values=configured_secret_values(settings))
+        evaluator = prepare_strict_visual_evaluator(settings, requires_ai_assertion=prepared.requires_ai_assertion)
         harness = HarnessFactory().create_harness(
             platform=settings.harness.platform,
             harness_settings=settings.harness,
-            artifact_store=ArtifactStore(run_dir=run_dir, secret_values=configured_secret_values(settings)),
+            artifact_store=artifact_store,
             ai_assertion_evaluator=evaluator,
+            visual_assertion_policy_resolver=prepared.visual_assertion_policy_resolver,
             runtime_secret_settings=settings.runtime_secrets,
             app_id=_android_app_id(settings, prepared.case) if settings.harness.platform == "android" else None,
             serial=prepared.target_id if settings.harness.platform == "android" else None,
@@ -419,7 +425,6 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
         )
         close_harness = getattr(harness, "close", None)
         harness = None
-        evaluator = None
         if callable(close_harness):
             close_harness()
         state.transition(request_id, "finalizing", summary="Finalizing strict evidence and report.")
@@ -458,11 +463,6 @@ def _run_strict(prepared: PreparedRun, state: ControlPlaneState) -> None:
                     fallback_close()
                 except Exception as cleanup_exc:  # noqa: BLE001 - preserve already-published failure/cancel state.
                     logging.getLogger(__name__).warning("Fallback strict harness cleanup failed (%s)", type(cleanup_exc).__name__)
-        elif evaluator is not None:
-            try:
-                evaluator.close()
-            except Exception as cleanup_exc:  # noqa: BLE001
-                logging.getLogger(__name__).warning("Fallback strict evaluator cleanup failed (%s)", type(cleanup_exc).__name__)
 
 
 class _ProjectionEvidenceRecorder(EvidenceRecorder):

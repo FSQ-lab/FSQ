@@ -2,8 +2,11 @@
 # Licensed under the MIT License.
 
 import ast
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+from xml.etree import ElementTree
 
 import pytest
 from pydantic import ValidationError
@@ -102,6 +105,13 @@ def test_android_discovery_core_export_is_canonical():
     assert AndroidDeviceDiscovery is CanonicalDiscovery
 
 
+def test_runtime_secret_store_core_export_is_canonical() -> None:
+    from fsq_agent.core import RuntimeSecretStore
+    from fsq_agent.core.runtime_secrets import RuntimeSecretStore as CanonicalStore
+
+    assert RuntimeSecretStore is CanonicalStore
+
+
 def test_capability_definition_factory_selects_platform_and_filters_ai_assertion() -> None:
     from fsq_agent.core import CapabilityDefinitionFactory, CommonPlatformTools
 
@@ -176,14 +186,15 @@ def test_non_core_package_code_does_not_import_core_private_modules() -> None:
     assert violations == []
 
 
-def test_runner_submodule_imports_only_public_core_interfaces():
+@pytest.mark.parametrize("subpackage", ["evidence", "runner"])
+def test_core_submodules_import_only_approved_core_dependencies(subpackage: str) -> None:
+    local_package = f"fsq_agent.core.{subpackage}"
+    allowed = {local_package, "fsq_agent.core.interfaces", "fsq_agent.core.runtime_secrets"}
     violations = []
-    for path in Path("fsq_agent/core/runner").glob("*.py"):
+    for path in Path(f"fsq_agent/core/{subpackage}").glob("*.py"):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             imports = [node.module or ""] if isinstance(node, ast.ImportFrom) else [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
-            violations.extend(
-                f"{path}:{node.lineno}:{module}" for module in imports if module.startswith("fsq_agent.core") and not module.startswith(("fsq_agent.core.interfaces", "fsq_agent.core.runner"))
-            )
+            violations.extend(f"{path}:{node.lineno}:{module}" for module in imports if module.startswith("fsq_agent.core") and module not in allowed and not module.startswith(f"{local_package}."))
     assert violations == []
 
 
@@ -432,6 +443,57 @@ def test_phase_report_preserves_phase_failure_boundary() -> None:
 def test_runner_event_requires_known_event_type() -> None:
     with pytest.raises(ValidationError):
         RunnerEvent(run_id="run-1", event_type="unknown", payload={})
+
+
+def test_artifact_and_journal_redact_raw_xml_without_corrupting_markup(tmp_path: Path) -> None:
+    from fsq_agent.core import ArtifactStore, EvidenceRecorder, RuntimeSecretStore
+
+    private_value = 'active<&"value'
+    root = ElementTree.Element("Window", {"title": f"Selected {private_value}", "label": 'Quotes " & text', "password": "XML_KEY_CANARY"})
+    node = ElementTree.SubElement(root, "Button", {"title": "password=ASSIGNMENT_CANARY", "url": "https://example.test/?scope=notes&sig=URL_CANARY&view=full"})
+    node.text = f"Visible {private_value}"
+    payload = {"format": "xml", "xml": ElementTree.tostring(root, encoding="unicode")}
+
+    artifacts = ArtifactStore(tmp_path, secret_values=(private_value,))
+    ref = artifacts.write_json(kind="ui_snapshot", step_id="snapshot", phase="invoke", name="observation", payload=payload)
+    assert ref.path is not None
+    persisted_snapshot = json.loads((tmp_path / ref.path).read_text(encoding="utf-8"))
+    evidence = EvidenceRecorder(run_id="run", output_dir=tmp_path, secret_values=(private_value,))
+    evidence.record_event(RunnerEvent(run_id="run", event_type="action_result", payload={"snapshot": payload}))
+    record = json.loads((tmp_path / "evidence-events.jsonl").read_text(encoding="utf-8"))
+    assert record["event"]["payload"]["snapshot"] == persisted_snapshot
+
+    xml = persisted_snapshot["xml"]
+    assert RuntimeSecretStore.redact_text(payload["xml"], (private_value,)) == xml
+    assert not any(canary in xml for canary in ("active", "XML_KEY_CANARY", "ASSIGNMENT_CANARY", "URL_CANARY"))
+    parsed = ElementTree.fromstring(xml)  # noqa: S314
+    assert parsed.attrib == {"title": "Selected ***", "label": 'Quotes " & text', "password": "***"}
+    assert parsed[0].attrib["title"] == "password=***"
+    assert parse_qs(urlsplit(parsed[0].attrib["url"]).query) == {"scope": ["notes"], "sig": ["[REDACTED]"], "view": ["full"]}
+    assert parsed[0].text == "Visible ***"
+
+
+def test_late_snapshot_redaction_respects_xml_character_cap(tmp_path: Path) -> None:
+    from fsq_agent.core import ArtifactStore
+
+    raw_xml = '<Button label="Z" />'
+    snapshot = {
+        "format": "xml",
+        "xml": raw_xml,
+        "compaction": {"max_xml_chars": len(raw_xml)},
+        "coverage": {"status": "complete", "retained_nodes": 1, "retained_characters": len(raw_xml)},
+    }
+    artifacts = ArtifactStore(tmp_path, secret_values=("Z",))
+    ref = artifacts.write_json(kind="ui_snapshot", step_id="snapshot", phase="invoke", name="observation", payload=snapshot)
+    assert ref.path is not None
+    persisted = json.loads((tmp_path / ref.path).read_text(encoding="utf-8"))
+
+    assert ElementTree.fromstring(persisted["xml"]) is not None  # noqa: S314
+    assert "Z" not in persisted["xml"]
+    assert len(persisted["xml"]) <= len(raw_xml)
+    assert persisted["compaction"]["size_limit_applied"] is True
+    assert persisted["coverage"]["status"] == "partial"
+    assert persisted["coverage"]["retained_characters"] == len(persisted["xml"])
 
 
 def test_evidence_bundle_serializes_artifact_refs_without_binary_payloads() -> None:

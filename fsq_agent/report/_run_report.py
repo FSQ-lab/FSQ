@@ -551,14 +551,37 @@ class RunReportService:
         execution["observed_attempt_count"] = observed_attempt_count
         execution["source_outcomes"] = source_outcomes
         execution["history_conflict"] = history_conflict and not frozen
-        execution["recovered_failures"] = []
+        recorded_evidence = frozen.get("evidence") or metadata.get("evidence") or {}
+        recorded_recovery = (frozen.get("evidence") or {}).get("recovered_step_execution_ids")
+        recovered_ids = set()
+        if accounting_complete and outcome == "success" and recorded_evidence.get("status") == "complete" and isinstance(recorded_recovery, list):
+            failed_ids = {step["step_execution_id"] for step in steps if step["aggregate_status"] == "failed"}
+            recovered_ids = {item for item in recorded_recovery if isinstance(item, str) and item in failed_ids}
+        recovered_failures = []
+        if accounting_complete and outcome == "success":
+            for step in steps:
+                if step["step_execution_id"] in recovered_ids:
+                    recovered_failures.append(step)
+                elif metadata.get("mode") == "strict" and step["aggregate_status"] == "failed" and step["source_step_id"] and step["invocation_path"]:
+                    # A later Strict attempt explains the action outcome, not any missing evidence.
+                    replacement = logical_steps[(step["source_step_id"], str(step["invocation_path"]))] if not step["container"] else None
+                    if (
+                        replacement
+                        and replacement["aggregate_status"] == "passed"
+                        and replacement["step_execution_id"] != step["step_execution_id"]
+                        and replacement["action_name"] == step["action_name"]
+                        and type(replacement["attempt_index"]) is int
+                        and type(step["attempt_index"]) is int
+                        and replacement["attempt_index"] > step["attempt_index"]
+                    ):
+                        recovered_failures.append(step)
+        execution["recovered_failures"] = recovered_failures
         if outcome == "success":
-            execution["recovered_failures"] = [step for step in steps if step["status"] == "failed"]
             execution["first_failure"] = None
         execution["interpretations"] = self._interpretations(run_id, execution, documents, suggestions, projected_artifacts)
         if isinstance(execution.get("first_failure"), dict):
             execution["first_failure"].update(provenance="recorded_fact", references=[{"run_id": run_id, "step_execution_id": execution["first_failure"].get("step_execution_id")}])
-        evidence = self._coverage(steps, projected_artifacts, frozen.get("evidence") or metadata.get("evidence") or {}, bundle, warnings)
+        evidence = self._coverage(steps, projected_artifacts, recorded_evidence, bundle, warnings, recovered_ids=recovered_ids)
         blocking_steps = list(logical_steps.values()) if outcome != "success" else []
         execution["infrastructure_failures"] = [
             {"step_execution_id": step.get("step_execution_id"), "failure_category": step.get("failure_category")}
@@ -758,6 +781,8 @@ class RunReportService:
         if status not in {"passed", "failed", "skipped", "cancelled", "incomplete"}:
             status = "incomplete"
         timing = {"duration_ms": metric(raw.get("duration_ms"), measured=_duration_measured(raw), reason=raw.get("unavailable_reason") or "unmeasured")}
+        entered_invoke = any(item.get("phase") in {"invoke", "settle", "finalize"} for item in phases)
+        prepare_aborted = any(item.get("phase") == "prepare" and item.get("status") != "passed" for item in phases) and not entered_invoke
         for name in ("prepare", "invoke", "settle", "finalize"):
             phase = next((item for item in phases if item.get("phase") == name), {})
             measured = _duration_measured(phase)
@@ -804,6 +829,7 @@ class RunReportService:
             "metrics": timing,
             "evidence_policy": metadata.get("evidence_policy") or {},
             "required_evidence": metadata.get("required_evidence") or [],
+            "prepare_aborted": prepare_aborted,
             "container": bool((source.get("metadata") or {}).get("hook_action_name") == "runCase" or metadata.get("hook_action_name") == "runCase"),
             "assertion": assertion,
             "assertion_details": assertion_details,
@@ -953,15 +979,22 @@ class RunReportService:
             values[artifact_id] = artifact
         return list(values.values())
 
-    def _coverage(self, steps, artifacts, recorded, bundle, warnings):
+    def _coverage(self, steps, artifacts, recorded, bundle, warnings, *, recovered_ids):
         missing = list(recorded.get("required_missing") or [])
+        bundle_warnings = bundle.get("warnings") or []
         for step in steps:
+            if step["step_execution_id"] in recovered_ids:
+                continue
             required = list(step.get("required_evidence") or [])
             policy = step.get("evidence_policy") or {}
             for phase, key in (("prepare", "capture_before"), ("finalize", "capture_after")):
+                if phase == "finalize" and step.get("prepare_aborted"):
+                    continue
                 if policy.get(key):
                     required.extend({"kind": kind, "phase": phase} for kind in policy.get("artifact_kinds", ("screenshot", "ui_snapshot")))
             for expected in required:
+                if expected.get("phase") == "finalize" and step.get("prepare_aborted"):
+                    continue
                 found = any(
                     item.get("step_execution_id") == step["step_execution_id"]
                     and (item.get("requested_kind") or item.get("kind")) == expected.get("kind")
@@ -971,9 +1004,17 @@ class RunReportService:
                 )
                 if not found:
                     missing.append({"run_id": step["run_id"], "step_execution_id": step["step_execution_id"], **expected})
-        errors = [error for step in steps for error in step.get("evidence_errors", [])]
+        errors = [error for step in steps if step["step_execution_id"] not in recovered_ids for error in step.get("evidence_errors", [])]
         unknown_legacy = bundle.get("schema_version") != "fsq.evidence/v2" and (bundle.get("metadata") or {}).get("legacy_coverage_unknown", False)
-        incomplete = (not unknown_legacy and bundle.get("completeness") in {"partial", "unavailable"}) or any(item.get("unavailable_reason") == "identity_conflict" for item in artifacts)
+        evidence_artifact_ids = {item.get("artifact_id") for item in bundle.get("artifacts", [])}
+        unrecovered_artifact_failure = any(
+            item.get("availability") not in {None, "available", "not_applicable"} and item.get("step_execution_id") not in recovered_ids
+            for item in artifacts
+            if item.get("step_execution_id") is not None or item.get("artifact_id") in evidence_artifact_ids
+        )
+        bundle_incomplete = bundle.get("completeness") == "unavailable" or (bundle.get("completeness") == "partial" and (not recovered_ids or bool(bundle_warnings) or unrecovered_artifact_failure))
+        incomplete = (not unknown_legacy and bundle_incomplete) or any(item.get("unavailable_reason") == "identity_conflict" for item in artifacts)
+        combined_warnings = list(dict.fromkeys([*(recorded.get("warnings") or []), *warnings]))
         status = "partial" if missing or errors or incomplete else recorded.get("status") or ("complete" if bundle and not unknown_legacy else "unavailable")
         return {
             "status": status,
@@ -981,7 +1022,7 @@ class RunReportService:
             "errors": [*recorded.get("errors", []), *errors],
             "artifact_count": len(artifacts),
             "availability": "known" if recorded or (bundle and not unknown_legacy) else "unknown",
-            "warnings": list(warnings),
+            "warnings": combined_warnings,
         }
 
     def _gate(self, execution, verification, evidence, metadata, frozen):

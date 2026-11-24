@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import asyncio
+import hashlib
 import itertools
 import json
 import time
@@ -24,6 +25,7 @@ from fsq_agent.models import (
 )
 
 _SCOPED_VISUAL_CAPABILITIES = frozenset({"assert_with_ai", "inspect_with_ai"})
+_RETRY_FIELD = "retry_of_step_execution_id"
 
 
 def _validated_write_budget(value: object) -> dict[str, int] | None:
@@ -81,6 +83,7 @@ class HarnessToolAdapter:
         )
         self.reserved_tool_names = reserved_tool_names or set()
         self._counter = itertools.count(1)
+        self._capture_retry: tuple[RunnerStepResult, bytes] | None = None
         self._capability_snapshot = self._capability_registry.snapshot()
         self.schemas = self._discover_schemas()
         self.schemas_by_name = {schema.name: schema for schema in self.schemas}
@@ -105,7 +108,7 @@ class HarnessToolAdapter:
             ToolBinding(
                 name=schema.name,
                 description=schema.description or f"Run platform action {schema.name} through the active harness.",
-                parameters_schema=schema.params_json_schema,
+                parameters_schema=self._retry_schema(schema),
                 strict=True,
                 invoke=self._handler_for(schema),
                 on_invalid_input=self._invalid_input_handler_for(schema),
@@ -113,8 +116,54 @@ class HarnessToolAdapter:
             for schema in self.schemas
         ]
 
+    def _supports_capture_retry(self, schema: HarnessFunctionSchema) -> bool:
+        capability = self._capability_for_schema(schema)
+        return capability is not None and capability.executor_kind == "driver" and capability.step_kind in {"action", "setup", "teardown", "assertion"}
+
+    def _retry_schema(self, schema: HarnessFunctionSchema) -> dict[str, Any]:
+        params = schema.params_json_schema
+        if not self._supports_capture_retry(schema):
+            return params
+        return {
+            **params,
+            "properties": {
+                **params.get("properties", {}),
+                _RETRY_FIELD: {
+                    "type": ["string", "null"],
+                    "description": "Null for a new call. Only when safe to repeat after a required capture failure, provide the previous step_execution_id and repeat the exact same arguments.",
+                },
+            },
+        }
+
+    @staticmethod
+    def _argument_digest(params: dict[str, Any]) -> bytes:
+        return hashlib.sha256(json.dumps(params, sort_keys=True, separators=(",", ":")).encode()).digest()
+
+    @staticmethod
+    def _extract_retry(params: dict[str, Any], *, supported: bool) -> tuple[dict[str, Any], str | None]:
+        if _RETRY_FIELD not in params:
+            return params, None
+        if not supported:
+            raise ValueError("This tool does not accept capture retry references.")
+        params = dict(params)
+        reference = params.pop(_RETRY_FIELD)
+        if reference is not None and (not isinstance(reference, str) or not reference):
+            raise ValueError("Capture retry reference must be a nonempty execution ID or null.")
+        return params, reference
+
+    def _select_retry(self, reference: str, action_name: str, params: dict[str, Any]) -> RunnerStepResult:
+        candidate = self._capture_retry
+        if candidate is not None:
+            previous, digest = candidate
+            if reference == previous.step_execution_id and previous.action_name == action_name and self._argument_digest(params) == digest:
+                return previous
+        raise ValueError("Capture retry must reference the latest eligible execution of the same tool with the same arguments.")
+
     def run_step_with_capability_result(self, run_id: str, step: ExecutableStep):
         self._dispatch.step_id = None
+        capability = self._capability_snapshot.resolve(step.action_name)
+        if capability is None or capability.executor_kind != "common":
+            self._capture_retry = None
         result = self.runner.run_step(run_id=run_id, step=step)
         return result, self.runner.last_capability_execution_result
 
@@ -140,17 +189,23 @@ class HarnessToolAdapter:
         return reject
 
     def _handler_for(self, schema: HarnessFunctionSchema):
+        supports_retry = self._supports_capture_retry(schema)
+
         async def invoke(call: ToolCall) -> str:
             started = time.perf_counter()
             self._dispatch.step_id = None
             try:
                 if self.cancellation_check is not None:
                     self.cancellation_check()
-                params = call.arguments
+                params, reference = self._extract_retry(call.arguments, supported=supports_retry)
                 self._validate_arguments(schema, params)
                 action_name = self._capability_name(schema)
+                previous = self._select_retry(reference, action_name, params) if reference is not None else None
                 step = ExecutableStep(
                     step_id=f"agent-{schema.name}-{next(self._counter)}",
+                    source_step_id=previous.source_step_id if previous is not None else None,
+                    invocation_path=previous.invocation_path if previous is not None else (),
+                    attempt_index=previous.attempt_index + 1 if previous is not None else 1,
                     kind=self._step_kind(schema),
                     action_name=action_name,
                     params=params,
@@ -169,6 +224,17 @@ class HarnessToolAdapter:
                     },
                 )
                 result, _ = self.run_step_with_capability_result(self.run_id, step)
+                if (
+                    supports_retry
+                    and result.status == "failed"
+                    and result.failure_category == "artifact_error"
+                    and result.action_status == "passed"
+                    and result.evidence_errors
+                    and result.step_execution_id
+                    and result.source_step_id
+                    and result.invocation_path
+                ):
+                    self._capture_retry = (result, self._argument_digest(params))
                 return self._format_runner_result(schema, step, result, int((time.perf_counter() - started) * 1000), dispatched_step_id=self._dispatch.step_id)
             # Tool transport must convert arbitrary capability failures into structured results.
             except Exception as exc:

@@ -5,7 +5,6 @@ from fsq_agent.core._capabilities import CapabilityRegistry
 from fsq_agent.core._default_capabilities import CapabilityDefinitionFactory
 from fsq_agent.core._platform_runtime import PlatformRuntimeService
 from fsq_agent.core._platform_tools import CommonPlatformTools
-from fsq_agent.core._runtime_secrets import RuntimeSecretStore
 from fsq_agent.core.evidence import ArtifactStore, EvidenceRecorder
 from fsq_agent.core.harness import AndroidDeviceDiscovery, IOSDeviceDiscovery
 from fsq_agent.core.interfaces import (
@@ -27,6 +26,7 @@ from fsq_agent.core.interfaces import (
     WindowsDriverInterface,
 )
 from fsq_agent.core.runner import StepRunner, StepSequenceRunner
+from fsq_agent.core.runtime_secrets import RuntimeSecretStore
 
 __all__ = [
     "AIAssertionEvaluatorProtocol",

@@ -105,7 +105,7 @@ class EvidenceProjection:
             "tool": self.safe_text(event.tool_name or "", limit=100) or None,
             "durationMs": event.duration_ms,
             "message": message,
-            "level": "error" if status == "failed" else "info",
+            "level": "error" if status in {"error", "failed"} else "info",
         }
         if status:
             projected["status"] = status
@@ -480,18 +480,19 @@ def _persisted_artifact_refs(run_dir: Path) -> list[dict[str, Any]]:
 
 
 def _artifact_payload(run_dir: Path, ref: dict[str, Any]) -> dict[str, Any] | None:
-    kind = ref.get("kind")
-    if kind not in {"screenshot", "ui_snapshot"}:
+    kind = _capture_kind(ref)
+    if kind is None:
         return None
-    path = _contained_artifact_path(run_dir, ref.get("path"))
+    stored_capture = ref.get("kind") == kind
+    path = _contained_artifact_path(run_dir, ref.get("path")) if stored_capture else None
     phase = _artifact_phase(ref)
-    mime = _optional_str(ref.get("mime_type") or ref.get("mimeType")) or (mimetypes.guess_type(path.name)[0] if path else None) or ("image/png" if kind == "screenshot" else "application/json")
+    mime = (_optional_str(ref.get("mime_type") or ref.get("mimeType")) if stored_capture else None) or (mimetypes.guess_type(path.name)[0] if path else None)
     metadata = ref.get("metadata") if isinstance(ref.get("metadata"), dict) else {}
     common = {
         "kind": kind,
         "phase": phase,
         "timestamp": _optional_str(ref.get("created_at") or ref.get("timestamp")),
-        "mimeType": mime,
+        "mimeType": mime or ("image/png" if kind == "screenshot" else "application/json"),
         "artifactId": ref.get("artifact_id"),
         "captureReason": ref.get("capture_reason") or ref.get("reason") or metadata.get("capture_reason") or phase,
         "attemptIndex": ref.get("attempt_index") or metadata.get("attempt_index"),
@@ -506,6 +507,8 @@ def _artifact_payload(run_dir: Path, ref: dict[str, Any]) -> dict[str, Any] | No
         "availability": ref.get("availability") or ("available" if path else "unavailable"),
         "unavailableReason": safe_text(ref.get("unavailable_reason") or metadata.get("unavailable_reason") or "", limit=500) or None,
     }
+    if common["availability"] == "not_applicable":
+        return common
     if path is None or common["availability"] != "available":
         return {**common, "error": common["unavailableReason"] or "Capture has no readable contained artifact."}
     try:
@@ -540,6 +543,14 @@ def _artifact_payload(run_dir: Path, ref: dict[str, Any]) -> dict[str, Any] | No
     }
 
 
+def _capture_kind(ref: dict[str, Any]) -> str | None:
+    kind = ref.get("kind")
+    if kind == "json" and ref.get("availability") == "not_applicable":
+        metadata = ref.get("metadata")
+        kind = (metadata.get("requested_artifact_kind") or metadata.get("requested_kind")) if isinstance(metadata, dict) else None
+    return kind if kind in ("screenshot", "ui_snapshot") else None
+
+
 def _contained_artifact_path(run_dir: Path, value: object) -> Path | None:
     if not isinstance(value, str) or not value:
         return None
@@ -563,7 +574,7 @@ def _artifact_phase(ref: dict[str, Any]) -> str:
 
 
 def _artifact_sort_key(ref: dict[str, Any]) -> tuple[int, int, int, str]:
-    kind_order = 0 if ref.get("kind") == "screenshot" else 1
+    kind_order = 0 if _capture_kind(ref) == "screenshot" else 1
     phase_order = {"before": 0, "after": 1}.get(_artifact_phase(ref), 2)
     return (kind_order, phase_order, _timestamp_ms(ref.get("created_at") or ref.get("timestamp")) or 0, str(ref.get("path") or ""))
 
@@ -650,6 +661,8 @@ def _step_mapping_payload(value: dict[str, Any], sanitizer) -> dict[str, Any]:
 
 
 def _run_event_status(event: RunEvent) -> str | None:
+    if event.type == "run_failed" and event.payload.get("status") in ("error", "cancelled"):
+        return event.payload["status"]
     if event.type in {"run_failed", "tool_call_failed"}:
         return "failed"
     if event.type in {"run_completed", "tool_call_completed", "step_completed"}:

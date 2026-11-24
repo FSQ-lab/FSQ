@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -24,13 +25,16 @@ from fsq_agent.models import (
     EvidenceBundle,
     ReportArtifact,
     ReportGenerationError,
+    RunEvent,
     RunExecutionContext,
+    RunExecutionResult,
     RunnerEvent,
     RunRuntime,
     RunSource,
     TaskResult,
     ToolExecutionError,
 )
+from fsq_agent.observation import ExecutionLogger
 from fsq_agent.report import ReportGenerator, RunReportService
 
 from .recording import RecordingResult, RecordingService
@@ -104,6 +108,47 @@ class DynamicExecutionService:
         processing = {}
         active_processing = None
         checking_cancellation = False
+        last_event_sequence = 0
+        failure_notification = None
+
+        def relay(event: RunEvent):
+            nonlocal last_event_sequence, failure_notification
+            if event.run_id != metadata.run_id:
+                raise ValueError("Agent event identity does not match the allocated Run.")
+            if event.type == "run_failed":
+                failure_notification = event
+            elif event.type != "run_completed":
+                last_event_sequence = max(last_event_sequence, event.sequence)
+                if request.event_sink is not None:
+                    return request.event_sink(event)
+            return None
+
+        async def terminal_event(frozen: RunExecutionResult, *, error: BaseException | None = None) -> None:
+            payload = {}
+            if failure_notification is not None and frozen.outcome != "success":
+                payload.update(RunLifecycleService.safe_value(failure_notification.payload, secret_values))
+            if error is not None:
+                payload["exception_type"] = type(error).__name__
+            payload["status"] = frozen.outcome
+            verification_status = frozen.verification["status"]
+            if verification_status not in {frozen.outcome, "not_requested"}:
+                payload["verification_status"] = verification_status
+            event = RunEvent(
+                run_id=metadata.run_id,
+                task_id=safe_task.id,
+                type="run_failed" if error is not None else "run_completed",
+                title="Execution interrupted" if error is not None else "Execution completed",
+                message=frozen.summary,
+                sequence=last_event_sequence + 1,
+                payload=payload,
+            )
+            if (run_dir / "events.jsonl").is_symlink():
+                raise ValueError("Run events must remain contained.")
+            ExecutionLogger(run_dir.parent).write_run_event(event)
+            if request.event_sink is not None:
+                dispatched = request.event_sink(event)
+                if inspect.isawaitable(dispatched):
+                    await dispatched
 
         def check_cancellation():
             nonlocal checking_cancellation
@@ -125,7 +170,7 @@ class DynamicExecutionService:
             heartbeat = asyncio.create_task(self._heartbeat(run_dir))
             recorder = EvidenceRecorder(run_id=metadata.run_id, output_dir=run_dir, secret_values=secret_values)
             context = lifecycle.context(run_dir, metadata)
-            outcome = await self._agent.run_in_context(safe_task, context, request.event_sink, evidence_sink=recorder, cancellation_check=check_cancellation)
+            outcome = await self._agent.run_in_context(safe_task, context, relay, evidence_sink=recorder, cancellation_check=check_cancellation)
             _validate_outcome_identity(outcome, safe_task)
             check_cancellation()
             in_memory_bundle = recorder.build_bundle()
@@ -162,6 +207,7 @@ class DynamicExecutionService:
                 secret_values=secret_values,
                 duration_ms=int((time.perf_counter() - started) * 1000),
             )
+            await terminal_event(frozen)
             active_processing = "report"
             processing[active_processing] = {"status": "pending"}
             try:
@@ -223,9 +269,7 @@ class DynamicExecutionService:
                 except (OSError, ValueError):
                     bundle = EvidenceBundle(bundle_id=f"{metadata.run_id}-evidence", run_id=metadata.run_id)
                 if (run_dir / "execution-result.json").is_file():
-                    from fsq_agent.models import RunExecutionResult
-
-                    frozen = RunExecutionResult.model_validate_json((run_dir / "execution-result.json").read_text())
+                    frozen = lifecycle.load_result(run_dir)
                 else:
                     cancelled = (
                         checking_cancellation or isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)) or type(exc).__name__ in {"ExecutionCancelled", "RunCancelled", "TaskCancelledError"}
@@ -233,6 +277,8 @@ class DynamicExecutionService:
                     frozen = lifecycle.freeze(
                         run_dir, metadata, bundle=bundle, status="cancelled" if cancelled else "error", summary="Execution cancelled." if cancelled else f"Execution stopped ({type(exc).__name__})."
                     )
+                    with suppress(BaseException):
+                        await terminal_event(frozen, error=exc)
                 lifecycle.finalize(run_dir, metadata, execution_result=frozen, processing=processing)
             except BaseException as persistence_error:  # noqa: BLE001 - preserve the original execution failure.
                 logging.getLogger(__name__).warning("Run finalization failed (%s)", type(persistence_error).__name__)

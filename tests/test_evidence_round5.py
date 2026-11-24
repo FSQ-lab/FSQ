@@ -58,14 +58,33 @@ def test_assertion_invoke_screenshot_acknowledged_before_evaluator_failure(tmp_p
 
         def evaluate(self, request, *, cancellation_check=None):
             bundle = EvidenceRecorder.recover_bundle(tmp_path)
-            self.seen = [ref for ref in bundle.artifacts if ref.phase == "invoke"]
+            self.seen = [ref for ref in bundle.artifacts if ref.phase == "prepare"]
             raise RuntimeError("evaluator failed")
 
+    from fsq_agent.models import AndroidVisualAssertionPolicy
+
     evaluator = Evaluator()
-    harness = WebHarness(driver=FakeWebDriver(), artifact_store=ArtifactStore(tmp_path), ai_assertion_evaluator=evaluator)
+    harness = WebHarness(
+        driver=FakeWebDriver(),
+        artifact_store=ArtifactStore(tmp_path),
+        ai_assertion_evaluator=evaluator,
+        visual_assertion_policy_resolver=lambda _ctx, _seq: AndroidVisualAssertionPolicy(
+            allow_provider_upload=True,
+            provider_available=True,
+            frame_sensitivity="non_sensitive",
+        ),
+    )
     recorder = EvidenceRecorder(run_id="run", output_dir=tmp_path)
     runner = StepRunner(harness, capability_registry=build_capability_registry(platform="web"), evidence_sink=recorder)
-    result = runner.run_step("run", ExecutableStep(step_id="assert", kind="assertion", action_name="assertWithAI", params={"prompt": "Check"}))
+    result = runner.run_step(
+        "run",
+        ExecutableStep(
+            step_id="assert",
+            kind="assertion",
+            action_name="assertWithAI",
+            params={"assertion": "Check", "surface": "appearance", "full_screen_reason": "Full page check"},
+        ),
+    )
     assert evaluator.seen is not None
     assert len(evaluator.seen) == 1
     assert evaluator.seen[0].kind == "screenshot"

@@ -149,7 +149,7 @@ def test_launch_app_restores_iconic_hwnd_and_sets_focus_after_binding(monkeypatc
 
     driver = PywinautoWindowsDriver(app_path=exe_path)
     monkeypatch.setattr(driver, "_application_cls", lambda: _FakeApp)
-    monkeypatch.setattr(driver, "_snapshot_pre_launch_state", lambda _norm: (set(), set()))
+    monkeypatch.setattr(driver, "_snapshot_pre_launch_state", lambda _norm: (set(), set(), set()))
     monkeypatch.setattr(driver, "_list_top_windows", lambda **kwargs: [window])
     monkeypatch.setattr(driver, "_process_executable_path", lambda _pid: exe_path)
     monkeypatch.setattr(driver, "_is_win32_window", lambda candidate: candidate == hwnd)
@@ -1190,3 +1190,312 @@ def test_pywinauto_driver_sample_color_supports_image_and_verified_pointer_space
         assert minimized_ptr_res["metadata"]["reason"] == "pointer_mapping_unavailable"
     finally:
         driver.close()
+
+
+def _make_uwp_fake_desktop() -> Any:
+    import re
+
+    class _FakeWindow:
+        def __init__(self, desktop: Any, handle: int, process_id: int, title: str, *, visible: bool = True) -> None:
+            self._desktop = desktop
+            self.handle = handle
+            self.process_id = process_id
+            self.title = title
+            self.visible = visible
+            self.closed = False
+
+        def wait(self, wait_for: str, timeout: int = 0) -> _FakeWindow:
+            if self.closed or self.handle not in self._desktop.windows:
+                raise LookupError("window closed")
+            if "visible" in wait_for and not self.visible:
+                raise LookupError("window not visible")
+            return self
+
+        def set_focus(self) -> None:
+            self._desktop.events.append(("set_focus", self.handle, self.process_id))
+
+        def type_keys(self, key: str, **_kwargs: object) -> None:
+            self._desktop.events.append(("type_keys", self.handle, self.process_id, key))
+
+        def close(self) -> None:
+            self.closed = True
+            self._desktop.windows.pop(self.handle, None)
+            self._desktop.events.append(("close_window", self.handle, self.process_id))
+
+    class _FakeDesktop:
+        def __init__(self) -> None:
+            self.processes: dict[int, dict[str, Any]] = {}
+            self.windows: dict[int, _FakeWindow] = {}
+            self.events: list[tuple[Any, ...]] = []
+            self.on_start: Any = None
+
+        def add_process(self, exe_path: str, *, pid: int, alive: bool = True) -> int:
+            self.processes[pid] = {"exe": exe_path, "alive": alive}
+            return pid
+
+        def add_window(self, pid: int, title: str, *, handle: int, visible: bool = True) -> _FakeWindow:
+            win = _FakeWindow(self, handle, pid, title, visible=visible)
+            self.windows[handle] = win
+            return win
+
+        def process_executable(self, pid: int) -> str | None:
+            info = self.processes.get(pid)
+            return None if info is None else str(info["exe"])
+
+        def alive_pids(self) -> list[int]:
+            return [pid for pid, info in self.processes.items() if info["alive"]]
+
+        def find_top_windows(self, **kwargs: Any) -> list[_FakeWindow]:
+            title_re = kwargs.get("title_re")
+            handle = kwargs.get("handle")
+            visible_only = kwargs.get("visible_only", True)
+            matches: list[_FakeWindow] = []
+            for win in list(self.windows.values()):
+                if handle is not None and win.handle != handle:
+                    continue
+                if visible_only and not win.visible:
+                    continue
+                if title_re is not None and re.search(str(title_re), win.title) is None:
+                    continue
+                matches.append(win)
+            return matches
+
+        def make_app_cls(self) -> type[Any]:
+            desktop = self
+
+            class _FakeApp:
+                def __init__(self, backend: str = "uia") -> None:
+                    self.backend = backend
+                    self.process: int | None = None
+
+                def start(self, cmd: str) -> _FakeApp:
+                    desktop.events.append(("start", cmd))
+                    assert desktop.on_start is not None
+                    self.process = desktop.on_start(desktop, cmd)
+                    return self
+
+                def connect(self, **kwargs: Any) -> _FakeApp:
+                    if "handle" in kwargs:
+                        win = desktop.windows.get(int(kwargs["handle"]))
+                        if win is None:
+                            raise LookupError("handle not found")
+                        self.process = win.process_id
+                        return self
+                    raise RuntimeError(f"unsupported connect kwargs: {kwargs}")
+
+                def window(self, **kwargs: Any) -> _FakeWindow:
+                    win = desktop.windows.get(int(kwargs["handle"]))
+                    if win is None:
+                        raise LookupError("window not found")
+                    return win
+
+                def kill(self) -> bool:
+                    if self.process is not None and self.process in desktop.processes:
+                        desktop.processes[self.process]["alive"] = False
+                    desktop.events.append(("kill_process", self.process))
+                    return True
+
+            return _FakeApp
+
+    return _FakeDesktop()
+
+
+def test_pywinauto_driver_binds_uwp_host_frame_without_title_re_via_new_core_window_pid(monkeypatch: pytest.MonkeyPatch) -> None:
+    desktop = _make_uwp_fake_desktop()
+    calc_exe = r"C:\Windows\System32\calc.exe"
+    calc_app_exe = r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator\CalculatorApp.exe"
+    settings_exe = r"C:\Windows\ImmersiveControlPanel\SystemSettings.exe"
+    frame_host_exe = r"C:\Windows\System32\ApplicationFrameHost.exe"
+
+    host_pid = desktop.add_process(frame_host_exe, pid=500)
+    settings_pid = desktop.add_process(settings_exe, pid=510)
+    settings_win = desktop.add_window(host_pid, "Settings", handle=901)
+    core_window_pids: dict[int, list[int]] = {901: [settings_pid]}
+
+    def on_start(d: Any, _cmd: str) -> int:
+        stub_pid = d.add_process(calc_exe, pid=501, alive=False)
+        calc_app_pid = d.add_process(calc_app_exe, pid=502, alive=True)
+        d.add_window(host_pid, "计算器", handle=902)
+        core_window_pids[902] = [calc_app_pid]
+        return stub_pid
+
+    desktop.on_start = on_start
+    driver = PywinautoWindowsDriver(app_path=calc_exe, window_title_re=None)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.alive_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_host_frame_core_window_pids", lambda hwnd: list(core_window_pids.get(hwnd, [])))
+
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver._bound_handle == 902
+        assert driver._owns_process is False
+        driver.press_key(WindowsPressKeyParams(key="1"))
+        assert [e for e in desktop.events if e[0] == "type_keys"] == [("type_keys", 902, 500, "1")]
+    finally:
+        driver.close()
+
+    assert desktop.processes[host_pid]["alive"] is True
+    assert settings_win.closed is False
+    assert 902 not in desktop.windows
+    assert [e for e in desktop.events if e[0] == "kill_process"] == []
+
+
+def test_pywinauto_driver_uwp_host_frame_prefers_target_exe_core_window_over_other_new_uwp(monkeypatch: pytest.MonkeyPatch) -> None:
+    desktop = _make_uwp_fake_desktop()
+    uwp_target_exe = r"C:\Program Files\WindowsApps\Microsoft.WindowsNotepad\Notepad.exe"
+    other_uwp_exe = r"C:\Program Files\WindowsApps\Microsoft.WindowsStore\WinStore.App.exe"
+    frame_host_exe = r"C:\Windows\System32\ApplicationFrameHost.exe"
+
+    host_pid = desktop.add_process(frame_host_exe, pid=500)
+    resident_target_pid = desktop.add_process(uwp_target_exe, pid=520)
+    desktop.add_window(host_pid, "Existing Notepad", handle=901)
+    core_window_pids: dict[int, list[int]] = {901: [resident_target_pid]}
+
+    def on_start(d: Any, _cmd: str) -> int:
+        launcher_pid = d.add_process(uwp_target_exe, pid=521, alive=False)
+        unrelated_pid = d.add_process(other_uwp_exe, pid=530, alive=True)
+        # Unrelated new UWP window appears first in enumeration order; target-exe window appears second.
+        d.add_window(host_pid, "Microsoft Store", handle=903)
+        d.add_window(host_pid, "Untitled - Notepad", handle=902)
+        core_window_pids[903] = [unrelated_pid]
+        core_window_pids[902] = [resident_target_pid]
+        return launcher_pid
+
+    desktop.on_start = on_start
+    driver = PywinautoWindowsDriver(app_path=uwp_target_exe, window_title_re=None)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.alive_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_host_frame_core_window_pids", lambda hwnd: list(core_window_pids.get(hwnd, [])))
+
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver._bound_handle == 902
+    finally:
+        driver.close()
+
+    assert 901 in desktop.windows
+    assert 903 in desktop.windows
+    assert 902 not in desktop.windows
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["no_core_window", "host_pid_only", "pre_existing_backing_pid", "ambiguous_new_backing_pids"],
+)
+def test_pywinauto_driver_rejects_unverified_or_ambiguous_uwp_host_frame_without_title_re(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    desktop = _make_uwp_fake_desktop()
+    calc_exe = r"C:\Windows\System32\calc.exe"
+    settings_exe = r"C:\Windows\ImmersiveControlPanel\SystemSettings.exe"
+    store_exe = r"C:\Program Files\WindowsApps\Microsoft.WindowsStore\WinStore.App.exe"
+    calc_app_exe = r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator\CalculatorApp.exe"
+    frame_host_exe = r"C:\Windows\System32\ApplicationFrameHost.exe"
+
+    host_pid = desktop.add_process(frame_host_exe, pid=500)
+    settings_pid = desktop.add_process(settings_exe, pid=510)
+    desktop.add_window(host_pid, "Settings", handle=901)
+    core_window_pids: dict[int, list[int]] = {901: [settings_pid]}
+
+    driver = PywinautoWindowsDriver(app_path=calc_exe, window_title_re=None)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.alive_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_host_frame_core_window_pids", lambda hwnd: list(core_window_pids.get(hwnd, [])))
+
+    driver._launched = True
+    driver._launched_pid = 501
+    driver._pre_existing_handles = {901}
+    driver._pre_existing_pids = set()
+    driver._pre_existing_all_pids = {host_pid, settings_pid}
+
+    if scenario == "no_core_window":
+        desktop.add_window(host_pid, "Mystery Host Window", handle=902)
+        core_window_pids[902] = []
+    elif scenario == "host_pid_only":
+        desktop.add_window(host_pid, "Host Owned CoreWindow", handle=902)
+        core_window_pids[902] = [host_pid]
+    elif scenario == "pre_existing_backing_pid":
+        desktop.add_window(host_pid, "Settings Subwindow", handle=902)
+        core_window_pids[902] = [settings_pid]
+    elif scenario == "ambiguous_new_backing_pids":
+        calc_app_pid = desktop.add_process(calc_app_exe, pid=502, alive=True)
+        store_pid = desktop.add_process(store_exe, pid=503, alive=True)
+        desktop.add_window(host_pid, "Calculator", handle=902)
+        desktop.add_window(host_pid, "Microsoft Store", handle=903)
+        core_window_pids[902] = [calc_app_pid]
+        core_window_pids[903] = [store_pid]
+
+    try:
+        with pytest.raises(LookupError, match="No visible top-level window matched"):
+            driver._select_target_window(desktop.make_app_cls(), wait_for="exists visible", wait=False)
+    finally:
+        driver.close()
+
+
+def test_pywinauto_driver_uwp_host_frame_respects_explicit_window_title_re_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    desktop = _make_uwp_fake_desktop()
+    calc_exe = r"C:\Windows\System32\calc.exe"
+    store_exe = r"C:\Program Files\WindowsApps\Microsoft.WindowsStore\WinStore.App.exe"
+    frame_host_exe = r"C:\Windows\System32\ApplicationFrameHost.exe"
+
+    host_pid = desktop.add_process(frame_host_exe, pid=500)
+    store_pid = desktop.add_process(store_exe, pid=530, alive=True)
+    desktop.add_window(host_pid, "Microsoft Store", handle=902)
+
+    driver = PywinautoWindowsDriver(app_path=calc_exe, window_title_re=r".*(?:Calculator|计算器).*")
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_host_frame_core_window_pids", lambda hwnd: [store_pid] if hwnd == 902 else [])
+
+    driver._launched = True
+    driver._launched_pid = 501
+    driver._pre_existing_handles = set()
+    driver._pre_existing_pids = set()
+    driver._pre_existing_all_pids = {host_pid}
+
+    try:
+        with pytest.raises(LookupError, match="No visible top-level window matched"):
+            driver._select_target_window(desktop.make_app_cls(), wait_for="exists visible", wait=False)
+    finally:
+        driver.close()
+
+
+def test_pywinauto_driver_uwp_host_frame_allows_title_fallback_when_explicit_title_re_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    desktop = _make_uwp_fake_desktop()
+    calc_exe = r"C:\Windows\System32\calc.exe"
+    frame_host_exe = r"C:\Windows\System32\ApplicationFrameHost.exe"
+
+    host_pid = desktop.add_process(frame_host_exe, pid=500)
+    settings_win = desktop.add_window(host_pid, "Settings", handle=901)
+
+    def on_start(d: Any, _cmd: str) -> int:
+        stub_pid = d.add_process(calc_exe, pid=501, alive=False)
+        d.add_window(host_pid, "Calculator", handle=902)
+        return stub_pid
+
+    desktop.on_start = on_start
+    driver = PywinautoWindowsDriver(app_path=calc_exe, window_title_re=r".*(?:Calculator|计算器).*")
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.alive_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_host_frame_core_window_pids", lambda _hwnd: [])
+
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver._bound_handle == 902
+        assert driver._owns_process is False
+    finally:
+        driver.close()
+
+    assert desktop.processes[host_pid]["alive"] is True
+    assert settings_win.closed is False
+    assert 902 not in desktop.windows

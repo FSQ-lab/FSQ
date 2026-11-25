@@ -121,6 +121,7 @@ WINDOWS_SNAPSHOT_POLICY = TreeCompactionPolicy(
 _T = TypeVar("_T")
 _WindowRect = tuple[int, int, int, int]
 _HOST_FRAME_EXECUTABLE = "applicationframehost.exe"
+_UWP_CORE_WINDOW_CLASS = "windows.ui.core.corewindow"
 
 
 class _PopupWindowDisappearedError(RuntimeError):
@@ -168,6 +169,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._bound_handle: int | None = None
         self._pre_existing_handles: set[int] = set()
         self._pre_existing_pids: set[int] = set()
+        self._pre_existing_all_pids: set[int] = set()
         self._owns_process: bool = False
         self._snapshot_secret_values: tuple[str, ...] = ()
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fsq-pywinauto")
@@ -207,7 +209,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             self._cleanup_owned_target()
         application_cls = self._application_cls()
         target_norm = _normalize_windows_executable_path(app_path)
-        pre_all_handles, pre_matching_pids = self._snapshot_pre_launch_state(target_norm)
+        pre_all_handles, pre_matching_pids, pre_all_pids = self._snapshot_pre_launch_state(target_norm)
         launch_args = [*self.launch_args, *(params.extra_args or [])]
         cmd = subprocess.list2cmdline([app_path, *launch_args])
         started = application_cls(backend=self.backend_kind).start(cmd)
@@ -218,6 +220,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._bound_handle = None
         self._pre_existing_handles = pre_all_handles
         self._pre_existing_pids = pre_matching_pids
+        self._pre_existing_all_pids = pre_all_pids
         self._owns_process = len(pre_matching_pids) == 0
         try:
             window = self._resolve_main_window(wait=True, wait_for=WINDOW_LAUNCH_WAIT_FOR)
@@ -267,7 +270,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 self._bound_handle = None
             target_norm = _normalize_windows_executable_path(self.app_path)
             direct_candidates: list[tuple[int, int, bool]] = []
-            host_frame_candidates: list[int] = []
+            host_frame_candidates: list[tuple[int, int]] = []
             top_query: dict[str, Any] = {"title_re": self.window_title_re, "visible_only": self.backend_kind != "uia"}
             if self.backend_kind == "uia":
                 top_query["control_type"] = "Window"
@@ -291,8 +294,8 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 exe_norm = self._safe_normalized_process_path(pid)
                 if is_started_pid or exe_norm == target_norm:
                     direct_candidates.append((hwnd, pid, hwnd not in self._pre_existing_handles))
-                elif self.window_title_re and exe_norm is not None and ntpath.basename(exe_norm) == _HOST_FRAME_EXECUTABLE and hwnd not in self._pre_existing_handles:
-                    host_frame_candidates.append(hwnd)
+                elif exe_norm is not None and ntpath.basename(exe_norm) == _HOST_FRAME_EXECUTABLE and hwnd not in self._pre_existing_handles:
+                    host_frame_candidates.append((hwnd, pid))
 
             ordered_direct = [(hwnd, pid) for hwnd, pid, is_new in direct_candidates if is_new] + [(hwnd, pid) for hwnd, pid, is_new in direct_candidates if not is_new]
             for hwnd, pid in ordered_direct:
@@ -300,7 +303,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 if resolved is not None:
                     borrowed = hwnd in self._pre_existing_handles or pid in self._pre_existing_pids
                     return resolved[0], resolved[1], hwnd, (False if borrowed else None)
-            for hwnd in host_frame_candidates:
+            for hwnd in self._resolve_verified_host_frame_candidates(host_frame_candidates, target_norm):
                 resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for, timeout=timeout)
                 if resolved is not None:
                     return resolved[0], resolved[1], hwnd, False
@@ -362,9 +365,44 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             return None
         return connected, window
 
-    def _snapshot_pre_launch_state(self, target_norm: str) -> tuple[set[int], set[int]]:
+    def _resolve_verified_host_frame_candidates(
+        self,
+        candidates: list[tuple[int, int]],
+        target_norm: str,
+    ) -> list[int]:
+        if not candidates:
+            return []
+        direct_match: list[int] = []
+        new_backing_pid_match: list[int] = []
+        title_fallback: list[int] = []
+        for hwnd, host_pid in candidates:
+            core_pids = [pid for pid in self._host_frame_core_window_pids(hwnd) if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and pid != host_pid]
+            matched_direct = False
+            matched_new_pid = False
+            for child_pid in core_pids:
+                if (self._launched_pid is not None and child_pid == self._launched_pid) or self._safe_normalized_process_path(child_pid) == target_norm:
+                    matched_direct = True
+                    break
+                if child_pid not in self._pre_existing_all_pids:
+                    matched_new_pid = True
+            if matched_direct:
+                direct_match.append(hwnd)
+            elif matched_new_pid:
+                new_backing_pid_match.append(hwnd)
+            elif self.window_title_re:
+                title_fallback.append(hwnd)
+        if direct_match:
+            return direct_match
+        if new_backing_pid_match:
+            if self.window_title_re or len(new_backing_pid_match) == 1:
+                return new_backing_pid_match
+            return []
+        return title_fallback
+
+    def _snapshot_pre_launch_state(self, target_norm: str) -> tuple[set[int], set[int], set[int]]:
         all_handles: set[int] = set()
         matching_pids: set[int] = set()
+        all_pids: set[int] = set()
         snapshot_query: dict[str, Any] = {"visible_only": False}
         if self.backend_kind == "uia":
             snapshot_query["control_type"] = "Window"
@@ -373,12 +411,16 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             pid = getattr(elem, "process_id", None)
             if isinstance(hwnd, int):
                 all_handles.add(hwnd)
-            if isinstance(pid, int) and self._safe_normalized_process_path(pid) == target_norm:
-                matching_pids.add(pid)
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                all_pids.add(pid)
+                if self._safe_normalized_process_path(pid) == target_norm:
+                    matching_pids.add(pid)
         for pid in self._list_process_ids():
-            if pid not in matching_pids and self._safe_normalized_process_path(pid) == target_norm:
-                matching_pids.add(pid)
-        return all_handles, matching_pids
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+                all_pids.add(pid)
+                if pid not in matching_pids and self._safe_normalized_process_path(pid) == target_norm:
+                    matching_pids.add(pid)
+        return all_handles, matching_pids, all_pids
 
     def _safe_normalized_process_path(self, pid: int) -> str | None:
         try:
@@ -420,6 +462,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._bound_handle = None
         self._pre_existing_handles = set()
         self._pre_existing_pids = set()
+        self._pre_existing_all_pids = set()
         self._owns_process = False
 
     @_windows_driver_tool("clickOn", description="Click a Windows control or explicit screen point.")
@@ -1215,6 +1258,37 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         if not thread_id or pid.value <= 0:
             return None
         return int(pid.value)
+
+    def _host_frame_core_window_pids(self, hwnd: int) -> list[int]:
+        if os.name != "nt" or not isinstance(hwnd, int) or isinstance(hwnd, bool) or hwnd <= 0:
+            return []
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        enum_child_windows = user32.EnumChildWindows
+        enum_child_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        enum_child_windows.argtypes = [wintypes.HWND, enum_child_proc, wintypes.LPARAM]
+        enum_child_windows.restype = wintypes.BOOL
+        get_class_name = user32.GetClassNameW
+        get_class_name.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        get_class_name.restype = ctypes.c_int
+        class_buf = ctypes.create_unicode_buffer(256)
+        found: list[int] = []
+        seen: set[int] = set()
+
+        def _callback(child_hwnd: int, _lparam: int) -> bool:
+            length = get_class_name(child_hwnd, class_buf, len(class_buf))
+            if length > 0 and class_buf.value.casefold() == _UWP_CORE_WINDOW_CLASS:
+                child_pid = self._window_process_id(int(child_hwnd))
+                if child_pid is not None and child_pid not in seen:
+                    seen.add(child_pid)
+                    found.append(child_pid)
+            return True
+
+        with suppress(OSError):
+            enum_child_windows(hwnd, enum_child_proc(_callback), 0)
+        return found
 
     def _win32_window_rect(self, hwnd: int) -> _WindowRect | None:
         if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:

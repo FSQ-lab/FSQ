@@ -145,14 +145,17 @@ def load_workspace_platform_settings(
 
 
 def load_quick_test_workspace_settings(platform: str, target: object, user_config_root: str | Path | None = None) -> tuple[str, str, Settings]:
-    """Initialize only if absent, then compose shared settings without applying the saved default target."""
+    """Compose shared settings, initializing only when an initial target is supplied and the document is absent."""
     platform_id = platform.strip().lower()
-    if platform_id not in {"android", "web", "windows", "macos"}:
+    if platform_id not in {"android", "web", "windows", "macos", "ios"}:
         raise ConfigurationError("Unsupported Quick Test platform.", context={"platform": platform_id})
     config, root, path, revision = _quick_test_workspace_snapshot(platform_id, target, user_config_root)
     if isinstance(config.target, WindowsWorkspaceTarget) and config.target.launch_args:
         _parse_windows_launch_args(config.target.launch_args)
-    return config.name, revision, _compose_workspace_platform_settings(config, root, path, user_config_root, include_target=False)
+    settings = _compose_workspace_platform_settings(config, root, path, user_config_root, include_target=False)
+    if isinstance(config.target, IOSWorkspaceTarget):
+        _apply_ios_signing(settings, config.target)
+    return config.name, revision, settings
 
 
 def _compose_workspace_platform_settings(
@@ -187,14 +190,19 @@ def _compose_workspace_platform_settings(
     elif isinstance(target, IOSWorkspaceTarget):
         settings.harness.ios.bundle_id = target.bundle_id
         settings.harness.ios.app_path = target.app_path
-        settings.harness.ios.xcode_org_id = target.xcode_org_id
-        settings.harness.ios.xcode_signing_id = target.xcode_signing_id
-        settings.harness.ios.updated_wda_bundle_id = target.updated_wda_bundle_id
+        _apply_ios_signing(settings, target)
 
     settings.runtime_secrets.set_values(workspace_config.env)
     settings = refresh_provider_settings(settings, user_config_root)
     resolve_workspace_runtime_paths(settings, workspace_root, preset_path.parent, platform_id)
     return settings
+
+
+def _apply_ios_signing(settings: Settings, target: IOSWorkspaceTarget) -> None:
+    ios = settings.harness.ios
+    ios.xcode_org_id = target.xcode_org_id
+    ios.xcode_signing_id = target.xcode_signing_id
+    ios.updated_wda_bundle_id = target.updated_wda_bundle_id
 
 
 def _reject_workspace_owned_preset_settings(data: dict[str, Any]) -> None:

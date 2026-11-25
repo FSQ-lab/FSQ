@@ -50,7 +50,7 @@ it.each([
   await expect(controlPlaneClient.quickTestContext('macos')).rejects.toMatchObject({ body: { code: 'invalid_response' } });
 });
 
-it.each([['android', 'serial:5555'], ['web', 'chrome-beta']] as const)('binds %s without workspace, mode, Case or Provider fields', async (platform, targetId) => {
+it.each([['android', 'serial:5555'], ['ios', 'Exact-iOS-UDID'], ['web', 'chrome-beta']] as const)('binds %s without workspace, mode, Case, signing or Provider fields', async (platform, targetId) => {
   const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ ...context, platform, targetId, diagnostics: quickDiagnostics(platform, targetId) })))
     .mockResolvedValueOnce(new Response(JSON.stringify({ requestId: 'q1' }), { status: 202 }));
   await controlPlaneClient.quickTestContext(platform, targetId);
@@ -67,3 +67,41 @@ it('accepts Quick bootstrap provenance but never treats unknown workflow as Mana
   fetch.mockResolvedValue(new Response(JSON.stringify({ ...body, activeTask: { ...preparation, workflow: 'unknown' } })));
   await expect(controlPlaneClient.bootstrap()).rejects.toMatchObject({ body: { code: 'invalid_response' } });
 });
+
+it('allows optional iOS discovery facts but rejects unknown kinds, states, and private fields', async () => {
+  const choice = { id: 'ios-udid', label: 'iPhone', selectable: true, status: 'ready' };
+  const body = { ...context, platform: 'ios', targetId: choice.id, diagnostics: { ...quickDiagnostics('ios', choice.id), targetId: choice.id } };
+  const fetch = vi.spyOn(globalThis, 'fetch');
+  for (const facts of [{}, { kind: null, state: null }, { kind: 'device', state: 'connected' }]) {
+    const response = { ...body, choices: [{ ...choice, ...facts }] };
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify(response)));
+    expect(await controlPlaneClient.quickTestContext('ios', choice.id)).toEqual(response);
+  }
+  for (const facts of [{ kind: 'emulator' }, { state: 'private raw discovery' }, { xcodeOrgId: 'private' }]) {
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify({ ...body, choices: [{ ...choice, ...facts }] })));
+    await expect(controlPlaneClient.quickTestContext('ios', choice.id)).rejects.toMatchObject({ body: { code: 'invalid_response' } });
+  }
+  fetch.mockResolvedValueOnce(new Response(JSON.stringify({ ...body, choices: [choice], diagnostics: { ...body.diagnostics, targetId: 'other-udid' } })));
+  await expect(controlPlaneClient.quickTestContext('ios', choice.id)).rejects.toMatchObject({ body: { code: 'invalid_response' } });
+});
+
+it('retains shared iOS diagnostics when target inventory independently blocks Start', async () => {
+  const targetId = 'Disconnected-UDID';
+  const reply = { ...context, platform: 'ios', targetId, canStart: false, diagnostics: quickDiagnostics('ios', targetId) };
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(reply)));
+  expect(await controlPlaneClient.quickTestContext('ios', targetId)).toEqual(reply);
+});
+
+it('validates iOS task recovery separately from runnable Case Manager platforms', async () => {
+  const task = { ...preparation, platform: 'ios', targetId: 'physical-udid' };
+  const body = { apiVersion: '1', platforms: context.choices, quickTestPlatforms: [{ id: 'ios', label: 'iOS' }], busy: true, activeTask: task };
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(body)));
+  expect((await controlPlaneClient.bootstrap()).activeTask).toEqual(task);
+  expect(validateRunSnapshot(task)).toEqual(task);
+  expect(validateRunSnapshot({ ...task, source: {} }).source).toEqual({});
+  expect(() => validateRunSnapshot({ ...task, source: {}, workspaceName: 'quick-test' })).toThrow();
+  expect(() => validateRunSnapshot({ ...preparation, source: {} })).toThrow();
+  expect(() => validateRunSnapshot({ ...task, workflow: 'case-manager', workspaceName: 'quick-test' })).toThrow();
+  expect(() => validateRunSnapshot({ ...task, targetId: '' })).toThrow();
+});
+

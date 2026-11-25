@@ -152,7 +152,7 @@ def diagnosis_projection(diagnosis, *, include_context: bool = False) -> dict[st
         payload["commands"]["caseTestSuggest"] = _doctor_record(diagnosis.commands.case_test_suggest, include_context=True)
         if diagnosis.preparation is not None:
             payload["commands"]["prepare"] = _doctor_record(diagnosis.preparation, include_context=True)
-    if diagnosis.platform == "android":
+    if diagnosis.platform == "android" or (diagnosis.platform == "ios" and include_context):
         payload["targetId"] = diagnosis.target_id
     return payload
 

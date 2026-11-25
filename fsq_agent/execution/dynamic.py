@@ -90,7 +90,11 @@ class DynamicExecutionService:
             raise ConfigurationError("Web search evidence requires Web execution settings before actions.")
         started = time.perf_counter()
         lifecycle = RunLifecycleService()
-        secret_values = tuple(sorted(set(settings.runtime_secrets.private_values().values()), key=len, reverse=True))
+        private_values = set(settings.runtime_secrets.private_values().values())
+        if settings.harness.platform == "ios" and request.quick_test_target_id is not None:
+            ios = settings.harness.ios
+            private_values.update(value for value in (ios.xcode_org_id, ios.xcode_signing_id, ios.updated_wda_bundle_id) if value)
+        secret_values = tuple(sorted(private_values, key=len, reverse=True))
         root = Path(settings.workspace.root_dir or Path(settings.output.runs_dir).parent.parent.parent)
         safe_task = request.task.model_copy(update={key: _redact_metadata_text(value, secret_values, root) for key, value in request.task.model_dump().items() if isinstance(value, str)})
         safe_source_id = safe_task.id
@@ -167,9 +171,9 @@ class DynamicExecutionService:
         try:
             configuration = lifecycle.safe_configuration(settings)
             if request.quick_test_target_id is not None:
-                private_values = (*secret_values, settings.agent_runtime.api_key)
-                target = _quick_test_target(settings, request.quick_test_target_id, request.quick_test_application, private_values)
-                configuration["quick_test_target"] = lifecycle.safe_value(target, private_values)
+                target_private_values = (*secret_values, settings.agent_runtime.api_key)
+                target = _quick_test_target(settings, request.quick_test_target_id, request.quick_test_application, target_private_values)
+                configuration["quick_test_target"] = lifecycle.safe_value(target, target_private_values)
             metadata = lifecycle.snapshot_sources(
                 run_dir, metadata, sources={"goal": request.task.planning_reference_text or request.task.description}, secret_values=secret_values, configuration=configuration
             )
@@ -398,6 +402,10 @@ def _quick_test_target(settings: Settings, target_id: str, application: str | No
         macos = settings.harness.macos
         target["bundle_id"] = macos.bundle_id
         target["application_name"] = macos.app_path.name if macos.app_path else None
+    elif platform == "ios":
+        ios = settings.harness.ios
+        target["bundle_id"] = ios.bundle_id
+        target["application_name"] = ios.app_path.name if ios.app_path else None
     elif platform == "windows":
         path = settings.harness.windows.app_path
         target["application_name"] = path.name if path else None

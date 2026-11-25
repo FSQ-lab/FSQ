@@ -20,6 +20,9 @@ from fsq_agent.models import (
     ApplicationCandidate,
     ApplicationInventoryResult,
     ApplicationLookupResult,
+    IOSDevice,
+    IOSDeviceDiscoveryResult,
+    IOSWorkspaceTarget,
     PlatformPrerequisiteCheck,
     PlatformRuntimeCheck,
     WebWorkspaceTarget,
@@ -74,6 +77,149 @@ def request(root, **updates):
     params = {"platform": "android", "target_id": "serial-1", "goal": "Calculator: 1+1=2", "user_config_root": root}
     params.update(updates)
     return QuickTestPrepareRequest(**params)
+
+
+@pytest.fixture
+def ios_ready(ready, monkeypatch):
+    devices = [
+        IOSDevice(udid="sim-1", name="iPhone Simulator", kind="simulator", state="booted"),
+        IOSDevice(udid="sim-off", name="Inactive Simulator", kind="simulator", state="shutdown"),
+        IOSDevice(udid="phone-1", name="iPhone", kind="device", state="connected"),
+    ]
+    monkeypatch.setattr("fsq_agent.application._quick_test.IOSDeviceDiscovery.discover", lambda self: IOSDeviceDiscoveryResult(devices=devices))
+
+    def prerequisites(self, settings, **kwargs):
+        ios = settings.harness.ios
+        selection = PlatformPrerequisiteCheck(identifier="device_selection", status="ready" if ios.udid in {"sim-1", "phone-1"} else "unavailable", message="Select a device.")
+        if ios.udid != "phone-1":
+            return (selection,)
+        signed = bool(ios.xcode_org_id and ios.xcode_signing_id)
+        return (selection, PlatformPrerequisiteCheck(identifier="wda_signing", status="ready" if signed else "unavailable", message="Configure WDA signing.", code="ios.wda_signing_invalid"))
+
+    monkeypatch.setattr(PlatformRuntimeService, "check_prerequisites", prerequisites)
+    return ready
+
+
+def test_ios_simulator_first_prepare_seeds_application_but_not_udid(ios_ready, monkeypatch):
+    app = ApplicationCandidate(identity="com.apple.Preferences", candidate_id="settings", label="Settings", bundle_id="com.apple.Preferences")
+    monkeypatch.setattr(PlatformRuntimeService, "list_applications", lambda *a, **k: ApplicationInventoryResult(status="complete", candidates=(app,)))
+    intent = QuickTestIntent(True, "sufficient", candidate_id="settings")
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda *a: SimpleNamespace(analyze=lambda **k: intent))
+    result = prepare_quick_test(request(ios_ready, platform="ios", target_id="sim-1", goal="Open Settings and read the header"))
+    assert result.target_id == result.settings.harness.ios.udid == "sim-1"
+    assert result.target.bundle_id == result.settings.harness.ios.bundle_id == "com.apple.Preferences"
+    raw = result.settings.workspace.config_path.read_text(encoding="utf-8")
+    assert "com.apple.Preferences" in raw
+    assert "sim-1" not in raw
+    assert "udid" not in raw
+    stored = load_registered_workspace("quick-test", "ios", ios_ready).target
+    assert stored.xcode_org_id is stored.xcode_signing_id is stored.updated_wda_bundle_id is None
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_ios_simulator_refreshes_cached_miss_once_and_preserves_saved_target(ios_ready, monkeypatch, changed):
+    def candidate(bundle_id):
+        return ApplicationCandidate(candidate_id=bundle_id, identity=bundle_id, label=bundle_id, bundle_id=bundle_id)
+
+    old = candidate("com.example.old")
+    new = candidate("com.example.new")
+    calls = []
+    decisions = []
+
+    def list_apps(self, *, platform, target_id, force_refresh, **kwargs):
+        calls.append((platform, target_id, force_refresh))
+        if force_refresh and changed:
+            return ApplicationInventoryResult(status="complete", candidates=(new,), fingerprint="new")
+        return ApplicationInventoryResult(status="complete", candidates=(old,), fingerprint="old", from_cache=not force_refresh)
+
+    def analyze(**kwargs):
+        ids = tuple(item.bundle_id for item in kwargs["candidates"])
+        decisions.append(ids)
+        if ids == (old.bundle_id,):
+            return QuickTestIntent(False, "application_not_found")
+        return QuickTestIntent(True, "sufficient", candidate_id=new.candidate_id)
+
+    workspace = ios_ready / "quick-test"
+    create_workspace_at_root(
+        root_path=workspace, name="quick-test", platforms=[WorkspacePlatformCreateInput(platform="ios", target=IOSWorkspaceTarget(bundle_id=old.bundle_id), env={})], user_config_root=ios_ready
+    )
+    config = workspace / ".fsq/config/config.ios.yaml"
+    before = config.read_bytes()
+    monkeypatch.setattr(PlatformRuntimeService, "list_applications", list_apps)
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=analyze))
+    query = request(ios_ready, platform="ios", target_id="sim-1", goal="Open the new app and read the header")
+    if changed:
+        result = prepare_quick_test(query)
+        assert result.target.bundle_id == result.settings.harness.ios.bundle_id == new.bundle_id
+        assert result.target_id == result.settings.harness.ios.udid == "sim-1"
+        assert decisions == [(old.bundle_id,), (new.bundle_id,)]
+    else:
+        with pytest.raises(ApplicationError, match="No matching application"):
+            prepare_quick_test(query)
+        assert decisions == [(old.bundle_id,)]
+    assert calls == [("ios", "sim-1", False), ("ios", "sim-1", True)]
+    assert config.read_bytes() == before
+
+
+def test_ios_choice_and_signing_gate_are_read_only(ios_ready, monkeypatch):
+    monkeypatch.setattr(PlatformRuntimeService, "list_applications", lambda *a, **k: pytest.fail("Signing gate reached inventory"))
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda *a: pytest.fail("Signing gate reached inference"))
+    unselected = get_quick_test_context(QuickTestContextRequest(platform="ios", user_config_root=ios_ready))
+    assert not unselected.can_start
+    assert [(item.id, item.kind, item.state, item.selectable) for item in unselected.choices] == [
+        ("sim-1", "simulator", "booted", True),
+        ("sim-off", "simulator", "shutdown", False),
+        ("phone-1", "device", "connected", True),
+    ]
+    assert get_quick_test_context(QuickTestContextRequest(platform="ios", target_id="sim-1", user_config_root=ios_ready)).can_start
+    physical = get_quick_test_context(QuickTestContextRequest(platform="ios", target_id="phone-1", user_config_root=ios_ready))
+    assert not physical.can_start
+    assert any(item.id == "wda_signing" and "config.ios.yaml" in item.action for item in physical.checks)
+    with pytest.raises(ApplicationError) as error:
+        prepare_quick_test(request(ios_ready, platform="ios", target_id="phone-1"))
+    assert error.value.code.value == "quick_test.prerequisites"
+    assert "config.ios.yaml" in error.value.action
+    assert not (ios_ready / "quick-test").exists()
+
+
+def test_ios_physical_unsupported_inventory_binds_only_explicit_app_with_local_signing(ios_ready, monkeypatch):
+    root = ios_ready / "quick-test"
+    configured = IOSWorkspaceTarget(bundle_id="com.example.saved", xcode_org_id="TEAM123456", xcode_signing_id="Unit Signing", updated_wda_bundle_id="com.example.wda")
+    create_workspace_at_root(root_path=root, name="quick-test", platforms=[WorkspacePlatformCreateInput(platform="ios", target=configured, env={})], user_config_root=ios_ready)
+    config = root / ".fsq/config/config.ios.yaml"
+    before = config.read_bytes()
+    monkeypatch.setattr(PlatformRuntimeService, "list_applications", lambda *a, **k: ApplicationInventoryResult(status="unsupported", code="unsupported"))
+    candidate = ApplicationCandidate(identity="com.example.actual", label="com.example.actual", bundle_id="com.example.actual")
+    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lambda *a, **k: ApplicationLookupResult(status="complete", candidates=(candidate,)))
+    decisions = []
+
+    def analyze(**kwargs):
+        decisions.append(kwargs)
+        if "com.example.actual" not in kwargs["goal"]:
+            return QuickTestIntent(False, "application_not_found")
+        return QuickTestIntent(True, "sufficient", explicit_reference="com.example.actual")
+
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=analyze))
+    with pytest.raises(ApplicationError) as missing:
+        prepare_quick_test(request(ios_ready, platform="ios", target_id="phone-1", goal="Open Notes and read the header"))
+    assert missing.value.details["reason"] == "ios_physical_inventory_unsupported"
+    assert "bundle ID" in missing.value.action
+    assert len(decisions) == 1
+    assert not decisions.pop()["candidates"]
+    with pytest.raises(ApplicationError) as private:
+        prepare_quick_test(request(ios_ready, platform="ios", target_id="phone-1", goal="Open com.example.actual with TEAM123456"))
+    assert private.value.details["reason"] == "ios_signing_in_goal"
+    assert not decisions
+    result = prepare_quick_test(request(ios_ready, platform="ios", target_id="phone-1", goal="Open com.example.actual and read the header"))
+    assert len(decisions) == 1
+    assert not decisions[0]["candidates"]
+    assert result.installation_unverified
+    assert result.target.bundle_id == result.settings.harness.ios.bundle_id == "com.example.actual"
+    assert result.settings.harness.ios.xcode_org_id == "TEAM123456"
+    assert result.settings.harness.ios.xcode_signing_id == "Unit Signing"
+    assert result.settings.harness.ios.updated_wda_bundle_id == "com.example.wda"
+    assert "TEAM123456" not in result.model_dump_json()
+    assert config.read_bytes() == before
 
 
 @pytest.fixture
@@ -652,13 +798,13 @@ def test_invalid_windows_seed_cannot_publish_platform_or_registry(ready, existin
     assert root.exists() == existing_workspace
 
 
-def test_quick_test_config_does_not_initialize_ios(tmp_path):
+def test_read_only_quick_test_config_does_not_initialize_ios(tmp_path):
     from fsq_agent.config import load_quick_test_workspace_settings
-    from fsq_agent.models import ConfigurationError, IOSWorkspaceTarget
+    from fsq_agent.models import ConfigurationError
 
     user_root = tmp_path / "absent"
-    with pytest.raises(ConfigurationError):
-        load_quick_test_workspace_settings("ios", IOSWorkspaceTarget(bundle_id="com.fixture"), user_root)
+    with pytest.raises(ConfigurationError, match="not registered"):
+        load_quick_test_workspace_settings("ios", None, user_root)
     assert not user_root.exists()
 
 

@@ -653,3 +653,178 @@ def test_windows_inventory_cache_separates_distinct_catalogues(monkeypatch, tmp_
     assert first_cached.from_cache
     assert [c.app_path for c in first_cached.candidates] == [app_a.resolve()]
     clear_application_inventory_cache()
+
+
+def test_ios_inventory_and_explicit_references(monkeypatch, tmp_path):
+    from fsq_agent.environments import _applications as boundary
+    from fsq_agent.environments.providers import _ios
+    from fsq_agent.models import IOSDevice, IOSDeviceDiscoveryResult
+
+    devices = [IOSDevice(udid=udid, name=udid, kind=kind, state=state) for udid, kind, state in (("sim-a", "simulator", "booted"), ("sim-b", "simulator", "booted"), ("phone", "device", "connected"))]
+    monkeypatch.setattr(_ios, "discover_ios_devices", lambda *a: IOSDeviceDiscoveryResult(devices=devices))
+    seen = []
+
+    def listapps(udid, deadline):
+        seen.append(udid)
+        return plistlib.dumps({f"com.example.{udid}": {"CFBundleDisplayName": "Example"}, "com.example.ipa": {"CFBundleDisplayName": "Another App"}})
+
+    monkeypatch.setattr(_ios, "_simulator_listapps_output", listapps)
+    service = PlatformRuntimeService()
+    boundary.clear_application_inventory_cache()
+    try:
+        for udid in ("sim-a", "sim-b", "sim-a"):
+            result = service.list_applications(platform="ios", target_id=udid)
+            assert {item.bundle_id: item.label for item in result.candidates} == {f"com.example.{udid}": "Example", "com.example.ipa": "Another App"}
+        assert seen == ["sim-a", "sim-b"]
+        devices[0] = devices[0].model_copy(update={"state": "shutdown"})
+        assert service.list_applications(platform="ios", target_id="sim-a").status == "failed"
+        devices[0] = devices[0].model_copy(update={"state": "booted"})
+        assert service.list_applications(platform="ios", target_id="sim-a", force_refresh=True).status == "complete"
+        assert seen == ["sim-a", "sim-b", "sim-a"]
+        found = service.lookup_application(platform="ios", name="Example", explicit_reference="com.example.sim-a", target_id="sim-a")
+        assert [item.bundle_id for item in found.candidates] == ["com.example.sim-a"]
+        absent = service.lookup_application(platform="ios", name="Example", explicit_reference="com.example.sim-b", target_id="sim-a")
+        assert absent.status == "complete"
+        assert not absent.candidates
+        for _ in range(2):
+            result = service.list_applications(platform="ios", target_id="phone")
+            assert (result.status, result.code) == ("unsupported", "unsupported")
+        result = service.lookup_application(platform="ios", name="Example", explicit_reference="com.example.app", target_id="phone")
+        assert [item.bundle_id for item in result.candidates] == ["com.example.app"]
+        assert result.candidates[0].source == "physical_installation_unverified"
+        for udid in ("phone", "sim-a"):
+            result = service.lookup_application(platform="ios", name="Another App", explicit_reference="com.example.ipa", target_id=udid)
+            assert [item.bundle_id for item in result.candidates] == ["com.example.ipa"]
+        app = tmp_path / "Example.app"
+        app.mkdir()
+        (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.local"}))
+        result = service.lookup_application(platform="ios", name="Example", explicit_reference=str(app), target_id="sim-a")
+        assert [(item.app_path, item.bundle_id) for item in result.candidates] == [(app.resolve(), "com.example.local")]
+        result = service.lookup_application(platform="ios", name="Example", explicit_reference=str(app), target_id="phone")
+        assert not result.candidates
+        for reference in (str(app.with_suffix(".ipa")), "bad bundle identifier"):
+            assert service.lookup_application(platform="ios", name="Example", explicit_reference=reference, target_id="sim-a").status == "failed"
+        (app / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": " com.example.local "}))
+        assert service.lookup_application(platform="ios", name="Example", explicit_reference=str(app), target_id="sim-a").status == "failed"
+        assert service.lookup_application(platform="ios", name="Example", explicit_reference="com.example.app", target_id="missing").status == "failed"
+    finally:
+        boundary.clear_application_inventory_cache()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        b"not metadata",
+        b"[]",
+        b'{"com.example.app": {"CFBundleIdentifier": "com.other.app"}}',
+        b'{"com.example.app": {}, "com.example.app": {}}',
+        b'{"com.example.app": {"unknown": NaN}}',
+    ],
+)
+def test_ios_malformed_inventory_does_not_establish_absence(output):
+    from fsq_agent.environments.providers import _ios
+
+    with pytest.raises(ValueError, match="Invalid iOS application"):
+        _ios._parse_simulator_listapps(output, float("inf"))
+
+
+def test_ios_inventory_rejects_exceeded_limits_without_partial_results(monkeypatch):
+    from fsq_agent.environments.providers import _ios
+
+    payload = b'{"com.example.app": {}, "com.example.other": {}}'
+    monkeypatch.setattr(_ios, "_LISTAPPS_MAX_BYTES", len(payload) - 1)
+    with pytest.raises(ValueError, match="size limit"):
+        _ios._parse_simulator_listapps(payload, float("inf"))
+    monkeypatch.setattr(_ios, "_LISTAPPS_MAX_BYTES", len(payload))
+    monkeypatch.setattr(_ios, "_LISTAPPS_MAX_CANDIDATES", 1)
+    with pytest.raises(ValueError, match="inventory shape"):
+        _ios._parse_simulator_listapps(payload, float("inf"))
+
+
+@pytest.mark.parametrize(
+    ("kind", "team", "identity", "wda", "expected"),
+    [
+        ("device", "TEAM123456", "Apple Development", None, "ready"),
+        ("device", "TEAM123456", None, None, "unavailable"),
+        ("device", "private invalid team", "Apple Development", None, "unavailable"),
+        ("device", "TEAM123456", "Apple Development", "private invalid bundle", "unavailable"),
+        ("simulator", None, None, None, "not_applicable"),
+        (None, None, None, None, "not_applicable"),
+    ],
+)
+def test_ios_signing_runs_while_application_is_pending(monkeypatch, kind, team, identity, wda, expected):
+    from types import SimpleNamespace
+
+    from fsq_agent.environments.providers import _ios
+    from fsq_agent.models import IOSDevice, IOSDeviceDiscoveryResult
+
+    monkeypatch.setattr(_ios.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(_ios, "_active_developer_directory", lambda: Path("/Applications/Xcode.app/Contents/Developer"))
+    monkeypatch.setattr(_ios, "_developer_directory_is_full_xcode", lambda path: True)
+    monkeypatch.setattr(_ios, "_check_ios_appium_connect_runtime", lambda: _ios._fact("appium_connect_runtime", message="ready"))
+    devices = [IOSDevice(udid="chosen", name="Chosen", kind=kind, state="connected" if kind == "device" else "booted")] if kind else []
+    monkeypatch.setattr(_ios, "discover_ios_devices", lambda: IOSDeviceDiscoveryResult(devices=devices))
+    settings = SimpleNamespace(udid="chosen", xcode_org_id=team, xcode_signing_id=identity, updated_wda_bundle_id=wda)
+    facts = _ios.ios_prerequisites(settings, application_pending=True, require_explicit_selection=True)
+    assert tuple(fact.identifier for fact in facts[4:7]) == ("device_selection", "wda_signing", "application_identifier")
+    assert facts[5].status == expected
+    if kind is None:
+        assert facts[5].code == "ios.dependency_unavailable"
+    for secret in filter(None, (team, identity, wda)):
+        assert secret not in facts[5].model_dump_json()
+
+
+def test_ios_simulator_uses_fixed_listapps_and_allowlisted_metadata(monkeypatch):
+    from fsq_agent.environments.providers import _ios
+
+    commands = []
+
+    def run(command, deadline):
+        commands.append((command, deadline))
+        return b'{"com.example.app":{"CFBundleDisplayName":"Example","LocalizedDisplayName":"Localized","Bundle":"/private/path"},"com.apple.system":{}}'
+
+    monkeypatch.setattr(_ios, "_read_bounded_tool", run)
+    deadline = 123.0
+    apps = _ios._parse_simulator_listapps(_ios._simulator_listapps_output("selected", deadline), deadline)
+    assert commands == [(["/usr/bin/xcrun", "simctl", "listapps", "selected"], deadline)]
+    assert [(app.bundle_id, app.label, app.aliases, app.app_path) for app in apps] == [
+        ("com.apple.system", "com.apple.system", (), None),
+        ("com.example.app", "Localized", ("Example",), None),
+    ]
+
+
+def test_ios_openstep_listapps_is_converted_without_using_reported_paths(monkeypatch):
+    from fsq_agent.environments.providers import _ios
+
+    source = b'{ "com.example.app" = { Bundle = "/private/app"; }; }'
+
+    def convert(command, deadline, *, data):
+        assert command == ["/usr/bin/plutil", "-convert", "xml1", "-o", "-", "--", "-"]
+        assert data == source
+        return plistlib.dumps({"com.example.app": {"Bundle": "/private/app"}})
+
+    monkeypatch.setattr(_ios, "_read_bounded_tool", convert)
+    (candidate,) = _ios._parse_simulator_listapps(source, float("inf"))
+    assert candidate.bundle_id == "com.example.app"
+    assert candidate.app_path is None
+
+
+@pytest.mark.parametrize("error", [TimeoutError, OSError])
+def test_ios_failed_simulator_query_is_neither_unsupported_nor_empty(monkeypatch, error):
+    from fsq_agent.environments.providers import _ios
+    from fsq_agent.models import IOSDevice, IOSDeviceDiscoveryResult
+
+    device = IOSDevice(udid="sim-error", name="Selected", kind="simulator", state="booted")
+    monkeypatch.setattr(_ios, "discover_ios_devices", lambda *a: IOSDeviceDiscoveryResult(devices=[device]))
+
+    def fail(*args):
+        raise error("private tool details")
+
+    monkeypatch.setattr(_ios, "_simulator_listapps_output", fail)
+    service = PlatformRuntimeService()
+    inventory = service.list_applications(platform="ios", target_id=device.udid, force_refresh=True)
+    lookup = service.lookup_application(platform="ios", name="App", explicit_reference="com.example.app", target_id=device.udid)
+    for result in (inventory, lookup):
+        assert result.status == "failed"
+        assert result.code == ("discovery_timeout" if error is TimeoutError else "discovery_failed")
+        assert "private tool details" not in result.model_dump_json()

@@ -109,6 +109,33 @@ def test_candidate_selection_uses_single_tool_free_call_and_hides_host_fields():
     assert session.closed
 
 
+@pytest.mark.parametrize("reference", ["com.example.app", "com.example.ipa", "/Applications/Test Product.app"])
+def test_ios_verbatim_bundle_or_simulator_path(reference):
+    session = Session(output(candidate_id=None, explicit_reference=reference))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="ios", goal=f'Open "{reference}" and read the header', candidates=())
+    assert result.explicit_reference == reference
+    assert len(session.requests) == 1
+    assert not {"xcode_org_id", "xcode_signing_id", "updated_wda_bundle_id"}.intersection(session.requests[0].output.schema["properties"])
+
+
+@pytest.mark.parametrize(
+    ("goal", "reference"),
+    [
+        ("Open Notes", "com.example.notes"),
+        ("Open /Applications/Notes.ipa", "/Applications/Notes.ipa"),
+        ("Open ./Notes.app", "./Notes.app"),
+        ('Open "~/Applications/Notes.app"', "/Applications/Notes.app"),
+        ('Open "/Applications/Notes.app/Subdirectory"', "/Applications/Notes.app"),
+        ('Open "/Applications/Old.app copies/New.app" and inspect it', "/Applications/Old.app"),
+        ("打开「/Applications/Old.app copies/New.app」并检查", "/Applications/Old.app"),
+    ],
+)
+def test_ios_rejects_guessed_or_unsupported_explicit_references(goal, reference):
+    session = Session(output(candidate_id=None, explicit_reference=reference))
+    with pytest.raises(EngineError, match="verbatim"):
+        QuickTestIntentAnalyzer(session).analyze(platform="ios", goal=goal, candidates=())
+
+
 def test_cross_language_alias_and_entry_app_selection_without_literal_grounding():
     session = Session(output(target_name="Google Play Store", candidate_id="c002", explanation="Install target app via Play Store first."))
     result = QuickTestIntentAnalyzer(session).analyze(

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { controlPlaneClient, toApiError } from '../../../api/controlPlaneClient';
-import type { PlatformId, StepArtifact, StepArtifactsResponse } from '../../../api/types';
+import type { QuickTestPlatformId, StepArtifact, StepArtifactsResponse } from '../../../api/types';
 import { SnapshotDiffView } from '../../runs/SnapshotDiffView';
 import { CaptureQualifiers } from '../../runs/CaptureQualifiers';
 
@@ -8,7 +8,7 @@ interface Props {
   requestId: string;
   stepId: string;
   kind: 'screen' | 'ui-tree';
-  platform: PlatformId | null;
+  platform: QuickTestPlatformId | null;
   targetLabel?: string;
 }
 

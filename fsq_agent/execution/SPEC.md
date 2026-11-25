@@ -101,6 +101,8 @@ The allowlisted `agent_runtime` policy snapshot includes the effective boolean `
 
 Quick Test Runs also capture an allowlisted effective target projection in `run.json` provenance before actions: the frozen run `target_id`, platform-specific application or browser identity, and, for Web, the effective starting `base_url` or `null` for address-free search. These facts originate in the prepared Run, not Workspace YAML or another Run. Persisted provenance applies existing private-value, URL, and local-path safeguards and does not serialize full Settings. The `fsq.run/v2` schema, Run identity and paths stay unchanged; Runs without Quick Test target facts remain readable without backfilling.
 
+For iOS Quick Test, the Run-local projection records the frozen selected UDID as `target_id` and the validated application identity. A Simulator `.app` reference follows the existing local-path safeguard; physical-device WDA signing values are never serialized to Run provenance, evidence, or result projections.
+
 Recording links Run, candidate content, saved/published content, and Strict source through execution identities and content digests. New Case YAML contains no Run provenance; `recording.json` and append-only lineage carry those facts. Existing user `properties.recording` data may be preserved as legacy input. Source filename similarity is never a replay link, and recording validation is not proof of replay success.
 
 A separate owner record contains process identity, process-start identity, and heartbeat. Read-only liveness distinguishes verified alive, confirmed dead, and unknown; stale, absent, inaccessible, or unsupported checks alone do not prove death. Inspection does not modify metadata, resume actions, or finalize Runs.

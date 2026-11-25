@@ -7,7 +7,7 @@ from fsq_agent.application import ApplicationError, QuickTestContextRequest, Qui
 from fsq_agent.models import ConfigurationError
 
 from ._evidence import configured_secret_values, safe_text
-from ._execution import ExecutionHandle, prepare_run, start_execution
+from ._execution import ExecutionHandle, PreparedRun, prepare_run, start_execution
 from ._readiness import AndroidPreflightError, MacOSPreflightError, diagnosed_readiness
 from ._state import TaskCancelledError
 
@@ -21,7 +21,7 @@ def context(query, user_root):
         "platform": result.platform,
         "targetId": result.target_id,
         "canStart": result.can_start,
-        "choices": [choice.model_dump(mode="json") for choice in result.choices],
+        "choices": [choice.model_dump(mode="json", exclude_none=True) for choice in result.choices],
         "checks": [check.model_dump(mode="json") for check in result.checks],
         "diagnostics": diagnosed_readiness(result.diagnosis, workspace_name=None, include_context=True) if result.diagnosis is not None else None,
     }
@@ -34,7 +34,9 @@ def start(server, body):
     # Reject even a null desktop override: it is not an applicable input field.
     if request.platform in {"windows", "macos"} and "targetId" in body:
         raise ValueError("Desktop targetId is not accepted.")
-    request_id = server.state.reserve(workspace_name=None, platform=request.platform, target_id=request.target_id, mode="explore", source={"goal": request.goal}, workflow="quick-test")
+    # Before local signing validation, do not publish iOS goal text through snapshots or SSE.
+    source = {} if request.platform == "ios" else {"goal": request.goal}
+    request_id = server.state.reserve(workspace_name=None, platform=request.platform, target_id=request.target_id, mode="explore", source=source, workflow="quick-test")
     handle = ExecutionHandle(request_id=request_id)
     thread = Thread(target=_prepare, args=(server, request_id, request), name=f"fsq-quick-test-{request_id}", daemon=True)
     handle.thread = thread
@@ -57,17 +59,24 @@ def _prepare(server, request_id, request):
         state.transition(request_id, "preparing", summary="Checking prerequisites and identifying the current goal's application.")
         result = prepare_quick_test(request, check_cancelled=lambda: state.raise_if_cancelled(request_id))
         state.raise_if_cancelled(request_id)
-        prepared = prepare_run(
-            request_id=request_id,
-            settings=result.settings,
-            body={"workspaceName": result.workspace_name, "platform": request.platform, "targetId": result.target_id, "mode": "explore", "goal": request.goal},
-            frozen_revision=result.platform_revision,
-        )
+        if request.platform == "ios":
+            # Application has resolved the exact device and owns its final execution preflight.
+            prepared = PreparedRun(request_id, result.settings, result.workspace_name, result.platform_revision, "explore", result.target_id)
+        else:
+            prepared = prepare_run(
+                request_id=request_id,
+                settings=result.settings,
+                body={"workspaceName": result.workspace_name, "platform": request.platform, "targetId": result.target_id, "mode": "explore", "goal": request.goal},
+                frozen_revision=result.platform_revision,
+            )
         prepared.requires_web_search_evidence = result.requires_web_search_evidence
         prepared.quick_test_preparation = result
         prepared.goal = request.goal
         state.raise_if_cancelled(request_id)
-        application = safe_text(result.application, secret_values=configured_secret_values(result.settings))
+        private_values = configured_secret_values(result.settings)
+        application = safe_text(result.application, secret_values=private_values)
+        if request.platform == "ios":
+            state.update_source(request_id, {"goal": safe_text(request.goal, secret_values=private_values, limit=16_000)})
         state.bind_preparation(request_id, workspace_name=result.workspace_name, target_id=result.target_id, application=application, platform_revision=result.platform_revision)
         state.bind_cases_dir(request_id, result.settings.cases.dir)
         server._handles[request_id] = start_execution(prepared, state)

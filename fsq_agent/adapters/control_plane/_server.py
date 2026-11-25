@@ -23,6 +23,7 @@ from fsq_agent import application
 from fsq_agent.application import ApplicationError, CaseSaveRequest, save_recorded_case
 from fsq_agent.application.contracts import runs as contracts
 from fsq_agent.case_dsl import FSQ_CASE_SUFFIX
+from fsq_agent.config import find_quick_test_workspace
 from fsq_agent.models import AndroidVisualAssertionPolicy, ConfigurationError, FsqAgentError, HarnessContext
 
 from ._cases import discover_cases, resolve_case
@@ -132,7 +133,7 @@ def _history_scope(workspace: str | None, user_root: Path | None) -> dict[str, A
 
 def _history_route(path: str) -> tuple[str, str, tuple[str, ...]]:
     parts = tuple(unquote(part) for part in path.removeprefix(_HISTORY_PREFIX + "/").split("/"))
-    if len(parts) < 2 or parts[0] not in {"web", "android", "windows", "macos"} or any(not part or part in {".", ".."} or "/" in part or "\\" in part for part in parts):
+    if len(parts) < 2 or parts[0] not in (*_CONTROL_PLANE_HISTORY_PLATFORMS, "ios") or any(not part or part in {".", ".."} or "/" in part or "\\" in part for part in parts):
         raise ValueError("Invalid historical Run address.")
     return parts[0], parts[1], parts[2:]
 
@@ -156,11 +157,20 @@ def _list_history(query: dict[str, list[str]], user_root: Path | None) -> dict[s
     return application.list_runs(request).model_dump(mode="json")
 
 
+def _history_read_scope(platform: str, query: dict[str, list[str]], user_root: Path | None) -> dict[str, Any]:
+    workspace_name = _history_one(query, "workspace", required=True)
+    if platform == "ios":
+        entry = find_quick_test_workspace(user_root)
+        if entry is None or entry.name != workspace_name:
+            raise ValueError("An exact registered Quick Test Workspace is required for iOS Run evidence.")
+    return _history_scope(workspace_name, user_root)
+
+
 def _get_history(platform: str, run_id: str, query: dict[str, list[str]], user_root: Path | None) -> dict[str, Any]:
     if set(query) - {"workspace", "baselineRunId", "relatedRunId"}:
         raise ValueError("Unsupported report query.")
     request = contracts.GetRunReportRequest(
-        **_history_scope(_history_one(query, "workspace", required=True), user_root),
+        **_history_read_scope(platform, query, user_root),
         platform=platform,
         run_id=run_id,
         baseline_run_id=_history_one(query, "baselineRunId"),
@@ -170,6 +180,8 @@ def _get_history(platform: str, run_id: str, query: dict[str, list[str]], user_r
 
 
 def _export_history(platform: str, run_id: str, body: dict[str, Any], user_root: Path | None) -> dict[str, Any]:
+    if platform == "ios":
+        raise ValueError("iOS Run history is read-only.")
     if set(body) - {"workspaceName", "format", "baselineRunId", "relatedRunIds"} or not isinstance(body.get("workspaceName"), str) or not body["workspaceName"].strip() or "format" not in body:
         raise ValueError("Choose a Workspace and one report format.")
     request = contracts.ExportRunReportRequest(
@@ -198,11 +210,11 @@ def _resolve_history_file(platform: str, run_id: str, suffix: tuple[str, ...], q
         raise ValueError("Only a Workspace scope is accepted.")
     if len(suffix) == 2 and suffix[0] == "artifacts":
         reference = {"kind": "source", "artifact_id": suffix[1]}
-    elif len(suffix) == 4 and suffix[0] == "exports" and suffix[2] == "files":
+    elif platform != "ios" and len(suffix) == 4 and suffix[0] == "exports" and suffix[2] == "files":
         reference = {"kind": "export", "export_id": suffix[1], "file_id": suffix[3]}
     else:
         raise ValueError("Invalid report file address.")
-    request = contracts.ResolveRunArtifactRequest(**_history_scope(_history_one(query, "workspace", required=True), user_root), platform=platform, run_id=run_id, reference=reference)
+    request = contracts.ResolveRunArtifactRequest(**_history_read_scope(platform, query, user_root), platform=platform, run_id=run_id, reference=reference)
     return application.resolve_run_artifact(request)
 
 
@@ -350,7 +362,10 @@ class ControlPlaneServer:
                 self._require_config_access(peer_host)
                 return 200, self._provider_auth.get(auth_request_id), dict(_JSON_HEADERS)
             if path == f"{_API_PREFIX}/bootstrap":
-                return 200, self.state.bootstrap(), dict(_JSON_HEADERS)
+                bootstrap = self.state.bootstrap()
+                if (bootstrap["activeTask"] or {}).get("platform") == "ios":
+                    self._require_config_access(peer_host)
+                return 200, bootstrap, dict(_JSON_HEADERS)
             if path == f"{_API_PREFIX}/readiness":
                 workspace_name, platform = _workspace_platform_query(query)
                 return 200, self._readiness(workspace_name, platform), dict(_JSON_HEADERS)
@@ -548,6 +563,8 @@ class ControlPlaneServer:
     def _save_run_yaml(self, request_id: str, body: dict[str, Any]) -> dict[str, Any]:
         case_name = _save_case_name(body)
         snapshot = self.state.snapshot(request_id)
+        if snapshot.get("platform") == "ios":
+            raise ValueError("Save yaml is unavailable for iOS Quick Test runs.")
         if not snapshot.get("terminal"):
             raise _RunNotTerminalError("Save yaml is available after the run reaches a terminal state.")
         if snapshot.get("mode") != "explore":
@@ -758,6 +775,8 @@ class ControlPlaneServer:
         mode = body.get("mode")
         if not isinstance(workspace_name, str) or not workspace_name.strip() or not isinstance(platform, str) or not isinstance(target_id, str) or not isinstance(mode, str):
             return 400, _error("invalid_run", "workspaceName, mode, platform, and targetId are required.", "Complete the run form and retry.")
+        if platform == "ios":
+            return 400, _error("invalid_run", "Select a supported Case Manager platform.", "Choose Android, Web, Windows, or macOS.")
         workspace_name = workspace_name.strip()
         source = {"goal": body["goal"]} if isinstance(body.get("goal"), str) else {"casePath": body["casePath"]} if isinstance(body.get("casePath"), str) else {}
         settings = None

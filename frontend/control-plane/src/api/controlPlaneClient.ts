@@ -17,6 +17,7 @@ import type {
   GitHubModelsResponse,
   ProviderStatusResponse,
   PlatformId,
+  QuickTestPlatformId,
   ReadinessResponse,
   ReplayFramesResponse,
   ReplayVideoResponse,
@@ -49,7 +50,7 @@ function validateHistory(value: unknown): HistoryResponse {
   return value;
 }
 function validateRunReport(value: unknown): RunReportResponse {
-  if (!record(value) || !string(value.workspace) || !string(value.run_id) || !platform(value.platform) || !publicReportValid(value.report) || !arrayOf(value.warnings,string)) invalidResponse('report', 'Invalid report fields.');
+  if (!record(value) || !string(value.workspace) || !string(value.run_id) || !quickTestPlatform(value.platform) || !publicReportValid(value.report) || !arrayOf(value.warnings,string)) invalidResponse('report', 'Invalid report fields.');
   if (value.report.run.run_id !== value.run_id || value.report.run.platform !== value.platform) invalidResponse('report', 'Mismatched report identity.');
   return value as unknown as RunReportResponse;
 }
@@ -113,6 +114,8 @@ function bool(value: unknown): value is boolean { return typeof value === 'boole
 function finiteNumber(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value); }
 function nonNegativeInteger(value: unknown): value is number { return finiteNumber(value) && Number.isInteger(value) && value >= 0; }
 function platform(value: unknown): value is PlatformId { return string(value) && platforms.has(value as PlatformId); }
+function quickTestPlatform(value: unknown): value is QuickTestPlatformId { return value === 'ios' || platform(value); }
+function iosUdid(value: unknown): value is string { return string(value) && value === value.trim() && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value); }
 function arrayOf(value: unknown, predicate: (item: unknown) => boolean): boolean { return Array.isArray(value) && value.every(predicate); }
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const allowed = new Set(keys);
@@ -124,16 +127,17 @@ function hasNoUnknownKeys(value: Record<string, unknown>, keys: readonly string[
 }
 
 function activeTask(value: unknown): boolean {
-  if (!record(value) || !string(value.requestId) || !nullableString(value.runId) || !platform(value.platform)
+  if (!record(value) || !string(value.requestId) || !nullableString(value.runId) || !quickTestPlatform(value.platform)
     || !string(value.mode) || !modes.has(value.mode) || !string(value.status) || !statuses.has(value.status)) return false;
   if (value.workflow !== 'quick-test' && value.workflow !== 'case-manager') return false;
   if (!nullableString(value.application) || !nullableString(value.platformRevision)) return false;
   if (value.workflow === 'quick-test') {
     return value.mode === 'explore' && nullableString(value.workspaceName) && nullableString(value.targetId)
       && (value.runId === null || (string(value.workspaceName) && value.workspaceName.length > 0))
+      && (value.platform !== 'ios' || iosUdid(value.targetId))
       && ((value.platform === 'windows' || value.platform === 'macos') || string(value.targetId));
   }
-  return string(value.workspaceName) && string(value.targetId);
+  return platform(value.platform) && string(value.workspaceName) && string(value.targetId);
 }
 
 const diagnosticStatuses = new Set(['ready', 'unavailable', 'error', 'not_applicable', 'pending']);
@@ -142,7 +146,7 @@ function diagnosticDetail(value: unknown, nullableText = false): boolean {
     && (nullableText ? nullableString(value.message) && nullableString(value.action) : string(value.message) && string(value.action));
 }
 function quickDiagnostics(value: unknown): value is QuickDiagnostics {
-  if (!record(value) || value.workspaceName !== null || !platform(value.platformId)
+  if (!record(value) || value.workspaceName !== null || !quickTestPlatform(value.platformId)
     || !['workspace', 'platform', 'provider', 'target', 'strict'].every(key => diagnosticDetail(value[key]))
     || !arrayOf(value.prerequisites, item => record(item) && string(item.identifier) && nullableString(item.code)
       && string(item.status) && diagnosticStatuses.has(item.status) && string(item.message) && nullableString(item.action) && arrayOf(item.commands, string))
@@ -153,17 +157,27 @@ function quickDiagnostics(value: unknown): value is QuickDiagnostics {
     || !string(value.status) || !['ready', 'partial', 'unavailable', 'pending'].includes(value.status)
     || !string(value.checkedAt) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value.checkedAt)
     || !Number.isFinite(Date.parse(value.checkedAt))
-    || ('targetId' in value && (value.platformId !== 'android' || !nullableString(value.targetId)))) return false;
+    || ('targetId' in value && !(value.platformId === 'android' && nullableString(value.targetId)
+      || value.platformId === 'ios' && (value.targetId === null || iosUdid(value.targetId))))) return false;
   return true;
 }
+const iosDiscoveryStates = { booted: true, shutdown: true, connected: true, unavailable: true, unknown: true };
+function quickTestChoice(item: unknown, ios: boolean): boolean {
+  return record(item) && string(item.id) && string(item.label) && bool(item.selectable) && string(item.status) && readinessStatuses.has(item.status)
+    && (item.kind == null || item.kind === 'simulator' || item.kind === 'device')
+    && (item.state == null || string(item.state) && Object.hasOwn(iosDiscoveryStates, item.state))
+    && (!ios || iosUdid(item.id) && hasNoUnknownKeys(item, ['id', 'label', 'selectable', 'status', 'kind', 'state']));
+}
 function quickTestContext(value: unknown): value is QuickTestContext {
-  if (!record(value) || !platform(value.platform) || !nullableString(value.targetId) || !bool(value.canStart)
-    || !arrayOf(value.choices, item => record(item) && string(item.id) && string(item.label) && bool(item.selectable) && string(item.status) && readinessStatuses.has(item.status))
+  if (!record(value) || !quickTestPlatform(value.platform) || !nullableString(value.targetId) || !bool(value.canStart)
+    || (value.platform === 'ios' && value.targetId !== null && !iosUdid(value.targetId))
+    || !arrayOf(value.choices, item => quickTestChoice(item, value.platform === 'ios'))
     || !arrayOf(value.checks, item => record(item) && string(item.id) && string(item.message) && string(item.action) && string(item.status) && diagnosticStatuses.has(item.status))) return false;
   if (value.diagnostics === null) return true;
   return quickDiagnostics(value.diagnostics) && value.diagnostics.platformId === value.platform
     && (value.diagnostics.targetId === undefined || value.diagnostics.targetId === value.targetId)
-    && value.canStart === (value.diagnostics.commands.prepare.status === 'ready');
+    // iOS independently verifies the choice inventory as well as shared preparation readiness.
+    && ((value.platform === 'ios' && !value.canStart) || value.canStart === (value.diagnostics.commands.prepare.status === 'ready'));
 }
 function validateQuickTestContext(value: unknown): QuickTestContext {
   if (!quickTestContext(value)) invalidResponse('quick-test context', 'Invalid choices, checks or context-bound diagnostics.');
@@ -183,12 +197,13 @@ export function validateRunSnapshot(value: unknown, path = 'run snapshot'): RunS
   if (!activeTask(value) || !record(value)) invalidResponse(path, 'Invalid task identity or discriminants.');
   const source = value.source;
   const activeStep = value.activeStep;
+  const mayWithholdGoal = value.workflow === 'quick-test' && value.platform === 'ios' && value.workspaceName === null;
   const validSource = record(source)
     && (source.goal === undefined || string(source.goal))
     && (source.casePath === undefined || string(source.casePath))
     && (source.caseContent === undefined || string(source.caseContent))
     && (source.caseSteps === undefined || arrayOf(source.caseSteps, strictCaseStep))
-    && (value.mode === 'explore' ? string(source.goal) && source.casePath === undefined : string(source.casePath) && source.goal === undefined);
+    && (value.mode === 'explore' ? (string(source.goal) || mayWithholdGoal) && source.casePath === undefined : string(source.casePath) && source.goal === undefined);
   const validActiveStep = activeStep === null || (record(activeStep) && string(activeStep.stepId) && (activeStep.label === undefined || string(activeStep.label)));
   if (!validSource || !string(value.startedAt) || !nullableString(value.completedAt) || !bool(value.cancelRequested)
     || !arrayOf(value.events, timelineEvent) || !validActiveStep || !(value.result === null || record(value.result))
@@ -214,6 +229,7 @@ function strictCaseStep(value: unknown): boolean {
 function validateBootstrap(value: unknown): BootstrapResponse {
   if (!record(value) || !string(value.apiVersion)
     || !arrayOf(value.platforms, (item) => record(item) && platform(item.id) && string(item.label))
+    || (value.quickTestPlatforms !== undefined && !arrayOf(value.quickTestPlatforms, item => record(item) && quickTestPlatform(item.id) && string(item.label)))
     || !bool(value.busy) || !(value.activeTask === null || activeTask(value.activeTask))) invalidResponse('bootstrap', 'Invalid bootstrap fields.');
   return value as unknown as BootstrapResponse;
 }
@@ -512,7 +528,7 @@ export const controlPlaneClient = {
     for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
     return jsonRequest(`/history?${query}`, validateHistory, { signal }).then(value => { if (value.workspace !== workspaceName) invalidResponse('history', 'Mismatched Workspace.'); return value; });
   },
-  runReport: (workspaceName: string, platformId: PlatformId, runId: string, baselineRunId?: string, signal?: AbortSignal, relatedRunIds: string[] = []) => {
+  runReport: (workspaceName: string, platformId: QuickTestPlatformId, runId: string, baselineRunId?: string, signal?: AbortSignal, relatedRunIds: string[] = []) => {
     const query = new URLSearchParams({ workspace: workspaceName });
     if (baselineRunId) query.set('baselineRunId', baselineRunId);
     relatedRunIds.forEach(id => query.append('relatedRunId', id));
@@ -527,8 +543,8 @@ export const controlPlaneClient = {
     }
     return value;
   }),
-  historyArtifactUrl: (workspaceName: string, platformId: PlatformId, runId: string, artifactId: string) => `${API_BASE}/history/${encodeURIComponent(platformId)}/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}?workspace=${encodeURIComponent(workspaceName)}`,
-  historyArtifactImage: async (workspaceName: string, platformId: PlatformId, runId: string, artifactId: string, signal?: AbortSignal) => {
+  historyArtifactUrl: (workspaceName: string, platformId: QuickTestPlatformId, runId: string, artifactId: string) => `${API_BASE}/history/${encodeURIComponent(platformId)}/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}?workspace=${encodeURIComponent(workspaceName)}`,
+  historyArtifactImage: async (workspaceName: string, platformId: QuickTestPlatformId, runId: string, artifactId: string, signal?: AbortSignal) => {
     const response = await fetch(controlPlaneClient.historyArtifactUrl(workspaceName, platformId, runId, artifactId), { signal });
     if (!response.ok) throw await responseError(response);
     const mime = response.headers.get('Content-Type')?.split(';')[0];
@@ -539,7 +555,7 @@ export const controlPlaneClient = {
     if (!blob.size || blob.size > 16 * 1024 * 1024) invalidResponse('artifact image', 'Image exceeds the display limit.');
     return blob;
   },
-  historyArtifactText: async (workspaceName: string, platformId: PlatformId, runId: string, artifactId: string, signal?: AbortSignal) => {
+  historyArtifactText: async (workspaceName: string, platformId: QuickTestPlatformId, runId: string, artifactId: string, signal?: AbortSignal) => {
     const response = await fetch(controlPlaneClient.historyArtifactUrl(workspaceName, platformId, runId, artifactId), { signal });
     if (!response.ok) throw await responseError(response);
     const length = Number(response.headers.get('Content-Length'));
@@ -547,9 +563,9 @@ export const controlPlaneClient = {
     return response.text();
   },
   bootstrap: (signal?: AbortSignal) => jsonRequest('/bootstrap', validateBootstrap, { signal }),
-  quickTestContext: (platform: PlatformId, targetId?: string, signal?: AbortSignal) => {
+  quickTestContext: (platform: QuickTestPlatformId, targetId?: string, signal?: AbortSignal) => {
     const params = new URLSearchParams({ platform });
-    if ((platform === 'android' || platform === 'web') && targetId) params.set('targetId', targetId);
+    if ((platform === 'android' || platform === 'ios' || platform === 'web') && targetId) params.set('targetId', targetId);
     return jsonRequest(`/quick-test/context?${params}`, validateQuickTestContext, { signal });
   },
   startQuickTest: (payload: QuickTestPayload) => jsonRequest('/quick-test/runs', validateStart, { method: 'POST', body: JSON.stringify(payload) }),

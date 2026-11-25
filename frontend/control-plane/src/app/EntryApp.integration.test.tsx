@@ -174,3 +174,34 @@ it.each(['valid', 'removed', 'unavailable'])('F004/F005 residual: real Runner pr
   expect(controlPlaneClient.startRun).not.toHaveBeenCalled();
   expect(controlPlaneClient.cancelRun).not.toHaveBeenCalled();
 });
+
+it('opens an exact iOS persisted report and source artifact without a runnable Workspace or export', async () => {
+  window.history.replaceState(null, '', '/#runs?workspace=quick-test&platform=ios&run=ios-run');
+  vi.mocked(controlPlaneClient.workspaces).mockRejectedValue(new Error('Workspace list unavailable'));
+  const history = vi.spyOn(controlPlaneClient, 'history');
+  const exportReport = vi.spyOn(controlPlaneClient, 'exportReport');
+  const reportFetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+    const url = String(input);
+    if (url.includes('/artifacts/')) return new Response('<hierarchy/>', { headers: { 'Content-Length': '12' } });
+    return new Response(JSON.stringify({
+      workspace: 'quick-test', run_id: 'ios-run', platform: 'ios', warnings: [],
+      report: { schema_version: 'fsq.report/v1', run: { run_id: 'ios-run', platform: 'ios', mode: 'explore', gate: { status: 'failed', reasons: [] } },
+        source: {}, execution: { outcome: 'failed' }, verification: {}, evidence: {}, processing: {}, metrics: {}, lineage: {}, comparison: {}, warnings: [], logs: [], tool_calls: [],
+        steps: [{ step_execution_id: 's1', action_name: 'Inspect iPhone', status: 'failed' }],
+        artifacts: [{ artifact_id: 'tree', kind: 'ui_snapshot', step_execution_id: 's1', availability: 'available' }],
+      },
+    }));
+  });
+  render(<EntryApp />);
+  await screen.findByRole('heading', { name: 'ios-run' });
+  expect(await screen.findByText('<hierarchy/>')).toBeVisible();
+  expect(screen.getByRole('link', { name: 'Download artifact' })).toHaveAttribute('href', '/api/control-plane/history/ios/ios-run/artifacts/tree?workspace=quick-test');
+  expect(reportFetch.mock.calls.map(([url]) => String(url))).toEqual([
+    '/api/control-plane/history/ios/ios-run?workspace=quick-test',
+    '/api/control-plane/history/ios/ios-run/artifacts/tree?workspace=quick-test',
+  ]);
+  expect(screen.queryByRole('button', { name: 'All Runs' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Export report' })).not.toBeInTheDocument();
+  expect(history).not.toHaveBeenCalled();
+  expect(exportReport).not.toHaveBeenCalled();
+});

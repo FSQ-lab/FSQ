@@ -1,7 +1,7 @@
-import type { PlatformId } from '../../api/types';
+import type { QuickTestPlatformId } from '../../api/types';
 
-export interface RunRoute { workspace?: string; platform?: PlatformId; run?: string; step?: string; error?: string }
-const platforms = new Set(['web', 'android', 'windows', 'macos']);
+export interface RunRoute { workspace?: string; platform?: QuickTestPlatformId; run?: string; step?: string; error?: string }
+const platforms = ['web', 'android', 'windows', 'macos', 'ios'];
 
 export function parseRunRoute(hash: string): RunRoute | null {
   if (hash !== '#runs' && !hash.startsWith('#runs?')) return null;
@@ -12,7 +12,12 @@ export function parseRunRoute(hash: string): RunRoute | null {
     if (values.length > 1 || values.some(value => !value.trim())) return { error: 'Invalid Run address. Use a complete Workspace, platform, and Run identity.' };
     if (values[0]) Object.assign(route, { [key]: values[0] });
   }
-  if ([...query.keys()].some(key => !['workspace', 'platform', 'run', 'step'].includes(key)) || route.platform && !platforms.has(route.platform) || route.run && (!route.workspace || !route.platform) || route.step && !route.run || route.platform && !route.workspace) return { error: 'Invalid Run address. Use a complete Workspace, platform, and Run identity.' };
+  if ([...query.keys()].some(key => !['workspace', 'platform', 'run', 'step'].includes(key))
+    || route.platform && !platforms.includes(route.platform) || route.run && (!route.workspace || !route.platform)
+    || route.step && !route.run || route.platform && !route.workspace
+    || route.platform === 'ios' && (!route.run || route.workspace?.toLowerCase() !== 'quick-test')) {
+    return { error: 'Invalid Run address. Use a complete Workspace, platform, and Run identity.' };
+  }
   return route;
 }
 

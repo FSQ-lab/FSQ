@@ -12,4 +12,11 @@ describe('durable Runs identity', () => {
     expect(parseRunRoute('#runs?run=run-1')).toHaveProperty('error');
     expect(parseRunRoute('#runs?workspace=a&platform=other')).toHaveProperty('error');
   });
+  it('only accepts iOS as an exact dedicated Workspace Run address', () => {
+    const route = { workspace: 'quick-test', platform: 'ios' as const, run: 'ios-run', step: 'call/2' };
+    expect(parseRunRoute(runHash(route))).toEqual(route);
+    expect(parseRunRoute('#runs?workspace=quick-test&platform=ios')).toHaveProperty('error');
+    expect(parseRunRoute('#runs?workspace=other&platform=ios&run=ios-run')).toHaveProperty('error');
+  });
+
 });

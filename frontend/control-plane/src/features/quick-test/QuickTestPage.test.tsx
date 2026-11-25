@@ -2,11 +2,12 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { quickDiagnostics } from '../../test/quickTestFixtures';
 import { controlPlaneClient } from '../../api/controlPlaneClient';
-import type { RunSnapshot } from '../../api/types';
+import type { QuickTestContext, RunSnapshot } from '../../api/types';
 import { QuickTestPage } from './QuickTestPage';
 
 const platforms = [{ id: 'android', label: 'Android' }, { id: 'web', label: 'Web' }, { id: 'windows', label: 'Windows' }, { id: 'macos', label: 'macOS' }] as const;
-const bootstrap = { apiVersion: '1', platforms: [...platforms], busy: false, activeTask: null };
+const quickTestPlatforms = [...platforms, { id: 'ios', label: 'iOS' } as const];
+const bootstrap = { apiVersion: '1', platforms: [...platforms], quickTestPlatforms, busy: false, activeTask: null };
 const prep = {
   requestId: 'q1', workflow: 'quick-test' as const, application: null, platformRevision: null,
   workspaceName: null, targetId: null, runId: null, platform: 'macos' as const, mode: 'explore' as const, status: 'preparing' as const,
@@ -228,9 +229,9 @@ it.each([400, 503])('F007: malformed %s start errors remain renderable and conse
   expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeDisabled();
   expect(fetch).toHaveBeenCalledTimes(1);
 });
-it('shows four platforms without workspace or strict controls; pending application can start exactly once', async () => {
+it('shows five Quick Test platforms without workspace or strict controls; pending application can start exactly once', async () => {
   await compose();
-  for (const p of platforms) expect(screen.getByRole('option', { name: p.label })).toBeInTheDocument();
+  for (const p of quickTestPlatforms) expect(screen.getByRole('option', { name: p.label })).toBeInTheDocument();
   expect(screen.queryByText('Strict Replay')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Workspace')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Browser')).not.toBeInTheDocument();
@@ -306,3 +307,106 @@ it.each([
   await waitFor(() => expect(controlPlaneClient.startQuickTest).toHaveBeenCalledWith({ platform: 'web', targetId: 'chrome', goal }));
   await screen.findByRole('heading', { name: 'Activity' });
 });
+
+it('requires deliberate iOS selection and preserves the exact UDID through disappearance, signing checks and stale response', async () => {
+  const phone = { id: 'Exact-iPhone-UDID', label: 'iPhone', kind: 'device', state: 'connected', status: 'ready', selectable: true } as const;
+  const simulator = { id: 'Sim-UDID', label: 'iPhone', kind: 'simulator', state: 'booted', status: 'ready', selectable: true } as const;
+  const disconnected = { ...simulator, state: 'shutdown', status: 'unavailable', selectable: false } as const;
+  let choices: QuickTestContext['choices'] = [phone, disconnected];
+  const makeContext = (target: string | null, currentChoices = choices): QuickTestContext => {
+    const diagnostics = { ...quickDiagnostics('ios', target), targetId: target };
+    const canStart = target === simulator.id;
+    if (target === phone.id && currentChoices.some(choice => choice.id === phone.id)) {
+      diagnostics.prerequisites.push({ identifier: 'wda_signing', status: 'unavailable', code: 'ios.wda_signing_missing', message: 'WDA signing is required.', action: 'Configure signing locally.', commands: [] });
+      diagnostics.commands.prepare = { status: 'unavailable', code: 'ios.wda_signing_missing', message: 'WDA signing is required.', action: 'Configure signing locally.' };
+    } else if (!canStart) {
+      diagnostics.commands.prepare = { status: 'unavailable', code: 'ios.device_selection', message: 'Select an available iOS device.', action: '' };
+    }
+    return { platform: 'ios' as const, targetId: target, choices: currentChoices, canStart, checks: [], diagnostics };
+  };
+  const stale = deferred<QuickTestContext>();
+  vi.mocked(controlPlaneClient.quickTestContext).mockImplementation(async (_platform, id) => makeContext(id ?? null));
+  const iosTask: RunSnapshot = { ...prep, platform: 'ios', targetId: simulator.id, status: 'success', terminal: true, runId: 'ios-report', workspaceName: 'quick-test' };
+  vi.mocked(controlPlaneClient.runSnapshot).mockResolvedValue(iosTask);
+  vi.spyOn(controlPlaneClient, 'replayVideo').mockResolvedValue({ available: false, videoUrl: null });
+  vi.spyOn(controlPlaneClient, 'replayFrames').mockResolvedValue({ available: false, frames: [], message: 'No frames' });
+
+  render(<QuickTestPage {...props} />);
+  await screen.findByRole('option', { name: 'iOS' });
+  fireEvent.change(screen.getByLabelText('Platform'), { target: { value: 'ios' } });
+  const device = screen.getByLabelText('Device');
+  expect(await screen.findByRole('option', { name: /iPhone.*Exact-iPhone-UDID.*Physical device.*connected/i })).toBeEnabled();
+  expect(screen.getByRole('option', { name: /iPhone.*Sim-UDID.*Simulator.*shutdown/i })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('What do you want to test?'), { target: { value: 'Inspect com.example.app' } });
+  expect(device).toHaveValue('');
+  expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeDisabled();
+  fireEvent.change(device, { target: { value: phone.id } });
+  const environment = screen.getByRole('region', { name: 'iOS environment' });
+  await within(environment).findByText('WDA signing', { exact: true });
+  expect(within(environment).getAllByText('Configure signing locally.').length).toBeGreaterThan(0);
+  expect(screen.queryByRole('button', { name: 'Edit target configuration' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeDisabled();
+
+  choices = [simulator];
+  fireEvent.click(screen.getByRole('button', { name: 'Recheck environment' }));
+  await screen.findByRole('option', { name: /Exact-iPhone-UDID.*unavailable/i });
+  expect(device).toHaveValue(phone.id);
+  expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeDisabled();
+  vi.mocked(controlPlaneClient.quickTestContext).mockReturnValueOnce(stale.promise);
+  fireEvent.click(screen.getByRole('button', { name: 'Recheck environment' }));
+  fireEvent.change(device, { target: { value: simulator.id } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeEnabled());
+  await act(async () => stale.resolve(makeContext(phone.id, [phone, disconnected])));
+  expect(device).toHaveValue(simulator.id);
+  fireEvent.click(screen.getByRole('button', { name: 'Start Quick Test' }));
+  expect(controlPlaneClient.startQuickTest).toHaveBeenCalledExactlyOnceWith({ platform: 'ios', targetId: simulator.id, goal: 'Inspect com.example.app' });
+  fireEvent.click(await screen.findByRole('button', { name: 'Open report' }));
+  expect(props.onOpenReport).toHaveBeenCalledWith('quick-test', 'ios', 'ios-report');
+});
+
+it.each([false, true])('shows a withheld iOS goal only for the locally submitted task (recovered: %s)', async recovered => {
+  const simulator = { id: 'Sim-UDID', label: 'iPhone', kind: 'simulator', state: 'booted', status: 'ready', selectable: true } as const;
+  const goal = 'Inspect the submitted iOS goal';
+  const task: RunSnapshot = { ...prep, platform: 'ios', targetId: simulator.id, source: {} };
+  vi.mocked(controlPlaneClient.quickTestContext).mockImplementation(async (_platform, id) => ({
+    platform: 'ios', targetId: id ?? null, choices: [simulator], canStart: id === simulator.id, checks: [], diagnostics: quickDiagnostics('ios', id ?? null),
+  }));
+  vi.mocked(controlPlaneClient.runSnapshot).mockResolvedValue(task);
+  const page = render(<QuickTestPage {...props} />);
+  await screen.findByRole('option', { name: 'iOS' });
+  fireEvent.change(screen.getByLabelText('Platform'), { target: { value: 'ios' } });
+  await screen.findByRole('option', { name: /Sim-UDID.*booted/i });
+  fireEvent.change(screen.getByLabelText('Device'), { target: { value: simulator.id } });
+  fireEvent.change(screen.getByLabelText('What do you want to test?'), { target: { value: goal } });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeEnabled());
+
+  if (recovered) {
+    vi.mocked(controlPlaneClient.bootstrap).mockResolvedValue({ ...bootstrap, busy: true, activeTask: task });
+    page.rerender(<QuickTestPage {...props} active={false} />);
+    page.rerender(<QuickTestPage {...props} />);
+  } else {
+    fireEvent.click(screen.getByRole('button', { name: 'Start Quick Test' }));
+  }
+  await screen.findByText('Identifying application');
+  if (recovered) {
+    expect(screen.getByText('Source unavailable')).toBeVisible();
+    expect(screen.queryByText(goal)).not.toBeInTheDocument();
+    expect(controlPlaneClient.startQuickTest).not.toHaveBeenCalled();
+  } else {
+    expect(screen.getByText(goal)).toBeVisible();
+    expect(screen.queryByText('Source unavailable')).not.toBeInTheDocument();
+  }
+});
+
+it('restores the iOS preparation and retains the recovered UDID when preparation fails', async () => {
+  const task: RunSnapshot = { ...prep, platform: 'ios', targetId: 'recovered-udid' };
+  vi.mocked(controlPlaneClient.bootstrap).mockResolvedValue({ ...bootstrap, busy: true, activeTask: task });
+  vi.mocked(controlPlaneClient.runSnapshot).mockResolvedValue({ ...task, status: 'error', terminal: true, error: { code: 'quick_test.prerequisites', message: 'Device unavailable.', action: 'Reconnect the selected device.' } });
+  render(<QuickTestPage {...props} />);
+  await screen.findByText('Device unavailable.');
+  expect(screen.getByLabelText('Platform')).toHaveValue('ios');
+  expect(screen.getByLabelText('Device')).toHaveValue('recovered-udid');
+  expect(screen.getByLabelText('What do you want to test?')).toHaveValue(task.source.goal);
+  expect(controlPlaneClient.startQuickTest).not.toHaveBeenCalled();
+});
+

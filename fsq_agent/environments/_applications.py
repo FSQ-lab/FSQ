@@ -12,6 +12,7 @@ from threading import BoundedSemaphore, Lock, Thread
 from typing import TYPE_CHECKING
 
 from fsq_agent.environments.providers._applications import collect_inventory, discover_candidates
+from fsq_agent.environments.providers._ios import _inventory_device
 from fsq_agent.models import ApplicationCandidate, ApplicationInventoryResult, ApplicationLookupHint, ApplicationLookupResult
 
 if TYPE_CHECKING:
@@ -103,27 +104,39 @@ def list_applications(
     windows_catalogue: Sequence[WindowsApplicationConfig] | None = None,
     force_refresh: bool = False,
 ) -> ApplicationInventoryResult:
-    if not isinstance(platform, str) or platform not in {"android", "windows", "macos"}:
+    if not isinstance(platform, str) or platform not in {"android", "windows", "macos", "ios"}:
         return ApplicationInventoryResult(status="failed", code="invalid_query")
     if target_id is not None and (not isinstance(target_id, str) or not target_id.strip() or len(target_id) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in target_id)):
         return ApplicationInventoryResult(status="failed", code="invalid_query")
-    if platform == "android" and not target_id:
+    if platform in {"android", "ios"} and not target_id:
         return ApplicationInventoryResult(status="failed", code="invalid_query")
-    scope_key = target_id if platform == "android" else (_windows_catalogue_digest(windows_catalogue) if platform == "windows" else None)
+    scope_key = target_id if platform in {"android", "ios"} else (_windows_catalogue_digest(windows_catalogue) if platform == "windows" else None)
     cache_key = (platform, scope_key)
-    now = time.monotonic()
-    if not force_refresh:
-        with _CACHE_LOCK:
-            cached = _INVENTORY_CACHE.get(cache_key)
-            if cached is not None and cached.expires_at > now:
-                return ApplicationInventoryResult(
-                    status="complete",
-                    candidates=cached.candidates,
-                    from_cache=True,
-                    fingerprint=cached.fingerprint,
-                )
+    with _CACHE_LOCK:
+        cached = None if force_refresh else _INVENTORY_CACHE.get(cache_key)
+        if platform == "ios" and force_refresh:
+            _INVENTORY_CACHE.pop(cache_key, None)
     try:
+        if cached is not None and cached.expires_at > time.monotonic():
+            if platform == "ios":
+                try:
+                    device = _run_bounded(lambda: _inventory_device(target_id, time.monotonic() + _LOOKUP_TIMEOUT))
+                    if device.kind == "device":
+                        return ApplicationInventoryResult(status="unsupported", code="unsupported")
+                except Exception:
+                    with _CACHE_LOCK:
+                        if _INVENTORY_CACHE.get(cache_key) is cached:
+                            del _INVENTORY_CACHE[cache_key]
+                    raise
+            return ApplicationInventoryResult(
+                status="complete",
+                candidates=cached.candidates,
+                from_cache=True,
+                fingerprint=cached.fingerprint,
+            )
         candidates = _bounded_inventory(platform, target_id, windows_catalogue)
+        if candidates is None:
+            return ApplicationInventoryResult(status="unsupported", code="unsupported")
         if len(candidates) > 2048:
             return ApplicationInventoryResult(status="failed", code="discovery_failed")
         unique = tuple({item.identity: item for item in candidates}.values())
@@ -148,10 +161,10 @@ def list_applications(
 
 def lookup_application(*, platform: str, name: str, explicit_reference: str | None = None, target_id: str | None = None, inferred_hint: ApplicationLookupHint | None = None) -> ApplicationLookupResult:
     values = ((name, 512), (explicit_reference, 2048), (target_id, 256))
-    if not isinstance(platform, str) or platform not in {"android", "web", "windows", "macos"} or not isinstance(name, str) or not name.strip():
+    if not isinstance(platform, str) or platform not in {"android", "web", "windows", "macos", "ios"} or not isinstance(name, str) or not name.strip() or (platform == "ios" and not target_id):
         return ApplicationLookupResult(status="failed", code="invalid_query")
     if inferred_hint is not None:
-        allowed_hints = {"android": {"app_id"}, "macos": {"bundle_id", "app_path"}, "windows": {"app_path"}, "web": set()}
+        allowed_hints = {"android": {"app_id"}, "ios": set(), "macos": {"bundle_id", "app_path"}, "windows": {"app_path"}, "web": set()}
         if not isinstance(inferred_hint, ApplicationLookupHint) or inferred_hint.kind not in allowed_hints[platform] or explicit_reference is not None:
             return ApplicationLookupResult(status="failed", code="invalid_query")
     if any(value is not None and (not isinstance(value, str) or not value.strip() or len(value) > bound or any(ord(char) < 32 or ord(char) == 127 for char in value)) for value, bound in values):

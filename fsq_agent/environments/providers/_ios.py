@@ -3,16 +3,20 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import plistlib
 import re
+import selectors
 import shutil
 import stat
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
+from xml.parsers.expat import ExpatError
 
 from fsq_agent.environments.providers._android import (
     ALLOWED_MANAGED_ROOT_ENTRIES,
@@ -33,7 +37,7 @@ from fsq_agent.environments.providers._macos import (
     _full_xcode_path,
 )
 from fsq_agent.environments.providers._runtime import RuntimeProvider
-from fsq_agent.models import IOSDevice, IOSDeviceDiscoveryResult, PlatformPrerequisiteCheck
+from fsq_agent.models import ApplicationCandidate, IOSDevice, IOSDeviceDiscoveryResult, PlatformPrerequisiteCheck
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,6 +51,11 @@ _BUNDLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 _UDID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _PLIST_MAX_BYTES = 262_144
 _SIMCTL_MAX_OUTPUT_BYTES = 65_536
+_LISTAPPS_MAX_BYTES = 2 * 1024 * 1024
+_LISTAPPS_MAX_CANDIDATES = 512
+_APPLE_BUNDLE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)*")
+_OPENSTEP_DICT = re.compile(rb'\{\s*(?:"(?:[^"\\]|\\.)*"|[A-Za-z0-9._-]+)\s*=')
+_SIGNING_TEAM_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 
 def _fact(
@@ -485,19 +494,27 @@ def _select_ios_device(
     )
 
 
-def _ios_bundle_id_from_app_dir(app_path: Path) -> str | None:
+def _read_ios_app_info(app_path: Path) -> dict[str, object] | None:
     plist_path = app_path / "Info.plist"
     if not plist_path.is_file() or plist_path.is_symlink():
         return None
     try:
-        with plist_path.open("rb") as stream:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(plist_path, flags), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
             raw = stream.read(_PLIST_MAX_BYTES + 1)
         if len(raw) > _PLIST_MAX_BYTES:
             return None
-        payload = plistlib.loads(raw)
-    except (OSError, ValueError, TypeError, plistlib.InvalidFileException):
+        payload = plistlib.loads(raw, dict_type=_UniquePlistDictionary)
+    except (OSError, ValueError, TypeError, plistlib.InvalidFileException, ExpatError):
         return None
-    bundle_id = payload.get("CFBundleIdentifier") if isinstance(payload, dict) else None
+    return payload if isinstance(payload, dict) else None
+
+
+def _ios_bundle_id_from_app_dir(app_path: Path) -> str | None:
+    metadata = _read_ios_app_info(app_path)
+    bundle_id = metadata.get("CFBundleIdentifier") if metadata is not None else None
     return bundle_id.strip() if isinstance(bundle_id, str) and bundle_id.strip() else None
 
 
@@ -591,6 +608,168 @@ def _inspect_ios_app_path(
     )
 
 
+def _valid_apple_bundle_id(value: object) -> bool:
+    return isinstance(value, str) and len(value) <= 255 and _APPLE_BUNDLE_ID.fullmatch(value) is not None
+
+
+def _inventory_device(target_id: str | None, deadline: float) -> IOSDevice:
+    if target_id is None or not _UDID_PATTERN.fullmatch(target_id):
+        raise ValueError("Invalid iOS device selection.")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    result = discover_ios_devices(remaining)
+    if result.error_code == "discovery_timeout":
+        raise TimeoutError
+    matches = [device for device in result.devices if device.udid == target_id]
+    if result.error_code or len(matches) != 1 or not _device_is_usable(matches[0]):
+        raise ValueError("Selected iOS device is unavailable.")
+    return matches[0]
+
+
+def _read_bounded_tool(command: list[str], deadline: float, *, data: bytes | None = None) -> bytes:
+    output = bytearray()
+    with (
+        subprocess.Popen(  # noqa: S603 - fixed read-only host tools and validated arguments
+            command,
+            stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ) as process,
+        selectors.DefaultSelector() as selector,
+    ):
+        try:
+            if process.stdout is None:
+                raise ValueError("Read-only iOS host tool has no output pipe.")
+            selector.register(process.stdout, selectors.EVENT_READ)
+            pending = memoryview(data or b"")
+            if process.stdin is not None:
+                os.set_blocking(process.stdin.fileno(), False)
+                selector.register(process.stdin, selectors.EVENT_WRITE)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                for key, event in selector.select(remaining):
+                    if event == selectors.EVENT_WRITE:
+                        try:
+                            pending = pending[os.write(key.fd, pending) :]
+                        except BlockingIOError:
+                            continue
+                        if not pending:
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                    else:
+                        chunk = os.read(key.fd, min(65_536, _LISTAPPS_MAX_BYTES + 1 - len(output)))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                        output.extend(chunk)
+                        if len(output) > _LISTAPPS_MAX_BYTES:
+                            raise ValueError("iOS application metadata exceeds size limit.")
+            if process.wait(timeout=max(0.0, deadline - time.monotonic())) != 0:
+                raise ValueError("Read-only iOS host tool failed.")
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError from exc
+        finally:
+            if process.poll() is None:
+                process.kill()
+    return bytes(output)
+
+
+def _simulator_listapps_output(udid: str, deadline: float) -> bytes:
+    return _read_bounded_tool(["/usr/bin/xcrun", "simctl", "listapps", udid], deadline)
+
+
+def _unique_metadata(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    metadata = dict(pairs)
+    if len(metadata) != len(pairs):
+        raise ValueError("Duplicate iOS application metadata key.")
+    return metadata
+
+
+def _reject_json_constant(_value: str) -> object:
+    raise ValueError("Invalid iOS application JSON constant.")
+
+
+class _UniquePlistDictionary(dict):
+    def __setitem__(self, key, value):
+        if key in self:
+            raise ValueError("Duplicate iOS application metadata key.")
+        super().__setitem__(key, value)
+
+
+def _parse_simulator_listapps(raw: bytes, deadline: float) -> list[ApplicationCandidate]:
+    if len(raw) > _LISTAPPS_MAX_BYTES:
+        raise ValueError("iOS application metadata exceeds size limit.")
+    try:
+        start = raw.lstrip()
+        if raw.startswith(b"bplist00") or start.startswith((b"<", b"\xef\xbb\xbf<")):
+            payload = plistlib.loads(raw, dict_type=_UniquePlistDictionary)
+        elif _OPENSTEP_DICT.match(start):
+            # simctl also writes OpenStep property lists; convert in memory
+            # with the system plist parser, not by inspecting output paths.
+            xml = _read_bounded_tool(["/usr/bin/plutil", "-convert", "xml1", "-o", "-", "--", "-"], deadline, data=raw)
+            payload = plistlib.loads(xml, dict_type=_UniquePlistDictionary)
+        else:
+            payload = json.loads(raw, object_pairs_hook=_unique_metadata, parse_constant=_reject_json_constant)
+    except (ValueError, plistlib.InvalidFileException, TypeError, ExpatError) as exc:
+        raise ValueError("Invalid iOS application inventory metadata.") from exc
+    if not isinstance(payload, dict) or len(payload) > _LISTAPPS_MAX_CANDIDATES:
+        raise ValueError("Invalid iOS application inventory shape.")
+    candidates = []
+    for bundle_id, metadata in payload.items():
+        if not _valid_apple_bundle_id(bundle_id) or not isinstance(metadata, dict) or metadata.get("CFBundleIdentifier", bundle_id) != bundle_id:
+            raise ValueError("Invalid iOS application inventory entry.")
+        names = _application_names(metadata)
+        candidates.append(ApplicationCandidate(identity=bundle_id, bundle_id=bundle_id, label=names[0] if names else bundle_id, aliases=names[1:], source="simulator"))
+    return sorted(candidates, key=lambda item: (item.label.casefold(), item.identity))
+
+
+def _application_names(metadata: dict[str, object]) -> tuple[str, ...]:
+    names: dict[str, None] = {}
+    for key in ("LocalizedDisplayName", "CFBundleDisplayName", "LocalizedName", "CFBundleName"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+            if 0 < len(value) <= 512 and value.isprintable():
+                names[value] = None
+    return tuple(names)
+
+
+def _ios_application_inventory(target_id: str | None, deadline: float) -> list[ApplicationCandidate] | None:
+    device = _inventory_device(target_id, deadline)
+    if device.kind == "device":
+        return None  # The current SDK has no read-only physical-device app enumeration.
+    return _parse_simulator_listapps(_simulator_listapps_output(device.udid, deadline), deadline)
+
+
+def _lookup_ios_application(target_id: str | None, reference: str | None, deadline: float) -> list[ApplicationCandidate]:
+    if reference is None:
+        raise ValueError("A concrete iOS application reference is required.")
+    device = _inventory_device(target_id, deadline)
+    path = Path(reference)
+    if path.is_absolute():
+        if device.kind != "simulator" or path.suffix.casefold() != ".app":
+            raise ValueError("Only local Simulator application bundles are supported.")
+        if not path.is_dir():
+            return []
+        path = path.resolve(strict=True)
+        if path.suffix.casefold() != ".app":
+            raise ValueError("An application bundle directory is required.")
+        metadata = _read_ios_app_info(path)
+        bundle_id = metadata.get("CFBundleIdentifier") if metadata is not None else None
+        if metadata is None or not isinstance(bundle_id, str) or not _valid_apple_bundle_id(bundle_id):
+            raise ValueError("Invalid iOS application bundle metadata.")
+        names = _application_names(metadata)
+        return [ApplicationCandidate(identity=str(path), app_path=path, bundle_id=bundle_id, label=names[0] if names else bundle_id, aliases=names[1:], source="simulator_app_bundle")]
+    if not _valid_apple_bundle_id(reference):
+        raise ValueError("Invalid iOS bundle reference.")
+    if device.kind == "device":
+        return [ApplicationCandidate(identity=reference, bundle_id=reference, label=reference, source="physical_installation_unverified")]
+    installed = _parse_simulator_listapps(_simulator_listapps_output(device.udid, deadline), deadline)
+    return [candidate for candidate in installed if candidate.bundle_id == reference]
+
+
 def _simulator_app_installation_status(
     developer_dir: Path | None,
     udid: str,
@@ -653,6 +832,34 @@ def _simulator_app_installation_status(
     )
 
 
+def _wda_signing_prerequisite(settings: Any, device: IOSDevice | None) -> PlatformPrerequisiteCheck:
+    if device is None:
+        return _blocked("wda_signing", "device_selection")
+    if device.kind == "simulator":
+        return _fact("wda_signing", "not_applicable", "A Simulator does not require physical-device WDA signing configuration.")
+    team = getattr(settings, "xcode_org_id", None)
+    identity = getattr(settings, "xcode_signing_id", None)
+    wda_bundle = getattr(settings, "updated_wda_bundle_id", None)
+    if not (
+        isinstance(team, str)
+        and _SIGNING_TEAM_ID.fullmatch(team)
+        and isinstance(identity, str)
+        and 0 < len(identity) <= 128
+        and identity.strip()
+        and identity.isascii()
+        and identity.isprintable()
+        and (wda_bundle is None or _valid_apple_bundle_id(wda_bundle))
+    ):
+        return _fact(
+            "wda_signing",
+            "unavailable",
+            "Physical-device WDA signing configuration is missing or invalid.",
+            "ios.wda_signing_invalid",
+            "Configure a valid Xcode team ID and signing identity in the local iOS Workspace. If supplied, use a valid WDA bundle identifier.",
+        )
+    return _fact("wda_signing", message="Physical-device WDA signing is configured. Certificates, provisioning, and WDA startup are not verified here.")
+
+
 def ios_prerequisites(
     settings: Any,
     *,
@@ -665,6 +872,7 @@ def ios_prerequisites(
         "appium_connect_runtime",
         "device_connection",
         "device_selection",
+        "wda_signing",
         "application_identifier",
         "application_path",
         "application_installation",
@@ -782,6 +990,8 @@ def ios_prerequisites(
                 require_explicit_selection=require_explicit_selection,
             )
 
+    signing_check = _wda_signing_prerequisite(settings, selected_device)
+
     if application_pending:
         pending_fact = lambda ident: _fact(  # noqa: E731
             ident,
@@ -795,6 +1005,7 @@ def ios_prerequisites(
             resolved_runtime_check,
             connection_check,
             selection_check,
+            signing_check,
             pending_fact("application_identifier"),
             pending_fact("application_path"),
             pending_fact("application_installation"),
@@ -898,7 +1109,7 @@ def ios_prerequisites(
         installation_check = _fact(
             "application_installation",
             "not_applicable",
-            "Physical iOS device app installation and WDA code signing are verified at XCUITest session startup.",
+            "Physical iOS device app installation is unverified until XCUITest session startup.",
         )
 
     return (
@@ -907,6 +1118,7 @@ def ios_prerequisites(
         resolved_runtime_check,
         connection_check,
         selection_check,
+        signing_check,
         app_id_check,
         app_path_check,
         installation_check,

@@ -96,6 +96,10 @@ def test_case_manager_in_dedicated_workspace_is_not_quick_test(tmp_path):
         {"platform": "web", "goal": "Search FSQ", "targetId": "chrome", "requires_web_search_evidence": False},
         {"platform": "web", "goal": "Search FSQ", "targetId": "chrome", "requiresWebSearchEvidence": True},
         {"platform": "web", "goal": "Verify heading", "targetId": "chrome", "url": "https://example.test"},
+        {"platform": "ios", "goal": "Test"},
+        {"platform": "ios", "goal": "Test", "targetId": None},
+        {"platform": "ios", "goal": "Test", "targetId": "sim-udid", "xcodeOrgId": "private"},
+        {"platform": "ios", "goal": "Test", "targetId": "sim-udid", "signing": {"team": "private"}},
     ],
 )
 def test_invalid_transport_fields_never_reserve(body, tmp_path):
@@ -384,3 +388,236 @@ def test_quick_test_preparation_error_forwards_structured_details(monkeypatch, t
     assert terminal["status"] == "error"
     assert terminal["error"]["code"] == "quick_test.application_not_found"
     assert terminal["error"]["details"] == {"target_name": "WeChat", "reason": "WeChat is not installed on dev-1."}
+
+
+def test_ios_context_projects_only_safe_choice_and_shared_signing_facts(monkeypatch, tmp_path):
+    from fsq_agent.application import QuickTestChoice, QuickTestContextResult
+    from fsq_agent.application.contracts.doctor import DoctorPlatformResult
+
+    ready = {"status": "ready"}
+    pending = {"status": "pending"}
+    signing = {"status": "unavailable", "code": "ios.wda_signing_missing", "message": "WDA signing is required.", "action": "Configure signing locally."}
+    diagnosis = DoctorPlatformResult.model_validate(
+        {
+            "platform": "ios",
+            "target_id": "phone-udid",
+            "status": "unavailable",
+            "checks": dict.fromkeys(("configuration", "runtime", "target_configuration", "target_availability", "strict_core", "provider", "suggestion_analyzer", "dynamic_agent"), ready),
+            "commands": dict.fromkeys(("case_create", "case_test", "case_test_suggest"), pending),
+            "prerequisites": [{"identifier": "wda_signing", **signing}],
+            "preparation": signing,
+        }
+    )
+
+    def context(request):
+        assert request.platform == "ios"
+        assert request.target_id == "phone-udid"
+        return QuickTestContextResult(
+            platform="ios",
+            target_id=request.target_id,
+            can_start=False,
+            checks=(),
+            diagnosis=diagnosis,
+            choices=(
+                QuickTestChoice(id="phone-udid", label="iPhone", kind="device", state="connected", selectable=True, status="ready"),
+                QuickTestChoice(id="sim-udid", label="iPhone Simulator", kind="simulator", state="shutdown", selectable=False, status="unavailable"),
+            ),
+        )
+
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.get_quick_test_context", context)
+    server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=tmp_path))
+    status, payload, _ = server.handle_get(f"{PREFIX}/quick-test/context", {"platform": ["ios"], "targetId": ["phone-udid"]})
+    assert status == 200
+    assert not payload["canStart"]
+    assert payload["choices"] == [
+        {"id": "phone-udid", "label": "iPhone", "kind": "device", "state": "connected", "selectable": True, "status": "ready"},
+        {"id": "sim-udid", "label": "iPhone Simulator", "kind": "simulator", "state": "shutdown", "selectable": False, "status": "unavailable"},
+    ]
+    assert payload["diagnostics"]["targetId"] == "phone-udid"
+    assert payload["diagnostics"]["prerequisites"] == [{"identifier": "wda_signing", **signing, "commands": []}]
+    assert payload["diagnostics"]["commands"]["prepare"] == signing
+
+
+def test_ios_start_recovers_exact_udid_and_signing_failure_without_case_manager_selection(monkeypatch, tmp_path):
+    server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=tmp_path))
+    entered, release = threading.Event(), threading.Event()
+    private = "TEAM123456"
+    goal = f"Inspect com.example.app with {private}"
+    facts = {"reason": "ios_signing_in_goal", "action": "Keep signing configuration local."}
+
+    def prepare(request, *, check_cancelled):
+        assert request.platform == "ios"
+        assert request.target_id == "Exact-Phone-UDID"
+        assert request.goal == goal
+        entered.set()
+        assert release.wait(3)
+        check_cancelled()
+        raise ApplicationError(
+            code=ApplicationErrorCode("quick_test.prerequisites"), category=ApplicationErrorCategory.REQUEST_VALIDATION, message="WDA signing is required.", action=facts["action"], details=facts
+        )
+
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.prepare_quick_test", prepare)
+    status, accepted = server.handle_post(f"{PREFIX}/quick-test/runs", {"platform": "ios", "targetId": "Exact-Phone-UDID", "goal": goal})
+    assert status == 202
+    try:
+        assert entered.wait(2)
+        _, bootstrap, _ = server.handle_get(f"{PREFIX}/bootstrap")
+        assert [item["id"] for item in bootstrap["platforms"]] == ["android", "web", "windows", "macos"]
+        assert [item["id"] for item in bootstrap["quickTestPlatforms"]] == ["android", "ios", "web", "windows", "macos"]
+        task = bootstrap["activeTask"]
+        assert (task["workflow"], task["platform"], task["targetId"], task["runId"]) == ("quick-test", "ios", "Exact-Phone-UDID", None)
+        snapshot = server.handle_get(f"{PREFIX}/runs/{accepted['requestId']}")[1]
+        assert snapshot["targetId"] == "Exact-Phone-UDID"
+        assert snapshot["source"] == {}
+        assert private not in json.dumps(snapshot)
+        assert server.handle_get(f"{PREFIX}/bootstrap", peer_host="192.0.2.1")[0] == 403
+    finally:
+        release.set()
+    terminal = wait_terminal(server, accepted["requestId"])
+    assert terminal["runId"] is None
+    assert not terminal["reportAvailable"]
+    assert terminal["error"]["details"] == facts
+    assert private not in json.dumps(terminal)
+    for mode, source in (("explore", {"goal": "Inspect the app"}), ("strict", {"casePath": "case.fsq.yaml"})):
+        assert server.handle_post(f"{PREFIX}/runs", {"workspaceName": "quick-test", "platform": "ios", "targetId": "Exact-Phone-UDID", "mode": mode, **source})[0] == 400
+
+
+@pytest.mark.parametrize("execution_ready", [True, False])
+def test_ios_start_reuses_frozen_settings_and_waits_for_shared_execution_preflight(monkeypatch, tmp_path, execution_ready):
+    from fsq_agent.application import QuickTestPrepareResult, QuickTestRunResult
+    from fsq_agent.config import Settings
+    from fsq_agent.models import IOSWorkspaceTarget
+
+    server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=tmp_path))
+    settings = Settings(harness={"platform": "ios"})
+    settings.harness.ios.udid = "Exact-Phone-UDID"
+    settings.harness.ios.xcode_org_id = "AB12CD34EF"
+    settings.output.runs_dir = tmp_path / "runs"
+    settings.cases.dir = tmp_path / "cases"
+    target = IOSWorkspaceTarget(bundle_id="com.example.app")
+    prepared = QuickTestPrepareResult(
+        workspace_name="quick-test",
+        root_path=tmp_path / "quick-test",
+        platform_revision="frozen-revision",
+        target_id="Exact-Phone-UDID",
+        target=target,
+        application="Example",
+        settings=settings,
+    )
+    observed = []
+
+    async def execute(received, goal, *, event_sink, **_):
+        request_id = server.state.bootstrap()["activeTask"]["requestId"]
+        observed.append((received is prepared, goal, server.state.snapshot(request_id)["status"]))
+        if not execution_ready:
+            raise ApplicationError(
+                code=ApplicationErrorCode("quick_test.prerequisites"),
+                category=ApplicationErrorCategory.UNAVAILABLE,
+                message="WDA signing is not ready.",
+                action="Recheck local signing.",
+                details={"reason": "wda_signing_missing"},
+            )
+        await event_sink({"phase": "running", "message": "Executing the prepared Quick Test goal."})
+        observed.append(server.state.snapshot(request_id)["status"])
+        return QuickTestRunResult(
+            workspace_name=prepared.workspace_name,
+            root_path=prepared.root_path,
+            platform="ios",
+            platform_revision=prepared.platform_revision,
+            target_id=prepared.target_id,
+            target=target,
+            application="Example",
+            run_id="run-1",
+            status="success",
+            summary="Observed signing output AB12CD34EF.",
+            report_path=tmp_path / "report.md",
+        )
+
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.prepare_quick_test", lambda *a, **kw: prepared)
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.prepare_run", lambda **kw: pytest.fail("iOS must use Application preflight."))
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._execution.execute_prepared_quick_test", execute)
+    status, accepted = server.handle_post(f"{PREFIX}/quick-test/runs", {"platform": "ios", "targetId": "Exact-Phone-UDID", "goal": "Inspect com.example.app"})
+    assert status == 202
+    terminal = wait_terminal(server, accepted["requestId"])
+    assert observed[0] == (True, "Inspect com.example.app", "preparing")
+    assert terminal["targetId"] == "Exact-Phone-UDID"
+    assert terminal["platformRevision"] == "frozen-revision"
+    assert "AB12CD34EF" not in json.dumps(terminal)
+    if execution_ready:
+        assert observed[1] == "running"
+        assert terminal["status"] == "success"
+        assert terminal["runId"] == "run-1"
+        assert terminal["reportAvailable"]
+        assert server.handle_post(f"{PREFIX}/runs/{accepted['requestId']}/save-yaml", {"caseName": "test"})[0] == 400
+    else:
+        assert terminal["status"] == "error"
+        assert terminal["runId"] is None
+        assert terminal["error"]["code"] == "quick_test.prerequisites"
+        assert terminal["error"]["details"] == {"reason": "wda_signing_missing"}
+
+
+def test_ios_history_is_exact_registered_and_read_only(tmp_path):
+    from fsq_agent.config import WorkspacePlatformCreateInput, create_workspace_at_root
+    from fsq_agent.execution import RunLifecycleService, RunSource, allocate_run
+    from fsq_agent.models import EvidenceBundle, RunnerStepResult
+
+    user_root = tmp_path / "user"
+    user_root.mkdir()
+    workspace_root = user_root / "quick-test"
+    platform = WorkspacePlatformCreateInput(platform="ios", target={"bundle_id": "com.example.app"})
+    for name, root in (("quick-test", workspace_root), ("other", tmp_path / "other")):
+        create_workspace_at_root(root_path=root, name=name, user_config_root=user_root, platforms=[platform])
+    goal = "Inspect com.example.app"
+    metadata = allocate_run(workspace=workspace_root, workspace_name="quick-test", platform="ios", source_id="inspect", mode="explore", source=RunSource(kind="goal", goal_summary=goal))
+    directory = workspace_root / ".fsq" / "runs" / "ios" / metadata.run_id
+    lifecycle = RunLifecycleService()
+    metadata = lifecycle.snapshot_sources(directory, metadata, sources={"goal": goal})
+    result = lifecycle.freeze(
+        directory,
+        metadata,
+        bundle=EvidenceBundle(bundle_id="evidence", run_id=metadata.run_id, steps=[RunnerStepResult(step_id="inspect", status="failed", failure_category="assertion_error")]),
+    )
+    lifecycle.finalize(directory, metadata, execution_result=result)
+    before = (directory / "run.json").read_bytes()
+    server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=user_root))
+    assert not server.state.bootstrap()["busy"]
+    path = f"{PREFIX}/history/ios/{metadata.run_id}"
+    scope = {"workspace": ["quick-test"]}
+    status, detail, headers = server.handle_get(path, scope)
+    assert status == 200
+    assert headers["Cache-Control"] == "no-store"
+    assert (detail["workspace"], detail["platform"], detail["run_id"]) == ("quick-test", "ios", metadata.run_id)
+    assert detail["report"]["execution"]["outcome"] != "success"
+    status, artifact, headers = server.handle_get(path + "/artifacts/source-snapshot", scope)
+    assert status == 200
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert artifact.path.read_text(encoding="utf-8") == goal
+    assert server.handle_get(path, {"workspace": ["other"]})[0] == 400
+    assert server.handle_get(path, {"workspace": ["QUICK-TEST"]})[0] == 400
+    assert server.handle_get(path, scope, peer_host="192.0.2.1")[0] == 403
+    assert server.handle_get(f"{PREFIX}/history", {**scope, "platform": ["ios"]})[0] == 400
+    assert server.handle_get(path + "/exports/export-1/files/report", scope)[0] == 400
+    assert server.handle_post(path + "/exports", {"workspaceName": "quick-test", "format": "json"})[0] == 400
+    assert server.handle_get(f"{PREFIX}/workspaces/quick-test")[1]["platforms"] == []
+    assert server.handle_get(f"{PREFIX}/workspaces/quick-test/platforms/ios")[0] == 400
+    assert server.handle_get(f"{PREFIX}/readiness", {**scope, "platform": ["ios"]})[0] == 400
+    assert (directory / "run.json").read_bytes() == before
+    assert not (directory / "exports").exists()
+
+
+def test_ios_history_refuses_unregistered_or_misregistered_dedicated_root(monkeypatch, tmp_path):
+    from fsq_agent.config import WorkspacePlatformCreateInput, create_workspace_at_root
+
+    user_root = tmp_path / "user"
+    server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=user_root))
+    path = f"{PREFIX}/history/ios/run-1"
+    scope = {"workspace": ["quick-test"]}
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._server.application.get_run_report", lambda _: pytest.fail("Unsafe scope reached Application history."))
+    assert server.handle_get(path, scope)[0] == 400
+    create_workspace_at_root(
+        root_path=tmp_path / "different-root",
+        name="quick-test",
+        user_config_root=user_root,
+        platforms=[WorkspacePlatformCreateInput(platform="ios", target={"bundle_id": "com.example.app"})],
+    )
+    assert server.handle_get(path, scope)[0] == 400

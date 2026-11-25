@@ -1,4 +1,5 @@
 export type PlatformId = 'android' | 'web' | 'windows' | 'macos';
+export type QuickTestPlatformId = PlatformId | 'ios';
 export type RunMode = 'explore' | 'strict';
 export type TaskStatus =
   | 'preparing'
@@ -19,23 +20,26 @@ export interface ApiErrorBody {
   details?: unknown;
 }
 
-export interface PlatformOption { id: PlatformId; label: string }
-export interface ActiveTaskSummary {
+export interface PlatformOption<P extends QuickTestPlatformId = PlatformId> { id: P; label: string }
+interface ActiveTaskFields {
   requestId: string;
   runId: string | null;
   workspaceName: string | null;
-  platform: PlatformId;
   targetId: string | null;
-  /** Transport requires explicit provenance; absent local state never implies Quick Test. */
-  workflow?: 'quick-test' | 'case-manager';
   application?: string | null;
   platformRevision?: string | null;
   mode: RunMode;
   status: TaskStatus;
 }
+/** An iOS task is never runnable Case Manager selection. */
+export type ActiveTaskSummary = ActiveTaskFields & (
+  | { platform: PlatformId; workflow?: 'quick-test' | 'case-manager' }
+  | { platform: 'ios'; workflow: 'quick-test' }
+);
 export interface BootstrapResponse {
   apiVersion: string;
   platforms: PlatformOption[];
+  quickTestPlatforms?: PlatformOption<QuickTestPlatformId>[];
   busy: boolean;
   activeTask: ActiveTaskSummary | null;
 }
@@ -48,7 +52,7 @@ export interface DiagnosticDetail { status: DiagnosticStatus; code: string | nul
 export interface RawDiagnosticDetail { status: DiagnosticStatus; code: string | null; message: string | null; action: string | null }
 export interface QuickDiagnostics {
   workspaceName: null;
-  platformId: PlatformId;
+  platformId: QuickTestPlatformId;
   workspace: DiagnosticDetail;
   platform: DiagnosticDetail;
   provider: DiagnosticDetail;
@@ -136,7 +140,7 @@ export interface StrictCaseStep {
   failureCategory?: string | null;
   message?: string | null;
 }
-export interface RunSnapshot extends ActiveTaskSummary {
+export type RunSnapshot = ActiveTaskSummary & {
   error?: ApiErrorBody | null;
   suggestedCaseName?: string | null;
   recordingDraft?: boolean | null;
@@ -159,13 +163,21 @@ export type StartRunPayload =
   | { mode: 'strict'; workspaceName: string; platform: PlatformId; targetId: string; casePath: string };
 export interface StartRunResponse { requestId: string }
 export type QuickTestPayload =
-  | { platform: 'android' | 'web'; targetId: string; goal: string }
+  | { platform: 'android' | 'ios' | 'web'; targetId: string; goal: string }
   | { platform: 'windows' | 'macos'; goal: string };
+export interface QuickTestChoice {
+  id: string;
+  label: string;
+  selectable: boolean;
+  status: ReadinessStatus;
+  kind?: 'simulator' | 'device' | null;
+  state?: 'booted' | 'shutdown' | 'connected' | 'unavailable' | 'unknown' | null;
+}
 export interface QuickTestContext {
-  platform: PlatformId;
+  platform: QuickTestPlatformId;
   targetId: string | null;
   canStart: boolean;
-  choices: { id: string; label: string; selectable: boolean; status: ReadinessStatus }[];
+  choices: QuickTestChoice[];
   checks: { id: string; status: DiagnosticStatus; message: string; action: string }[];
   diagnostics: QuickDiagnostics | null;
 }
@@ -395,7 +407,7 @@ export interface PublicRunReport {
   steps: ReportFact[]; tool_calls: ReportFact[]; logs: ReportFact[]; artifacts: ReportFact[];
   metrics: ReportFact; lineage: ReportFact; comparison: ReportFact; warnings: unknown[];
 }
-export interface RunReportResponse { workspace: string; run_id: string; platform: PlatformId; report: PublicRunReport; warnings: unknown[] }
+export interface RunReportResponse { workspace: string; run_id: string; platform: QuickTestPlatformId; report: PublicRunReport; warnings: unknown[] }
 export interface HistoryRun { result?: ReportFact | null; evidence?: ReportFact | null; liveness?: string | null; persisted_status?: string | null; run_id: string; platform: PlatformId; mode?: string | null; status: string | null; started_at?: string | null; duration_ms?: number | null; source?: ReportFact | null; warnings: unknown[] }
 export interface HistoryResponse { workspace: string; platforms: PlatformId[]; filters: ReportFact; matched_count: number; returned_count: number; truncated: boolean; runs: HistoryRun[]; warnings: unknown[] }
 export type ReportFormat = 'json' | 'junit' | 'html' | 'bundle';

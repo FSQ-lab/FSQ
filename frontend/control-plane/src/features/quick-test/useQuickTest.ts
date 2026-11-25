@@ -28,7 +28,7 @@ export function useQuickTest(active: boolean) {
   const startLock = useRef(false);
   const requestRef = useRef(requestId);
   requestRef.current = requestId;
-  const restoredRequest = useRef<string | null>(null);
+  const [restoredRequest, setRestoredRequest] = useState<string | null>(null);
   const submitted = useRef<{ requestId: string; goal: string } | null>(null);
   const bootstrapGeneration = useRef(0);
   const { snapshot: streamed, connection, error: streamError } = useRunStream(requestId);
@@ -56,7 +56,7 @@ export function useQuickTest(active: boolean) {
         // Mobile device selection owns its scope before React commits the restored task.
         if (data.activeTask.platform === 'android' || data.activeTask.platform === 'ios') contextController.current?.abort();
         ++contextGeneration.current;
-        restoredRequest.current = data.activeTask.requestId;
+        setRestoredRequest(data.activeTask.requestId);
         setRequestId(data.activeTask.requestId);
         setPlatform(data.activeTask.platform);
         setTargetId(needsTarget(data.activeTask.platform) ? data.activeTask.targetId ?? '' : '');
@@ -72,12 +72,10 @@ export function useQuickTest(active: boolean) {
     if (active) void reconcile();
     return () => { ++bootstrapGeneration.current; };
   }, [active, reconcile]);
-  useEffect(() => {
-    if (snapshot && restoredRequest.current === snapshot.requestId) {
-      if (snapshot.source.goal !== undefined) setGoal(snapshot.source.goal);
-      if (snapshot.source.goal !== undefined || snapshot.terminal) restoredRequest.current = null;
-    }
-  }, [snapshot]);
+  if (snapshot && restoredRequest === snapshot.requestId) {
+    if (snapshot.source.goal !== undefined) setGoal(snapshot.source.goal);
+    if (snapshot.source.goal !== undefined || snapshot.terminal) setRestoredRequest(null);
+  }
 
   useEffect(() => {
     if (!platform || locked || !active) return;

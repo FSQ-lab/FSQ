@@ -4,12 +4,19 @@
 import base64
 import hashlib
 import html
+import io
 import json
 from collections.abc import Mapping
 from pathlib import Path
 
+from PIL import Image
+
 from fsq_agent.models import PublicRunReport, RunReportExportOptions
-from fsq_agent.report._run_report import MAX_INLINE_IMAGE_BYTES, RunReportService
+from fsq_agent.report._run_report import MAX_IMAGE_PIXELS, MAX_INLINE_IMAGE_BYTES, RunReportService, report_error
+
+INLINE_IMAGE_MAX_DIMENSION = 1280
+INLINE_IMAGE_WEBP_QUALITY = 75
+_SUPPORTED_IMAGE_FORMATS = {"PNG", "JPEG", "WEBP"}
 
 _SCRIPT = "document.querySelectorAll('[data-step-link]').forEach(function(b){b.addEventListener('click',function(){var s=document.getElementById(b.dataset.stepLink);if(s){s.open=true;s.scrollIntoView({block:'start'});}});});"
 _CSS = "body{font:15px system-ui;margin:0;color:#20242c;background:#f5f6fa}main{max-width:1250px;margin:auto;padding:28px}h1{font-size:26px}h2{font-size:20px}section,details{background:white;border:1px solid #d8dce5;border-radius:8px;padding:16px;margin:16px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f4f8;padding:12px}table{width:100%;border-collapse:collapse;table-layout:fixed}td,th{padding:8px;border-bottom:1px solid #ddd;text-align:left;overflow-wrap:anywhere}button{background:#164fbd;color:white;border:0;border-radius:4px;padding:6px 10px;cursor:pointer;white-space:nowrap}.pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(260px,100%),1fr));gap:12px}img{max-width:100%;max-height:600px;object-fit:contain}.failed,.error{border-left:5px solid #a32b2b}.passed{border-left:5px solid #258143}.incomplete{border-left:5px solid #aa7618}.changed{background:#fff1bd}.added{background:#e1f4e7}.removed{background:#ffe0df}.muted{color:#596579}code{white-space:pre-wrap}summary{cursor:pointer}a{color:#164fbd}mark{background:#ffe08a}.metrics{display:flex;gap:16px;flex-wrap:wrap}.metrics span{font-size:13px;padding:6px 8px;background:#f3f4f8;border-radius:4px}@media(max-width:600px){main{padding:12px}section,details{padding:12px}td,th{padding:6px 3px;font-size:12px}button{padding:6px;font-size:12px}}"
@@ -21,6 +28,32 @@ def _escape(value):
 
 def _json(value):
     return _escape(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def _transcode_webp(raw: bytes) -> bytes:
+    with Image.open(io.BytesIO(raw)) as image:
+        if image.width <= 0 or image.height <= 0 or image.width * image.height > MAX_IMAGE_PIXELS or image.format not in _SUPPORTED_IMAGE_FORMATS:
+            raise ValueError("Raster dimensions or type are unsupported.")
+        image.load()
+        raster = image.convert("RGB")
+    width, height = raster.size
+    longest = max(width, height)
+    if longest > INLINE_IMAGE_MAX_DIMENSION:
+        scale = INLINE_IMAGE_MAX_DIMENSION / longest
+        target_size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        raster = raster.resize(target_size, Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    raster.save(output, format="WEBP", quality=INLINE_IMAGE_WEBP_QUALITY)
+    return output.getvalue()
+
+
+def _encode_inline_webp(content: bytes) -> bytes:
+    if not isinstance(content, (bytes, bytearray, memoryview)):
+        raise report_error("artifact_unavailable", "Inline screenshot cannot be encoded safely.")
+    try:
+        return _transcode_webp(bytes(content))
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+        raise report_error("artifact_unavailable", "Inline screenshot cannot be encoded safely.") from exc
 
 
 def render_html(report: PublicRunReport, contents: dict) -> str:
@@ -71,11 +104,12 @@ def render_html(report: PublicRunReport, contents: dict) -> str:
         for artifact in artifacts:
             content = contents.get((artifact["run_id"], artifact["artifact_id"]))
             body.append(f'<article id="artifact-{_escape(artifact["run_id"])}-{_escape(artifact["artifact_id"])}"><h3>{_escape(artifact.get("phase"))} · {_escape(artifact["kind"])}</h3>')
-            if artifact["kind"] == "screenshot" and content:
-                image_bytes += len(content)
-                if image_bytes <= MAX_INLINE_IMAGE_BYTES:
-                    encoded = base64.b64encode(content).decode()
-                    body.append(f'<img alt="{_escape(artifact["artifact_id"])}" src="data:image/png;base64,{encoded}">')
+            if artifact["kind"] == "screenshot" and content is not None:
+                webp_bytes = _encode_inline_webp(content)
+                if image_bytes + len(webp_bytes) <= MAX_INLINE_IMAGE_BYTES:
+                    image_bytes += len(webp_bytes)
+                    encoded = base64.b64encode(webp_bytes).decode()
+                    body.append(f'<img alt="{_escape(artifact["artifact_id"])}" src="data:image/webp;base64,{encoded}">')
                 else:
                     artifact.update(display_availability="omitted", display_unavailable_reason="inline_image_budget")
                     body.append("<p>Image omitted: report inline resource limit.</p>")
@@ -88,7 +122,6 @@ def render_html(report: PublicRunReport, contents: dict) -> str:
             body.append("</article>")
         body.append("</div>")
         body.extend(_diff_html(diff) for diff in report.comparison.get("before_after", []) if diff.get("step_execution_id") == identity)
-        body.append(f"<details><summary>Complete step facts</summary><pre>{_json(step)}</pre></details>")
         body.append("</details>")
     if report.comparison.get("baseline_current"):
         body.append(_baseline_html(report))
@@ -100,12 +133,14 @@ def render_html(report: PublicRunReport, contents: dict) -> str:
             continue
         body.append(f"<details><summary>{_escape(artifact['run_id'])} · {_escape(artifact['artifact_id'])}</summary>")
         content = contents.get((artifact["run_id"], artifact["artifact_id"]))
-        if artifact.get("kind") == "screenshot" and content and image_bytes + len(content) <= MAX_INLINE_IMAGE_BYTES:
-            image_bytes += len(content)
-            body.append(f'<img alt="{_escape(artifact["artifact_id"])}" src="data:image/png;base64,{base64.b64encode(content).decode()}">')
-        elif artifact.get("kind") == "screenshot" and content:
-            artifact.update(display_availability="omitted", display_unavailable_reason="inline_image_budget")
-            body.append("<p>Image omitted: inline_image_budget. Complete artifact remains available in the bundle.</p>")
+        if artifact.get("kind") == "screenshot" and content is not None:
+            webp_bytes = _encode_inline_webp(content)
+            if image_bytes + len(webp_bytes) <= MAX_INLINE_IMAGE_BYTES:
+                image_bytes += len(webp_bytes)
+                body.append(f'<img alt="{_escape(artifact["artifact_id"])}" src="data:image/webp;base64,{base64.b64encode(webp_bytes).decode()}">')
+            else:
+                artifact.update(display_availability="omitted", display_unavailable_reason="inline_image_budget")
+                body.append("<p>Image omitted: inline_image_budget. Complete artifact remains available in the bundle.</p>")
         elif artifact.get("content") is not None:
             body.append(f"<pre>{_escape(artifact.get('normalized_content') or artifact['content'])}</pre>")
         else:

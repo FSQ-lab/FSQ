@@ -47,31 +47,34 @@ def _is_url_parameter_credential_key(key: str) -> bool:
     return is_credential_key(key) or key.strip().casefold() in _URL_QUERY_ONLY_CREDENTIAL_KEYS
 
 
-def sanitize_urls(text: str) -> str:
-    def safe_parameters(value: str) -> str:
-        parameters = parse_qsl(value, keep_blank_values=True)
-        if not any(_is_url_parameter_credential_key(key) for key, _ in parameters):
-            return value
-        return urlencode([(key, "[REDACTED]" if _is_url_parameter_credential_key(key) else item) for key, item in parameters])
+def _safe_url_parameters(value: str) -> str:
+    parameters = parse_qsl(value, keep_blank_values=True)
+    if not any(_is_url_parameter_credential_key(key) for key, _ in parameters):
+        return value
+    return urlencode([(key, "[REDACTED]" if _is_url_parameter_credential_key(key) else item) for key, item in parameters])
 
-    def replace(match: re.Match[str]) -> str:
-        raw = match.group(0)
-        try:
-            parsed = urlsplit(raw)
-            safe_query = safe_parameters(parsed.query)
-            safe_fragment = parsed.fragment
-            if "=" in parsed.fragment:
-                # A '?' before the first assignment separates a route query;
-                # after an assignment it may be part of the credential value.
-                route, separator, parameters = parsed.fragment.partition("?")
-                safe_fragment = route + separator + safe_parameters(parameters) if separator and "=" not in route else safe_parameters(parsed.fragment)
-            if "@" not in parsed.netloc and safe_query == parsed.query and safe_fragment == parsed.fragment:
-                return raw
-            return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, safe_query, safe_fragment))
-        except ValueError:
-            return "[REDACTED_URL]"
 
-    return re.sub(r"https?://[^\s<>\"']+", replace, text, flags=re.I)
+def _sanitize_url(raw: str) -> str:
+    try:
+        parsed = urlsplit(raw)
+        safe_query = _safe_url_parameters(parsed.query)
+        safe_fragment = parsed.fragment
+        if "=" in parsed.fragment:
+            # A '?' before the first assignment separates a route query;
+            # after an assignment it may be part of the credential value.
+            route, separator, parameters = parsed.fragment.partition("?")
+            safe_fragment = route + separator + _safe_url_parameters(parameters) if separator and "=" not in route else _safe_url_parameters(parsed.fragment)
+        if "@" not in parsed.netloc and safe_query == parsed.query and safe_fragment == parsed.fragment:
+            return raw
+        return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, safe_query, safe_fragment))
+    except ValueError:
+        return "[REDACTED_URL]"
+
+
+def sanitize_urls(text: str, *, whole_url: bool = False) -> str:
+    if whole_url:
+        return _sanitize_url(text)
+    return re.sub(r"https?://[^\s<>\"']+", lambda match: _sanitize_url(match.group(0)), text, flags=re.I)
 
 
 def redact_text(

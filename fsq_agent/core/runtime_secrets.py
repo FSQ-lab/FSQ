@@ -43,8 +43,8 @@ class RuntimeSecretStore:
         return is_credential_key(key)
 
     @staticmethod
-    def sanitize_urls(text: str) -> str:
-        return sanitize_urls(text)
+    def sanitize_urls(text: str, *, whole_url: bool = False) -> str:
+        return sanitize_urls(text, whole_url=whole_url)
 
     @staticmethod
     def redact_text(

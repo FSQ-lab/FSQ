@@ -15,6 +15,8 @@ from fsq_agent.config._workspace import (
     WEB_CHANNEL_EXECUTABLE_NAMES,
     _is_ios_app_bundle_or_ipa,
     _is_macos_app_bundle_or_executable,
+    _parse_windows_launch_args,
+    _quick_test_workspace_snapshot,
     load_workspace_config,
 )
 from fsq_agent.models import (
@@ -24,6 +26,7 @@ from fsq_agent.models import (
     MacOSWorkspaceTarget,
     WebWorkspaceTarget,
     WindowsWorkspaceTarget,
+    WorkspaceConfig,
     WorkspaceSettings,
     web_executable_matches_channel,
 )
@@ -138,6 +141,24 @@ def load_workspace_platform_settings(
 ) -> Settings:
     platform_id = platform.strip().lower()
     workspace_config, workspace_root, workspace_config_path = load_workspace_config(workspace, platform_id)
+    return _compose_workspace_platform_settings(workspace_config, workspace_root, workspace_config_path, user_config_root)
+
+
+def load_quick_test_workspace_settings(platform: str, target: object, user_config_root: str | Path | None = None) -> tuple[str, str, Settings]:
+    """Initialize only if absent, then compose shared settings without applying the saved default target."""
+    platform_id = platform.strip().lower()
+    if platform_id not in {"android", "web", "windows", "macos"}:
+        raise ConfigurationError("Unsupported Quick Test platform.", context={"platform": platform_id})
+    config, root, path, revision = _quick_test_workspace_snapshot(platform_id, target, user_config_root)
+    if isinstance(config.target, WindowsWorkspaceTarget) and config.target.launch_args:
+        _parse_windows_launch_args(config.target.launch_args)
+    return config.name, revision, _compose_workspace_platform_settings(config, root, path, user_config_root, include_target=False)
+
+
+def _compose_workspace_platform_settings(
+    workspace_config: WorkspaceConfig, workspace_root: Path, workspace_config_path: Path, user_config_root: str | Path | None, *, include_target: bool = True
+) -> Settings:
+    platform_id = workspace_config.platform
     preset_path = resolve_platform_config_path(platform_id)
     preset_data = _read_yaml(preset_path)
     _reject_obsolete_settings(preset_data)
@@ -150,7 +171,7 @@ def load_workspace_platform_settings(
 
     settings.workspace = WorkspaceSettings(root_dir=workspace_root, config_path=workspace_config_path)
     settings.harness.platform = platform_id
-    target = workspace_config.target
+    target = workspace_config.target if include_target else None
     if isinstance(target, AndroidWorkspaceTarget):
         settings.harness.android.app_id = target.app_id
     elif isinstance(target, WebWorkspaceTarget):
@@ -214,64 +235,6 @@ def _reject_obsolete_settings(data: dict[str, Any]) -> None:
                 "Obsolete custom instruction configuration is no longer supported; move guidance into knowledge/project.md or configured skills.",
                 context={"config_key": f"agent_runtime.prompt.{key}"},
             )
-
-
-def _parse_windows_launch_args(value: str) -> list[str]:
-    try:
-        return _split_windows_command_line(value)
-    except ValueError as exc:
-        raise ConfigurationError(
-            "Windows workspace launch arguments could not be parsed.",
-            context={"config_key": "target.launch_args", "error": str(exc)},
-        ) from exc
-
-
-def _split_windows_command_line(value: str) -> list[str]:
-    args: list[str] = []
-    arg: list[str] = []
-    in_quotes = False
-    token_started = False
-    index = 0
-    length = len(value)
-    while index < length:
-        char = value[index]
-        if char.isspace() and not in_quotes:
-            if token_started:
-                args.append("".join(arg))
-                arg = []
-                token_started = False
-            index += 1
-            continue
-        if char == "\\":
-            slash_start = index
-            while index < length and value[index] == "\\":
-                index += 1
-            slash_count = index - slash_start
-            if index < length and value[index] == '"':
-                arg.extend("\\" * (slash_count // 2))
-                if slash_count % 2:
-                    arg.append('"')
-                else:
-                    in_quotes = not in_quotes
-                token_started = True
-                index += 1
-                continue
-            arg.extend("\\" * slash_count)
-            token_started = True
-            continue
-        if char == '"':
-            in_quotes = not in_quotes
-            token_started = True
-            index += 1
-            continue
-        arg.append(char)
-        token_started = True
-        index += 1
-    if in_quotes:
-        raise ValueError("No closing quotation")
-    if token_started:
-        args.append("".join(arg))
-    return args
 
 
 def validate_provider_settings(settings: Settings) -> None:

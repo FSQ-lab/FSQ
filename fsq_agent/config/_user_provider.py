@@ -36,6 +36,7 @@ GITHUB_PROVIDER_AUTH_FILENAME = "github-copilot-provider-token.json"
 
 _WRITE_LOCK = RLock()
 _LOCK_FILENAME = ".config.lock"
+_LOCKED_ROOTS: set[Path] = set()  # Accessed only while the thread owns _WRITE_LOCK.
 
 
 def _required_text(value: str, field_name: str) -> str:
@@ -521,6 +522,11 @@ def _user_config_root(value: str | Path | None) -> Path:
 @contextmanager
 def _user_config_lock(root: Path, *, provider: str | None = None) -> Iterator[None]:
     with _WRITE_LOCK:
+        lock_identity = root.resolve()
+        if lock_identity in _LOCKED_ROOTS:
+            # Workspace creation can register while holding the same user-root transaction.
+            yield
+            return
         try:
             root.mkdir(parents=True, exist_ok=True)
             lock_file = (root / _LOCK_FILENAME).open("a+b")
@@ -537,9 +543,11 @@ def _user_config_lock(root: Path, *, provider: str | None = None) -> Iterator[No
                     "Unable to lock user Provider configuration.",
                     context={"provider": provider, "reason": "storage"} if provider else {"path": str(root)},
                 ) from exc
+            _LOCKED_ROOTS.add(lock_identity)
             try:
                 yield
             finally:
+                _LOCKED_ROOTS.remove(lock_identity)
                 _release_process_lock(lock_file)
 
 

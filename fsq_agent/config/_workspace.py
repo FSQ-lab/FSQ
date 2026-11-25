@@ -11,7 +11,7 @@ import yaml
 from pydantic import ValidationError
 
 from fsq_agent.config._paths import _set_hidden_best_effort
-from fsq_agent.config._user_provider import _WRITE_LOCK, _atomic_write, _register_workspace, list_workspace_registry
+from fsq_agent.config._user_provider import _WRITE_LOCK, _atomic_write, _register_workspace, _user_config_lock, _user_config_root, list_workspace_registry
 from fsq_agent.models import (
     ConfigurationError,
     IOSWorkspaceTarget,
@@ -28,6 +28,7 @@ from fsq_agent.models import (
 
 SUPPORTED_PLATFORMS = ("android", "web", "windows", "macos", "ios")
 WORKSPACE_CONFIG_DIRECTORY = Path(".fsq/config")
+_QUICK_TEST_WORKSPACE = "quick-test"
 WEB_CHANNEL_EXECUTABLE_NAMES = {
     "chromium": {"chromium", "chromium.exe", "chromium-browser"},
     "chrome": {"chrome", "chrome.exe", "google chrome", "google-chrome", "google-chrome-stable"},
@@ -130,7 +131,7 @@ def _load_workspace_config_snapshot(workspace: str | Path, platform: str) -> tup
     if configured_root != workspace_root:
         raise ConfigurationError(
             "Workspace root_path does not identify the containing workspace.",
-            context={"workspace": str(workspace_root), "configured_root": str(configured_root)},
+            context={"workspace": str(workspace_root), "configured_root": str(configured_root), "workspace_failure": "identity_conflict"},
         )
     if config.platform != platform:
         raise ConfigurationError(
@@ -294,6 +295,121 @@ def _require_unregistered_workspace(name: str, root: Path, registered: Sequence[
         raise ConfigurationError("This workspace path is already registered.", context={"root_path": str(root), "workspace_failure": "identity_conflict"})
 
 
+def _workspace_mutation_lock(name: str, user_config_root: str | Path | None, selected: Path | None = None):
+    user_root = _user_config_root(user_config_root)
+    if (isinstance(name, str) and name.casefold() == _QUICK_TEST_WORKSPACE) or (selected is not None and selected.resolve() == (user_root / _QUICK_TEST_WORKSPACE).resolve()):
+        return _user_config_lock(user_root)
+    return _WRITE_LOCK
+
+
+def _quick_test_workspace_snapshot(platform: str, target: object, user_config_root: str | Path | None) -> tuple[WorkspaceConfig, Path, Path, str]:
+    user_root = _user_config_root(user_config_root)
+    root = user_root / _QUICK_TEST_WORKSPACE
+    if not user_root.is_absolute() or any(path.is_symlink() for path in (root, *root.parents)):
+        raise ConfigurationError("The Quick Test Workspace root is unsafe.", context={"workspace_failure": "unsafe_root"})
+    root = root.resolve()
+    with _user_config_lock(user_root):
+        entry = None
+        for candidate in list_workspace_registry(user_root):
+            same_name = candidate.name.casefold() == _QUICK_TEST_WORKSPACE
+            same_root = candidate.root_path.resolve() == root
+            if same_name != same_root:
+                raise ConfigurationError("The Quick Test Workspace identity is conflicting.", context={"workspace_failure": "identity_conflict"})
+            if same_name:
+                entry = candidate
+
+        config_path = _workspace_config_path(root, platform)
+        name = entry.name if entry is not None else _QUICK_TEST_WORKSPACE
+        if entry is not None:
+            if not root.is_dir():
+                raise ConfigurationError("The registered Quick Test Workspace root is unavailable.", context={"workspace_failure": "identity_unavailable"})
+            _validate_quick_test_layout(root, platform)
+        if entry is None or (not config_path.exists() and not config_path.is_symlink()):
+            seed = WorkspacePlatformCreateInput(platform=platform, target=target, env={})
+            if isinstance(seed.target, WindowsWorkspaceTarget) and seed.target.launch_args:
+                _parse_windows_launch_args(seed.target.launch_args)
+            if entry is None:
+                create_workspace_at_root(root_path=root, name=name, platforms=[seed], user_config_root=user_root)
+            else:
+                if inspect_registered_workspace(name, user_root, validate_target_paths=False).status == "unavailable":
+                    raise ConfigurationError("The registered Quick Test Workspace identity is unavailable.", context={"workspace_failure": "identity_unavailable"})
+                add_workspace_platform(name=name, platform=platform, target=seed.target, env={}, user_config_root=user_root)
+
+        try:
+            snapshot = _load_workspace_config_snapshot(root, platform)
+        except ConfigurationError as exc:
+            reason = exc.context.get("workspace_failure", "configuration_conflict")
+            raise ConfigurationError("The Quick Test Workspace platform is unavailable.", context={"workspace_failure": reason}) from exc
+        if snapshot[0].name != name:
+            raise ConfigurationError("The Quick Test Workspace platform identity is conflicting.", context={"workspace_failure": "identity_conflict"})
+        return snapshot
+
+
+def _validate_quick_test_layout(root: Path, platform: str) -> None:
+    for managed_root in (root / ".fsq" / "runs", root / "cases", root / "knowledge"):
+        for path in (managed_root, managed_root / platform):
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise ConfigurationError("The Quick Test Workspace managed directory is unsafe.", context={"workspace_failure": "configuration_conflict"})
+
+
+def _parse_windows_launch_args(value: str) -> list[str]:
+    try:
+        return _split_windows_command_line(value)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "Windows workspace launch arguments could not be parsed.",
+            context={"config_key": "target.launch_args", "error": str(exc), "workspace_failure": "configuration_conflict"},
+        ) from exc
+
+
+def _split_windows_command_line(value: str) -> list[str]:
+    args: list[str] = []
+    arg: list[str] = []
+    in_quotes = False
+    token_started = False
+    index = 0
+    length = len(value)
+    while index < length:
+        char = value[index]
+        if char.isspace() and not in_quotes:
+            if token_started:
+                args.append("".join(arg))
+                arg = []
+                token_started = False
+            index += 1
+            continue
+        if char == "\\":
+            slash_start = index
+            while index < length and value[index] == "\\":
+                index += 1
+            slash_count = index - slash_start
+            if index < length and value[index] == '"':
+                arg.extend("\\" * (slash_count // 2))
+                if slash_count % 2:
+                    arg.append('"')
+                else:
+                    in_quotes = not in_quotes
+                token_started = True
+                index += 1
+                continue
+            arg.extend("\\" * slash_count)
+            token_started = True
+            continue
+        if char == '"':
+            in_quotes = not in_quotes
+            token_started = True
+            index += 1
+            continue
+        arg.append(char)
+        token_started = True
+        index += 1
+    if in_quotes:
+        raise ValueError("No closing quotation")
+    if token_started:
+        args.append("".join(arg))
+    return args
+
+
 def create_workspace(
     *,
     selected_path: Path,
@@ -339,7 +455,7 @@ def _create_workspace(
         _validate_target_paths(config)
 
     created_paths: list[Path] = []
-    with _WRITE_LOCK:
+    with _workspace_mutation_lock(normalized_name, user_config_root, selected):
         try:
             if exact_root and next(selected.iterdir(), None) is not None:
                 raise ConfigurationError("The exact workspace root must be empty.", context={"workspace_failure": "identity_conflict"})  # noqa: TRY301 -- ordinary transaction rollback.
@@ -365,8 +481,8 @@ def _create_workspace(
                 created_paths.append(project_path)
                 config_path = _workspace_config_path(final_root, config.platform)
                 _atomic_write(config_path, _workspace_yaml_bytes(config))
-                _restrict_workspace_config_permissions(config_path)
                 created_paths.append(config_path)
+                _restrict_workspace_config_permissions(config_path)
             _register_workspace(
                 WorkspaceRegistryEntry(name=normalized_name, root_path=final_root),
                 user_config_root,
@@ -388,7 +504,7 @@ def create_workspace_at_root(
     root = root_path.expanduser()
     if not root.is_absolute() or any(parent.is_symlink() for parent in (root, *root.parents)) or not root.parent.is_dir():
         raise ConfigurationError("The exact workspace root is unsafe or unavailable.", context={"workspace_failure": "unsafe_root"})
-    with _WRITE_LOCK:
+    with _workspace_mutation_lock(name, user_config_root, root):
         created = False
         try:
             if not root.exists():
@@ -412,7 +528,7 @@ def add_workspace_platform(
     env: Mapping[str, str],
     user_config_root: str | Path | None = None,
 ) -> WorkspaceConfig:
-    with _WRITE_LOCK:
+    with _workspace_mutation_lock(name, user_config_root):
         entry = _find_registry_entry(name, user_config_root)
         config_path = _workspace_config_path(entry.root_path, platform)
         config_directory = entry.root_path / WORKSPACE_CONFIG_DIRECTORY
@@ -452,8 +568,8 @@ def add_workspace_platform(
                 _atomic_write(project_path, b"")
                 created_paths.append(project_path)
             _atomic_write(config_path, _workspace_yaml_bytes(candidate))
-            _restrict_workspace_config_permissions(config_path)
             created_paths.append(config_path)
+            _restrict_workspace_config_permissions(config_path)
         except Exception:
             _rollback_created_paths(created_paths)
             raise
@@ -469,7 +585,7 @@ def update_workspace_platform(
     expected_revision: str,
     user_config_root: str | Path | None = None,
 ) -> WorkspaceConfig:
-    with _WRITE_LOCK:
+    with _workspace_mutation_lock(name, user_config_root):
         current, current_revision = _load_registered_workspace_snapshot(name, platform, user_config_root, allow_unavailable_target=platform in {"macos", "ios"})
         config_path = _workspace_config_path(current.root_path, platform)
         if current_revision != expected_revision:

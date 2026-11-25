@@ -4,6 +4,7 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+- Quick Test initializes its dedicated Workspace and platform defaults only when missing. Concurrent preparations keep their own targets and starting URLs without overwriting shared settings; existing Case Manager and Run report links continue to work.
 - Windows verifies foreground ownership before sending input. Screenshots render only the bound window, without reading the desktop or separate top-level popups.
 - Windows and macOS UI snapshots redact credentials before XML escaping, withhold protected values, and enforce their output caps. Run evidence shares cycle- and depth-safe redaction.
 - Evidence distinguishes unstarted targets from capture failures and does not require a post-action frame when preparation aborted. Explore downgrades a capture failure to a warning only after an explicitly linked retry of the same operation with complete evidence; no operation retries automatically. Managed completion reports the frozen status and summary.

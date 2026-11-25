@@ -99,6 +99,8 @@ async def execute_prepared_quick_test(prepared: QuickTestPrepareResult, goal: st
                 allow_recording_failure=True,
                 cancellation_check=check_cancelled,
                 requires_web_search_evidence=prepared.requires_web_search_evidence,
+                quick_test_target_id=prepared.target_id,
+                quick_test_application=prepared.application,
             )
         )
     except (asyncio.CancelledError, KeyboardInterrupt, Exception) as error:

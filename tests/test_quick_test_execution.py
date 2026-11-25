@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -71,6 +72,159 @@ async def test_shared_execution_freezes_inputs_and_never_publishes(monkeypatch, 
     assert result.report_path == report.resolve()
     assert "UNIT_PRIVATE" not in result.model_dump_json()
     assert not item.settings.cases.dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_quick_test_runs_keep_distinct_target_provenance_and_report_links(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from fsq_agent.adapters.cli import main
+    from fsq_agent.config import create_workspace_at_root
+    from fsq_agent.control_plane import ControlPlaneServer, ControlPlaneServerOptions
+    from fsq_agent.models import WorkspacePlatformCreateInput
+
+    user_root = tmp_path / ".fsq"
+    user_root.mkdir()
+    original = prepared(user_root)
+    root = original.root_path
+    browser = tmp_path / "Google Chrome" / "chrome"
+    browser.parent.mkdir()
+    browser.write_bytes(b"not launched")
+    browser.chmod(0o755)
+    default = WebWorkspaceTarget(browser_channel="chrome", browser_executable_path=browser)
+    create_workspace_at_root(root_path=root, name="quick-test", platforms=[WorkspacePlatformCreateInput(platform="web", target=default, env={})], user_config_root=user_root)
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test_execution.diagnose_platform_settings", lambda settings: SimpleNamespace(commands=SimpleNamespace(case_create=SimpleNamespace(status="ready")))
+    )
+    monkeypatch.setattr("fsq_agent.application._quick_test_execution.validate_runtime_settings", lambda settings: None)
+
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, **kwargs):
+            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status="success", summary="Observed the fixture."))
+
+    runtime_urls = []
+
+    def agent_factory(settings):
+        runtime_urls.append(settings.harness.web.base_url)
+        return Agent()
+
+    persisted = []
+    runs = (
+        ("msedge", "https://first.example.test/?section=one&access_token=URL_SECRET#top"),
+        ("chrome", "https://second.example.test/?ref=UNIT%5FPRIVATE"),
+        ("msedge-beta", "https://third.example.test/o'clock#sig=SIGNATURE_VALUE"),
+        ("chromium", None),
+    )
+    for channel, url in runs:
+        settings = original.settings.model_copy(deep=True)
+        settings.harness.web.channel = channel
+        settings.harness.web.base_url = url
+        settings.agent_runtime.user_config_root = user_root
+        item = original.model_copy(
+            update={"target_id": channel, "target": WebWorkspaceTarget(browser_channel=channel, browser_executable_path=browser), "settings": settings, "requires_web_search_evidence": url is None}
+        )
+        result = await application.execute_prepared_quick_test(item, "Open the fixture and read the heading.", agent_factory=agent_factory)
+        assert result.status == ("inconclusive" if url is None else "success")
+        metadata_path = root / ".fsq/runs/web" / result.run_id / "run.json"
+        raw = metadata_path.read_text(encoding="utf-8")
+        facts = json.loads(raw)["provenance"]["configuration"]["quick_test_target"]
+        assert facts["target_id"] == facts["browser_channel"] == channel
+        if url is None:
+            assert facts["base_url"] is None
+        elif channel == "chrome":
+            assert facts["base_url"] == "[redacted URL]"
+        elif channel == "msedge-beta":
+            assert facts["base_url"].startswith("https://third.example.test/o'clock#sig=")
+        else:
+            assert facts["base_url"].startswith("https://first.example.test/?section=one&access_token=")
+        assert runtime_urls[-1] == url
+        assert "URL_SECRET" not in raw
+        assert "UNIT%5FPRIVATE" not in raw
+        assert "SIGNATURE_VALUE" not in raw
+        assert str(browser) not in raw
+        persisted.append((result.run_id, metadata_path, raw))
+
+    assert len({run_id for run_id, _, _ in persisted}) == len(runs)
+    server = ControlPlaneServer(ControlPlaneServerOptions(open_browser=False, user_config_root=user_root))
+    status, detail, _ = server.handle_get("/api/control-plane/workspaces/quick-test/platforms/web")
+    assert status == 200
+    assert detail["target"]["browserChannel"] == "chrome"
+
+    browser.unlink()  # Historical reads do not depend on the saved default still being usable.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.chdir(root)
+    opened = []
+
+    def open_report(address):
+        opened.append(address)
+        return True
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.webbrowser.open", open_report)
+    for run_id, metadata_path, raw in persisted:
+        status, _, _ = server.handle_get(f"/api/control-plane/history/web/{run_id}", {"workspace": ["quick-test"]})
+        assert status == 200
+        shown = application.show_run(application.ShowRunRequest(current_directory=root, user_config_root=user_root, platform="web", run_id=run_id))
+        assert shown.run.run_id == run_id
+        cli = CliRunner().invoke(main, ["runs", "show", run_id, "--platform", "web", "--open"])
+        assert cli.exit_code == 0, cli.output
+        report_path = metadata_path.with_name("report.html")
+        assert opened[-1] == report_path.as_uri()
+        assert report_path.is_file()
+        assert metadata_path.read_text(encoding="utf-8") == raw
+
+
+@pytest.mark.asyncio
+async def test_quick_test_windows_target_provenance_distinguishes_same_basename(monkeypatch, tmp_path):
+    from fsq_agent.models import WindowsWorkspaceTarget
+
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test_execution.diagnose_platform_settings", lambda settings: SimpleNamespace(commands=SimpleNamespace(case_create=SimpleNamespace(status="ready")))
+    )
+    monkeypatch.setattr("fsq_agent.application._quick_test_execution.validate_runtime_settings", lambda settings: None)
+
+    class Agent:
+        async def run_in_context(self, task, context, event_sink=None, **kwargs):
+            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status="success", summary="Observed the fixture."))
+
+    original = prepared(tmp_path)
+    cases = (
+        ("Stable", "Microsoft Edge", "Microsoft Edge"),
+        ("Beta", "Microsoft Edge Beta", "Microsoft Edge Beta"),
+        ("Canary", "Microsoft Edge Canary", "Microsoft Edge Canary"),
+        ("One", "msedge", "msedge"),
+        ("Two", "msedge", "msedge"),
+        ("One", r"C:\Private\Other\msedge.exe", "msedge.exe"),
+        ("UNIT_PRIVATE", "msedge", "msedge"),
+        ("one", "msedge", "msedge"),
+        ("PrivatePathValue", "msedge", "msedge"),
+    )
+    identities = []
+    for directory, label, expected_label in cases:
+        settings = original.settings.model_copy(deep=True)
+        settings.harness.platform = "windows"
+        settings.output.runs_dir = original.root_path / ".fsq/runs/windows"
+        exe = tmp_path / "Private" / directory / "msedge.exe"
+        if directory == "PrivatePathValue":
+            settings.runtime_secrets.set_values({"PRIVATE": str(exe).replace("/", "\\").upper()})
+        settings.harness.windows.app_path = exe
+        item = original.model_copy(update={"target_id": "windows-app", "target": WindowsWorkspaceTarget(app_path=exe), "application": label, "settings": settings})
+        result = await application.execute_prepared_quick_test(item, "Open the fixture and read the heading.", agent_factory=lambda settings: Agent())
+        raw = (settings.output.runs_dir / result.run_id / "run.json").read_text(encoding="utf-8")
+        facts = json.loads(raw)["provenance"]["configuration"]["quick_test_target"]
+        assert facts["application_name"] == "msedge.exe"
+        assert facts["target_id"] == "windows-app"
+        assert "Private" not in raw
+        assert "UNIT_PRIVATE" not in raw
+        assert facts["application_label"] == expected_label
+        identities.append(facts.get("application_identity"))
+    assert all(identities[:5])
+    assert len(set(identities[:5])) == 5
+    assert identities[3] == identities[5]  # Same resolved executable, different label.
+    assert identities[6] is None
+    assert identities[7] is not None
+    assert identities[7] != identities[3]  # Same label and basename; only the directory's case differs.
+    assert identities[8] is None  # The complete path is a private env value in Windows spelling.
 
 
 @pytest.mark.asyncio

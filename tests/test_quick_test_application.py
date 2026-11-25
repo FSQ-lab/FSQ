@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import json
+import multiprocessing
 import plistlib
 from types import SimpleNamespace
 
@@ -10,7 +11,7 @@ import pytest
 from fsq_agent.agent_engine import ModelResult
 from fsq_agent.ai_services import QuickTestIntent, QuickTestIntentAnalyzer
 from fsq_agent.application import ApplicationError, QuickTestContextRequest, QuickTestPrepareRequest, get_quick_test_context, prepare_quick_test
-from fsq_agent.config import create_workspace, load_registered_workspace, save_openai_provider, update_workspace_platform, workspace_revision
+from fsq_agent.config import create_workspace, create_workspace_at_root, list_workspace_registry, load_registered_workspace, save_openai_provider, update_workspace_platform, workspace_revision
 from fsq_agent.environments import AndroidDeviceDiscovery, PlatformRuntimeService
 from fsq_agent.models import (
     AndroidDevice,
@@ -21,6 +22,7 @@ from fsq_agent.models import (
     ApplicationLookupResult,
     PlatformPrerequisiteCheck,
     PlatformRuntimeCheck,
+    WebWorkspaceTarget,
     WorkspacePlatformCreateInput,
 )
 
@@ -320,7 +322,7 @@ def test_context_requires_explicit_device_selection(ready):
     assert [item.id for item in result.choices] == ["serial-1"]
 
 
-def test_prepare_first_use_and_update_preserve_env_and_unrelated_files(ready, monkeypatch):
+def test_prepare_existing_platform_preserves_saved_target_env_and_unrelated_files(ready, monkeypatch):
     first = prepare_quick_test(request(ready))
     assert first.workspace_name == "quick-test"
     assert first.root_path == ready / "quick-test"
@@ -334,6 +336,7 @@ def test_prepare_first_use_and_update_preserve_env_and_unrelated_files(ready, mo
         expected_revision=workspace_revision(config_path),
         user_config_root=ready,
     )
+    before = config_path.read_bytes()
     keep = first.root_path / "cases/android/keep.txt"
     keep.write_text("unchanged")
     other = ApplicationCandidate(candidate_id="c001", identity="com.other", label="Other", app_id="com.other", source="android_package")
@@ -344,12 +347,121 @@ def test_prepare_first_use_and_update_preserve_env_and_unrelated_files(ready, mo
     )
     second = prepare_quick_test(request(ready))
     current = load_registered_workspace("quick-test", "android", ready)
-    assert current.target.app_id == "com.other"
+    assert current.target.app_id == "com.calc"
+    assert config_path.read_bytes() == before
     assert current.env == {"PRIVATE": "secret-value"}
     assert keep.read_text() == "unchanged"
     assert first.settings.harness.android.app_id == "com.calc"
     assert second.settings.harness.android.app_id == "com.other"
     assert second.platform_revision == workspace_revision(config_path)
+
+
+def _prepare_web_worker(root, channel, executable, url, gate, publication, results):
+    from fsq_agent.config import _user_provider, _workspace, load_quick_test_workspace_settings
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(PlatformRuntimeService, "check", lambda self, platform: PlatformRuntimeCheck(platform=platform, status="ready", ready=True, message="Ready."))
+        patch.setattr(PlatformRuntimeService, "check_prerequisites", lambda *args, **kwargs: ())
+        patch.setattr(PlatformRuntimeService, "discover_web_executables", lambda self, selected: [executable] if selected == channel else [])
+        patch.setattr("fsq_agent.application.doctor.check_provider_readiness", lambda settings: SimpleNamespace(ready=True, message="Ready.", action=""))
+        patch.setattr(
+            "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+            lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "sufficient", target_name="Fixture", base_url=url)),
+        )
+        if publication is not None:
+            published, contender = publication
+            if channel == "chrome":
+                original_write = _workspace._atomic_write
+
+                def hold_first_publication(path, data):
+                    original_write(path, data)
+                    if path.name == "config.web.yaml":
+                        published.set()
+                        assert contender.wait(timeout=15), "The other process did not attempt the initialization lock."
+
+                patch.setattr(_workspace, "_atomic_write", hold_first_publication)
+            else:
+                acquire = _user_provider._acquire_process_lock
+
+                def contend(lock_file):
+                    if published.is_set():
+                        contender.set()
+                    acquire(lock_file)
+
+                patch.setattr(_user_provider, "_acquire_process_lock", contend)
+
+        def reach_configuration(*args, **kwargs):
+            gate.wait(timeout=15)
+            if publication is not None and channel != "chrome":
+                assert published.wait(timeout=15), "The first process did not publish the initial config."
+            return load_quick_test_workspace_settings(*args, **kwargs)
+
+        patch.setattr(PlatformRuntimeService, "check_target_availability", lambda *args: (True, "Ready.", ""))
+        patch.setattr("fsq_agent.application._quick_test.load_quick_test_workspace_settings", reach_configuration)
+        try:
+            result = prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id=channel, goal="Open the fixture and read its heading.", url=url, user_config_root=root))
+        except ApplicationError as error:
+            results.put((channel, error.to_record()))
+        else:
+            web = result.settings.harness.web
+            results.put((channel, result.workspace_name, result.root_path, result.platform_revision, result.target_id, result.target, web.channel, web.base_url, web.browser_executable_path))
+
+
+@pytest.mark.parametrize("state", ["new_workspace", "new_platform", "existing_platform"])
+def test_independent_processes_prepare_distinct_web_targets(ready, state):
+    def executable(product, name):
+        path = ready / product / name
+        path.parent.mkdir()
+        path.write_bytes(b"not launched")
+        path.chmod(0o755)
+        return path
+
+    targets = {
+        "chrome": (executable("Google Chrome", "chrome"), "https://first.example.test/path"),
+        "msedge": (executable("Microsoft Edge", "msedge"), "https://second.example.test/?section=two"),
+    }
+    root = ready / "quick-test"
+    config_path = root / ".fsq/config/config.web.yaml"
+    if state == "existing_platform":
+        default = WebWorkspaceTarget(browser_channel="chrome", browser_executable_path=targets["chrome"][0])
+        create_workspace_at_root(root_path=root, name="quick-test", platforms=[WorkspacePlatformCreateInput(platform="web", target=default, env={"KEEP": "unchanged"})], user_config_root=ready)
+        before = config_path.read_bytes()
+    elif state == "new_platform":
+        prepare_quick_test(request(ready))
+
+    ctx = multiprocessing.get_context("spawn")
+    gate = ctx.Barrier(2)
+    results = ctx.Queue()
+    publication = None if state == "existing_platform" else (ctx.Event(), ctx.Event())
+    workers = [ctx.Process(target=_prepare_web_worker, args=(ready, channel, path, url, gate, publication, results)) for channel, (path, url) in targets.items()]
+    try:
+        for worker in workers:
+            worker.start()
+        observed = {row[0]: row[1:] for row in (results.get(timeout=20) for _ in workers)}
+        for worker in workers:
+            worker.join(timeout=5)
+            assert worker.exitcode == 0
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=5)
+            worker.close()
+        results.close()
+        results.join_thread()
+
+    assert all(isinstance(outcome[0], str) for outcome in observed.values()), observed
+    assert [(entry.name, entry.root_path) for entry in list_workspace_registry(ready)] == [("quick-test", root)]
+    revision = workspace_revision(config_path)
+    assert observed == {
+        channel: ("quick-test", root, revision, channel, WebWorkspaceTarget(browser_channel=channel, browser_executable_path=path), channel, url, path) for channel, (path, url) in targets.items()
+    }
+    stored = load_registered_workspace("quick-test", "web", ready)
+    assert stored.target == WebWorkspaceTarget(browser_channel="chrome", browser_executable_path=targets["chrome"][0])
+    if state == "existing_platform":
+        assert config_path.read_bytes() == before
+    else:
+        assert "example.test" not in config_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("reason", ["insufficient", "missing_application", "application_not_found", "ambiguous_application"])
@@ -384,7 +496,32 @@ def test_registered_name_collision_does_not_fallback(ready, tmp_path):
     with pytest.raises(ApplicationError) as error:
         prepare_quick_test(request(ready))
     assert error.value.code.value == "quick_test.workspace_conflict"
+    assert error.value.details["reason"] == "identity_conflict"
     assert not (ready / "quick-test").exists()
+
+
+@pytest.mark.parametrize("problem", ["unsafe_root", "identity_unavailable"])
+def test_preparation_does_not_replace_an_unavailable_or_unsafe_root(ready, tmp_path, problem):
+    root = ready / "quick-test"
+    if problem == "unsafe_root":
+        other = tmp_path / "other"
+        other.mkdir()
+        try:
+            root.symlink_to(other, target_is_directory=True)
+        except OSError:
+            pytest.skip("Host does not support creating directory symlinks.")
+    else:
+        prepare_quick_test(request(ready))
+        root.rename(ready / "moved")
+    with pytest.raises(ApplicationError) as error:
+        prepare_quick_test(request(ready))
+    assert error.value.code.value == "quick_test.workspace_conflict"
+    assert error.value.details["reason"] == problem
+    if problem == "unsafe_root":
+        assert root.is_symlink()
+        assert not list(other.iterdir())
+    else:
+        assert not root.exists()
 
 
 def test_cancel_after_inference_prevents_persistence(ready, monkeypatch):
@@ -419,22 +556,110 @@ def test_config_exact_root_never_uses_nested_fallback(tmp_path):
 
 
 def test_concurrent_platform_edit_cannot_retarget_a_prepared_run(ready, monkeypatch):
-    import fsq_agent.application._quick_test as implementation
+    from fsq_agent.config import _loader
 
-    prepare_quick_test(request(ready))
-    original = implementation.load_workspace_platform_settings
+    first = prepare_quick_test(request(ready))
+    config_path = first.settings.workspace.config_path
+    update_workspace_platform(name="quick-test", platform="android", target=first.target, env={"PRIVATE": "before"}, expected_revision=first.platform_revision, user_config_root=ready)
+    before = workspace_revision(config_path)
+    compose = _loader._compose_workspace_platform_settings
 
-    def racing_load(*args, **kwargs):
-        config_path = ready / "quick-test/.fsq/config/config.android.yaml"
-        update_workspace_platform(
-            name="quick-test", platform="android", target=AndroidWorkspaceTarget(app_id="com.other"), env={}, expected_revision=workspace_revision(config_path), user_config_root=ready
-        )
-        return original(*args, **kwargs)
+    def edit_after_snapshot(*args, **kwargs):
+        update_workspace_platform(name="quick-test", platform="android", target=AndroidWorkspaceTarget(app_id="com.other"), env={"PRIVATE": "after"}, expected_revision=before, user_config_root=ready)
+        return compose(*args, **kwargs)
 
-    monkeypatch.setattr(implementation, "load_workspace_platform_settings", racing_load)
-    with pytest.raises(ApplicationError) as error:
+    monkeypatch.setattr(_loader, "_compose_workspace_platform_settings", edit_after_snapshot)
+    prepared = prepare_quick_test(request(ready))
+    assert prepared.settings.harness.android.app_id == "com.calc"
+    current = load_registered_workspace("quick-test", "android", ready)
+    assert current.target.app_id == "com.other"
+    assert current.env == {"PRIVATE": "after"}
+    assert prepared.settings.runtime_secrets.private_values() == {"PRIVATE": "before"}
+    assert prepared.platform_revision == before
+    assert prepared.platform_revision != workspace_revision(config_path)
+
+
+@pytest.mark.parametrize("unsafe_runs", [False, True])
+def test_stale_saved_browser_does_not_authorize_unsafe_workspace_paths(ready, unsafe_runs):
+    from fsq_agent.config import load_quick_test_workspace_settings
+    from fsq_agent.models import ConfigurationError
+
+    chrome = ready / "Google Chrome" / "chrome"
+    chrome.parent.mkdir()
+    chrome.write_bytes(b"not launched")
+    chrome.chmod(0o755)
+    root = ready / "quick-test"
+    default = WebWorkspaceTarget(browser_channel="chrome", browser_executable_path=chrome)
+    create_workspace_at_root(root_path=root, name="quick-test", platforms=[WorkspacePlatformCreateInput(platform="web", target=default, env={})], user_config_root=ready)
+    chrome.unlink()
+    edge = ready / "Microsoft Edge" / "msedge"
+    edge.parent.mkdir()
+    edge.write_bytes(b"not launched")
+    edge.chmod(0o755)
+    target = WebWorkspaceTarget(browser_channel="msedge", browser_executable_path=edge)
+    if not unsafe_runs:
+        _, _, settings = load_quick_test_workspace_settings("web", target, ready)
+        assert settings.output.runs_dir == root / ".fsq/runs/web"
+        return
+
+    outside = ready / "outside"
+    outside.mkdir()
+    runs_dir = root / ".fsq/runs/web"
+    runs_dir.rmdir()
+    try:
+        runs_dir.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Host does not support creating directory symlinks.")
+    with pytest.raises(ConfigurationError) as error:
+        load_quick_test_workspace_settings("web", target, ready)
+    assert error.value.context["workspace_failure"] == "configuration_conflict"
+    assert not list(outside.iterdir())
+
+
+def test_quick_test_shared_config_checks_saved_windows_launch_syntax(ready):
+    from fsq_agent.config import load_quick_test_workspace_settings
+    from fsq_agent.models import ConfigurationError, WindowsWorkspaceTarget
+
+    default_app = ready / "default.exe"
+    default_app.touch()
+    default = WindowsWorkspaceTarget(app_path=default_app, launch_args='--title "unmatched')
+    root = ready / "quick-test"
+    create_workspace_at_root(root_path=root, name="quick-test", platforms=[WorkspacePlatformCreateInput(platform="windows", target=default, env={})], user_config_root=ready)
+    new_app = ready / "new.exe"
+    new_app.touch()
+    with pytest.raises(ConfigurationError) as error:
+        load_quick_test_workspace_settings("windows", WindowsWorkspaceTarget(app_path=new_app), ready)
+    assert error.value.context["workspace_failure"] == "configuration_conflict"
+
+
+@pytest.mark.parametrize("existing_workspace", [False, True])
+def test_invalid_windows_seed_cannot_publish_platform_or_registry(ready, existing_workspace):
+    from fsq_agent.config import load_quick_test_workspace_settings
+    from fsq_agent.models import ConfigurationError, WindowsWorkspaceTarget
+
+    root = ready / "quick-test"
+    if existing_workspace:
         prepare_quick_test(request(ready))
-    assert error.value.code.value == "quick_test.workspace_conflict"
+    before = (ready / "config.yaml").read_bytes()
+    exe = ready / "fixture.exe"
+    exe.touch()
+    target = WindowsWorkspaceTarget(app_path=exe, launch_args='--title "unmatched')
+    with pytest.raises(ConfigurationError) as error:
+        load_quick_test_workspace_settings("windows", target, ready)
+    assert error.value.context["workspace_failure"] == "configuration_conflict"
+    assert (ready / "config.yaml").read_bytes() == before
+    assert not (root / ".fsq/config/config.windows.yaml").exists()
+    assert root.exists() == existing_workspace
+
+
+def test_quick_test_config_does_not_initialize_ios(tmp_path):
+    from fsq_agent.config import load_quick_test_workspace_settings
+    from fsq_agent.models import ConfigurationError, IOSWorkspaceTarget
+
+    user_root = tmp_path / "absent"
+    with pytest.raises(ConfigurationError):
+        load_quick_test_workspace_settings("ios", IOSWorkspaceTarget(bundle_id="com.fixture"), user_root)
+    assert not user_root.exists()
 
 
 def test_web_multiple_navigation_addresses_with_explicit_start_are_valid(ready, monkeypatch):
@@ -480,7 +705,7 @@ def test_dotted_search_subjects_are_not_supplied_navigation_addresses(ready, mon
 
 @pytest.mark.parametrize("goal", ["搜索 FSQ github\uff0c并且帮我找到FSQ 的官网地址", "Goal: search FSQ on GitHub and find its official site"])
 def test_web_search_clears_initial_and_frozen_url_and_keeps_subject(ready, monkeypatch, goal):
-    from fsq_agent.config import load_platform_settings, load_workspace_platform_settings
+    from fsq_agent.config import load_platform_settings, load_quick_test_workspace_settings
 
     browser = ready / "Google Chrome" / "chrome"
     browser.parent.mkdir()
@@ -498,17 +723,17 @@ def test_web_search_clears_initial_and_frozen_url_and_keeps_subject(ready, monke
         return settings
 
     def load_frozen(*args, **kwargs):
-        settings = load_workspace_platform_settings(*args, **kwargs)
+        name, revision, settings = load_quick_test_workspace_settings(*args, **kwargs)
         settings.harness.web.base_url = "https://prior-workspace.test"
         frozen.append(settings)
-        return settings
+        return name, revision, settings
 
     def analyze(**kwargs):
         analyzed.append(kwargs["goal"])
         return QuickTestIntent(True, "web_search", target_name="FSQ", base_url=None)
 
     monkeypatch.setattr("fsq_agent.application._quick_test.load_platform_settings", load)
-    monkeypatch.setattr("fsq_agent.application._quick_test.load_workspace_platform_settings", load_frozen)
+    monkeypatch.setattr("fsq_agent.application._quick_test.load_quick_test_workspace_settings", load_frozen)
     monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=analyze))
     result = prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=ready))
     assert analyzed == [goal]
@@ -661,7 +886,7 @@ def test_preparation_stage_failures_are_safe_and_do_not_allocate_workspace(ready
     elif stage == "availability":
         monkeypatch.setattr(PlatformRuntimeService, "check_target_availability", lambda *args: (False, "PRIVATE", "PRIVATE"))
     else:
-        monkeypatch.setattr("fsq_agent.application._quick_test.create_workspace_at_root", fail)
+        monkeypatch.setattr("fsq_agent.application._quick_test.load_quick_test_workspace_settings", fail)
     with pytest.raises(ApplicationError) as error:
         prepare_quick_test(request(ready))
     assert error.value.code.value == f"quick_test.{code}"
@@ -695,22 +920,13 @@ def test_workspace_resource_exports_canonical_quick_test_contracts():
         assert getattr(workspace, name) is getattr(contracts, name)
 
 
-@pytest.mark.parametrize("operation", ["create", "add", "update", "registry"])
+@pytest.mark.parametrize("operation", ["create", "add", "registry"])
 @pytest.mark.parametrize("failure", [PermissionError("PRIVATE permissions"), OSError(28, "PRIVATE disk full")])
 def test_real_config_write_failures_are_persistence_errors_not_conflicts(ready, monkeypatch, operation, failure):
-    from fsq_agent.config import _user_provider, _workspace, create_workspace_at_root
-    from fsq_agent.models import WebWorkspaceTarget
+    from fsq_agent.config import _user_provider, _workspace
 
     root = ready / "quick-test"
-    if operation == "update":
-        prepare_quick_test(request(ready))
-        updated = ApplicationCandidate(candidate_id="c001", identity="com.updated", label="Updated", app_id="com.updated", source="android_package")
-        monkeypatch.setattr(
-            PlatformRuntimeService,
-            "list_applications",
-            lambda *args, **kwargs: ApplicationInventoryResult(status="complete", candidates=(updated,), fingerprint="fp-updated"),
-        )
-    elif operation == "add":
+    if operation == "add":
         browser = ready / "Google Chrome" / "chrome"
         browser.parent.mkdir()
         browser.write_bytes(b"fixture")
@@ -757,7 +973,7 @@ def test_configuration_exception_type_alone_is_not_workspace_conflict_evidence(r
 
 
 @pytest.mark.parametrize("platform", ["windows", "macos"])
-def test_desktop_successful_prepare_create_update_preserves_env_and_frozen_settings(ready, monkeypatch, platform):
+def test_desktop_prepare_freezes_new_targets_without_updating_saved_defaults(ready, monkeypatch, platform):
     from fsq_agent.models import MacOSWorkspaceTarget, WindowsWorkspaceTarget
 
     monkeypatch.setattr("fsq_agent.execution.allocate_run", lambda *args, **kwargs: pytest.fail("Preparation must not allocate a Run"))
@@ -803,14 +1019,16 @@ def test_desktop_successful_prepare_create_update_preserves_env_and_frozen_setti
     update_workspace_platform(name="quick-test", platform=platform, target=first.target, env={"KEEP": "private-value"}, expected_revision=first.platform_revision, user_config_root=ready)
     keep = first.root_path / "cases" / platform / "preserved.txt"
     keep.write_bytes(b"case fixture")
+    before = config_path.read_bytes()
     selected[0] = 1
     second = prepare_quick_test(req)
     persisted = load_registered_workspace("quick-test", platform, ready)
     assert persisted.env == {"KEEP": "private-value"}
-    assert persisted.target.app_path == paths[1]
+    assert persisted.target.app_path == paths[0]
+    assert config_path.read_bytes() == before
     assert keep.read_bytes() == b"case fixture"
     assert second.platform_revision == workspace_revision(config_path)
-    assert first.platform_revision != second.platform_revision
+    assert first.platform_revision != second.platform_revision  # The explicit env edit changed the snapshot.
     assert getattr(first.settings.harness, platform).app_path == paths[0]
     assert getattr(second.settings.harness, platform).app_path == paths[1]
     assert first.settings.runtime_secrets.private_values() == {}

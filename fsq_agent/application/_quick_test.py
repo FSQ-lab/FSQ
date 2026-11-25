@@ -3,29 +3,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
 from fsq_agent.ai_services import build_quick_test_intent_analyzer, validate_quick_test_web_url
 from fsq_agent.application.contracts.shared import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode
 from fsq_agent.application.contracts.workspace import QuickTestCheck, QuickTestChoice, QuickTestContextRequest, QuickTestContextResult, QuickTestPrepareRequest, QuickTestPrepareResult
 from fsq_agent.application.doctor import PlatformDiagnosticContext, diagnose_platform_settings
-from fsq_agent.config import (
-    Settings,
-    add_workspace_platform,
-    create_workspace_at_root,
-    inspect_registered_workspace,
-    list_workspace_registry,
-    load_platform_settings,
-    load_registered_workspace,
-    load_windows_application_catalogue,
-    load_workspace_platform_settings,
-    update_workspace_platform,
-    validate_runtime_settings,
-    workspace_revision,
-)
+from fsq_agent.config import Settings, load_platform_settings, load_quick_test_workspace_settings, load_windows_application_catalogue, validate_runtime_settings
 from fsq_agent.environments import AndroidDeviceDiscovery, PlatformRuntimeService
-from fsq_agent.models import AndroidWorkspaceTarget, ConfigurationError, MacOSWorkspaceTarget, WebWorkspaceTarget, WindowsWorkspaceTarget, WorkspacePlatformCreateInput
+from fsq_agent.models import AndroidWorkspaceTarget, ConfigurationError, MacOSWorkspaceTarget, WebWorkspaceTarget, WindowsWorkspaceTarget
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -352,20 +338,19 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     if not available:
         raise _error("prerequisites", target_name=application, reason="target_unavailable")
     cancel()
-    root, name, revision, frozen = _persist(request, target)
-    # Loading never authorizes a changed target: _persist verifies target, identity and revision.
+    name, revision, frozen = _load_workspace_settings(request, target)
     _bind_target(frozen, target, request.target_id)
     if request.platform == "web":
         frozen.harness.web.base_url = address
     cancel()
     return QuickTestPrepareResult(
         workspace_name=name,
-        root_path=root,
+        root_path=frozen.workspace.root_dir,
         platform_revision=revision,
         target_id=request.target_id if request.platform in {"android", "web"} else f"{request.platform}-app",
         target=target,
         application=application,
-        settings=frozen.model_copy(deep=True),
+        settings=frozen,
         requires_web_search_evidence=requires_web_search_evidence,
     )
 
@@ -386,12 +371,6 @@ def _bind_target(settings, target, target_id):
         settings.harness.windows.launch_args = []
 
 
-class _WorkspaceConflictError(ValueError):
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
-        self.reason = reason
-
-
 def _has_io_cause(error: BaseException) -> bool:
     seen = set()
     while error is not None and id(error) not in seen:
@@ -402,60 +381,15 @@ def _has_io_cause(error: BaseException) -> bool:
     return False
 
 
-def _persist(request, target):
+def _load_workspace_settings(request, target):
     try:
-        return _persist_target(request, target)
-    except _WorkspaceConflictError as error:
-        raise _error("workspace_conflict", stage="workspace_persistence", reason=error.reason) from None
+        return load_quick_test_workspace_settings(request.platform, target, request.user_config_root)
     except ConfigurationError as error:
         if _has_io_cause(error):
             raise _error("persistence_failed", stage="workspace_persistence", reason="io_error") from None
-        if error.context.get("error_code") == "workspace_conflict":
-            raise _error("workspace_conflict", stage="workspace_persistence", reason="revision_conflict") from None
         reason = error.context.get("workspace_failure")
         if isinstance(reason, str) and reason in {"identity_conflict", "identity_unavailable", "configuration_conflict", "unsafe_root"}:
             raise _error("workspace_conflict", stage="workspace_persistence", reason=reason) from None
         raise _error("persistence_failed", stage="workspace_persistence", reason="storage_error") from None
     except Exception as error:  # noqa: BLE001 -- storage and unexpected persistence failures must not masquerade as identity conflicts.
         raise _error("persistence_failed", stage="workspace_persistence", reason="io_error" if _has_io_cause(error) else "storage_error") from None
-
-
-def _persist_target(request, target):
-    user_root = (request.user_config_root or Path.home() / ".fsq").expanduser()
-    root = user_root / "quick-test"
-    if not user_root.is_absolute() or any(path.is_symlink() for path in (root, *root.parents)):
-        raise _WorkspaceConflictError("unsafe_root")
-    root = root.resolve()
-    entries = list_workspace_registry(user_root)
-    matching = [entry for entry in entries if entry.name.casefold() == "quick-test" or entry.root_path.resolve() == root]
-    if any(entry.name.casefold() != "quick-test" or entry.root_path.resolve() != root for entry in matching):
-        raise _WorkspaceConflictError("identity_conflict")
-    name = matching[0].name if matching else "quick-test"
-    config_path = root / ".fsq/config" / f"config.{request.platform}.yaml"
-    if not matching:
-        create_workspace_at_root(root_path=root, name=name, platforms=[WorkspacePlatformCreateInput(platform=request.platform, target=target, env={})], user_config_root=user_root)
-    else:
-        if inspect_registered_workspace(name, user_root).status == "unavailable":
-            raise _WorkspaceConflictError("identity_unavailable")
-        if config_path.exists() or config_path.is_symlink():
-            revision = workspace_revision(config_path)
-            current = load_registered_workspace(name, request.platform, user_root)
-            if current.root_path.resolve() != root:
-                raise _WorkspaceConflictError("identity_conflict")
-            if current.target != target:
-                update_workspace_platform(name=name, platform=request.platform, target=target, env=current.env, expected_revision=revision, user_config_root=user_root)
-            elif workspace_revision(config_path) != revision:
-                raise _WorkspaceConflictError("revision_conflict")
-        else:
-            add_workspace_platform(name=name, platform=request.platform, target=target, env={}, user_config_root=user_root)
-    revision = workspace_revision(config_path)
-    current = load_registered_workspace(name, request.platform, user_root)
-    frozen = load_workspace_platform_settings(root, request.platform, user_config_root=user_root)
-    if current.root_path.resolve() != root or current.target != target or workspace_revision(config_path) != revision:
-        raise _WorkspaceConflictError("revision_conflict")
-    # A concurrent change during loading must not silently replace validated target.
-    comparison = frozen.model_copy(deep=True)
-    _bind_target(comparison, target, None)
-    if frozen.harness != comparison.harness:
-        raise _WorkspaceConflictError("revision_conflict")
-    return root, name, revision, frozen

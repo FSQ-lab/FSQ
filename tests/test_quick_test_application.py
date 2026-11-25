@@ -3,7 +3,6 @@
 
 import json
 import plistlib
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -18,13 +17,20 @@ from fsq_agent.models import (
     AndroidDeviceDiscoveryResult,
     AndroidWorkspaceTarget,
     ApplicationCandidate,
+    ApplicationInventoryResult,
     ApplicationLookupResult,
     PlatformPrerequisiteCheck,
     PlatformRuntimeCheck,
     WorkspacePlatformCreateInput,
 )
 
-_APPLICATION_LOOKUP = PlatformRuntimeService.lookup_application
+_DEFAULT_ANDROID_CANDIDATE = ApplicationCandidate(
+    candidate_id="c001",
+    identity="com.calc",
+    label="Calculator",
+    app_id="com.calc",
+    source="android_package",
+)
 
 
 @pytest.fixture
@@ -42,18 +48,30 @@ def ready(monkeypatch, tmp_path):
     monkeypatch.setattr(PlatformRuntimeService, "check_target_availability", lambda *args: (True, "Ready.", ""))
     monkeypatch.setattr(AndroidDeviceDiscovery, "discover", lambda self: AndroidDeviceDiscoveryResult(devices=[AndroidDevice(serial="serial-1", state="device")]))
     monkeypatch.setattr("fsq_agent.application.doctor.check_provider_readiness", lambda settings: SimpleNamespace(ready=True, message="Ready.", action=""))
-    intent = QuickTestIntent(True, "sufficient", "Calculator", None)
+    intent = QuickTestIntent(True, "sufficient", target_name="Calculator", candidate_id="c001")
     monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
     monkeypatch.setattr(
         PlatformRuntimeService,
+        "list_applications",
+        lambda self, **kwargs: ApplicationInventoryResult(
+            status="complete",
+            candidates=(_DEFAULT_ANDROID_CANDIDATE,),
+            from_cache=False,
+            fingerprint="fp-calc-1",
+        ),
+    )
+    monkeypatch.setattr(
+        PlatformRuntimeService,
         "lookup_application",
-        lambda self, **kwargs: ApplicationLookupResult(status="complete", candidates=(ApplicationCandidate(identity="com.calc", label="Calculator", app_id="com.calc"),)),
+        lambda self, **kwargs: ApplicationLookupResult(status="complete", candidates=(_DEFAULT_ANDROID_CANDIDATE,)),
     )
     return root
 
 
 def request(root, **updates):
-    return QuickTestPrepareRequest(platform="android", target_id="serial-1", goal="Calculator: 1+1=2", user_config_root=root, **updates)
+    params = {"platform": "android", "target_id": "serial-1", "goal": "Calculator: 1+1=2", "user_config_root": root}
+    params.update(updates)
+    return QuickTestPrepareRequest(**params)
 
 
 @pytest.fixture
@@ -63,42 +81,66 @@ def windows_catalogue(ready, monkeypatch):
     executable = ready / "msedge.exe"
     executable.write_bytes(b"filesystem fixture only")
     missing = ready / "missing.exe"
-    entries = (WindowsApplicationConfig(id="edge", name="Microsoft Edge", description="Web browser", path_candidates=[str(missing), str(executable)], window_title_re=".*Microsoft Edge.*"),)
+    entries = (
+        WindowsApplicationConfig(
+            id="edge",
+            name="Microsoft Edge",
+            description="Web browser",
+            path_candidates=[str(missing), str(executable)],
+            window_title_re=".*Microsoft Edge.*",
+        ),
+    )
     monkeypatch.setattr("fsq_agent.application._quick_test.load_windows_application_catalogue", lambda: entries)
     return entries, executable
 
 
-def test_windows_selected_catalogue_resolves_in_order_without_registry_and_persists_title(ready, monkeypatch, windows_catalogue):
+def test_windows_catalogue_candidate_hides_window_title_re_from_model_and_persists_it(ready, monkeypatch, windows_catalogue):
     from fsq_agent.config import load_workspace_platform_settings
 
     entries, executable = windows_catalogue
+    candidate = ApplicationCandidate(
+        candidate_id="c001",
+        identity=str(executable),
+        label="Microsoft Edge",
+        aliases=("edge",),
+        app_path=executable,
+        window_title_re=entries[0].window_title_re,
+        source="windows_catalogue",
+    )
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "list_applications",
+        lambda self, **kwargs: ApplicationInventoryResult(status="complete", candidates=(candidate,), fingerprint="fp-win-1"),
+    )
     requests = []
-    payload = json.dumps({"sufficient": True, "reason": "sufficient", "application_name": "edge", "explicit_reference": None, "inferred_hint": None, "app_config_id": "edge"})
+    payload = json.dumps(
+        {
+            "sufficient": True,
+            "reason": "sufficient",
+            "target_name": "Microsoft Edge",
+            "candidate_id": "c001",
+            "explicit_reference": None,
+            "base_url": None,
+            "candidate_ids": [],
+            "explanation": None,
+        }
+    )
 
     class Session:
-        def complete_sync(self, request):
-            requests.append(request)
-            return ModelResult(text=payload, parsed_output=request.output.parse(payload))
+        def complete_sync(self, req):
+            requests.append(req)
+            return ModelResult(text=payload, parsed_output=req.output.parse(payload))
 
         def close_sync(self):
             pass
 
     monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: QuickTestIntentAnalyzer(Session()))
-    calls = []
-
-    def concrete_lookup(self, **kwargs):
-        calls.append(kwargs)
-        assert kwargs["explicit_reference"] in entries[0].path_candidates
-        assert kwargs.get("inferred_hint") is None
-        return _APPLICATION_LOOKUP(self, **kwargs)
-
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", concrete_lookup)
-    monkeypatch.setattr("platform.system", lambda: "Windows")
-    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(OpenKey=lambda *args, **kwargs: pytest.fail("Selected catalogue must not scan registry")))
     monkeypatch.setattr("fsq_agent.core.HarnessFactory.create_harness", lambda *args, **kwargs: pytest.fail("No GUI/Driver construction"))
+
     result = prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="打开edge\uff0c访问www.google.com", user_config_root=ready))
     assert len(requests) == 1
-    assert [call["explicit_reference"] for call in calls] == list(entries[0].path_candidates)
+    assert "window_title_re" not in requests[0].input
+    assert "launch_args" not in requests[0].input
     assert result.target.app_path == executable
     assert result.target.window_title_re == entries[0].window_title_re
     assert result.application == "Microsoft Edge"
@@ -107,128 +149,162 @@ def test_windows_selected_catalogue_resolves_in_order_without_registry_and_persi
     assert persisted.target == result.target
     assert case_settings.harness.windows.app_path == executable
     assert case_settings.harness.windows.window_title_re == entries[0].window_title_re
-    assert "app_config_id" not in result.settings.workspace.config_path.read_text(encoding="utf-8")
+    assert "candidate_id" not in result.settings.workspace.config_path.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("first_candidate", ["available", "missing"])
-def test_windows_selected_candidates_use_existing_validator_and_stop_at_first_available(ready, monkeypatch, windows_catalogue, first_candidate):
-    entries, executable = windows_catalogue
-    first_path = str(executable if first_candidate == "available" else ready / "missing.exe")
-    entry = entries[0].model_copy(update={"path_candidates": (first_path, str(executable))})
-    monkeypatch.setattr("fsq_agent.application._quick_test.load_windows_application_catalogue", lambda: (entry,))
-    intent = QuickTestIntent(True, "sufficient", "edge", None, app_config_id="edge")
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
-    monkeypatch.setattr("platform.system", lambda: "Windows")
-    seen = []
-
-    def lookup(self, **kwargs):
-        seen.append(kwargs["explicit_reference"])
-        return _APPLICATION_LOOKUP(self, **kwargs)
-
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
-    req = QuickTestPrepareRequest(platform="windows", goal="打开edge\uff0c访问www.google.com", user_config_root=ready)
-    result = prepare_quick_test(req)
-    assert result.target.app_path == executable
-    assert seen == ([first_path] if first_candidate == "available" else [first_path, str(executable)])
-    before = result.settings.workspace.config_path.read_bytes()
-    executable.unlink()
-    with pytest.raises(ApplicationError) as error:
-        prepare_quick_test(req)
-    assert error.value.code.value == "quick_test.discovery_failed"
-    assert result.settings.workspace.config_path.read_bytes() == before
-
-
-@pytest.mark.parametrize("first_candidate", ["relative.exe", "directory", "wrong_suffix"])
-def test_windows_candidate_validation_failure_is_terminal_even_with_later_available_path(ready, monkeypatch, windows_catalogue, first_candidate):
-    entries, executable = windows_catalogue
-    invalid = first_candidate if first_candidate == "relative.exe" else str(ready if first_candidate == "directory" else executable.with_suffix(".txt"))
-    entry = entries[0].model_copy(update={"path_candidates": (invalid, str(executable))})
-    monkeypatch.setattr("fsq_agent.application._quick_test.load_windows_application_catalogue", lambda: (entry,))
-    intent = QuickTestIntent(True, "sufficient", "edge", None, app_config_id="edge")
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
-    monkeypatch.setattr("platform.system", lambda: "Windows")
-    seen = []
-
-    def lookup(self, **kwargs):
-        seen.append(kwargs["explicit_reference"])
-        return _APPLICATION_LOOKUP(self, **kwargs)
-
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
-    with pytest.raises(ApplicationError) as error:
-        prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="edge: inspect page", user_config_root=ready))
-    assert error.value.code.value == "quick_test.discovery_failed"
-    assert seen == [invalid]
-    assert not (ready / "quick-test").exists()
-
-
-@pytest.mark.parametrize("selected", [None, "edge"])
-@pytest.mark.parametrize("explicit", [False, True])
-def test_windows_explicit_or_no_match_uses_existing_lookup(ready, monkeypatch, windows_catalogue, selected, explicit):
-    entries, executable = windows_catalogue
-    reference = str(executable) if explicit else None
-    intent = QuickTestIntent(True, "sufficient", "edge", reference, app_config_id=selected)
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
-    seen = []
-
-    def lookup(self, **kwargs):
-        seen.append(kwargs)
-        return ApplicationLookupResult(status="complete", candidates=(ApplicationCandidate(identity=str(executable), label="Existing lookup", app_path=executable),))
-
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
-    result = prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="edge: inspect page", user_config_root=ready))
-    assert seen[0]["explicit_reference"] == (reference if explicit or selected is None else entries[0].path_candidates[0])
-    assert result.target.window_title_re == (entries[0].window_title_re if selected and not explicit else None)
-
-
-@pytest.mark.parametrize("failure", ["unknown_id", "missing_candidates", "invalid_candidates", "invalid_catalogue", "invalid_explicit"])
-def test_windows_selection_errors_do_not_fallback_or_mutate_workspace(ready, monkeypatch, windows_catalogue, failure):
-    from fsq_agent.models import ConfigurationError
-
+def test_windows_unknown_model_candidate_id_is_inference_failure(ready, monkeypatch, windows_catalogue):
     _, executable = windows_catalogue
-    prepare_quick_test(request(ready))
-    before = (ready / "quick-test/.fsq/config/config.android.yaml").read_bytes()
-    explicit = str(executable) if failure == "invalid_explicit" else None
-    intent = QuickTestIntent(True, "sufficient", "edge", explicit, app_config_id="unknown" if failure == "unknown_id" else "edge")
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
-    calls = []
+    candidate = ApplicationCandidate(
+        candidate_id="c001",
+        identity=str(executable),
+        label="Microsoft Edge",
+        app_path=executable,
+        source="windows_catalogue",
+    )
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "list_applications",
+        lambda self, **kwargs: ApplicationInventoryResult(status="complete", candidates=(candidate,), fingerprint="fp-win-1"),
+    )
 
-    def lookup(self, **kwargs):
-        calls.append(kwargs)
-        assert kwargs["explicit_reference"] is not None
-        return ApplicationLookupResult(status="failed" if failure == "invalid_candidates" else "complete", code="invalid_query" if failure == "invalid_candidates" else "complete")
-
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
-    if failure == "invalid_catalogue":
-
-        def invalid():
-            raise ConfigurationError("Invalid catalogue.")
-
-        monkeypatch.setattr("fsq_agent.application._quick_test.load_windows_application_catalogue", invalid)
-    with pytest.raises(ApplicationError):
-        prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="edge: inspect page", user_config_root=ready))
-    assert (ready / "quick-test/.fsq/config/config.android.yaml").read_bytes() == before
-    assert not (ready / "quick-test/.fsq/config/config.windows.yaml").exists()
-    if failure in {"unknown_id", "invalid_catalogue"}:
-        assert not calls
-    if failure == "invalid_explicit":
-        assert len(calls) == 1
-
-
-def test_windows_unknown_model_selection_is_inference_failure_not_no_match(ready, monkeypatch, windows_catalogue):
     class Session:
-        def complete_sync(self, request):
-            payload = json.dumps({"sufficient": True, "reason": "sufficient", "application_name": "edge", "explicit_reference": None, "inferred_hint": None, "app_config_id": "invented"})
-            return ModelResult(text=payload, parsed_output=request.output.parse(payload))
+        def complete_sync(self, req):
+            payload = json.dumps(
+                {
+                    "sufficient": True,
+                    "reason": "sufficient",
+                    "target_name": "edge",
+                    "candidate_id": "c999",
+                    "explicit_reference": None,
+                    "base_url": None,
+                    "candidate_ids": [],
+                    "explanation": None,
+                }
+            )
+            return ModelResult(text=payload, parsed_output=req.output.parse(payload))
 
         def close_sync(self):
             pass
 
     monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: QuickTestIntentAnalyzer(Session()))
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lambda *args, **kwargs: pytest.fail("Unknown model ID is not a no-match lookup"))
     with pytest.raises(ApplicationError) as error:
         prepare_quick_test(QuickTestPrepareRequest(platform="windows", goal="打开edge\uff0c访问www.google.com", user_config_root=ready))
     assert error.value.code.value == "quick_test.inference_failed"
     assert not (ready / "quick-test").exists()
+
+
+def test_cache_miss_refreshes_inventory_once_and_reinvokes_only_when_changed(ready, monkeypatch):
+    cached_candidate = ApplicationCandidate(candidate_id="c001", identity="com.calc", label="Calculator", app_id="com.calc", source="android_package")
+    fresh_candidate = ApplicationCandidate(candidate_id="c002", identity="com.tencent.mm", label="WeChat", app_id="com.tencent.mm", source="android_package")
+    inventory_calls = []
+
+    def list_apps(self, **kwargs):
+        inventory_calls.append(kwargs["force_refresh"])
+        if not kwargs["force_refresh"]:
+            return ApplicationInventoryResult(status="complete", candidates=(cached_candidate,), from_cache=True, fingerprint="fp-old")
+        return ApplicationInventoryResult(status="complete", candidates=(cached_candidate, fresh_candidate), from_cache=False, fingerprint="fp-new")
+
+    analyze_calls = []
+
+    def analyze(**kwargs):
+        analyze_calls.append(tuple(item.candidate_id for item in kwargs["candidates"]))
+        if len(analyze_calls) == 1:
+            return QuickTestIntent(False, "application_not_found", target_name="WeChat", explanation="Not in cached inventory.")
+        return QuickTestIntent(True, "sufficient", target_name="WeChat", candidate_id="c002")
+
+    monkeypatch.setattr(PlatformRuntimeService, "list_applications", list_apps)
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=analyze))
+
+    result = prepare_quick_test(request(ready, goal="打开微信发消息"))
+    assert inventory_calls == [False, True]
+    assert analyze_calls == [("c001",), ("c001", "c002")]
+    assert result.target.app_id == "com.tencent.mm"
+    assert result.application == "WeChat"
+
+
+def test_cache_miss_skips_second_model_call_when_refreshed_inventory_is_unchanged(ready, monkeypatch):
+    cached_candidate = ApplicationCandidate(candidate_id="c001", identity="com.calc", label="Calculator", app_id="com.calc", source="android_package")
+    inventory_calls = []
+
+    def list_apps(self, **kwargs):
+        inventory_calls.append(kwargs["force_refresh"])
+        return ApplicationInventoryResult(
+            status="complete",
+            candidates=(cached_candidate,),
+            from_cache=not kwargs["force_refresh"],
+            fingerprint="fp-same",
+        )
+
+    analyze_calls = []
+
+    def analyze(**kwargs):
+        analyze_calls.append(kwargs)
+        return QuickTestIntent(False, "application_not_found", target_name="WeChat", explanation="WeChat is not installed.")
+
+    monkeypatch.setattr(PlatformRuntimeService, "list_applications", list_apps)
+    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=analyze))
+
+    with pytest.raises(ApplicationError) as error:
+        prepare_quick_test(request(ready, goal="打开微信发消息"))
+    assert error.value.code.value == "quick_test.application_not_found"
+    assert error.value.details == {"target_name": "WeChat", "reason": "WeChat is not installed."}
+    assert inventory_calls == [False, True]
+    assert len(analyze_calls) == 1
+    assert not (ready / "quick-test").exists()
+
+
+def test_application_ambiguous_carries_structured_candidate_diagnostics(ready, monkeypatch):
+    first = ApplicationCandidate(candidate_id="c001", identity="com.tencent.mm", label="WeChat", app_id="com.tencent.mm", source="android_package")
+    second = ApplicationCandidate(candidate_id="c002", identity="com.tencent.wework", label="WeCom", app_id="com.tencent.wework", source="android_package")
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "list_applications",
+        lambda self, **kwargs: ApplicationInventoryResult(status="complete", candidates=(first, second), from_cache=False, fingerprint="fp-2"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: SimpleNamespace(
+            analyze=lambda **kwargs: QuickTestIntent(
+                False,
+                "ambiguous_application",
+                target_name="微信",
+                candidate_ids=("c001", "c002"),
+                explanation="Both WeChat and WeCom are installed.",
+            )
+        ),
+    )
+    with pytest.raises(ApplicationError) as error:
+        prepare_quick_test(request(ready, goal="打开微信发消息"))
+    assert error.value.code.value == "quick_test.application_ambiguous"
+    assert error.value.details["target_name"] == "微信"
+    assert error.value.details["reason"] == "Both WeChat and WeCom are installed."
+    assert [item["candidate_id"] for item in error.value.details["candidates"]] == ["c001", "c002"]
+    assert not (ready / "quick-test").exists()
+
+
+def test_explicit_reference_fallback_resolves_via_lookup_application(ready, monkeypatch):
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "list_applications",
+        lambda self, **kwargs: ApplicationInventoryResult(status="complete", candidates=(), from_cache=False, fingerprint="fp-empty"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "sufficient", target_name="CustomCalc", explicit_reference="com.custom.calc")),
+    )
+    seen = []
+
+    def lookup(self, **kwargs):
+        seen.append(kwargs)
+        return ApplicationLookupResult(
+            status="complete",
+            candidates=(ApplicationCandidate(identity="com.custom.calc", label="CustomCalc", app_id="com.custom.calc"),),
+        )
+
+    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
+    result = prepare_quick_test(request(ready, goal="Open com.custom.calc and verify 1+1=2"))
+    assert seen[0]["explicit_reference"] == "com.custom.calc"
+    assert result.target.app_id == "com.custom.calc"
 
 
 def test_context_needs_no_workspace_and_app_checks_do_not_deadlock(ready):
@@ -260,10 +336,11 @@ def test_prepare_first_use_and_update_preserve_env_and_unrelated_files(ready, mo
     )
     keep = first.root_path / "cases/android/keep.txt"
     keep.write_text("unchanged")
+    other = ApplicationCandidate(candidate_id="c001", identity="com.other", label="Other", app_id="com.other", source="android_package")
     monkeypatch.setattr(
         PlatformRuntimeService,
-        "lookup_application",
-        lambda self, **kwargs: ApplicationLookupResult(status="complete", candidates=(ApplicationCandidate(identity="com.other", label="Other", app_id="com.other"),)),
+        "list_applications",
+        lambda self, **kwargs: ApplicationInventoryResult(status="complete", candidates=(other,), from_cache=False, fingerprint="fp-other"),
     )
     second = prepare_quick_test(request(ready))
     current = load_registered_workspace("quick-test", "android", ready)
@@ -275,21 +352,14 @@ def test_prepare_first_use_and_update_preserve_env_and_unrelated_files(ready, mo
     assert second.platform_revision == workspace_revision(config_path)
 
 
-@pytest.mark.parametrize(("count", "code"), [(0, "quick_test.application_not_found"), (2, "quick_test.application_ambiguous")])
-def test_zero_multiple_fail_before_workspace_creation(ready, monkeypatch, count, code):
-    candidates = tuple(ApplicationCandidate(identity=f"com.app{index}", label="Calculator", app_id=f"com.app{index}") for index in range(count))
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lambda self, **kwargs: ApplicationLookupResult(status="complete", candidates=candidates))
-    with pytest.raises(ApplicationError) as error:
-        prepare_quick_test(request(ready))
-    assert error.value.code.value == code
-    assert not (ready / "quick-test").exists()
-
-
-@pytest.mark.parametrize("reason", ["insufficient", "missing_application", "ambiguous_application"])
+@pytest.mark.parametrize("reason", ["insufficient", "missing_application", "application_not_found", "ambiguous_application"])
 def test_insufficient_never_uses_old_target(ready, monkeypatch, reason):
     prepare_quick_test(request(ready))
     before = (ready / "quick-test/.fsq/config/config.android.yaml").read_bytes()
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(False, reason, None, None)))
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(False, reason)),
+    )
     with pytest.raises(ApplicationError):
         prepare_quick_test(request(ready))
     assert (ready / "quick-test/.fsq/config/config.android.yaml").read_bytes() == before
@@ -317,13 +387,13 @@ def test_registered_name_collision_does_not_fallback(ready, tmp_path):
     assert not (ready / "quick-test").exists()
 
 
-def test_cancel_after_inference_prevents_discovery_and_persistence(ready, monkeypatch):
+def test_cancel_after_inference_prevents_persistence(ready, monkeypatch):
     cancelled = False
 
     def analyze(**kwargs):
         nonlocal cancelled
         cancelled = True
-        return QuickTestIntent(True, "sufficient", "Calculator", None)
+        return QuickTestIntent(True, "sufficient", target_name="Calculator", candidate_id="c001")
 
     def check():
         if cancelled:
@@ -376,7 +446,7 @@ def test_web_multiple_navigation_addresses_with_explicit_start_are_valid(ready, 
     goal = "Start at http://example.test then navigate to https://example.test/login and verify the login form."
     monkeypatch.setattr(
         "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
-        lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "sufficient", None, "http://example.test")),
+        lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "sufficient", target_name="example.test", base_url="http://example.test")),
     )
     result = prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=ready))
     assert result.application == "http://example.test"
@@ -398,7 +468,7 @@ def test_dotted_search_subjects_are_not_supplied_navigation_addresses(ready, mon
 
     def analyze(**kwargs):
         seen.append(kwargs["goal"])
-        return QuickTestIntent(True, "sufficient" if address else "web_search", subject, address)
+        return QuickTestIntent(True, "sufficient" if address else "web_search", target_name=subject, base_url=address)
 
     monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=analyze))
     result = prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=ready))
@@ -435,7 +505,7 @@ def test_web_search_clears_initial_and_frozen_url_and_keeps_subject(ready, monke
 
     def analyze(**kwargs):
         analyzed.append(kwargs["goal"])
-        return QuickTestIntent(True, "web_search", "FSQ", None)
+        return QuickTestIntent(True, "web_search", target_name="FSQ", base_url=None)
 
     monkeypatch.setattr("fsq_agent.application._quick_test.load_platform_settings", load)
     monkeypatch.setattr("fsq_agent.application._quick_test.load_workspace_platform_settings", load_frozen)
@@ -452,18 +522,23 @@ def test_web_search_clears_initial_and_frozen_url_and_keeps_subject(ready, monke
 
 
 @pytest.mark.parametrize(
-    "address", ["https:/", "https://", "https:/example.test", "https://user:pass@example.test", "javascript:alert(1)", "file:///tmp/test", "ftp://example.test", "custom://example.test"]
+    "bad_url",
+    ["https://user:pass@example.test", "javascript:alert(1)", "file:///tmp/test", "ftp://example.test", "https://example.test:0"],
 )
-def test_invalid_supplied_address_cannot_be_laundered_into_search(ready, monkeypatch, address):
+def test_invalid_model_extracted_web_url_is_rejected_safely(ready, monkeypatch, bad_url):
     browser = ready / "Google Chrome" / "chrome"
     browser.parent.mkdir()
     browser.write_text("browser")
     browser.chmod(0o755)
     monkeypatch.setattr(PlatformRuntimeService, "discover_web_executables", lambda self, channel: [browser] if channel == "chrome" else [])
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: pytest.fail("Invalid navigation address reached inference"))
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "sufficient", target_name="site", base_url=bad_url)),
+    )
     with pytest.raises(ApplicationError) as error:
-        prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=f"Search FSQ {address} and find its official site", user_config_root=ready))
+        prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=f"Open {bad_url} and verify", user_config_root=ready))
     assert error.value.code.value == "quick_test.invalid_web_address"
+    assert "user:pass" not in str(error.value.to_record())
     assert not (ready / "quick-test").exists()
 
 
@@ -481,21 +556,21 @@ def test_search_whole_prepare_execution_handoff_and_terminal_evidence_result(rea
     browser.chmod(0o755)
     monkeypatch.setattr(PlatformRuntimeService, "discover_web_executables", lambda self, channel: [browser] if channel == "chrome" else [])
     monkeypatch.setattr(
-        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "web_search", "FSQ", None))
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "web_search", target_name="FSQ", base_url=None)),
     )
     seen = []
     execute = DynamicExecutionService.execute
 
-    async def checked_execute(self, request):
-        seen.append(request)
-        return await execute(self, request)
+    async def checked_execute(self, req):
+        seen.append(req)
+        return await execute(self, req)
 
     class Agent:
         async def run_in_context(self, task, context, **kwargs):
             assert task.description == task.planning_reference_text == goal
             return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status="success", summary="Unsupported model claim"))
 
-    # The service passes the event sink positionally, just as in normal execution.
     async def run(task, context, event_sink=None, **kwargs):
         return await Agent().run_in_context(task, context, **kwargs)
 
@@ -582,7 +657,7 @@ def test_preparation_stage_failures_are_safe_and_do_not_allocate_workspace(ready
     if stage == "inference":
         monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", fail)
     elif stage == "discovery":
-        monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lambda *args, **kwargs: ApplicationLookupResult(status="failed", code="discovery_failed"))
+        monkeypatch.setattr(PlatformRuntimeService, "list_applications", lambda *args, **kwargs: ApplicationInventoryResult(status="failed", code="discovery_failed"))
     elif stage == "availability":
         monkeypatch.setattr(PlatformRuntimeService, "check_target_availability", lambda *args: (False, "PRIVATE", "PRIVATE"))
     else:
@@ -620,117 +695,6 @@ def test_workspace_resource_exports_canonical_quick_test_contracts():
         assert getattr(workspace, name) is getattr(contracts, name)
 
 
-def test_inferred_hint_reaches_discovery_without_replacing_grounded_name(ready, monkeypatch):
-    from fsq_agent.models import ApplicationLookupHint
-
-    hint = ApplicationLookupHint(kind="app_id", value="com.calc")
-    intent = QuickTestIntent(True, "sufficient", "Calculator", None, inferred_hint=hint)
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
-    seen = []
-
-    def lookup(self, **kwargs):
-        seen.append(kwargs)
-        return ApplicationLookupResult(status="complete", candidates=(ApplicationCandidate(identity="com.calc", label="Calculator", app_id="com.calc"),))
-
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
-    prepare_quick_test(request(ready))
-    assert seen[0]["name"] == "Calculator"
-    assert seen[0]["explicit_reference"] is None
-    assert seen[0]["inferred_hint"] == hint
-
-
-def _use_native_lookup(monkeypatch):
-    from fsq_agent.environments._applications import lookup_application
-
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lambda self, **kwargs: lookup_application(**kwargs))
-
-
-@pytest.mark.parametrize("name", ["微信", "WeChat"])
-def test_named_goal_prepares_installed_inferred_package_without_labels(ready, monkeypatch, name):
-    payload = json.dumps(
-        {
-            "sufficient": True,
-            "reason": "sufficient",
-            "application_name": name,
-            "explicit_reference": None,
-            "inferred_hint": {"kind": "app_id", "value": "com.tencent.mm"},
-        }
-    )
-    session = SimpleNamespace(
-        complete_sync=lambda request: ModelResult(text=payload, parsed_output=request.output.parse(payload)),
-        close_sync=lambda: None,
-    )
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: QuickTestIntentAnalyzer(session))
-    _use_native_lookup(monkeypatch)
-    monkeypatch.setattr(
-        "fsq_agent.environments.providers._applications.inventory", lambda deadline: [AndroidDevice(serial="serial-1", state="device"), AndroidDevice(serial="other-device", state="device")]
-    )
-    monkeypatch.setattr("fsq_agent.environments.providers._applications.package_inventory", lambda *args: pytest.fail("Concrete reference must not enumerate names"))
-    queries = []
-
-    def package_status(serial, app_id, **kwargs):
-        queries.append((serial, app_id))
-        return "installed" if (serial, app_id) == ("serial-1", "com.tencent.mm") else "absent"
-
-    monkeypatch.setattr("fsq_agent.environments.providers._applications.package_status", package_status, raising=False)
-    result = prepare_quick_test(QuickTestPrepareRequest(platform="android", target_id="serial-1", goal=f"用{name}搜索联系人张三\uff0c确认出现匹配结果", user_config_root=ready))
-    assert result.target.app_id == "com.tencent.mm"
-    assert result.settings.harness.android.app_id == "com.tencent.mm"
-    assert result.settings.harness.android.serial == "serial-1"
-    assert queries == [("serial-1", "com.tencent.mm")]
-    assert load_registered_workspace("quick-test", "android", ready).target.app_id == "com.tencent.mm"
-
-
-def test_missing_inferred_package_never_uses_name_match_or_previous_target(ready, monkeypatch):
-    from fsq_agent.models import ApplicationLookupHint
-
-    previous = prepare_quick_test(request(ready))
-    before = previous.settings.workspace.config_path.read_bytes()
-    intent = QuickTestIntent(True, "sufficient", "Calculator", None, ApplicationLookupHint(kind="app_id", value="com.missing.calculator"))
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
-    _use_native_lookup(monkeypatch)
-    monkeypatch.setattr("fsq_agent.environments.providers._applications.inventory", lambda deadline: [AndroidDevice(serial="serial-1", state="device")])
-    monkeypatch.setattr("fsq_agent.environments.providers._applications.package_status", lambda serial, app_id, **kwargs: "absent", raising=False)
-    monkeypatch.setattr("fsq_agent.environments.providers._applications.package_inventory", lambda *args: pytest.fail("No name fallback after a missing concrete target"))
-    with pytest.raises(ApplicationError) as error:
-        prepare_quick_test(request(ready))
-    assert error.value.code.value == "quick_test.application_not_found"
-    assert previous.settings.workspace.config_path.read_bytes() == before
-    assert not list((previous.root_path / ".fsq/runs/android").iterdir())
-
-
-def test_scoped_multiple_bundle_installations_fail_before_workspace_or_execution(ready, monkeypatch, tmp_path):
-    from fsq_agent.models import ApplicationLookupHint
-
-    applications = tmp_path / "applications"
-    for index in range(2):
-        metadata = applications / f"Installation{index}.app/Contents/Info.plist"
-        metadata.parent.mkdir(parents=True)
-        metadata.write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.tencent.xinWeChat", "CFBundleName": f"Local label {index}"}))
-    intent = QuickTestIntent(True, "sufficient", "WeChat", None, ApplicationLookupHint(kind="bundle_id", value="com.tencent.xinWeChat"))
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
-    _use_native_lookup(monkeypatch)
-    monkeypatch.setattr("fsq_agent.environments.providers._applications.platform.system", lambda: "Darwin")
-    monkeypatch.setattr("fsq_agent.environments.providers._applications._macos_roots", lambda: (applications,))
-    with pytest.raises(ApplicationError) as error:
-        prepare_quick_test(QuickTestPrepareRequest(platform="macos", goal="Use WeChat to search and verify the result", user_config_root=ready))
-    assert error.value.code.value == "quick_test.application_ambiguous"
-    assert not (ready / "quick-test").exists()
-
-
-@pytest.mark.parametrize(("reason", "code"), [("insufficient", "quick_test.insufficient"), ("ambiguous_application", "quick_test.application_ambiguous")])
-def test_concrete_hint_does_not_override_negative_intent(ready, monkeypatch, reason, code):
-    from fsq_agent.models import ApplicationLookupHint
-
-    intent = QuickTestIntent(False, reason, "Calculator", None, ApplicationLookupHint(kind="app_id", value="com.android.calculator2"))
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=lambda **kwargs: intent))
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lambda *args, **kwargs: pytest.fail("Negative intent must fail before concrete lookup"))
-    with pytest.raises(ApplicationError) as error:
-        prepare_quick_test(request(ready))
-    assert error.value.code.value == code
-    assert not (ready / "quick-test").exists()
-
-
 @pytest.mark.parametrize("operation", ["create", "add", "update", "registry"])
 @pytest.mark.parametrize("failure", [PermissionError("PRIVATE permissions"), OSError(28, "PRIVATE disk full")])
 def test_real_config_write_failures_are_persistence_errors_not_conflicts(ready, monkeypatch, operation, failure):
@@ -740,10 +704,11 @@ def test_real_config_write_failures_are_persistence_errors_not_conflicts(ready, 
     root = ready / "quick-test"
     if operation == "update":
         prepare_quick_test(request(ready))
+        updated = ApplicationCandidate(candidate_id="c001", identity="com.updated", label="Updated", app_id="com.updated", source="android_package")
         monkeypatch.setattr(
             PlatformRuntimeService,
-            "lookup_application",
-            lambda *args, **kwargs: ApplicationLookupResult(status="complete", candidates=(ApplicationCandidate(identity="com.updated", label="Updated", app_id="com.updated"),)),
+            "list_applications",
+            lambda *args, **kwargs: ApplicationInventoryResult(status="complete", candidates=(updated,), fingerprint="fp-updated"),
         )
     elif operation == "add":
         browser = ready / "Google Chrome" / "chrome"
@@ -793,7 +758,7 @@ def test_configuration_exception_type_alone_is_not_workspace_conflict_evidence(r
 
 @pytest.mark.parametrize("platform", ["windows", "macos"])
 def test_desktop_successful_prepare_create_update_preserves_env_and_frozen_settings(ready, monkeypatch, platform):
-    from fsq_agent.models import ApplicationLookupHint, MacOSWorkspaceTarget, WindowsWorkspaceTarget
+    from fsq_agent.models import MacOSWorkspaceTarget, WindowsWorkspaceTarget
 
     monkeypatch.setattr("fsq_agent.execution.allocate_run", lambda *args, **kwargs: pytest.fail("Preparation must not allocate a Run"))
     monkeypatch.setattr("fsq_agent.core.HarnessFactory.create_harness", lambda *args, **kwargs: pytest.fail("Preparation must not create a Driver"))
@@ -807,22 +772,28 @@ def test_desktop_successful_prepare_create_update_preserves_env_and_frozen_setti
             metadata.parent.mkdir(parents=True)
             metadata.write_bytes(plistlib.dumps({"CFBundleIdentifier": f"com.fixture.app{index}", "CFBundleName": "Calculator"}))
         paths.append(path)
-    selected = [0]
-
-    def analyzer(settings):
-        hint = ApplicationLookupHint(kind="app_path", value=str(paths[selected[0]]))
-        return SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "sufficient", "Calculator", None, hint))
-
-    def lookup(self, **kwargs):
-        index = selected[0]
-        assert kwargs["inferred_hint"].value == str(paths[index])
-        return ApplicationLookupResult(
-            status="complete",
-            candidates=(ApplicationCandidate(identity=str(paths[index]), label="Calculator", app_path=paths[index], bundle_id=f"com.fixture.app{index}" if platform == "macos" else None),),
+    candidates = tuple(
+        ApplicationCandidate(
+            candidate_id=f"c00{index + 1}",
+            identity=str(paths[index]),
+            label="Calculator",
+            app_path=paths[index],
+            bundle_id=f"com.fixture.app{index}" if platform == "macos" else None,
+            source="windows_app_paths" if platform == "windows" else "macos_bundle",
         )
+        for index in range(2)
+    )
+    selected = [0]
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "list_applications",
+        lambda self, **kwargs: ApplicationInventoryResult(status="complete", candidates=candidates, fingerprint="fp-desk"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: SimpleNamespace(analyze=lambda **kwargs: QuickTestIntent(True, "sufficient", target_name="Calculator", candidate_id=f"c00{selected[0] + 1}")),
+    )
 
-    monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", analyzer)
-    monkeypatch.setattr(PlatformRuntimeService, "lookup_application", lookup)
     req = QuickTestPrepareRequest(platform=platform, goal="Calculator: verify 1+1=2", user_config_root=ready)
     first = prepare_quick_test(req)
     assert isinstance(first.target, WindowsWorkspaceTarget if platform == "windows" else MacOSWorkspaceTarget)
@@ -860,189 +831,133 @@ def test_desktop_successful_prepare_create_update_preserves_env_and_frozen_setti
     assert not list((first.root_path / ".fsq/runs" / platform).iterdir())
 
 
-@pytest.mark.parametrize("goal", ["Check example.com opens", "Check ftp://example.com opens", "Check https://a.test and https://b.test open"])
-def test_web_requires_explicit_single_site_before_persistence(ready, monkeypatch, goal):
-    browser = ready / "Google Chrome" / "chrome"
-    browser.parent.mkdir()
-    browser.write_text("browser")
-    monkeypatch.setattr(PlatformRuntimeService, "discover_web_executables", lambda *args: [browser])
-    with pytest.raises(ApplicationError) as error:
-        prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=ready))
-    assert error.value.code.value == "quick_test.invalid_web_address"
-    assert not (ready / "quick-test").exists()
+def test_control_plane_failure_propagates_structured_diagnostic_details(ready, monkeypatch):
+    import time
+
+    from fsq_agent.adapters.control_plane import ControlPlaneServer, ControlPlaneServerOptions
+
+    first = ApplicationCandidate(candidate_id="c001", identity="com.tencent.mm", label="WeChat", app_id="com.tencent.mm", source="android_package")
+    second = ApplicationCandidate(candidate_id="c002", identity="com.tencent.wework", label="WeCom", app_id="com.tencent.wework", source="android_package")
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "list_applications",
+        lambda self, **kwargs: ApplicationInventoryResult(status="complete", candidates=(first, second), from_cache=False, fingerprint="fp-cp"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: SimpleNamespace(
+            analyze=lambda **kwargs: QuickTestIntent(
+                False,
+                "ambiguous_application",
+                target_name="微信",
+                candidate_ids=("c001", "c002"),
+                explanation="Multiple matching apps found.",
+            )
+        ),
+    )
+    server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=ready))
+    status, accepted = server.handle_post("/api/control-plane/quick-test/runs", {"platform": "android", "targetId": "serial-1", "goal": "打开微信发消息"})
+    assert status == 202
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        snapshot = server.state.snapshot(accepted["requestId"])
+        if snapshot["terminal"]:
+            break
+        time.sleep(0.01)
+    assert snapshot["terminal"]
+    assert snapshot["error"]["code"] == "quick_test.application_ambiguous"
+    assert snapshot["error"]["details"]["target_name"] == "微信"
+    assert snapshot["error"]["details"]["reason"] == "Multiple matching apps found."
+    assert [item["candidate_id"] for item in snapshot["error"]["details"]["candidates"]] == ["c001", "c002"]
 
 
-@pytest.fixture
-def web_boundary(ready, monkeypatch):
+def test_cli_human_and_json_output_include_structured_quick_test_diagnostics(ready, monkeypatch):
+    from click.testing import CliRunner
+
+    from fsq_agent.adapters.cli import main
+
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: SimpleNamespace(
+            analyze=lambda **kwargs: QuickTestIntent(
+                False,
+                "application_not_found",
+                target_name="WeChat",
+                explanation="WeChat is not installed on this device.",
+            )
+        ),
+    )
+    runner = CliRunner()
+    human = runner.invoke(
+        main,
+        ["quick-test", "run", "--platform", "android", "--target-id", "serial-1", "--goal", "打开微信发消息"],
+        env={"FSQ_USER_CONFIG_ROOT": str(ready)},
+    )
+    assert human.exit_code != 0
+    assert "WeChat" in human.output
+    assert "WeChat is not installed on this device." in human.output
+
+    as_json = runner.invoke(
+        main,
+        ["--output", "json", "quick-test", "run", "--platform", "android", "--target-id", "serial-1", "--goal", "打开微信发消息"],
+        env={"FSQ_USER_CONFIG_ROOT": str(ready)},
+    )
+    assert as_json.exit_code != 0
+    record = json.loads(as_json.output)
+    assert record["error"]["code"] == "quick_test.application_not_found"
+    assert record["error"]["details"]["target_name"] == "WeChat"
+    assert record["error"]["details"]["reason"] == "WeChat is not installed on this device."
+
+
+def test_real_analyzer_invalid_extracted_web_url_raises_invalid_web_address(ready, monkeypatch):
+    from fsq_agent.ai_services import QuickTestIntentAnalyzer
+
     browser = ready / "Google Chrome" / "chrome"
     browser.parent.mkdir()
-    browser.write_text("controlled browser fixture")
+    browser.write_bytes(b"fixture")
     browser.chmod(0o755)
     monkeypatch.setattr(PlatformRuntimeService, "discover_web_executables", lambda self, channel: [browser] if channel == "chrome" else [])
-    monkeypatch.setattr("fsq_agent.core.HarnessFactory.create_harness", lambda *args, **kwargs: pytest.fail("No real browser or UI actions"))
-    sessions = []
 
-    def reply(reference, *, search=False):
-        requests = []
-        payload = json.dumps({"sufficient": True, "reason": "web_search" if search else "sufficient", "application_name": "FSQ", "explicit_reference": reference, "inferred_hint": None})
-        session = SimpleNamespace(requests=requests, closed=False)
+    class FakeSession:
+        def complete_sync(self, req):
+            raw = '{"sufficient": true, "reason": "sufficient", "target_name": "site", "candidate_id": null, "explicit_reference": null, "base_url": "javascript:alert(1)", "candidate_ids": [], "explanation": null}'
+            return SimpleNamespace(parsed_output=req.output.parse(raw))
 
-        def complete(request):
-            requests.append(request)
-            return ModelResult(text=payload, parsed_output=request.output.parse(payload))
+        def close_sync(self):
+            pass
 
-        session.complete_sync = complete
-        session.close_sync = lambda: setattr(session, "closed", True)
-        sessions.append(session)
-        monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: QuickTestIntentAnalyzer(session))
-        return session
-
-    return ready, reply, sessions
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("goal", "reference"),
-    [
-        ("打开https://example.test/docs\uff0c确认标题", "https://example.test/docs"),
-        ("Open “HTTPS://Example.TEST:443/a(b(c))?q=%2f#片段!” and verify", "HTTPS://Example.TEST:443/a(b(c))?q=%2f#片段!"),
-        ("Open `https://example.test/路径?q=值\uff0c。` and verify", "https://example.test/路径?q=值\uff0c。"),
-        ("Open <https://[2001:db8::1]:8443/a(b)?#> and verify", "https://[2001:db8::1]:8443/a(b)?#"),
-        ("Open [site](https://example.test/report. 'title') and verify", "https://example.test/report."),
-        ("Open https://example.test? and verify", "https://example.test?"),
-        ("Open https://example.test/?q=one; and verify", "https://example.test/?q=one;"),
-        ("Open https://example.test/#part!, and verify", "https://example.test/#part!,"),
-        ("Open <https://example.test/a'b\"c?x=%2F> and verify", "https://example.test/a'b\"c?x=%2F"),
-        ("Open <https://outer.test/?next=//☃.test&redirect=//😀.test> and verify", "https://outer.test/?next=//☃.test&redirect=//😀.test"),
-        ("First https://first.test then https://second.test/path and verify", "https://second.test/path"),
-        ("Open https://example.test/a\nVerify the heading", "https://example.test/a"),
-        ("Open https://example.test/a\tVerify the heading", "https://example.test/a"),
-        ("Open (https://[::1]:8443/a(b)) and verify", "https://[::1]:8443/a(b)"),
-        (r'Open [https://label.test](<HTTPS://Example.TEST/a%2Fb?!> "say \"hello\" https://title.test") and verify', "HTTPS://Example.TEST/a%2Fb?!"),
-    ],
-)
-async def test_exact_selected_address_reaches_shared_execution(web_boundary, monkeypatch, goal, reference):
-    from fsq_agent.application import run_quick_test
-    from fsq_agent.config import load_platform_settings
-    from fsq_agent.execution import DynamicExecutionService
-    from fsq_agent.models import DynamicAgentOutcome, VerificationResult
-
-    root, reply, _ = web_boundary
-    session = reply(reference)
-    seen = []
-    initial = []
-    original_execute = DynamicExecutionService.execute
-
-    def load(*args, **kwargs):
-        settings = load_platform_settings(*args, **kwargs)
-        initial.append(settings)
-        return settings
-
-    async def execute(self, request):
-        seen.append(request)
-        return await original_execute(self, request)
-
-    class Agent:
-        async def run_in_context(self, task, context, event_sink=None, **kwargs):
-            assert task.description == task.planning_reference_text == goal
-            return DynamicAgentOutcome(task=task, steps=[], verification=VerificationResult(status="inconclusive", summary="Controlled execution boundary"))
-
-    monkeypatch.setattr(DynamicExecutionService, "execute", execute)
-    monkeypatch.setattr("fsq_agent.application._quick_test.load_platform_settings", load)
-    result = await run_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=root), agent_factory=lambda settings: Agent())
-    assert len(seen) == 1
-    assert seen[0].settings.harness.web.base_url == reference
-    assert initial[0].harness.web.base_url == reference
-    assert seen[0].task.description == seen[0].task.planning_reference_text == goal
-    assert not seen[0].requires_web_search_evidence
-    assert result.application == reference
-    assert len(session.requests) == 1
-    assert session.closed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "address",
-    [
-        "https://example.test/a(b",
-        "https://example.test:0/a",
-        "https://[::1]extra/a",
-        "https://example.test/%GG",
-        "https://user@example.test/a",
-        "https://example.test/a\\b",
-        '"https://example.test/a\tb"',
-        '"https://example.test/a\nb"',
-        "https://example.test/a\u200bb",
-        "https://[::1]]?x=1",
-        "https://example.test/a)?x=1",
-        "https://example.test/a]#part",
-        *[
-            template.format(f"//{host}")
-            for host in ["example.test", "例子.test", "☃.test", "😀.test", "\u0301.test", "_.test", "%41.test", ").test", ">.test"]
-            for template in ["{}", '"{}"', "<{}>", "`{}`", "[site]({})"]
-        ],
-        "https://example.test/path,then",
-        '"https://example.test/a',
-        "prefixhttps://example.test",
-        "ftp://example.test",
-    ],
-)
-async def test_invalid_syntax_stops_before_model_persistence_or_execution(web_boundary, monkeypatch, address):
-    from fsq_agent.application import run_quick_test
-    from fsq_agent.execution import DynamicExecutionService
-
-    root, reply, _ = web_boundary
-    session = reply(None, search=True)
-    before = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    monkeypatch.setattr(DynamicExecutionService, "execute", lambda *args: pytest.fail("Invalid input reached execution"))
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: QuickTestIntentAnalyzer(FakeSession()),
+    )
     with pytest.raises(ApplicationError) as error:
-        await run_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=f"Search FSQ {address} and verify", user_config_root=root), agent_factory=lambda settings: object())
+        prepare_quick_test(request(ready, platform="web", target_id="chrome", goal="Open javascript:alert(1) and check"))
     assert error.value.code.value == "quick_test.invalid_web_address"
-    assert session.requests == []
-    assert {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+    assert error.value.details["reason"] == "invalid_extracted_web_url"
 
 
-def test_nul_in_address_fails_at_public_request_boundary(web_boundary):
-    from pydantic import ValidationError
+def test_web_bare_domain_goal_persists_completed_https_url(ready, monkeypatch):
+    from fsq_agent.ai_services import QuickTestIntentAnalyzer
 
-    root, reply, _ = web_boundary
-    session = reply(None, search=True)
-    with pytest.raises(ValidationError, match="A current goal is required"):
-        prepare_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal="Open https://example.test/a\x00b and verify", user_config_root=root))
-    assert session.requests == []
-    assert not (root / "quick-test").exists()
+    browser = ready / "Google Chrome" / "chrome"
+    browser.parent.mkdir()
+    browser.write_bytes(b"fixture")
+    browser.chmod(0o755)
+    monkeypatch.setattr(PlatformRuntimeService, "discover_web_executables", lambda self, channel: [browser] if channel == "chrome" else [])
 
+    class FakeSession:
+        def complete_sync(self, req):
+            raw = '{"sufficient": true, "reason": "sufficient", "target_name": "x.com", "candidate_id": null, "explicit_reference": null, "base_url": "https://x.com", "candidate_ids": [], "explanation": null}'
+            return SimpleNamespace(parsed_output=req.output.parse(raw))
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("multiple", [False, True])
-@pytest.mark.parametrize(
-    "reference",
-    [
-        None,
-        "https://Example.TEST:443/a%2Fb?x=1#part",
-        "https://example.test:443/a%2Fb?x=1#part!",
-        "https://Example.TEST:443/a%2fb?x=1#part!",
-        "https://Example.TEST/a%2Fb?x=1#part!",
-        "https://Example.TEST:443/a%2Fb?x=1",
-        "https://Example.TEST",
-        "https://inner.test",
-        "\nhttps://Example.TEST:443/a%2Fb?x=1#part!\n",
-    ],
-)
-async def test_invalid_model_provenance_stops_before_persistence_or_execution(web_boundary, monkeypatch, reference, multiple):
-    from fsq_agent.application import run_quick_test
-    from fsq_agent.execution import DynamicExecutionService
+        def close_sync(self):
+            pass
 
-    root, reply, _ = web_boundary
-    session = reply(reference)
-    monkeypatch.setattr(DynamicExecutionService, "execute", lambda *args: pytest.fail("Invalid provenance reached execution"))
-    goal = "Open <https://Example.TEST:443/a%2Fb?x=1#part!>"
-    if multiple:
-        goal += " then <https://outer.test/?next=https://inner.test>"
-    goal += " and verify"
-    with pytest.raises(ApplicationError) as error:
-        await run_quick_test(QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=root), agent_factory=lambda settings: object())
-    assert error.value.code.value == "quick_test.inference_failed"
-    assert len(session.requests) == 1
-    assert session.closed
-    assert not (root / "quick-test").exists()
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer",
+        lambda settings: QuickTestIntentAnalyzer(FakeSession()),
+    )
+    prepared = prepare_quick_test(request(ready, platform="web", target_id="chrome", goal="please open x.com and check trending posts"))
+    assert prepared.application == "https://x.com"
+    assert prepared.settings.harness.web.base_url == "https://x.com"
+    assert not prepared.requires_web_search_evidence

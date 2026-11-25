@@ -163,9 +163,12 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
             {
                 "sufficient": True,
                 "reason": "sufficient",
-                "application_name": "微信",
+                "target_name": "微信",
+                "candidate_id": "c001",
                 "explicit_reference": None,
-                "inferred_hint": {"kind": "app_id", "value": "com.tencent.mm"},
+                "base_url": None,
+                "candidate_ids": [],
+                "explanation": None,
             }
         ),
     }
@@ -338,19 +341,22 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
             assert result.summary == "No change needed."
             assert result.candidate_case_yaml is None
     else:
+        from fsq_agent.models import ApplicationCandidate
+
         analyzer = build_quick_test_intent_analyzer(settings)
         goal = "用微信搜索联系人张三\uff0c确认出现匹配结果"
+        candidates = (ApplicationCandidate(candidate_id="c001", identity="com.tencent.mm", label="微信", app_id="com.tencent.mm", source="android_package"),)
         if failure_kind is not None:
             with pytest.raises(EngineError) as failure:
-                analyzer.analyze(platform="android", goal=goal)
+                analyzer.analyze(platform="android", goal=goal, candidates=candidates)
             if failure_kind in {"refusal", "incomplete"}:
                 assert failure.value.category == failure_kind
         else:
-            result = analyzer.analyze(platform="android", goal=goal)
+            result = analyzer.analyze(platform="android", goal=goal, candidates=candidates)
             assert result.sufficient
-            assert result.application_name == "微信"
+            assert result.target_name == "微信"
+            assert result.candidate_id == "c001"
             assert result.explicit_reference is None
-            assert result.inferred_hint.model_dump() == {"kind": "app_id", "value": "com.tencent.mm"}
     split_finalization = provider == "kimi" and path == "pre_plan" and failure_kind is None
     assert len(payloads) == (2 if split_finalization else 1)
     assert payloads[0]["model"] == model_name
@@ -377,7 +383,7 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
             expected = {
                 "assertion": {"outcome", "explanation", "confidence"},
                 "suggestion": {"summary", "suggestions", "candidate_case_yaml"},
-                "quick_test": {"sufficient", "reason", "application_name", "explicit_reference", "inferred_hint"},
+                "quick_test": {"sufficient", "reason", "target_name", "candidate_id", "explicit_reference", "base_url", "candidate_ids", "explanation"},
                 "inspection_extract": {"summary", "candidates"},
                 "inspection_locate": {"summary", "candidates"},
             }[path]
@@ -385,10 +391,8 @@ async def test_inference_paths_use_real_engine_without_sdk_import(monkeypatch: p
             assert set(schema["required"]) == expected
             assert schema["additionalProperties"] is False
             if path == "quick_test":
-                hint_schema = schema["$defs"]["_InferredHintOutput"]
-                assert set(hint_schema["properties"]) == {"kind", "value"}
-                assert set(hint_schema["required"]) == {"kind", "value"}
-                assert hint_schema["additionalProperties"] is False
+                assert "launch_args" not in schema["properties"]
+                assert "window_title_re" not in schema["properties"]
             elif path in {"inspection_extract", "inspection_locate"}:
                 if provider == "google_gemini":
                     assert output_format["mime_type"] == "application/json"
@@ -826,28 +830,42 @@ def test_suggestion_invalid_output_through_real_clients(structured_session, text
     assert len(payloads) == 1
 
 
-@pytest.mark.parametrize("outcome", ["sufficient", "web_search", "insufficient", "malformed", "invalid_bool", "invalid_hint", "missing_hint", "invalid_explicit", "refusal", "incomplete"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["sufficient", "web_search", "insufficient", "application_not_found", "ambiguous_application", "malformed", "invalid_bool", "unknown_candidate", "invalid_explicit", "refusal", "incomplete"],
+)
 def test_quick_intent_actual_schema_through_pinned_clients(structured_session, outcome):
+    from fsq_agent.models import ApplicationCandidate
+
     session, control, payloads = structured_session
-    value = {
+    candidates = (
+        ApplicationCandidate(candidate_id="c001", identity="com.tencent.mm", label="微信", app_id="com.tencent.mm", source="android_package"),
+        ApplicationCandidate(candidate_id="c002", identity="com.tencent.wework", label="企业微信", app_id="com.tencent.wework", source="android_package"),
+    )
+    value: dict[str, object] = {
         "sufficient": True,
         "reason": "sufficient",
-        "application_name": "微信",
+        "target_name": "微信",
+        "candidate_id": "c001",
         "explicit_reference": None,
-        "inferred_hint": {"kind": "app_id", "value": "com.tencent.mm"},
+        "base_url": None,
+        "candidate_ids": [],
+        "explanation": None,
     }
     if outcome == "web_search":
-        value.update(reason="web_search", application_name="FSQ", inferred_hint=None)
+        value.update(reason="web_search", target_name="FSQ", candidate_id=None, base_url=None)
     elif outcome == "insufficient":
-        value.update(sufficient=False, reason="insufficient", inferred_hint=None)
+        value.update(sufficient=False, reason="insufficient", candidate_id=None)
+    elif outcome == "application_not_found":
+        value.update(sufficient=False, reason="application_not_found", target_name="微信", candidate_id=None, explanation="Not installed.")
+    elif outcome == "ambiguous_application":
+        value.update(sufficient=False, reason="ambiguous_application", target_name="微信", candidate_id=None, candidate_ids=["c001", "c002"])
     elif outcome == "invalid_bool":
         value["sufficient"] = "true"
-    elif outcome == "invalid_hint":
-        value["inferred_hint"]["verified"] = True
-    elif outcome == "missing_hint":
-        del value["inferred_hint"]
+    elif outcome == "unknown_candidate":
+        value["candidate_id"] = "c999"
     elif outcome == "invalid_explicit":
-        value.update(explicit_reference="com.tencent.mm", inferred_hint=None)
+        value.update(candidate_id=None, explicit_reference="com.tencent.mm")
     elif outcome in {"refusal", "incomplete"}:
         control["failure"] = outcome
     control["text"] = "not JSON" if outcome == "malformed" else json.dumps(value)
@@ -856,17 +874,20 @@ def test_quick_intent_actual_schema_through_pinned_clients(structured_session, o
         result = analyzer.analyze(platform="web", goal="搜索 FSQ github\uff0c并且帮我找到FSQ 的官网地址")
         assert result.sufficient
         assert result.reason == "web_search"
-        assert result.application_name == "FSQ"
-        assert result.explicit_reference is None
-        assert result.inferred_hint is None
-    elif outcome in {"sufficient", "insufficient"}:
-        result = analyzer.analyze(platform="android", goal="用微信搜索联系人张三\uff0c确认出现匹配结果")
+        assert result.target_name == "FSQ"
+        assert result.base_url is None
+        assert result.candidate_id is None
+    elif outcome in {"sufficient", "insufficient", "application_not_found", "ambiguous_application"}:
+        result = analyzer.analyze(platform="android", goal="用微信搜索联系人张三\uff0c确认出现匹配结果", candidates=candidates)
         assert result.sufficient is (outcome == "sufficient")
+        assert result.reason == outcome
         assert result.explicit_reference is None
-        assert result.inferred_hint.value == "com.tencent.mm" if result.sufficient else result.inferred_hint is None
+        assert result.candidate_id == ("c001" if outcome == "sufficient" else None)
+        if outcome == "ambiguous_application":
+            assert result.candidate_ids == ("c001", "c002")
     else:
         with pytest.raises(EngineError) as failure:
-            analyzer.analyze(platform="android", goal="用微信搜索联系人张三\uff0c确认出现匹配结果")
+            analyzer.analyze(platform="android", goal="用微信搜索联系人张三\uff0c确认出现匹配结果", candidates=candidates)
         assert failure.value.category == (outcome if outcome in {"refusal", "incomplete"} else "invalid_output")
         assert "private" not in str(failure.value)
     assert len(payloads) == 1
@@ -875,6 +896,7 @@ def test_quick_intent_actual_schema_through_pinned_clients(structured_session, o
     assert not payload.get("stream")
     output = payload["response_format"] if session.provider == "google_gemini" else payload["text"]["format"]
     schema = output["schema"]
-    assert set(schema["required"]) == {"sufficient", "reason", "application_name", "explicit_reference", "inferred_hint"}
+    assert set(schema["required"]) == {"sufficient", "reason", "target_name", "candidate_id", "explicit_reference", "base_url", "candidate_ids", "explanation"}
     assert schema["additionalProperties"] is False
-    assert schema["$defs"]["_InferredHintOutput"]["additionalProperties"] is False
+    assert "launch_args" not in schema["properties"]
+    assert "window_title_re" not in schema["properties"]

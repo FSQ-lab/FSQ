@@ -59,9 +59,41 @@ class ApplicationCandidate(BaseModel):
 
     identity: str = Field(min_length=1, max_length=4096)
     label: str = Field(min_length=1, max_length=512)
+    candidate_id: str | None = Field(default=None, min_length=1, max_length=128)
+    aliases: tuple[str, ...] = ()
     app_path: Path | None = None
     app_id: str | None = None
     bundle_id: str | None = None
+    window_title_re: str | None = Field(default=None, min_length=1, max_length=2048)
+    source: str | None = Field(default=None, min_length=1, max_length=64)
+
+    def model_summary(self) -> dict[str, object]:
+        """Return model-facing candidate metadata, stripping host-only fields."""
+        summary: dict[str, object] = {
+            "candidate_id": self.candidate_id or self.identity,
+            "label": self.label,
+        }
+        if self.aliases:
+            summary["aliases"] = list(self.aliases)
+        if self.app_id is not None:
+            summary["app_id"] = self.app_id
+        if self.bundle_id is not None:
+            summary["bundle_id"] = self.bundle_id
+        if self.app_path is not None:
+            summary["app_path"] = str(self.app_path)
+        if self.source is not None:
+            summary["source"] = self.source
+        return summary
+
+
+class ApplicationInventoryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["complete", "failed"]
+    candidates: tuple[ApplicationCandidate, ...] = ()
+    code: Literal["complete", "invalid_query", "discovery_failed", "discovery_timeout"] = "complete"
+    from_cache: bool = False
+    fingerprint: str | None = None
 
 
 class ApplicationLookupResult(BaseModel):

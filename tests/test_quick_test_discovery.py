@@ -484,3 +484,172 @@ def test_complete_empty_bundle_scope_remains_zero_matches_with_hint(monkeypatch,
     result = PlatformRuntimeService().lookup_application(platform="macos", name="Calculator", inferred_hint=ApplicationLookupHint(kind="bundle_id", value="com.apple.calculator"))
     assert result.status == "complete"
     assert not result.candidates
+
+
+def test_android_inventory_prioritizes_third_party_packages_and_caches_by_target_id(monkeypatch):
+    from fsq_agent.environments._applications import clear_application_inventory_cache
+
+    clear_application_inventory_cache()
+    monkeypatch.setattr(
+        "fsq_agent.environments.providers._applications.inventory",
+        lambda deadline: [AndroidDevice(serial="dev-1", state="device")],
+    )
+    calls = []
+
+    def third_party(serial, deadline):
+        calls.append(("3p", serial))
+        return {"com.tencent.mm", "com.example.shop"}
+
+    def all_packages(serial, deadline):
+        calls.append(("all", serial))
+        return {"com.tencent.mm", "com.example.shop", "com.android.vending", "com.vendor.hidden.daemon"}
+
+    monkeypatch.setattr("fsq_agent.environments.providers._applications.third_party_package_inventory", third_party)
+    monkeypatch.setattr("fsq_agent.environments.providers._applications.package_inventory", all_packages)
+
+    first = PlatformRuntimeService().list_applications(platform="android", target_id="dev-1")
+    assert first.status == "complete"
+    assert not first.from_cache
+    assert first.fingerprint
+    app_ids = [item.app_id for item in first.candidates]
+    assert app_ids[:2] == ["com.example.shop", "com.tencent.mm"]
+    assert "com.android.vending" in app_ids
+    assert [item.candidate_id for item in first.candidates] == [f"android:{index + 1}" for index in range(len(first.candidates))]
+
+    second = PlatformRuntimeService().list_applications(platform="android", target_id="dev-1")
+    assert second.from_cache
+    assert second.fingerprint == first.fingerprint
+    assert len(calls) == 2
+
+    refreshed = PlatformRuntimeService().list_applications(platform="android", target_id="dev-1", force_refresh=True)
+    assert not refreshed.from_cache
+    assert len(calls) == 4
+    clear_application_inventory_cache()
+
+
+def test_macos_inventory_collects_localized_infoplist_strings(monkeypatch, tmp_path):
+    from fsq_agent.environments._applications import clear_application_inventory_cache
+
+    clear_application_inventory_cache()
+    app = tmp_path / "WeChat.app"
+    (app / "Contents").mkdir(parents=True)
+    (app / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.tencent.xinWeChat", "CFBundleName": "WeChat", "CFBundleDisplayName": "WeChat"}))
+    zh = app / "Contents/Resources/zh-Hans.lproj"
+    zh.mkdir(parents=True)
+    (zh / "InfoPlist.strings").write_bytes(plistlib.dumps({"CFBundleDisplayName": "微信"}))
+
+    monkeypatch.setattr("fsq_agent.environments.providers._applications.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("fsq_agent.environments.providers._applications._macos_roots", lambda: (tmp_path,))
+
+    result = PlatformRuntimeService().list_applications(platform="macos", force_refresh=True)
+    assert result.status == "complete"
+    assert len(result.candidates) == 1
+    candidate = result.candidates[0]
+    assert candidate.candidate_id == "macos:1"
+    assert candidate.bundle_id == "com.tencent.xinWeChat"
+    assert "微信" in candidate.aliases
+    assert candidate.source == "applications_dir"
+    clear_application_inventory_cache()
+
+
+def _make_minimal_lnk(target_path: str) -> bytes:
+    # Minimal Shell Link (.lnk) with HasLinkInfo flag (0x02) and ASCII local base path.
+    header = bytearray(76)
+    struct.pack_into("<I", header, 0, 0x4C)
+    header[4:20] = bytes.fromhex("0114020000000000c000000000000046")
+    struct.pack_into("<I", header, 20, 0x02)  # HasLinkInfo
+    encoded = target_path.encode("ascii") + b"\x00"
+    link_info_header_size = 28
+    local_base_path_offset = link_info_header_size
+    link_info_size = link_info_header_size + len(encoded)
+    link_info = bytearray(link_info_size)
+    struct.pack_into("<I", link_info, 0, link_info_size)
+    struct.pack_into("<I", link_info, 4, link_info_header_size)
+    struct.pack_into("<I", link_info, 8, 0x01)  # VolumeIDAndLocalBasePath
+    struct.pack_into("<I", link_info, 16, local_base_path_offset)
+    link_info[local_base_path_offset:] = encoded
+    return bytes(header) + bytes(link_info)
+
+
+def test_windows_inventory_merges_catalogue_app_paths_and_start_menu_lnk(monkeypatch, tmp_path):
+    from fsq_agent.environments._applications import clear_application_inventory_cache
+    from fsq_agent.models import WindowsApplicationConfig
+
+    clear_application_inventory_cache()
+    edge_exe = tmp_path / "msedge.exe"
+    edge_exe.write_bytes(b"fixture")
+    reg_exe = tmp_path / "Code.exe"
+    reg_exe.write_bytes(b"fixture")
+    lnk_exe = tmp_path / "MyTool.exe"
+    lnk_exe.write_bytes(b"fixture")
+    start_menu = tmp_path / "StartMenu"
+    start_menu.mkdir()
+    (start_menu / "My Custom Tool.lnk").write_bytes(_make_minimal_lnk(str(lnk_exe)))
+
+    catalogue = (
+        WindowsApplicationConfig(
+            id="edge",
+            name="Microsoft Edge",
+            description="Browser",
+            path_candidates=[str(edge_exe)],
+            window_title_re=".*Microsoft Edge.*",
+        ),
+    )
+    registry = SimpleNamespace(
+        HKEY_CURRENT_USER="current",
+        HKEY_LOCAL_MACHINE="machine",
+        KEY_WOW64_32KEY=1,
+        KEY_WOW64_64KEY=2,
+        KEY_READ=4,
+        REG_SZ=1,
+        OpenKey=lambda root, key, *args: nullcontext(key),
+        QueryInfoKey=lambda root: (1,),
+        EnumKey=lambda root, index: reg_exe.name,
+        QueryValueEx=lambda key, name: (str(reg_exe), 1),
+    )
+    monkeypatch.setitem(sys.modules, "winreg", registry)
+    monkeypatch.setattr("fsq_agent.environments.providers._applications.platform.system", lambda: "Windows")
+    monkeypatch.setattr("fsq_agent.environments.providers._applications._windows_start_menu_roots", lambda: (start_menu,))
+
+    result = PlatformRuntimeService().list_applications(platform="windows", windows_catalogue=catalogue, force_refresh=True)
+    assert result.status == "complete"
+    by_path = {item.app_path: item for item in result.candidates}
+    assert edge_exe.resolve() in by_path
+    assert by_path[edge_exe.resolve()].window_title_re == ".*Microsoft Edge.*"
+    assert "window_title_re" not in by_path[edge_exe.resolve()].model_summary()
+    assert reg_exe.resolve() in by_path
+    assert lnk_exe.resolve() in by_path
+    assert by_path[lnk_exe.resolve()].label == "My Custom Tool"
+    clear_application_inventory_cache()
+
+
+def test_windows_inventory_cache_separates_distinct_catalogues(monkeypatch, tmp_path):
+    from fsq_agent.environments._applications import clear_application_inventory_cache
+    from fsq_agent.models import WindowsApplicationConfig
+
+    clear_application_inventory_cache()
+    app_a = tmp_path / "AppA.exe"
+    app_b = tmp_path / "AppB.exe"
+    app_a.write_bytes(b"exe")
+    app_b.write_bytes(b"exe")
+    monkeypatch.setattr("fsq_agent.environments.providers._applications.platform.system", lambda: "Windows")
+    monkeypatch.setattr("fsq_agent.environments.providers._applications._windows_start_menu_roots", lambda: ())
+    monkeypatch.setattr("fsq_agent.environments.providers._applications._collect_windows_app_paths", lambda *a, **kw: None)
+
+    cat_a = (WindowsApplicationConfig(id="a", name="App A", description="App A", path_candidates=[str(app_a)], window_title_re=".*A.*"),)
+    cat_b = (WindowsApplicationConfig(id="b", name="App B", description="App B", path_candidates=[str(app_b)], window_title_re=".*B.*"),)
+
+    first = PlatformRuntimeService().list_applications(platform="windows", windows_catalogue=cat_a)
+    second = PlatformRuntimeService().list_applications(platform="windows", windows_catalogue=cat_b)
+    first_cached = PlatformRuntimeService().list_applications(platform="windows", windows_catalogue=cat_a)
+
+    assert first.status == "complete"
+    assert not first.from_cache
+    assert [c.app_path for c in first.candidates] == [app_a.resolve()]
+    assert second.status == "complete"
+    assert not second.from_cache
+    assert [c.app_path for c in second.candidates] == [app_b.resolve()]
+    assert first_cached.status == "complete"
+    assert first_cached.from_cache
+    assert [c.app_path for c in first_cached.candidates] == [app_a.resolve()]
+    clear_application_inventory_cache()

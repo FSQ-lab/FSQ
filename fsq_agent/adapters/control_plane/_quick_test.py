@@ -78,7 +78,9 @@ def _prepare(server, request_id, request):
             state.finish(request_id, status="cancelled", summary="Quick Test cancelled.")
             return
         if isinstance(error, ApplicationError):
-            facts = {"code": error.code.value, "message": error.message, "action": error.action or ""}
+            facts: dict[str, object] = {"code": error.code.value, "message": error.message, "action": error.action or ""}
+            if error.details:
+                facts["details"] = error.details
         elif isinstance(error, (AndroidPreflightError, MacOSPreflightError, ConfigurationError, ValueError, TypeError)):
             facts = {
                 "code": "quick_test.prerequisites",

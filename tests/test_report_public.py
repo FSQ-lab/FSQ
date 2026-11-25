@@ -1,8 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import base64
 import hashlib
+import io
 import json
+import os
+import re
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -11,7 +15,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from fsq_agent.models import PublicRunReport, ReportGenerationError, RunReportExportOptions
-from fsq_agent.report import RunReportService
+from fsq_agent.report import RunReportService, generate_static_run_report
 
 
 def _run(root, run_id="run-1", *, status="success", mode="strict"):
@@ -139,7 +143,9 @@ def test_exports_share_verdict_standalone_media_and_bundle_checksums(tmp_path):
     assert len(junit.findall(".//testcase")) == 1
     assert len(junit.findall(".//failure")) == 1
     html = (tmp_path / "out.html").read_text()
-    assert "data:image/png;base64," in html
+    assert "data:image/webp;base64," in html
+    assert "data:image/png;base64," not in html
+    assert "Complete step facts" not in html
     assert "Button: Saved" in html
     assert "Content-Security-Policy" in html
     with zipfile.ZipFile(tmp_path / "out.zip") as archive:
@@ -497,3 +503,289 @@ def test_summary_omission_clears_derived_main_answer_without_rewriting_gate(tmp_
     assert main["text"] == "[OMITTED]"
     assert shared["run"]["gate"] == report.run["gate"]
     assert shared["verification"] == report.verification
+
+
+def _extract_inline_images(markup: str) -> list[tuple[str, str, tuple[int, int], Image.Image]]:
+    uris = re.findall(r'src="(data:image/[^"]+)"', markup)
+    decoded = []
+    for uri in uris:
+        assert uri.startswith("data:image/webp;base64,")
+        raw = base64.b64decode(uri.removeprefix("data:image/webp;base64,"))
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            decoded.append((image.format, image.mode, image.size, image.copy()))
+    return decoded
+
+
+def test_html_and_static_report_embed_bounded_rgb_webp_for_step_and_related_screenshots(tmp_path, monkeypatch):
+    from fsq_agent.report import _static_html
+
+    run, facts = _run(tmp_path, "origin", mode="explore")
+    facts["artifacts"] = {"candidate_case": "case.yaml"}
+    (run / "run.json").write_text(json.dumps(facts))
+    Image.new("RGB", (2400, 1600), (20, 60, 120)).save(run / "large.png", format="PNG")
+    Image.new("RGBA", (5, 5), (10, 200, 30, 180)).save(run / "small.png", format="PNG")
+    Image.new("RGB", (1, 3000), (180, 40, 40)).save(run / "tall.png", format="PNG")
+    Image.new("RGB", (1600, 800), (90, 90, 140)).save(run / "extra.png", format="PNG")
+    artifacts = [
+        {"artifact_id": "large", "kind": "screenshot", "path": "large.png", "step_id": "s1", "phase": "prepare"},
+        {"artifact_id": "small", "kind": "screenshot", "path": "small.png", "step_id": "s1", "phase": "invoke"},
+        {"artifact_id": "tall", "kind": "screenshot", "path": "tall.png", "step_id": "s1", "phase": "finalize"},
+        {"artifact_id": "extra", "kind": "screenshot", "path": "extra.png"},
+    ]
+    origin_bundle = _bundle(run.name, artifacts=artifacts)
+    (run / "evidence-manifest.json").write_text(json.dumps(origin_bundle))
+
+    related_dir, related_facts = _run(tmp_path, "replay")
+    related_facts["lineage"] = [{"kind": "replay", "originating_run_id": "origin", "case_digest": hashlib.sha256(b"name: search").hexdigest()}]
+    (related_dir / "run.json").write_text(json.dumps(related_facts))
+    Image.new("RGB", (10, 8), (50, 70, 90)).save(related_dir / "related.png", format="PNG")
+    related_bundle = _bundle("replay", artifacts=[{"artifact_id": "related-shot", "kind": "screenshot", "path": "related.png", "step_id": "s1", "phase": "prepare"}])
+
+    service = RunReportService()
+    related_report = service.project(related_dir, related_facts, related_bundle)
+    report = service.project(run, facts, origin_bundle, related_runs=[related_report])
+
+    exported = service.export(report, RunReportExportOptions(format="html", destination=tmp_path / "portable.html", run_dirs={"origin": run, "replay": related_dir}))
+    portable_html = exported.path.read_text(encoding="utf-8")
+    assert "data:image/png;base64," not in portable_html
+    portable_images = _extract_inline_images(portable_html)
+    assert [(fmt, mode, size) for fmt, mode, size, _ in portable_images] == [
+        ("WEBP", "RGB", (1280, 853)),
+        ("WEBP", "RGB", (5, 5)),
+        ("WEBP", "RGB", (1, 1280)),
+        ("WEBP", "RGB", (1280, 640)),
+        ("WEBP", "RGB", (10, 8)),
+    ]
+
+    static_path = generate_static_run_report(run, facts)
+    static_html = static_path.read_text(encoding="utf-8")
+    assert "data:image/png;base64," not in static_html
+    static_images = _extract_inline_images(static_html)
+    assert [(fmt, mode, size) for fmt, mode, size, _ in static_images] == [
+        ("WEBP", "RGB", (1280, 853)),
+        ("WEBP", "RGB", (5, 5)),
+        ("WEBP", "RGB", (1, 1280)),
+        ("WEBP", "RGB", (1280, 640)),
+    ]
+
+    budget_run, budget_facts = _run(tmp_path, "budget-run")
+    gradient = Image.frombytes("RGB", (1200, 900), bytes(idx % 251 for idx in range(1200 * 900 * 3)))
+    gradient.save(budget_run / "grad.png", format="PNG", compress_level=0)
+    raw_png_len = (budget_run / "grad.png").stat().st_size
+    budget_report = service.project(
+        budget_run,
+        budget_facts,
+        _bundle(budget_run.name, artifacts=[{"artifact_id": "grad", "kind": "screenshot", "path": "grad.png", "step_id": "s1", "phase": "prepare"}]),
+    )
+    probe_html = service.export(budget_report, RunReportExportOptions(format="html", destination=tmp_path / "probe.html")).path.read_text(encoding="utf-8")
+    probe_uri = re.findall(r'src="(data:image/webp;base64,[^"]+)"', probe_html)[0]
+    webp_len = len(base64.b64decode(probe_uri.removeprefix("data:image/webp;base64,")))
+    assert webp_len < raw_png_len
+
+    monkeypatch.setattr(_static_html, "MAX_INLINE_IMAGE_BYTES", webp_len)
+    fits_html = service.export(budget_report, RunReportExportOptions(format="html", destination=tmp_path / "fits.html")).path.read_text(encoding="utf-8")
+    assert "data:image/webp;base64," in fits_html
+    assert "inline_image_budget" not in fits_html
+
+    monkeypatch.setattr(_static_html, "MAX_INLINE_IMAGE_BYTES", webp_len - 1)
+    omitted_html = service.export(budget_report, RunReportExportOptions(format="html", destination=tmp_path / "omitted.html")).path.read_text(encoding="utf-8")
+    assert "data:image/webp;base64," not in omitted_html
+    assert "Image omitted: report inline resource limit." in omitted_html
+    assert "&quot;display_availability&quot;: &quot;omitted&quot;" in omitted_html
+    assert "&quot;display_unavailable_reason&quot;: &quot;inline_image_budget&quot;" in omitted_html
+
+
+def test_html_step_details_omit_complete_step_facts_while_preserving_step_evidence(tmp_path):
+    run, facts = _run(tmp_path, status="failed")
+    Image.new("RGB", (6, 6), "white").save(run / "step.png", format="PNG")
+    (run / "before.txt").write_text("Button: Save", encoding="utf-8")
+    (run / "after.txt").write_text("Button: Saved", encoding="utf-8")
+    artifacts = [
+        {"artifact_id": "step-shot", "kind": "screenshot", "path": "step.png", "step_id": "s1", "phase": "prepare"},
+        {"artifact_id": "before-ui", "kind": "ui_snapshot", "path": "before.txt", "step_id": "s1", "phase": "prepare", "metadata": {"coverage": {"status": "complete"}}},
+        {"artifact_id": "after-ui", "kind": "ui_snapshot", "path": "after.txt", "step_id": "s1", "phase": "finalize", "metadata": {"coverage": {"status": "complete"}}},
+    ]
+    bundle = _bundle(run.name, status="failed", artifacts=artifacts)
+    bundle["steps"][0].update(failure_category="assertion_failed", error_message="Button state mismatch")
+    bundle["steps"][0]["phase_reports"][0]["metadata"] = {"timing_measured": True}
+    bundle["steps"][0]["phase_reports"][1]["metadata"].update(safe_replay_params={"text": {"equals": "Saved"}}, harness_output={"text": "Save"})
+
+    service = RunReportService()
+    report = service.project(run, facts, bundle)
+    html = service.export(report, RunReportExportOptions(format="html", destination=tmp_path / "step-details.html")).path.read_text(encoding="utf-8")
+
+    assert "Complete step facts" not in html
+    assert "click_on · failed" in html
+    assert "Button state mismatch" in html
+    assert "Expected" in html
+    assert "Observed" in html
+    assert "Saved" in html
+    assert "duration: 25 ms" in html
+    assert "prepare: 0 ms" in html
+    assert "data:image/webp;base64," in html
+    assert "Button: Save" in html
+    assert "Button: Saved" in html
+    assert "UI snapshot diff · changed" in html
+    for preserved_section in (
+        "Run, source, metrics and processing",
+        "Evidence inventory",
+        "Lineage and comparison provenance",
+        "Structured logs",
+        "Availability and warnings",
+    ):
+        assert preserved_section in html
+
+
+def test_bundle_preserves_lossless_png_and_original_coordinate_masks_while_html_uses_webp(tmp_path):
+    run, facts = _run(tmp_path)
+    Image.new("RGB", (2000, 1000), (255, 255, 255)).save(run / "shot.png", format="PNG")
+    original_png = (run / "shot.png").read_bytes()
+    service = RunReportService()
+    report = service.project(
+        run,
+        facts,
+        _bundle(run.name, artifacts=[{"artifact_id": "shot", "kind": "screenshot", "mime_type": "image/png", "path": "shot.png", "step_id": "s1", "phase": "prepare"}]),
+    )
+
+    unmasked = service.export(report, RunReportExportOptions(format="bundle", destination=tmp_path / "unmasked.zip"))
+    with zipfile.ZipFile(unmasked.path) as archive:
+        bundle_png = archive.read("runs/run-1/shot.png")
+        assert bundle_png == original_png
+        with Image.open(io.BytesIO(bundle_png)) as png_image:
+            assert png_image.format == "PNG"
+            assert png_image.size == (2000, 1000)
+
+        bundle_html = archive.read("report.html").decode("utf-8")
+        assert "data:image/png;base64," not in bundle_html
+        assert "Complete step facts" not in bundle_html
+        inline_images = _extract_inline_images(bundle_html)
+        assert [(fmt, mode, size) for fmt, mode, size, _ in inline_images] == [("WEBP", "RGB", (1280, 640))]
+
+        report_json = json.loads(archive.read("report.json").decode("utf-8"))
+        shot_meta = next(item for item in report_json["artifacts"] if item["artifact_id"] == "shot")
+        assert shot_meta["mime_type"] == "image/png"
+        assert shot_meta["sha256"] == hashlib.sha256(original_png).hexdigest()
+        assert not shot_meta.get("transformed")
+        assert shot_meta.get("derived_sha256") is None
+        assert report_json["run"]["export"]["transformations"] == []
+
+        index = json.loads(archive.read("index.json").decode("utf-8"))
+        for entry in index["files"]:
+            payload = archive.read(entry["path"])
+            assert hashlib.sha256(payload).hexdigest() == entry["sha256"]
+            assert len(payload) == entry["size_bytes"]
+        for line in archive.read("SHA256SUMS").decode("utf-8").splitlines():
+            digest, path = line.split("  ", 1)
+            assert hashlib.sha256(archive.read(path)).hexdigest() == digest
+
+    masked = service.export(
+        report,
+        RunReportExportOptions(
+            format="bundle",
+            destination=tmp_path / "masked.zip",
+            share_profile={"masks": [{"run_id": run.name, "artifact_id": "shot", "x": 1800, "y": 800, "width": 200, "height": 200}]},
+        ),
+    )
+    assert (run / "shot.png").read_bytes() == original_png
+    with zipfile.ZipFile(masked.path) as archive:
+        masked_png_bytes = archive.read("runs/run-1/shot.png")
+        with Image.open(io.BytesIO(masked_png_bytes)) as masked_png:
+            assert masked_png.format == "PNG"
+            assert masked_png.size == (2000, 1000)
+            assert masked_png.getpixel((1900, 900)) == (0, 0, 0)
+            assert masked_png.getpixel((100, 100)) == (255, 255, 255)
+
+        masked_html = archive.read("report.html").decode("utf-8")
+        inline_masked = _extract_inline_images(masked_html)
+        assert len(inline_masked) == 1
+        fmt, mode, size, webp_img = inline_masked[0]
+        assert (fmt, mode, size) == ("WEBP", "RGB", (1280, 640))
+        assert max(webp_img.getpixel((1216, 576))) < 15
+        assert min(webp_img.getpixel((64, 64))) > 240
+
+        masked_index = json.loads(archive.read("index.json").decode("utf-8"))
+        for entry in masked_index["files"]:
+            assert hashlib.sha256(archive.read(entry["path"])).hexdigest() == entry["sha256"]
+        for line in archive.read("SHA256SUMS").decode("utf-8").splitlines():
+            digest, path = line.split("  ", 1)
+            assert hashlib.sha256(archive.read(path)).hexdigest() == digest
+
+
+def test_render_html_rejects_corrupt_unsupported_or_over_limit_screenshot_bytes(tmp_path):
+    from fsq_agent.report._static_html import render_html
+
+    run, facts = _run(tmp_path)
+    Image.new("RGB", (4, 4), "white").save(run / "shot.png", format="PNG")
+    Image.new("RGB", (4, 4), "white").save(run / "extra.png", format="PNG")
+    report = RunReportService().project(
+        run,
+        facts,
+        _bundle(
+            run.name,
+            artifacts=[
+                {"artifact_id": "shot", "kind": "screenshot", "path": "shot.png", "step_id": "s1", "phase": "prepare"},
+                {"artifact_id": "extra", "kind": "screenshot", "path": "extra.png"},
+            ],
+        ),
+    )
+
+    bmp_buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), "white").save(bmp_buffer, format="BMP")
+    oversized_pixels_buffer = io.BytesIO()
+    Image.new("L", (6400, 6400), 0).save(oversized_pixels_buffer, format="PNG")
+
+    invalid_payloads = [
+        b"corrupt-screenshot-bytes",
+        b"",
+        "not-bytes",
+        bmp_buffer.getvalue(),
+        oversized_pixels_buffer.getvalue(),
+    ]
+    for artifact_id in ("shot", "extra"):
+        for payload in invalid_payloads:
+            with pytest.raises(ReportGenerationError) as exc_info:
+                render_html(report, {(run.name, artifact_id): payload})
+            assert exc_info.value.context["reason"] == "artifact_unavailable"
+
+
+def test_in_policy_screenshot_with_oversized_intermediate_png_succeeds_in_static_html_and_exports(tmp_path):
+    from fsq_agent.report._export import _raster
+    from fsq_agent.report._run_report import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS
+
+    run, facts = _run(tmp_path)
+    noisy = Image.frombytes("RGB", (2400, 2400), os.urandom(2400 * 2400 * 3))
+    noisy.save(run / "shot.jpg", format="JPEG", quality=50)
+    source_bytes = (run / "shot.jpg").read_bytes()
+    intermediate_png = _raster(source_bytes, [])
+    assert len(source_bytes) <= MAX_IMAGE_BYTES
+    assert noisy.width * noisy.height <= MAX_IMAGE_PIXELS
+    assert len(intermediate_png) > MAX_IMAGE_BYTES
+
+    bundle = _bundle(
+        run.name,
+        artifacts=[{"artifact_id": "shot", "kind": "screenshot", "mime_type": "image/jpeg", "path": "shot.jpg", "step_id": "s1", "phase": "prepare"}],
+    )
+    (run / "evidence-manifest.json").write_text(json.dumps(bundle), encoding="utf-8")
+
+    static_path = generate_static_run_report(run, facts)
+    static_images = _extract_inline_images(static_path.read_text(encoding="utf-8"))
+    assert [(fmt, mode, size) for fmt, mode, size, _ in static_images] == [("WEBP", "RGB", (1280, 1280))]
+
+    service = RunReportService()
+    report = service.project(run, facts, bundle)
+
+    html_export = service.export(report, RunReportExportOptions(format="html", destination=tmp_path / "exported.html"))
+    html_images = _extract_inline_images(html_export.path.read_text(encoding="utf-8"))
+    assert [(fmt, mode, size) for fmt, mode, size, _ in html_images] == [("WEBP", "RGB", (1280, 1280))]
+
+    bundle_export = service.export(report, RunReportExportOptions(format="bundle", destination=tmp_path / "exported.zip"))
+    with zipfile.ZipFile(bundle_export.path) as archive:
+        bundle_html = archive.read("report.html").decode("utf-8")
+        bundle_images = _extract_inline_images(bundle_html)
+        assert [(fmt, mode, size) for fmt, mode, size, _ in bundle_images] == [("WEBP", "RGB", (1280, 1280))]
+        bundle_raster = archive.read("runs/run-1/shot.jpg")
+        assert len(bundle_raster) > MAX_IMAGE_BYTES
+        with Image.open(io.BytesIO(bundle_raster)) as exported_png:
+            assert exported_png.format == "PNG"
+            assert exported_png.size == (2400, 2400)

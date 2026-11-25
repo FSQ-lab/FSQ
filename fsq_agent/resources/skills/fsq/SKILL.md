@@ -118,14 +118,14 @@ For Web with a known starting address, submit exactly one command with the
 selected browser (or omit `--target-id` when only one browser channel is
 available) and separate exact URL:
 
-`fsq --output jsonl --non-interactive quick-test run --platform web [--target-id "<target-id>"] --url "<exact-url>" --goal "<confirmed-goal>"`
+`fsq --output jsonl --non-interactive quick-test run --platform web --target-id "<target-id>" --url "<exact-url>" --goal "<confirmed-goal>"`
 
 For Android, iOS, or Web without a separate starting URL, use the existing goal
 path with the selected device/browser (or omit `--target-id` when only one
 selectable ready target is available). URL-free Web search keeps the discovery
 objective and checkable result in the goal; do not guess a starting address:
 
-`fsq --output jsonl --non-interactive quick-test run --platform "<platform>" [--target-id "<target-id>"] --goal "<confirmed-goal>"`
+`fsq --output jsonl --non-interactive quick-test run --platform "<platform>" --target-id "<target-id>" --goal "<confirmed-goal>"`
 
 For Windows/macOS omit target-id:
 

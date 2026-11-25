@@ -4,8 +4,17 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-26
+
+- Quick Test resolves targets from bounded read-only host application inventories cached per `(platform, target_id)` with single-shot LLM selection, single cache-miss refresh, simplified explicit Web URL handling, and transparent diagnostic errors.
 - Quick Test initializes its dedicated Workspace and platform defaults only when missing. Concurrent preparations keep their own targets and starting URLs without overwriting shared settings; existing Case Manager and Run report links continue to work.
-- iOS Quick Test supports explicit Simulator and physical-device selection in CLI and Control Plane, read-only Simulator app discovery, and local signing preflight for physical devices. When physical-device app enumeration is unavailable, supply an exact bundle ID.
+- iOS Quick Test supports Simulator and physical-device selection in CLI and Control Plane, read-only Simulator app discovery, and local signing preflight for physical devices. When physical-device app enumeration is unavailable, supply an exact bundle ID.
+- Android, iOS, and Web Quick Test deterministically auto-select the sole ready target when `target_id` is omitted, while strictly preserving explicit selections and returning structured `target_unavailable` / `target_ambiguous` diagnostics otherwise.
+- Windows verifies foreground ownership with bounded activation wait and Win32 owner-PID fallback, and binds UWP `ApplicationFrameHost` windows via `CoreWindow` ownership without requiring `window_title_re`.
+
+## [0.4.1] - 2026-11-25
+
+- Inline HTML report screenshots use WebP compression and omit raw step facts.
 - Windows verifies foreground ownership before sending input. Screenshots render only the bound window, without reading the desktop or separate top-level popups.
 - Windows and macOS UI snapshots redact credentials before XML escaping, withhold protected values, and enforce their output caps. Run evidence shares cycle- and depth-safe redaction.
 - Evidence distinguishes unstarted targets from capture failures and does not require a post-action frame when preparation aborted. Explore downgrades a capture failure to a warning only after an explicitly linked retry of the same operation with complete evidence; no operation retries automatically. Managed completion reports the frozen status and summary.
@@ -210,7 +219,9 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/FSQ-lab/FSQ/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/FSQ-lab/FSQ/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/FSQ-lab/FSQ/compare/v0.3.9...v0.4.0
 [0.3.9]: https://github.com/FSQ-lab/FSQ/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/FSQ-lab/FSQ/compare/v0.3.7...v0.3.8

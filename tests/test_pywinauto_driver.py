@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 from io import BytesIO
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from PIL import Image, ImageGrab
 
+from fsq_agent.drivers.windows import _pywinauto
 from fsq_agent.drivers.windows._pywinauto import PW_RENDERFULLCONTENT, PywinautoWindowsDriver
 from fsq_agent.models import (
     ConfigurationError,
@@ -364,6 +367,162 @@ def test_press_key_requires_foreground_to_be_the_target_or_its_owned_popup_chain
             with pytest.raises(RuntimeError, match="foreground window"):
                 driver.press_key(WindowsPressKeyParams(key="{ENTER}"))
             assert events == [f"set_focus:{hwnd}:iconic=False"]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("focus_delay", [0.010, None], ids=["delayed-target", "permanent-same-pid-sibling"])
+def test_press_key_waits_only_for_an_authorized_foreground_after_focus(monkeypatch: pytest.MonkeyPatch, focus_delay: float | None) -> None:
+    hwnd, sibling = 7001, 7003
+    events: list[str] = []
+    now = 0.0
+    window = _FakeInteractiveWindow(hwnd, 8800, events, {"iconic": False, "focused": False})
+    driver = PywinautoWindowsDriver(window_title_re=".*Target")
+    driver._bound_handle = hwnd
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: window)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle == hwnd)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _handle: False)
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: hwnd if focus_delay is not None and now >= focus_delay else sibling)
+    monkeypatch.setattr(driver, "_window_process_id", lambda _handle: 8800)
+    monkeypatch.setattr(driver, "_window_owner_handle", lambda _handle: 0)
+
+    def _sleep(seconds: float) -> None:
+        nonlocal now
+        assert events == [f"set_focus:{hwnd}:iconic=False"]
+        assert 0 < seconds <= 0.010
+        now += seconds
+        assert now <= 0.250
+
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now, sleep=_sleep))
+    try:
+        if focus_delay is None:
+            with pytest.raises(RuntimeError, match="foreground window"):
+                driver.press_key(WindowsPressKeyParams(key="{ENTER}"))
+            assert now == pytest.approx(0.250)
+            assert events == [f"set_focus:{hwnd}:iconic=False"]
+        else:
+            assert driver.press_key(WindowsPressKeyParams(key="{ENTER}"))["status"] == "passed"
+            assert now == pytest.approx(focus_delay)
+            assert events == [f"set_focus:{hwnd}:iconic=False", "window_type_keys:{ENTER}:iconic=False:focused=True"]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("observation_end", [0.250, 0.251], ids=["at-deadline", "past-deadline"])
+def test_press_key_rejects_successful_foreground_observation_completed_at_or_after_deadline(monkeypatch: pytest.MonkeyPatch, observation_end: float) -> None:
+    hwnd = 7001
+    events: list[str] = []
+    now = 0.0
+    window = _FakeInteractiveWindow(hwnd, 8800, events, {"iconic": False, "focused": False})
+    driver = PywinautoWindowsDriver(window_title_re=".*Target")
+    driver._bound_handle = hwnd
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: window)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle == hwnd)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _handle: False)
+    monkeypatch.setattr(driver, "_window_process_id", lambda _handle: None)
+
+    def _foreground() -> int:
+        nonlocal now
+        if now == 0.0:
+            return 0
+        now = observation_end
+        return hwnd
+
+    def _sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+        assert 0 < now < 0.250
+
+    monkeypatch.setattr(driver, "_foreground_window_handle", _foreground)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now, sleep=_sleep))
+    try:
+        with pytest.raises(RuntimeError, match="foreground window"):
+            driver.press_key(WindowsPressKeyParams(key="{ENTER}"))
+        assert now == observation_end
+        assert events == [f"set_focus:{hwnd}:iconic=False"]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize(
+    ("owner_error", "at_dispatch"),
+    [(1400, False), (0, False), (5, False), (1400, True), (0, True)],
+    ids=["invalid-hwnd", "invalid-hwnd-without-error", "other-winerror", "dispatch-invalid-hwnd", "dispatch-invalid-hwnd-without-error"],
+)
+def test_press_key_retries_disappearing_popup_only_during_foreground_wait(monkeypatch: pytest.MonkeyPatch, owner_error: int, at_dispatch: bool) -> None:
+    hwnd, popup = 7001, 7002
+    events: list[str] = []
+    sleeps: list[float] = []
+    native_error = OSError("GetWindow failed")
+    native_error.winerror = owner_error
+    window = _FakeInteractiveWindow(hwnd, 8800, events, {"iconic": False, "focused": False})
+    driver = PywinautoWindowsDriver(window_title_re=".*Target")
+    driver._bound_handle = hwnd
+    observations = iter([hwnd, popup, hwnd] if at_dispatch else [popup, hwnd, hwnd])
+    popup_pid_read = False
+    popup_closed = False
+
+    def _get_pid(handle: int) -> int:
+        nonlocal popup_pid_read
+        popup_pid_read |= handle == popup
+        return 8800
+
+    def _get_window(handle: int, command: int) -> int:
+        nonlocal popup_closed
+        assert popup_pid_read
+        assert (handle, command) == (popup, 4)
+        popup_closed = True
+        return 0
+
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: window)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle == hwnd or (handle == popup and not popup_closed))
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _handle: False)
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: next(observations))
+    monkeypatch.setattr(driver, "_window_process_id", _get_pid)
+    monkeypatch.setattr(_pywinauto, "_get_window_api", lambda: _get_window)
+    monkeypatch.setattr(ctypes, "set_last_error", lambda _error: None, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: owner_error, raising=False)
+    monkeypatch.setattr(ctypes, "WinError", lambda _error: native_error, raising=False)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: sum(sleeps), sleep=sleeps.append))
+    try:
+        if at_dispatch or owner_error == 5:
+            if owner_error:
+                with pytest.raises(OSError, match="GetWindow failed") as exc_info:
+                    driver.press_key(WindowsPressKeyParams(key="{ENTER}"))
+                assert exc_info.value is native_error
+            else:
+                with pytest.raises(RuntimeError, match="Window disappeared during Win32 popup ownership check"):
+                    driver.press_key(WindowsPressKeyParams(key="{ENTER}"))
+            assert not sleeps
+            assert events == [f"set_focus:{hwnd}:iconic=False"]
+        else:
+            assert driver.press_key(WindowsPressKeyParams(key="{ENTER}"))["status"] == "passed"
+            assert sleeps == [0.010]
+            assert events == [f"set_focus:{hwnd}:iconic=False", "window_type_keys:{ENTER}:iconic=False:focused=True"]
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("popup_at_dispatch", [False, True], ids=["unowned-sibling", "unstable-owned-popup"])
+def test_press_key_checks_foreground_again_at_dispatch_without_waiting(monkeypatch: pytest.MonkeyPatch, popup_at_dispatch: bool) -> None:
+    hwnd, popup, sibling = 7001, 7002, 7003
+    events: list[str] = []
+    observations = iter([hwnd, popup, sibling] if popup_at_dispatch else [hwnd, sibling])
+    window = _FakeInteractiveWindow(hwnd, 8800, events, {"iconic": False, "focused": False})
+    driver = PywinautoWindowsDriver(window_title_re=".*Target")
+    driver._bound_handle = hwnd
+    monkeypatch.setattr(driver, "_resolve_main_window", lambda **kwargs: window)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle == hwnd)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _handle: False)
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: next(observations))
+    monkeypatch.setattr(driver, "_window_process_id", lambda _handle: 8800)
+    monkeypatch.setattr(driver, "_window_owner_handle", {popup: hwnd, sibling: 0}.__getitem__)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: 0.0, sleep=lambda _seconds: pytest.fail("dispatch must not wait")))
+
+    try:
+        with pytest.raises(RuntimeError, match="foreground window"):
+            driver.press_key(WindowsPressKeyParams(key="{ENTER}"))
+        assert events == [f"set_focus:{hwnd}:iconic=False"]
     finally:
         driver.close()
 

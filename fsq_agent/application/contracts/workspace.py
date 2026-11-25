@@ -85,11 +85,9 @@ class QuickTestPrepareRequest(QuickTestContextRequest):
         return value.strip()
 
     @model_validator(mode="after")
-    def explicit_selection(self):
+    def validate_platform_options(self):
         if self.url is not None and self.platform != "web":
             raise ValueError("An explicit starting URL is supported only for Web.")
-        if self.platform in {"android", "ios", "web"} and self.target_id is None:
-            raise ValueError("Explicit device or browser selection is required.")
         return self
 
 

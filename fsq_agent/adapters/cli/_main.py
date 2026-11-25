@@ -947,8 +947,16 @@ def _emit_safe_internal_diagnostic(error: ApplicationError) -> None:
         if isinstance(url, str) and url:
             click.echo(f"URL: {url}", err=True)
         if isinstance(candidates, list) and candidates:
-            labels = [str(item.get("label") or item.get("candidate_id") or "") for item in candidates if isinstance(item, dict)]
-            labels = [label for label in labels if label]
+            labels = []
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                item_id = item.get("id")
+                label = item.get("label") or item.get("candidate_id") or ""
+                if isinstance(item_id, str) and item_id:
+                    labels.append(f"{item_id} ({label})" if label and label != item_id else item_id)
+                elif label:
+                    labels.append(str(label))
             if labels:
                 click.echo(f"Candidates: {', '.join(labels)}", err=True)
         return

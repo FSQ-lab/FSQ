@@ -46,7 +46,10 @@ def ready(monkeypatch, tmp_path):
 
     def prerequisites(self, settings, **kwargs):
         if settings.harness.platform == "android":
-            return (PlatformPrerequisiteCheck(identifier="device_selection", status="ready" if settings.harness.android.serial else "unavailable", message="Device selection fixture."),)
+            serial = settings.harness.android.serial
+            discovery = AndroidDeviceDiscovery().discover()
+            online = any(device.serial == serial and device.state == "device" for device in discovery.devices)
+            return (PlatformPrerequisiteCheck(identifier="device_selection", status="ready" if online else "unavailable", message="Device selection fixture."),)
         return ()
 
     monkeypatch.setattr(PlatformRuntimeService, "check_prerequisites", prerequisites)
@@ -1325,3 +1328,152 @@ def test_web_bare_domain_goal_persists_completed_https_url(ready, monkeypatch):
     assert prepared.application == "https://x.com"
     assert prepared.settings.harness.web.base_url == "https://x.com"
     assert not prepared.requires_web_search_evidence
+
+
+def test_android_auto_selects_sole_ready_device_and_rejects_zero_or_multiple(ready, monkeypatch):
+    from fsq_agent.environments import AndroidDeviceDiscovery
+    from fsq_agent.models import AndroidDevice, AndroidDeviceDiscoveryResult
+
+    # Sole ready device (with offline/unauthorized siblings ignored) auto-selects when target_id omitted
+    monkeypatch.setattr(
+        AndroidDeviceDiscovery,
+        "discover",
+        lambda self: AndroidDeviceDiscoveryResult(
+            devices=(
+                AndroidDevice(serial="serial-1", state="device", metadata={"model": "Pixel 9"}),
+                AndroidDevice(serial="serial-off", state="offline", metadata={"model": "Offline"}),
+            )
+        ),
+    )
+    ctx = get_quick_test_context(QuickTestContextRequest(platform="android", target_id=None, user_config_root=ready))
+    assert ctx.target_id is None
+    assert [c.id for c in ctx.choices if c.selectable and c.status == "ready"] == ["serial-1"]
+    prepared = prepare_quick_test(request(ready, platform="android", target_id=None))
+    assert prepared.target_id == "serial-1"
+    assert prepared.settings.harness.android.serial == "serial-1"
+
+    # Explicit missing/offline target_id is NEVER substituted even when sole ready device exists
+    with pytest.raises(ApplicationError) as explicit_missing:
+        prepare_quick_test(request(ready, platform="android", target_id="serial-missing"))
+    assert explicit_missing.value.code.value == "quick_test.prerequisites"
+
+    # Multiple ready devices fail with target_ambiguous and structured candidates
+    monkeypatch.setattr(
+        AndroidDeviceDiscovery,
+        "discover",
+        lambda self: AndroidDeviceDiscoveryResult(
+            devices=(
+                AndroidDevice(serial="serial-1", state="device", metadata={"model": "Pixel 9"}),
+                AndroidDevice(serial="serial-2", state="device", metadata={"model": "Galaxy S25"}),
+            )
+        ),
+    )
+    with pytest.raises(ApplicationError) as ambiguous:
+        prepare_quick_test(request(ready, platform="android", target_id=None))
+    assert ambiguous.value.code.value == "quick_test.prerequisites"
+    assert ambiguous.value.details["reason"] == "target_ambiguous"
+    assert [item["id"] for item in ambiguous.value.details["candidates"]] == ["serial-1", "serial-2"]
+
+    # Zero ready devices fail with target_unavailable
+    monkeypatch.setattr(
+        AndroidDeviceDiscovery,
+        "discover",
+        lambda self: AndroidDeviceDiscoveryResult(devices=(AndroidDevice(serial="serial-off", state="offline"),)),
+    )
+    with pytest.raises(ApplicationError) as unavailable:
+        prepare_quick_test(request(ready, platform="android", target_id=None))
+    assert unavailable.value.code.value == "quick_test.prerequisites"
+    assert unavailable.value.details["reason"] == "target_unavailable"
+
+
+def test_ios_auto_selects_sole_booted_simulator_and_enforces_physical_signing_and_ambiguity(ios_ready, monkeypatch):
+    from fsq_agent.environments import IOSDeviceDiscovery
+    from fsq_agent.models import IOSDevice, IOSDeviceDiscoveryResult
+
+    # Multiple usable devices (sim-1 + phone-1 in ios_ready fixture) fail with target_ambiguous
+    with pytest.raises(ApplicationError) as ambiguous:
+        prepare_quick_test(request(ios_ready, platform="ios", target_id=None))
+    assert ambiguous.value.code.value == "quick_test.prerequisites"
+    assert ambiguous.value.details["reason"] == "target_ambiguous"
+    assert [item["id"] for item in ambiguous.value.details["candidates"]] == ["sim-1", "phone-1"]
+    assert [item["kind"] for item in ambiguous.value.details["candidates"]] == ["simulator", "device"]
+
+    # Sole booted simulator auto-selects when target_id omitted
+    app = ApplicationCandidate(identity="com.apple.Preferences", candidate_id="settings", label="Settings", bundle_id="com.apple.Preferences")
+    monkeypatch.setattr(PlatformRuntimeService, "list_applications", lambda *a, **k: ApplicationInventoryResult(status="complete", candidates=(app,)))
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda *a: SimpleNamespace(analyze=lambda **k: QuickTestIntent(True, "sufficient", candidate_id="settings"))
+    )
+    sim_only = IOSDeviceDiscoveryResult(
+        devices=(
+            IOSDevice(udid="sim-1", name="iPhone 16", kind="simulator", state="booted"),
+            IOSDevice(udid="sim-off", name="iPhone 15", kind="simulator", state="shutdown"),
+        )
+    )
+    monkeypatch.setattr(IOSDeviceDiscovery, "discover", lambda self: sim_only)
+    ctx = get_quick_test_context(QuickTestContextRequest(platform="ios", target_id=None, user_config_root=ios_ready))
+    assert ctx.target_id is None
+    assert [c.id for c in ctx.choices if c.selectable and c.status == "ready"] == ["sim-1"]
+    prepared = prepare_quick_test(request(ios_ready, platform="ios", target_id=None, goal="Open Settings and check version"))
+    assert prepared.target_id == "sim-1"
+    assert prepared.settings.harness.ios.udid == "sim-1"
+
+    # Sole connected physical device auto-selects BUT still enforces WDA signing gate
+    phone_only = IOSDeviceDiscoveryResult(devices=(IOSDevice(udid="phone-1", name="My iPhone", kind="device", state="connected"),))
+    monkeypatch.setattr(IOSDeviceDiscovery, "discover", lambda self: phone_only)
+    with pytest.raises(ApplicationError) as signing_err:
+        prepare_quick_test(request(ios_ready, platform="ios", target_id=None, goal="Open Settings and check version"))
+    assert signing_err.value.code.value == "quick_test.prerequisites"
+    assert signing_err.value.details["reason"] == "ios_wda_signing_required"
+    assert "config.ios.yaml" in signing_err.value.action
+
+    # Explicit missing iOS UDID is NEVER substituted even when sole simulator exists
+    monkeypatch.setattr(IOSDeviceDiscovery, "discover", lambda self: sim_only)
+    with pytest.raises(ApplicationError) as explicit_missing:
+        prepare_quick_test(request(ios_ready, platform="ios", target_id="sim-other", goal="Open Settings and check version"))
+    assert explicit_missing.value.code.value == "quick_test.prerequisites"
+
+
+def test_web_auto_selects_sole_ready_browser_and_rejects_zero_or_multiple(ready, monkeypatch):
+    chrome = ready / "Google Chrome" / "chrome"
+    chrome.parent.mkdir()
+    chrome.write_bytes(b"fixture")
+    chrome.chmod(0o755)
+    edge = ready / "Microsoft Edge" / "msedge"
+    edge.parent.mkdir()
+    edge.write_bytes(b"fixture")
+    edge.chmod(0o755)
+
+    # Sole ready browser auto-selects when target_id omitted
+    monkeypatch.setattr(PlatformRuntimeService, "discover_web_executables", lambda self, channel: [chrome] if channel == "chrome" else [])
+    monkeypatch.setattr(PlatformRuntimeService, "web_executable_matches_channel", lambda self, channel, path: True)
+    ctx = get_quick_test_context(QuickTestContextRequest(platform="web", target_id=None, user_config_root=ready))
+    assert ctx.target_id is None
+    assert [c.id for c in ctx.choices if c.selectable and c.status == "ready"] == ["chrome"]
+    prepared = prepare_quick_test(request(ready, platform="web", target_id=None, url="https://example.test", goal="Verify the page title"))
+    assert prepared.target_id == "chrome"
+    assert prepared.target.browser_channel == "chrome"
+
+    # Explicit unavailable channel is NEVER substituted by sole available chrome
+    with pytest.raises(ApplicationError) as explicit_missing:
+        prepare_quick_test(request(ready, platform="web", target_id="msedge", url="https://example.test", goal="Verify the page title"))
+    assert explicit_missing.value.code.value == "quick_test.prerequisites"
+
+    # Multiple ready browsers fail with target_ambiguous listing available channel ids
+    monkeypatch.setattr(
+        PlatformRuntimeService,
+        "discover_web_executables",
+        lambda self, channel: [chrome] if channel == "chrome" else ([edge] if channel == "msedge" else []),
+    )
+    with pytest.raises(ApplicationError) as ambiguous:
+        prepare_quick_test(request(ready, platform="web", target_id=None, url="https://example.test", goal="Verify the page title"))
+    assert ambiguous.value.code.value == "quick_test.prerequisites"
+    assert ambiguous.value.details["reason"] == "target_ambiguous"
+    assert [item["id"] for item in ambiguous.value.details["candidates"]] == ["chrome", "msedge"]
+
+    # Zero ready browsers fail with target_unavailable
+    monkeypatch.setattr(PlatformRuntimeService, "discover_web_executables", lambda self, channel: [])
+    with pytest.raises(ApplicationError) as unavailable:
+        prepare_quick_test(request(ready, platform="web", target_id=None, url="https://example.test", goal="Verify the page title"))
+    assert unavailable.value.code.value == "quick_test.prerequisites"
+    assert unavailable.value.details["reason"] == "target_unavailable"

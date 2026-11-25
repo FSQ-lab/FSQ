@@ -159,7 +159,7 @@ it('preserves explicit clearing through refresh, mounted inactivity, New test an
   hook.rerender({ active: true });
   await checked(hook);
   expect(hook.result.current.targetId).toBe('');
-  act(() => hook.result.current.setPlatform('web'));
+  act(() => hook.result.current.setPlatform('macos'));
   await checked(hook);
   expect(hook.result.current.targetId).toBe('');
   act(() => hook.result.current.setPlatform('android'));
@@ -192,7 +192,7 @@ it.each(['clear', 'choose', 'platform'] as const)('does not let a late discovery
   expect(hook.result.current.canStart).toBe(false);
   // Resolve in the same batch as the newer intent, before effect cleanup.
   await act(async () => {
-    if (intent === 'platform') hook.result.current.setPlatform('web');
+    if (intent === 'platform') hook.result.current.setPlatform('macos');
     else hook.result.current.setTargetId(intent === 'choose' ? 'manual' : '');
     pending.resolve(context([phone('old')]));
   });
@@ -356,13 +356,38 @@ async function nonAndroidSetup(platform: 'web' | 'macos' | 'windows') {
   });
   const hook = renderHook(() => useQuickTest(true));
   act(() => { hook.result.current.setPlatform(platform); hook.result.current.setGoal('Verify the welcome page'); });
-  await waitFor(() => expect(hook.result.current.context).not.toBeNull());
-  if (platform === 'web') act(() => hook.result.current.setTargetId('one'));
   await waitFor(() => expect(hook.result.current.canStart).toBe(true));
   return hook;
 }
 
-it.each(['web', 'macos', 'windows'] as const)('F002: %s same-platform callback retains pre-request reset semantics', async platform => {
+it.each(['ios', 'web'] as const)('auto-selects sole eligible %s target and respects explicit clearing without refill', async platform => {
+  vi.mocked(controlPlaneClient.bootstrap).mockResolvedValue({
+    ...bootstrap, quickTestPlatforms: [...bootstrap.platforms, { id: 'ios', label: 'iOS' }],
+  });
+  inventory = [phone('only-target'), phone('offline-target', false, 'unavailable')];
+  const hook = renderHook(() => useQuickTest(true));
+  act(() => { hook.result.current.setPlatform(platform); hook.result.current.setGoal('Verify target behavior'); });
+  await waitFor(() => expect(hook.result.current.targetId).toBe('only-target'));
+  await waitFor(() => expect(hook.result.current.canStart).toBe(true));
+  expect(controlPlaneClient.startQuickTest).not.toHaveBeenCalled();
+
+  // Manual clearing stays empty through refresh and New test without auto-refill.
+  act(() => hook.result.current.setTargetId(''));
+  await waitFor(() => expect(hook.result.current.context?.targetId).toBeNull());
+  expect(hook.result.current.targetId).toBe('');
+  act(() => hook.result.current.refresh());
+  await waitFor(() => expect(hook.result.current.context?.targetId).toBeNull());
+  expect(hook.result.current.targetId).toBe('');
+
+  // Multiple ready choices never auto-select even after platform switch.
+  inventory = [phone('first'), phone('second')];
+  act(() => hook.result.current.setPlatform('macos'));
+  act(() => hook.result.current.setPlatform(platform));
+  await waitFor(() => expect(hook.result.current.context).not.toBeNull());
+  expect(hook.result.current.targetId).toBe('');
+});
+
+it.each(['macos', 'windows'] as const)('F002: %s same-platform callback retains pre-request reset semantics', async platform => {
   const hook = await nonAndroidSetup(platform);
   const count = vi.mocked(controlPlaneClient.quickTestContext).mock.calls.length;
   act(() => hook.result.current.setPlatform(platform));
@@ -370,13 +395,10 @@ it.each(['web', 'macos', 'windows'] as const)('F002: %s same-platform callback r
   expect(hook.result.current.context).toBeNull();
   expect(hook.result.current.choices).toEqual([]);
   expect(hook.result.current.canStart).toBe(false);
-  // Web's reset changes its target and requests fresh facts. Desktop has no
-  // target change, so the baseline callback only invalidates its context.
-  if (platform === 'web') await waitFor(() => expect(controlPlaneClient.quickTestContext).toHaveBeenCalledTimes(count + 1));
-  else expect(controlPlaneClient.quickTestContext).toHaveBeenCalledTimes(count);
+  expect(controlPlaneClient.quickTestContext).toHaveBeenCalledTimes(count);
 });
 
-it.each(['web', 'macos', 'windows'] as const)('F002: %s same-target callback invalidates context as before', async platform => {
+it.each(['macos', 'windows'] as const)('F002: %s same-target callback invalidates context as before', async platform => {
   const hook = await nonAndroidSetup(platform);
   const target = hook.result.current.targetId;
   const count = vi.mocked(controlPlaneClient.quickTestContext).mock.calls.length;
@@ -387,7 +409,7 @@ it.each(['web', 'macos', 'windows'] as const)('F002: %s same-target callback inv
   expect(controlPlaneClient.quickTestContext).toHaveBeenCalledTimes(count);
 });
 
-it.each(['web', 'macos', 'windows'] as const)('F002: %s same-target callback does not reject a baseline in-flight response', async platform => {
+it.each(['macos', 'windows'] as const)('F002: %s same-target callback does not reject a baseline in-flight response', async platform => {
   const hook = await nonAndroidSetup(platform);
   const data = hook.result.current.context!;
   const pending = deferred<QuickTestContext>();
@@ -400,14 +422,13 @@ it.each(['web', 'macos', 'windows'] as const)('F002: %s same-target callback doe
 });
 
 it.each([
-  { platform: 'web', setter: 'platform' }, { platform: 'web', setter: 'target' },
   { platform: 'macos', setter: 'platform' }, { platform: 'macos', setter: 'target' },
   { platform: 'windows', setter: 'platform' }, { platform: 'windows', setter: 'target' },
 ] as const)('F002: $platform same-batch Start/$setter preserves baseline callback semantics and global duplicate guard', async ({ platform, setter }) => {
   const hook = await nonAndroidSetup(platform);
   const post = deferred<{ requestId: string }>();
   vi.mocked(controlPlaneClient.startQuickTest).mockReturnValue(post.promise);
-  const nextPlatform = platform === 'web' ? 'macos' : 'web';
+  const nextPlatform = platform === 'macos' ? 'windows' : 'macos';
   act(() => {
     void hook.result.current.start();
     if (setter === 'platform') hook.result.current.setPlatform(nextPlatform);
@@ -417,10 +438,7 @@ it.each([
   expect(hook.result.current.platform).toBe(setter === 'platform' ? nextPlatform : platform);
   expect(hook.result.current.targetId).toBe(setter === 'platform' ? '' : 'other');
   expect(hook.result.current.locked).toBe(true);
-  expect(controlPlaneClient.startQuickTest).toHaveBeenCalledExactlyOnceWith({
-    platform, goal: 'Verify the welcome page', ...(platform === 'web' ? { targetId: 'one' } : {}),
-  });
-  // Once locked state is committed, the pre-existing global guard still applies.
+  expect(controlPlaneClient.startQuickTest).toHaveBeenCalledExactlyOnceWith({ platform, goal: 'Verify the welcome page' });
   act(() => { hook.result.current.setPlatform('android'); hook.result.current.setTargetId('late'); });
   expect(hook.result.current.platform).toBe(setter === 'platform' ? nextPlatform : platform);
   expect(hook.result.current.targetId).toBe(setter === 'platform' ? '' : 'other');

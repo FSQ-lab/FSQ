@@ -55,7 +55,7 @@ export function QuickTestPage({ active, onCaseManager, onOpenReport }: QuickTest
             <label htmlFor="quick-target">{test.platform === 'web' ? 'Browser' : 'Device'}</label>
             <select id="quick-target" value={test.targetId} disabled={test.locked} aria-describedby={iosDevice ? 'quick-device-details' : undefined} onChange={event => test.setTargetId(event.target.value)}>
               <option value="">Select a {test.platform === 'web' ? 'browser' : 'device'}</option>
-              {(test.locked || test.hasDeviceSelection) && test.targetId && !test.choices.some(choice => choice.id === test.targetId) && <option value={test.targetId} disabled={Boolean(test.deviceSelectionStatus)}>{test.targetId}{test.deviceSelectionStatus ? ` — ${test.deviceSelectionStatus}` : ''}</option>}
+              {(test.locked || test.targetNeeded) && test.targetId && !test.choices.some(choice => choice.id === test.targetId) && <option value={test.targetId} disabled={Boolean(test.deviceSelectionStatus)}>{test.targetId}{test.deviceSelectionStatus ? ` — ${test.deviceSelectionStatus}` : ''}</option>}
               {test.choices.map(choice => <option key={choice.id} value={choice.id} disabled={!choice.selectable || choice.status !== 'ready' || (choice.id === test.targetId && Boolean(test.deviceSelectionStatus))}>{test.platform === 'ios' ? iosChoiceLabel(choice) : choice.label}{choice.id === test.targetId && test.deviceSelectionStatus ? ` — ${test.deviceSelectionStatus}` : ''}</option>)}
             </select>
             {iosDevice && <p id="quick-device-details">{iosChoiceLabel(iosDevice)}</p>}

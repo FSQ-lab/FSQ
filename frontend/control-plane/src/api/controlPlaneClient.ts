@@ -132,10 +132,14 @@ function activeTask(value: unknown): boolean {
   if (value.workflow !== 'quick-test' && value.workflow !== 'case-manager') return false;
   if (!nullableString(value.application) || !nullableString(value.platformRevision)) return false;
   if (value.workflow === 'quick-test') {
+    const desktop = value.platform === 'windows' || value.platform === 'macos';
+    const bound = value.runId !== null || value.workspaceName !== null;
+    const validTarget = value.targetId === null
+      ? !bound || desktop
+      : value.platform === 'ios' ? iosUdid(value.targetId) : string(value.targetId) && value.targetId.length > 0;
     return value.mode === 'explore' && nullableString(value.workspaceName) && nullableString(value.targetId)
       && (value.runId === null || (string(value.workspaceName) && value.workspaceName.length > 0))
-      && (value.platform !== 'ios' || iosUdid(value.targetId))
-      && ((value.platform === 'windows' || value.platform === 'macos') || string(value.targetId));
+      && validTarget;
   }
   return platform(value.platform) && string(value.workspaceName) && string(value.targetId);
 }

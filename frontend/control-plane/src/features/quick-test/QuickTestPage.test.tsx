@@ -286,29 +286,26 @@ it('uses shared terminal evidence and stable report identity; New test rechecks 
 it.each([
   'Open https://example.com and verify the title',
   '搜索 FSQ github，并且帮我找到FSQ 的官网地址',
-])('accepts the Web goal "%s" without extra modes and requires browser selection', async goal => {
+])('accepts the Web goal "%s" without extra modes and auto-selects sole ready browser', async goal => {
   vi.mocked(controlPlaneClient.runSnapshot).mockResolvedValue({
     ...prep, platform: 'web', targetId: 'chrome', source: { goal },
   });
   render(<QuickTestPage {...props} />);
   await screen.findByRole('option', { name: 'Web' });
   fireEvent.change(screen.getByLabelText('Platform'), { target: { value: 'web' } });
-  await screen.findByRole('option', { name: 'Chrome' });
+  await waitFor(() => expect(screen.getByLabelText('Browser')).toHaveValue('chrome'));
   fireEvent.change(screen.getByLabelText('What do you want to test?'), { target: { value: goal } });
-  expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeDisabled();
   expect(screen.getByText(/provide a URL or describe a clear search goal/)).toBeInTheDocument();
   expect(screen.queryByText(/Include an explicit test URL/)).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Search engine')).not.toBeInTheDocument();
   expect(screen.queryByText('Strict Replay')).not.toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText('Browser'), { target: { value: 'chrome' } });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeEnabled());
-  expect(screen.getByLabelText('Browser')).toHaveValue('chrome');
   fireEvent.click(screen.getByRole('button', { name: 'Start Quick Test' }));
   await waitFor(() => expect(controlPlaneClient.startQuickTest).toHaveBeenCalledWith({ platform: 'web', targetId: 'chrome', goal }));
   await screen.findByRole('heading', { name: 'Activity' });
 });
 
-it('requires deliberate iOS selection and preserves the exact UDID through disappearance, signing checks and stale response', async () => {
+it('auto-selects sole ready iOS device, enforces WDA signing, and preserves exact UDID through disappearance and stale response', async () => {
   const phone = { id: 'Exact-iPhone-UDID', label: 'iPhone', kind: 'device', state: 'connected', status: 'ready', selectable: true } as const;
   const simulator = { id: 'Sim-UDID', label: 'iPhone', kind: 'simulator', state: 'booted', status: 'ready', selectable: true } as const;
   const disconnected = { ...simulator, state: 'shutdown', status: 'unavailable', selectable: false } as const;
@@ -335,12 +332,11 @@ it('requires deliberate iOS selection and preserves the exact UDID through disap
   await screen.findByRole('option', { name: 'iOS' });
   fireEvent.change(screen.getByLabelText('Platform'), { target: { value: 'ios' } });
   const device = screen.getByLabelText('Device');
+  // Sole ready physical device is auto-selected, and WDA signing still blocks Start.
+  await waitFor(() => expect(device).toHaveValue(phone.id));
   expect(await screen.findByRole('option', { name: /iPhone.*Exact-iPhone-UDID.*Physical device.*connected/i })).toBeEnabled();
   expect(screen.getByRole('option', { name: /iPhone.*Sim-UDID.*Simulator.*shutdown/i })).toBeDisabled();
   fireEvent.change(screen.getByLabelText('What do you want to test?'), { target: { value: 'Inspect com.example.app' } });
-  expect(device).toHaveValue('');
-  expect(screen.getByRole('button', { name: 'Start Quick Test' })).toBeDisabled();
-  fireEvent.change(device, { target: { value: phone.id } });
   const environment = screen.getByRole('region', { name: 'iOS environment' });
   await within(environment).findByText('WDA signing', { exact: true });
   expect(within(environment).getAllByText('Configure signing locally.').length).toBeGreaterThan(0);

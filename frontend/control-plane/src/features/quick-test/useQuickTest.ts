@@ -13,7 +13,7 @@ export function useQuickTest(active: boolean) {
   const [bootstrapError, setBootstrapError] = useState<ApiErrorBody | null>(null);
   const [platform, setPlatform] = useState<QuickTestPlatformId | ''>('');
   const [targetId, setTargetId] = useState('');
-  const androidSelectionCleared = useRef(false);
+  const selectionCleared = useRef(false);
   const contextGeneration = useRef(0);
   const contextController = useRef<AbortController | null>(null);
   const [goal, setGoal] = useState('');
@@ -53,8 +53,8 @@ export function useQuickTest(active: boolean) {
       setBootstrap(data);
       setBootstrapError(null);
       if (data.activeTask?.workflow === 'quick-test' && data.activeTask.requestId !== requestRef.current) {
-        // Mobile device selection owns its scope before React commits the restored task.
-        if (data.activeTask.platform === 'android' || data.activeTask.platform === 'ios') contextController.current?.abort();
+        // Target-selectable platforms own their scope before React commits the restored task.
+        if (needsTarget(data.activeTask.platform)) contextController.current?.abort();
         ++contextGeneration.current;
         setRestoredRequest(data.activeTask.requestId);
         setRequestId(data.activeTask.requestId);
@@ -82,7 +82,7 @@ export function useQuickTest(active: boolean) {
     const controller = new AbortController();
     contextController.current = controller;
     const generation = ++contextGeneration.current;
-    const applies = () => !controller.signal.aborted && (!hasDeviceSelection || (generation === contextGeneration.current && !startLock.current));
+    const applies = () => !controller.signal.aborted && (!targetNeeded || (generation === contextGeneration.current && !startLock.current));
     setContext(null);
     setContextError(null);
     void controlPlaneClient.quickTestContext(platform, targetId || undefined, controller.signal).then(data => {
@@ -94,23 +94,21 @@ export function useQuickTest(active: boolean) {
       }
       // Empty/blank identities cannot represent a selection. Reject the response
       // rather than normalize an identity or silently choose another candidate.
-      if (platform === 'android' && data.choices.some(choice => !choice.id.trim())) {
+      if (targetNeeded && data.choices.some(choice => !choice.id.trim())) {
         setContextError({ code: 'invalid_response', message: 'The Control Plane server returned an invalid response.', action: 'Recheck environment.' });
         return;
       }
       setChoices(data.choices);
-      const deviceDiscoveryBlocked = data.platform === 'android' && data.diagnostics?.checks.configuration.status === 'error';
-      if (platform === 'android') {
+      const targetDiscoveryBlocked = data.platform === 'android' && data.diagnostics?.checks.configuration.status === 'error';
+      if (targetNeeded) {
         // Discovery never replaces a selected identity, even if it is unavailable.
         // Explicit clearing lasts for this platform's mounted selection lifecycle.
         const eligible = data.choices.filter(choice => choice.selectable && choice.status === 'ready');
-        if (!targetId && !androidSelectionCleared.current && !deviceDiscoveryBlocked && eligible.length === 1) {
+        if (!targetId && !selectionCleared.current && !targetDiscoveryBlocked && eligible.length === 1) {
           setTargetId(eligible[0].id);
           setContext(null); // The new identity still needs its own authoritative checks.
           return;
         }
-      } else if (platform !== 'ios' && targetId && !data.choices.some(choice => choice.id === targetId && choice.selectable && choice.status === 'ready')) {
-        setTargetId('');
       }
       setContext(data);
     }).catch(caught => { if (applies()) setContextError(toApiError(caught)); });
@@ -119,7 +117,7 @@ export function useQuickTest(active: boolean) {
   const matchingContext = context?.platform === platform && context.targetId === (targetId || null);
   const validTarget = !targetNeeded || Boolean(targetId && context?.choices.some(choice => choice.id === targetId && choice.selectable && choice.status === 'ready'));
   const blockedDeviceDiagnosis = context?.platform === 'android' && context.diagnostics?.checks.configuration.status === 'error' ? context.diagnostics : null;
-  const deviceSelectionStatus = hasDeviceSelection && targetId && !locked
+  const deviceSelectionStatus = targetNeeded && targetId && !locked
     ? !matchingContext || blockedDeviceDiagnosis ? 'not checked' : !validTarget ? 'unavailable' : null
     : null;
   const inputError = !goal.trim() ? 'Describe the application, actions, and expected result.'
@@ -185,16 +183,16 @@ export function useQuickTest(active: boolean) {
     foreign, canStart, blockedReason, preparationFailed,
     error: identityError ?? error ?? snapshot?.error ?? bootstrapError ?? contextError ?? streamError,
     setGoal, setPlatform: (value: QuickTestPlatformId | '') => {
-      if (locked || (hasDeviceSelection && (startLock.current || value === platform))) return;
-      if (needsTarget(value) && value !== 'web' && value !== platform) contextController.current?.abort();
+      if (locked || (targetNeeded && (startLock.current || value === platform))) return;
+      if (needsTarget(value) && value !== platform) contextController.current?.abort();
       ++contextGeneration.current;
-      androidSelectionCleared.current = false;
+      selectionCleared.current = false;
       setPlatform(value); setTargetId(''); setContext(null); setChoices([]);
     },
     setTargetId: (value: string) => {
-      if (locked || (hasDeviceSelection && startLock.current)) return;
-      if (platform === 'android') androidSelectionCleared.current = value === '';
-      if (hasDeviceSelection && value === targetId) return;
+      if (locked || (targetNeeded && startLock.current)) return;
+      if (targetNeeded) selectionCleared.current = value === '';
+      if (targetNeeded && value === targetId) return;
       ++contextGeneration.current;
       setTargetId(value); setContext(null);
     },

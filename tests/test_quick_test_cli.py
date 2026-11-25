@@ -92,9 +92,8 @@ def test_invalid_web_url_has_safe_terminal_without_inference_or_config(monkeypat
     "argv",
     [
         [],
-        ["--platform", "web", "--goal", "Test"],
-        ["--platform", "ios", "--goal", "Test"],
         ["--platform", "macos", "--goal", "Test", "--target-id", "override"],
+        ["--platform", "windows", "--goal", "Test", "--target-id", "override"],
         ["--platform", "web", "--goal", " ", "--target-id", "chrome"],
     ],
 )
@@ -297,3 +296,48 @@ def test_cli_renders_structured_quick_test_diagnostic_details(monkeypatch, tmp_p
     assert record["error"]["details"]["target_name"] == "微信"
     assert record["error"]["details"]["reason"] == "Both WeChat and WeCom matched."
     assert len(record["error"]["details"]["candidates"]) == 2
+
+
+@pytest.mark.parametrize("platform", ["android", "ios", "web"])
+def test_cli_accepts_omitted_target_id_for_selectable_platforms(monkeypatch, platform):
+    seen = []
+
+    async def run(request, **kwargs):
+        seen.append(request)
+        return SimpleNamespace(status="success", model_dump=lambda **kw: {"status": "success", "run_id": "exact-run"})
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.run_quick_test", run)
+    result = CliRunner().invoke(main, ["--output", "json", "--non-interactive", "quick-test", "run", "--platform", platform, "--goal", "Verify the exact application outcome."])
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1
+    assert seen[0].platform == platform
+    assert seen[0].target_id is None
+
+
+def test_cli_renders_ambiguous_target_candidates_in_human_and_json(monkeypatch, tmp_path):
+    err = ApplicationError(
+        code=ApplicationErrorCode.QUICK_TEST_PREREQUISITES,
+        category=ApplicationErrorCategory.UNAVAILABLE,
+        message="Quick Test prerequisites are not ready.",
+        action="Multiple available android devices were found. Pass --target-id explicitly.",
+        details={
+            "reason": "target_ambiguous",
+            "candidates": [{"id": "emulator-5554", "label": "Pixel 9"}, {"id": "emulator-5556", "label": "Pixel 8"}],
+        },
+    )
+
+    async def fail_run(*args, **kwargs):
+        raise err
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.run_quick_test", fail_run)
+    runner = CliRunner()
+    human = runner.invoke(main, ["quick-test", "run", "--platform", "android", "--goal", "Open Settings"], env={"FSQ_USER_CONFIG_ROOT": str(tmp_path)})
+    assert human.exit_code == 4
+    assert "Reason: target_ambiguous" in human.output
+    assert "Candidates: emulator-5554 (Pixel 9), emulator-5556 (Pixel 8)" in human.output
+
+    as_json = runner.invoke(main, ["--output", "json", "quick-test", "run", "--platform", "android", "--goal", "Open Settings"], env={"FSQ_USER_CONFIG_ROOT": str(tmp_path)})
+    assert as_json.exit_code == 4
+    record = json.loads(as_json.output)
+    assert record["error"]["details"]["reason"] == "target_ambiguous"
+    assert [c["id"] for c in record["error"]["details"]["candidates"]] == ["emulator-5554", "emulator-5556"]

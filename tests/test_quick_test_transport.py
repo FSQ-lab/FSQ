@@ -88,7 +88,8 @@ def test_case_manager_in_dedicated_workspace_is_not_quick_test(tmp_path):
     "body",
     [
         {"platform": "macos", "goal": "Test", "targetId": "override"},
-        {"platform": "android", "goal": "Test"},
+        {"platform": "macos", "goal": "Test", "targetId": None},
+        {"platform": "windows", "goal": "Test", "targetId": None},
         {"platform": "web", "goal": "Test", "targetId": "unknown"},
         {"platform": "macos", "goal": "Test", "workspaceName": "override"},
         {"platform": "macos", "goal": " "},
@@ -96,8 +97,6 @@ def test_case_manager_in_dedicated_workspace_is_not_quick_test(tmp_path):
         {"platform": "web", "goal": "Search FSQ", "targetId": "chrome", "requires_web_search_evidence": False},
         {"platform": "web", "goal": "Search FSQ", "targetId": "chrome", "requiresWebSearchEvidence": True},
         {"platform": "web", "goal": "Verify heading", "targetId": "chrome", "url": "https://example.test"},
-        {"platform": "ios", "goal": "Test"},
-        {"platform": "ios", "goal": "Test", "targetId": None},
         {"platform": "ios", "goal": "Test", "targetId": "sim-udid", "xcodeOrgId": "private"},
         {"platform": "ios", "goal": "Test", "targetId": "sim-udid", "signing": {"team": "private"}},
     ],
@@ -621,3 +620,30 @@ def test_ios_history_refuses_unregistered_or_misregistered_dedicated_root(monkey
         platforms=[WorkspacePlatformCreateInput(platform="ios", target={"bundle_id": "com.example.app"})],
     )
     assert server.handle_get(path, scope)[0] == 400
+
+
+@pytest.mark.parametrize("platform", ["android", "ios", "web"])
+def test_transport_accepts_omitted_target_id_and_preserves_target_ambiguous_details(monkeypatch, tmp_path, platform):
+    server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=tmp_path))
+    seen = []
+
+    def fail_ambiguous(request, **kwargs):
+        seen.append(request)
+        raise ApplicationError(
+            code=ApplicationErrorCode.QUICK_TEST_PREREQUISITES,
+            category=ApplicationErrorCategory.UNAVAILABLE,
+            message="Quick Test prerequisites are not ready.",
+            action="Select one target explicitly.",
+            details={"reason": "target_ambiguous", "candidates": [{"id": "t1", "label": "Target 1"}, {"id": "t2", "label": "Target 2"}]},
+        )
+
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.prepare_quick_test", fail_ambiguous)
+    status, accepted = server.handle_post(f"{PREFIX}/quick-test/runs", {"platform": platform, "goal": "Verify the page"})
+    assert status == 202
+    terminal = wait_terminal(server, accepted["requestId"])
+    assert len(seen) == 1
+    assert seen[0].target_id is None
+    assert terminal["status"] == "error"
+    assert terminal["error"]["code"] == "quick_test.prerequisites"
+    assert terminal["error"]["details"]["reason"] == "target_ambiguous"
+    assert [c["id"] for c in terminal["error"]["details"]["candidates"]] == ["t1", "t2"]

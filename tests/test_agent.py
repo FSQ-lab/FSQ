@@ -443,6 +443,52 @@ async def test_agent_events_redact_configured_values_before_persistence_and_disp
     assert events[0].message == "Check [REDACTED]"
 
 
+@pytest.mark.asyncio
+async def test_ios_agent_events_redact_local_signing_from_runtime_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_provider_refresh(monkeypatch)
+    settings = Settings(harness={"platform": "ios"})
+    settings.output.runs_dir = tmp_path
+    ios = settings.harness.ios
+    ios.xcode_org_id = "TEAM123456"
+    ios.xcode_signing_id = "Fixture%20Apple%20Signing"
+    ios.updated_wda_bundle_id = "com.example.privatewda"
+    private_values = (ios.xcode_org_id, ios.xcode_signing_id, ios.updated_wda_bundle_id)
+    events: list[RunEvent] = []
+
+    class SigningRuntime(_Runtime):
+        async def run_task(self, task, knowledge, skills, run_id, event_sink=None, **execution_context):
+            await event_sink(
+                RunEvent(
+                    run_id=run_id,
+                    task_id=task.id,
+                    type="agent_started",
+                    title="Runtime preview",
+                    message=" ".join(private_values),
+                    payload={
+                        "details": {private_values[0]: "ready"},
+                        "preview": json.dumps({private_values[1]: {private_values[2]: "observed"}, "public": "visible"}),
+                        "encoded_key": {"Fixture%2520Apple%2520Signing": "ready"},
+                    },
+                )
+            )
+            return await super().run_task(task, knowledge, skills, run_id, event_sink, **execution_context)
+
+    agent = FsqAgent(settings, Verifier(), _Reporter(), _KnowledgeLoader(), _SkillLoader(), SigningRuntime(), ExecutionLogger(tmp_path))
+    task = Task(id="ios-test", name="Inspect app", description="Task", key_actions=["Inspect"], verification_goal="Inspection complete.")
+    await _run_in_context(agent, task, "private-signing-run", events.append)
+
+    persisted = (tmp_path / "private-signing-run" / "events.jsonl").read_text(encoding="utf-8")
+    event = next(event for event in events if event.title == "Runtime preview")
+    assert event.message == "[REDACTED] [REDACTED] [REDACTED]"
+    assert event.payload["details"] == {"[REDACTED]": "ready"}
+    assert event.payload["encoded_key"] == {"[REDACTED]": "ready"}
+    assert json.loads(event.payload["preview"])["public"] == "visible"
+    assert "Runtime preview" in persisted
+    for private in private_values:
+        assert private not in persisted
+        assert private not in event.model_dump_json()
+
+
 async def _capture_failed_agent_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary: BaseException) -> tuple[RunEvent, str]:
     def failed_refresh(settings):
         raise primary

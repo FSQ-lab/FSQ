@@ -1,6 +1,6 @@
 import { ContentTabs } from '../../../shared/ContentTabs';
 import { useId } from 'react';
-import type { EvidenceTab, PlatformId, RunSnapshot } from '../../../api/types';
+import type { EvidenceTab, QuickTestPlatformId, RunSnapshot } from '../../../api/types';
 import { RunLogsView } from './RunLogsView';
 import { ReplayVideoView } from './ReplayVideoView';
 import { ScreenView } from './ScreenView';
@@ -15,7 +15,7 @@ interface LiveEvidencePanelProps {
   tab: EvidenceTab;
   snapshot: RunSnapshot | null;
   selectedStepId?: string | null;
-  platform: PlatformId | null;
+  platform: QuickTestPlatformId | null;
   targetLabel: string;
   onTabChange: (tab: EvidenceTab) => void;
   onClearStep?: () => void;

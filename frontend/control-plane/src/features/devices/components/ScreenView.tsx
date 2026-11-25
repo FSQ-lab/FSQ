@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { controlPlaneClient, toApiError } from '../../../api/controlPlaneClient';
-import type { PlatformId } from '../../../api/types';
+import type { QuickTestPlatformId } from '../../../api/types';
 
-export function ScreenView({ requestId, revision, platform, targetLabel }: { requestId: string | null; revision: number; platform: PlatformId | null; targetLabel: string }) {
+export function ScreenView({ requestId, revision, platform, targetLabel }: { requestId: string | null; revision: number; platform: QuickTestPlatformId | null; targetLabel: string }) {
   const [state, setState] = useState<'empty' | 'loading' | 'available' | 'unavailable' | 'error'>('empty');
   const [url, setUrl] = useState<string | null>(null);
   const [message, setMessage] = useState('');

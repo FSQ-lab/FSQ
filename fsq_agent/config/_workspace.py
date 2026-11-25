@@ -302,27 +302,43 @@ def _workspace_mutation_lock(name: str, user_config_root: str | Path | None, sel
     return _WRITE_LOCK
 
 
+def _quick_test_root(user_config_root: str | Path | None) -> Path:
+    root = _user_config_root(user_config_root) / _QUICK_TEST_WORKSPACE
+    if not root.is_absolute() or any(path.is_symlink() for path in (root, *root.parents)):
+        raise ConfigurationError("The Quick Test Workspace root is unsafe.", context={"workspace_failure": "unsafe_root"})
+    return root.resolve()
+
+
+def find_quick_test_workspace(user_config_root: str | Path | None = None) -> WorkspaceRegistryEntry | None:
+    """Resolve the exact registered dedicated identity without creating or reading platform configuration."""
+    root = _quick_test_root(user_config_root)
+    entry = None
+    for candidate in list_workspace_registry(user_config_root):
+        same_name = candidate.name.casefold() == _QUICK_TEST_WORKSPACE
+        same_root = candidate.root_path.resolve() == root
+        if same_name != same_root:
+            raise ConfigurationError("The Quick Test Workspace identity is conflicting.", context={"workspace_failure": "identity_conflict"})
+        if same_name:
+            entry = candidate
+    if entry is not None and not root.is_dir():
+        raise ConfigurationError("The registered Quick Test Workspace root is unavailable.", context={"workspace_failure": "identity_unavailable"})
+    return entry
+
+
 def _quick_test_workspace_snapshot(platform: str, target: object, user_config_root: str | Path | None) -> tuple[WorkspaceConfig, Path, Path, str]:
     user_root = _user_config_root(user_config_root)
-    root = user_root / _QUICK_TEST_WORKSPACE
-    if not user_root.is_absolute() or any(path.is_symlink() for path in (root, *root.parents)):
-        raise ConfigurationError("The Quick Test Workspace root is unsafe.", context={"workspace_failure": "unsafe_root"})
-    root = root.resolve()
+    root = _quick_test_root(user_root)
+    if target is None:
+        entry = find_quick_test_workspace(user_root)
+        if entry is None:
+            raise ConfigurationError("The Quick Test Workspace is not registered.", context={"workspace_failure": "identity_unavailable"})
+        _validate_quick_test_layout(root, platform)
+        return _read_quick_test_platform(root, platform, entry.name)
     with _user_config_lock(user_root):
-        entry = None
-        for candidate in list_workspace_registry(user_root):
-            same_name = candidate.name.casefold() == _QUICK_TEST_WORKSPACE
-            same_root = candidate.root_path.resolve() == root
-            if same_name != same_root:
-                raise ConfigurationError("The Quick Test Workspace identity is conflicting.", context={"workspace_failure": "identity_conflict"})
-            if same_name:
-                entry = candidate
-
+        entry = find_quick_test_workspace(user_root)
         config_path = _workspace_config_path(root, platform)
         name = entry.name if entry is not None else _QUICK_TEST_WORKSPACE
         if entry is not None:
-            if not root.is_dir():
-                raise ConfigurationError("The registered Quick Test Workspace root is unavailable.", context={"workspace_failure": "identity_unavailable"})
             _validate_quick_test_layout(root, platform)
         if entry is None or (not config_path.exists() and not config_path.is_symlink()):
             seed = WorkspacePlatformCreateInput(platform=platform, target=target, env={})
@@ -335,14 +351,18 @@ def _quick_test_workspace_snapshot(platform: str, target: object, user_config_ro
                     raise ConfigurationError("The registered Quick Test Workspace identity is unavailable.", context={"workspace_failure": "identity_unavailable"})
                 add_workspace_platform(name=name, platform=platform, target=seed.target, env={}, user_config_root=user_root)
 
-        try:
-            snapshot = _load_workspace_config_snapshot(root, platform)
-        except ConfigurationError as exc:
-            reason = exc.context.get("workspace_failure", "configuration_conflict")
-            raise ConfigurationError("The Quick Test Workspace platform is unavailable.", context={"workspace_failure": reason}) from exc
-        if snapshot[0].name != name:
-            raise ConfigurationError("The Quick Test Workspace platform identity is conflicting.", context={"workspace_failure": "identity_conflict"})
-        return snapshot
+        return _read_quick_test_platform(root, platform, name)
+
+
+def _read_quick_test_platform(root: Path, platform: str, name: str) -> tuple[WorkspaceConfig, Path, Path, str]:
+    try:
+        snapshot = _load_workspace_config_snapshot(root, platform)
+    except ConfigurationError as exc:
+        reason = exc.context.get("workspace_failure", "configuration_conflict")
+        raise ConfigurationError("The Quick Test Workspace platform is unavailable.", context={"workspace_failure": reason}) from exc
+    if snapshot[0].name != name:
+        raise ConfigurationError("The Quick Test Workspace platform identity is conflicting.", context={"workspace_failure": "identity_conflict"})
+    return snapshot
 
 
 def _validate_quick_test_layout(root: Path, platform: str) -> None:

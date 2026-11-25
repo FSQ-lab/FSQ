@@ -278,7 +278,7 @@ async def test_case_create_and_test_reject_udid_on_non_ios_and_validate_explicit
     assert missing_udid.value.code.value == "environment.unavailable"
 
 
-def test_cli_accepts_ios_for_init_and_case_commands_while_keeping_quick_test_phase1_scoped() -> None:
+def test_cli_accepts_ios_for_init_and_case_commands() -> None:
     runner = CliRunner()
 
     init_help = runner.invoke(main, ["init", "--help"])
@@ -290,8 +290,3 @@ def test_cli_accepts_ios_for_init_and_case_commands_while_keeping_quick_test_pha
     case_test_help = runner.invoke(main, ["case", "test", "--help"])
     assert case_test_help.exit_code == 0
     assert "--udid" in case_test_help.output
-
-    # Quick Test remains Phase-1 scoped to android|web|windows|macos without silently routing ios
-    qt_ios = runner.invoke(main, ["quick-test", "context", "--platform", "ios"])
-    assert qt_ios.exit_code != 0
-    assert "Invalid value for '--platform'" in qt_ios.output

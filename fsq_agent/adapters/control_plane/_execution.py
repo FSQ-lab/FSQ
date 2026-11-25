@@ -227,12 +227,16 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
     projection = _projection(settings, state, request_id)
     try:
         state.raise_if_cancelled(request_id)
-        state.transition(request_id, "running", summary="Explore run is executing.")
+        ios_quick_test = settings.harness.platform == "ios" and prepared.quick_test_preparation is not None
+        if not ios_quick_test:
+            state.transition(request_id, "running", summary="Explore run is executing.")
         if getattr(prepared, "quick_test_preparation", None) is not None:
 
             async def progress(event):
                 if event.get("type"):
                     projection.project_run_event(RunEvent.model_validate(event))
+                elif ios_quick_test and event.get("phase") == "running":
+                    state.transition(request_id, "running", summary=projection.safe_text(event["message"]))
                 elif event.get("phase") == "finalizing":
                     state.transition(request_id, "finalizing", summary=event["message"])
 
@@ -311,6 +315,14 @@ async def _run_explore(prepared: PreparedRun, state: ControlPlaneState) -> None:
         _finish_explore_error(prepared, state, projection, exc, cancelled=True)
         if isinstance(exc, asyncio.CancelledError):
             raise
+    except ApplicationError as exc:
+        if settings.harness.platform == "ios" and prepared.quick_test_preparation is not None and exc.code.value == "quick_test.prerequisites":
+            error = {"code": exc.code.value, "message": projection.safe_text(exc.message), "action": projection.safe_text(exc.action or "")}
+            if exc.details:
+                error["details"] = _safe_details(exc.details, projection.safe_text)
+            state.finish(request_id, status="error", summary=error["message"], error=error)
+        else:
+            _finish_explore_error(prepared, state, projection, exc)
     except Exception as exc:  # noqa: BLE001 - background failures are normalized into task state.
         _finish_explore_error(prepared, state, projection, exc)
 

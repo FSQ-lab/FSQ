@@ -66,7 +66,6 @@ from fsq_agent.application import (
 from ._composition import create_case_agent
 
 PLATFORMS = click.Choice(["android", "web", "windows", "macos", "ios"])
-QUICK_TEST_PLATFORMS = click.Choice(["android", "web", "windows", "macos"])
 OUTPUTS = click.Choice(["human", "json", "jsonl"])
 RUN_STATUSES = click.Choice(["preparing", "running", "finalizing", "success", "failed", "inconclusive", "cancelled", "error", "interrupted"])
 
@@ -364,7 +363,7 @@ def quick_test_group() -> None:
 
 
 @quick_test_group.command(name="context")
-@click.option("--platform", type=QUICK_TEST_PLATFORMS, required=True)
+@click.option("--platform", type=PLATFORMS, required=True)
 @click.option("--target-id", default=None)
 @click.pass_context
 def quick_test_context(context: click.Context, platform: str, target_id: str | None) -> None:
@@ -375,7 +374,7 @@ def quick_test_context(context: click.Context, platform: str, target_id: str | N
 
 
 @quick_test_group.command(name="run")
-@click.option("--platform", type=QUICK_TEST_PLATFORMS, required=True)
+@click.option("--platform", type=PLATFORMS, required=True)
 @click.option("--goal", required=True)
 @click.option("--target-id", default=None)
 @click.option("--url", default=None, help="Exact HTTP(S) starting address (Web only).")

@@ -89,9 +89,9 @@ class ApplicationCandidate(BaseModel):
 class ApplicationInventoryResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    status: Literal["complete", "failed"]
+    status: Literal["complete", "failed", "unsupported"]
     candidates: tuple[ApplicationCandidate, ...] = ()
-    code: Literal["complete", "invalid_query", "discovery_failed", "discovery_timeout"] = "complete"
+    code: Literal["complete", "invalid_query", "discovery_failed", "discovery_timeout", "unsupported"] = "complete"
     from_cache: bool = False
     fingerprint: str | None = None
 

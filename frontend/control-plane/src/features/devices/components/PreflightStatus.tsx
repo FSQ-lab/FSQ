@@ -1,6 +1,6 @@
 import { Check, Ellipsis, Minus, TriangleAlert } from 'lucide-react';
 import { useId } from 'react';
-import type { DiagnosticDetail, PlatformId, QuickDiagnostics, ReadinessRecord, ReadinessResponse, RunMode } from '../../../api/types';
+import type { DiagnosticDetail, QuickDiagnostics, QuickTestPlatformId, ReadinessRecord, ReadinessResponse, RunMode } from '../../../api/types';
 import { PrerequisiteList } from './PrerequisiteList';
 import ReactMarkdown from 'react-markdown';
 import prerequisiteGuide from '../../../../../../docs/platform-prerequisites.md?raw';
@@ -19,7 +19,7 @@ interface PreflightStatusProps {
   onRecheck?: () => void;
   onRepair?: () => void;
   locked?: boolean;
-  pendingContext?: { platform: PlatformId | ''; diagnostics: QuickDiagnostics | null };
+  pendingContext?: { platform: QuickTestPlatformId | ''; diagnostics: QuickDiagnostics | null };
 }
 
 function PreflightItem({ label, record, loading }: { label: string; record?: ReadinessRecord | DiagnosticDetail; loading: boolean }) {
@@ -34,7 +34,7 @@ function PreflightItem({ label, record, loading }: { label: string; record?: Rea
 export function PreflightStatus({ mode, workspace, provider, target, strict, loading, diagnostics, macos, android, onRecheck, onRepair, locked, pendingContext }: PreflightStatusProps) {
   const titleId = useId();
   if (macos || android || pendingContext) {
-    const labels: Record<PlatformId, string> = { android: 'Android', macos: 'macOS', web: 'Web', windows: 'Windows' };
+    const labels: Record<QuickTestPlatformId, string> = { android: 'Android', ios: 'iOS', macos: 'macOS', web: 'Web', windows: 'Windows' };
     const selectedPlatform = pendingContext ? pendingContext.platform : android ? 'android' : 'macos';
     const label = selectedPlatform ? labels[selectedPlatform] : '';
     const current = pendingContext ? pendingContext.diagnostics : diagnostics;

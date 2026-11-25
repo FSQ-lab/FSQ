@@ -10,8 +10,8 @@ from fsq_agent.application.contracts.shared import ApplicationError, Application
 from fsq_agent.application.contracts.workspace import QuickTestCheck, QuickTestChoice, QuickTestContextRequest, QuickTestContextResult, QuickTestPrepareRequest, QuickTestPrepareResult
 from fsq_agent.application.doctor import PlatformDiagnosticContext, diagnose_platform_settings
 from fsq_agent.config import Settings, load_platform_settings, load_quick_test_workspace_settings, load_windows_application_catalogue, validate_runtime_settings
-from fsq_agent.environments import AndroidDeviceDiscovery, PlatformRuntimeService
-from fsq_agent.models import AndroidWorkspaceTarget, ConfigurationError, MacOSWorkspaceTarget, WebWorkspaceTarget, WindowsWorkspaceTarget
+from fsq_agent.environments import AndroidDeviceDiscovery, IOSDeviceDiscovery, PlatformRuntimeService
+from fsq_agent.models import AndroidWorkspaceTarget, ConfigurationError, IOSWorkspaceTarget, MacOSWorkspaceTarget, WebWorkspaceTarget, WindowsWorkspaceTarget
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -30,6 +30,12 @@ _ERRORS = {
     "workspace_conflict": ("The dedicated Quick Test Workspace is conflicting or unavailable.", "Inspect the quick-test Workspace in Case Manager; no alternate Workspace was used."),
     "persistence_failed": ("The dedicated Quick Test Workspace could not be persisted.", "Check local storage availability and permissions, then retry."),
 }
+_IOS_SIGNING_ACTION = (
+    "Configure target.xcode_org_id and target.xcode_signing_id in the dedicated Quick Test Workspace's .fsq/config/config.ios.yaml. "
+    "If absent, initialize iOS locally with fsq init --platform ios from the exact dedicated quick-test root (normally ~/.fsq/quick-test)."
+)
+_IOS_SIGNING_FIELDS = ("xcode_org_id", "xcode_signing_id", "updated_wda_bundle_id")
+_IOS_EXPLICIT_BUNDLE_ACTION = "Put the exact installed application's iOS bundle ID in the goal; this host cannot verify installation on the selected physical device."
 
 
 def _safe_url_diagnostic(url: str) -> str | None:
@@ -63,8 +69,9 @@ def _error(
     target_name: str | None = None,
     candidates: Sequence[ApplicationCandidate] | None = None,
     url: str | None = None,
+    action: str | None = None,
 ) -> ApplicationError:
-    message, action = _ERRORS[kind]
+    message, default_action = _ERRORS[kind]
     details: dict[str, object] = {}
     if stage:
         details["stage"] = stage
@@ -82,7 +89,7 @@ def _error(
         code=ApplicationErrorCode(f"quick_test.{kind}"),
         category=ApplicationErrorCategory.UNAVAILABLE if kind == "persistence_failed" else ApplicationErrorCategory.REQUEST_VALIDATION,
         message=message,
-        action=action,
+        action=action or default_action,
         details=details or None,
     )
 
@@ -108,6 +115,19 @@ def _context(request: QuickTestContextRequest, settings: Settings | None) -> Qui
             )
         except Exception:  # noqa: BLE001 -- shared diagnosis supplies the failure facts; choices are only selection data.
             choices = []
+    elif request.platform == "ios":
+        choices = _ios_choices()
+        if settings is not None:
+            settings.harness.ios.udid = request.target_id
+            if any(choice.id == request.target_id and choice.selectable and choice.kind == "device" for choice in choices):
+                try:
+                    _, _, configured = load_quick_test_workspace_settings("ios", None, request.user_config_root)
+                except ConfigurationError:
+                    # The shared signing fact reports missing/invalid configuration without input values.
+                    pass
+                else:
+                    for field in _IOS_SIGNING_FIELDS:
+                        setattr(settings.harness.ios, field, getattr(configured.harness.ios, field))
     elif settings is not None and request.platform == "web":
         settings.harness.web.browser_executable_path = None
         if request.target_id is not None:
@@ -128,9 +148,14 @@ def _context(request: QuickTestContextRequest, settings: Settings | None) -> Qui
             application_pending=True,
             workspace_pending=True,
             require_explicit_selection=True,
-            target_id=request.target_id if request.platform == "android" else None,
+            target_id=request.target_id if request.platform in {"android", "ios"} else None,
         ),
     )
+    if request.platform == "ios":
+        prerequisites = tuple(
+            item.model_copy(update={"action": _IOS_SIGNING_ACTION}) if item.identifier == "wda_signing" and item.status in {"unavailable", "error"} else item for item in diagnosis.prerequisites
+        )
+        diagnosis = diagnosis.model_copy(update={"prerequisites": prerequisites})
     # Retain the original compact fields as a compatibility projection, not a
     # second diagnostic graph or eligibility calculation.
     checks = [
@@ -145,11 +170,29 @@ def _context(request: QuickTestContextRequest, settings: Settings | None) -> Qui
     return QuickTestContextResult(
         platform=request.platform,
         target_id=request.target_id,
-        can_start=diagnosis.preparation is not None and diagnosis.preparation.status == "ready",
+        can_start=(
+            diagnosis.preparation is not None
+            and diagnosis.preparation.status == "ready"
+            and (request.platform != "ios" or any(choice.id == request.target_id and choice.selectable for choice in choices))
+        ),
         choices=tuple(choices),
         checks=tuple(checks),
         diagnosis=diagnosis,
     )
+
+
+def _ios_choices() -> list[QuickTestChoice]:
+    try:
+        discovery = IOSDeviceDiscovery().discover()
+    except Exception:  # noqa: BLE001 -- shared diagnosis owns the safe discovery failure.
+        return []
+    if discovery.error_code:
+        return []
+    choices = []
+    for device in discovery.devices:
+        selectable = (device.kind, device.state) in {("simulator", "booted"), ("device", "connected")}
+        choices.append(QuickTestChoice(id=device.udid, label=device.name, kind=device.kind, state=device.state, selectable=selectable, status="ready" if selectable else "unavailable"))
+    return choices
 
 
 def _build_native_target(platform: str, candidate: ApplicationCandidate):
@@ -157,6 +200,8 @@ def _build_native_target(platform: str, candidate: ApplicationCandidate):
         return AndroidWorkspaceTarget(app_id=candidate.app_id)
     if platform == "macos":
         return MacOSWorkspaceTarget(app_path=candidate.app_path, bundle_id=candidate.bundle_id)
+    if platform == "ios":
+        return IOSWorkspaceTarget(bundle_id=candidate.bundle_id, app_path=candidate.app_path)
     return WindowsWorkspaceTarget(app_path=candidate.app_path, window_title_re=candidate.window_title_re)
 
 
@@ -182,12 +227,20 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     except Exception:  # noqa: BLE001 -- configuration and host errors become safe prerequisite facts.
         raise _error("prerequisites", reason="context_unavailable") from None
     if not context.can_start:
+        if request.platform == "ios":
+            signing = next((item for item in context.checks if item.id == "wda_signing" and item.status in {"unavailable", "error"}), None)
+            if signing is not None:
+                raise _error("prerequisites", reason="ios_wda_signing_required", action=signing.action)
         raise _error("prerequisites", reason="prerequisites_not_ready")
+    physical_ios = request.platform == "ios" and any(choice.id == request.target_id and choice.kind == "device" for choice in context.choices)
+    if physical_ios:
+        _check_ios_signing(settings, request.goal)
     cancel()
 
     runtime = PlatformRuntimeService()
     catalogue = None
     inventory_result = None
+    installation_unverified = False
     if request.platform != "web":
         if request.platform == "windows":
             try:
@@ -200,7 +253,8 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
             windows_catalogue=catalogue,
             force_refresh=False,
         )
-        if inventory_result.status != "complete":
+        installation_unverified = physical_ios and inventory_result.status == "unsupported"
+        if inventory_result.status != "complete" and not installation_unverified:
             raise _error("discovery_failed", reason=inventory_result.code)
         cancel()
 
@@ -222,10 +276,8 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     intent = _analyze_once(inventory_result.candidates if inventory_result is not None else None)
     cancel()
 
-    # Cache-miss single live refresh: only for native platforms when initial inventory came from cache
-    # and the model reported application_not_found. Re-invoke Model.complete at most once, and only
-    # if the refreshed inventory actually changed.
-    if inventory_result is not None and inventory_result.from_cache and not intent.sufficient and intent.reason == "application_not_found":
+    # A cached miss earns one live refresh, except on physical iOS devices.
+    if not physical_ios and inventory_result is not None and inventory_result.from_cache and not intent.sufficient and intent.reason == "application_not_found":
         refreshed = runtime.list_applications(
             platform=request.platform,
             target_id=request.target_id,
@@ -241,6 +293,8 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
             cancel()
 
     if not intent.sufficient:
+        if installation_unverified and intent.reason in {"missing_application", "application_not_found", "ambiguous_application"}:
+            raise _error("application_missing", reason="ios_physical_inventory_unsupported", action=_IOS_EXPLICIT_BUNDLE_ACTION)
         kind = {
             "insufficient": "insufficient",
             "missing_application": "application_missing",
@@ -297,6 +351,8 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
                 raise _error("discovery_failed", target_name=intent.target_name or candidate.label, reason="invalid_candidate_target") from None
             application = candidate.label
         elif intent.explicit_reference is not None:
+            if physical_ios and intent.explicit_reference.startswith("/"):
+                raise _error("application_not_found", reason="ios_physical_bundle_id_required", action=_IOS_EXPLICIT_BUNDLE_ACTION)
             name = intent.target_name or intent.explicit_reference
             lookup = runtime.lookup_application(
                 platform=request.platform,
@@ -338,7 +394,12 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     if not available:
         raise _error("prerequisites", target_name=application, reason="target_unavailable")
     cancel()
-    name, revision, frozen = _load_workspace_settings(request, target)
+    name, revision, frozen = _load_workspace_settings(request, None if physical_ios else target)
+    if physical_ios:
+        _check_ios_signing(frozen, request.goal)
+    elif request.platform == "ios":
+        for field in _IOS_SIGNING_FIELDS:
+            setattr(frozen.harness.ios, field, None)
     _bind_target(frozen, target, request.target_id)
     if request.platform == "web":
         frozen.harness.web.base_url = address
@@ -347,11 +408,12 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
         workspace_name=name,
         root_path=frozen.workspace.root_dir,
         platform_revision=revision,
-        target_id=request.target_id if request.platform in {"android", "web"} else f"{request.platform}-app",
+        target_id=request.target_id or f"{request.platform}-app",
         target=target,
         application=application,
         settings=frozen,
         requires_web_search_evidence=requires_web_search_evidence,
+        installation_unverified=installation_unverified,
     )
 
 
@@ -365,10 +427,22 @@ def _bind_target(settings, target, target_id):
     elif isinstance(target, MacOSWorkspaceTarget):
         settings.harness.macos.app_path = target.app_path
         settings.harness.macos.bundle_id = target.bundle_id
+    elif isinstance(target, IOSWorkspaceTarget):
+        settings.harness.ios.app_path = target.app_path
+        settings.harness.ios.bundle_id = target.bundle_id
+        settings.harness.ios.udid = target_id
     else:
         settings.harness.windows.app_path = target.app_path
         settings.harness.windows.window_title_re = target.window_title_re
         settings.harness.windows.launch_args = []
+
+
+def _check_ios_signing(settings: Settings, goal: str) -> None:
+    ios = settings.harness.ios
+    if not ios.xcode_org_id or not ios.xcode_signing_id:
+        raise _error("prerequisites", reason="ios_wda_signing_required", action=_IOS_SIGNING_ACTION)
+    if any((value := getattr(ios, field)) and value in goal for field in _IOS_SIGNING_FIELDS):
+        raise _error("insufficient", reason="ios_signing_in_goal", action="Remove WDA signing values from the goal and keep them in local configuration.")
 
 
 def _has_io_cause(error: BaseException) -> bool:

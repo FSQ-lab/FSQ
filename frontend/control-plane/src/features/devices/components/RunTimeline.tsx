@@ -162,7 +162,7 @@ export function RunTimeline({ variant = 'case-manager', actionContainer, snapsho
   const [saveResultOpen, setSaveResultOpen] = useState(false);
   const [caseName, setCaseName] = useState('');
   const lastSequence = snapshot?.events.at(-1)?.sequence ?? 0;
-  const source = snapshot ? (snapshot.mode === 'explore' ? snapshot.source.goal : snapshot.source.caseContent ?? snapshot.source.casePath) : pendingGoal;
+  const source = snapshot?.mode === 'strict' ? snapshot.source.caseContent ?? snapshot.source.casePath : snapshot?.source.goal ?? pendingGoal;
   const saveNameError = invalidCaseName(caseName);
   const savePathPreview = snapshot ? `cases/${snapshot.platform}/${caseName.trim() || defaultCaseName(snapshot)}${FSQ_CASE_SUFFIX}` : '';
   const openSaveDialog = () => {

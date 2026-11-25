@@ -24,7 +24,7 @@ class PlatformDiagnosticContext(BaseModel):
         min_length=1,
         max_length=256,
         pattern=r"^[A-Za-z0-9_.:@-]+$",
-        description="Requested Android selection scope, not proof of device availability.",
+        description="Requested Android or iOS selection scope, not proof of device availability.",
     )
 
     @model_validator(mode="after")

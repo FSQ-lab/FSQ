@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import type { EvidenceTab, PlatformId } from '../../api/types';
+import type { EvidenceTab, QuickTestChoice, QuickTestPlatformId } from '../../api/types';
 import { LiveEvidencePanel } from '../devices/components/LiveEvidencePanel';
 import { RunTimeline } from '../devices/components/RunTimeline';
 import { PreflightStatus } from '../devices/components/PreflightStatus';
@@ -9,8 +9,13 @@ import './quick-test.css';
 interface QuickTestPageProps {
   active: boolean;
   onCaseManager: () => void;
-  onOpenReport: (workspace: string, platform: PlatformId, runId: string) => void;
+  onOpenReport: (workspace: string, platform: QuickTestPlatformId, runId: string) => void;
 }
+function iosChoiceLabel(choice: QuickTestChoice) {
+  const kind = choice.kind === 'simulator' ? 'Simulator' : choice.kind === 'device' ? 'Physical device' : 'Kind unknown';
+  return `${choice.label} (${choice.id}) — ${kind} · ${choice.state ?? 'state unknown'} · ${choice.selectable && choice.status === 'ready' ? 'selectable' : choice.status === 'error' ? 'check failed' : 'unavailable'}`;
+}
+
 export function QuickTestPage({ active, onCaseManager, onOpenReport }: QuickTestPageProps) {
   const test = useQuickTest(active);
   const [tab, setTab] = useState<EvidenceTab>('screen');
@@ -18,6 +23,7 @@ export function QuickTestPage({ active, onCaseManager, onOpenReport }: QuickTest
   const heading = useRef<HTMLHeadingElement>(null);
   const prompt = useRef<HTMLTextAreaElement>(null);
   const snapshot = test.snapshot;
+  const iosDevice = test.platform === 'ios' ? test.choices.find(choice => choice.id === test.targetId) : undefined;
   const showWorkbench = test.starting || test.running;
   const status = snapshot?.status ?? (showWorkbench ? 'preparing' : null);
   const statusLabel = status === 'preparing' ? 'Preparing' : status === 'running' ? 'Running' : status ?? 'Awaiting server snapshot';
@@ -41,17 +47,18 @@ export function QuickTestPage({ active, onCaseManager, onOpenReport }: QuickTest
       <section className="operation-card" aria-label="Quick Test preparation">
         <div className="quick-test-fields">
           <label htmlFor="quick-platform">Platform</label>
-          <select id="quick-platform" value={test.platform} disabled={test.locked} onChange={event => test.setPlatform(event.target.value as PlatformId | '')}>
+          <select id="quick-platform" value={test.platform} disabled={test.locked} onChange={event => test.setPlatform(event.target.value as QuickTestPlatformId | '')}>
             <option value="">Select a platform</option>
-            {test.bootstrap?.platforms.map(platform => <option key={platform.id} value={platform.id}>{platform.label}</option>)}
+            {test.platforms?.map(platform => <option key={platform.id} value={platform.id}>{platform.label}</option>)}
           </select>
-          {(test.platform === 'android' || test.platform === 'web') && <>
+          {test.targetNeeded && <>
             <label htmlFor="quick-target">{test.platform === 'web' ? 'Browser' : 'Device'}</label>
-            <select id="quick-target" value={test.targetId} disabled={test.locked} onChange={event => test.setTargetId(event.target.value)}>
+            <select id="quick-target" value={test.targetId} disabled={test.locked} aria-describedby={iosDevice ? 'quick-device-details' : undefined} onChange={event => test.setTargetId(event.target.value)}>
               <option value="">Select a {test.platform === 'web' ? 'browser' : 'device'}</option>
-              {(test.locked || test.platform === 'android') && test.targetId && !test.choices.some(choice => choice.id === test.targetId) && <option value={test.targetId} disabled={Boolean(test.deviceSelectionStatus)}>{test.targetId}{test.deviceSelectionStatus ? ` — ${test.deviceSelectionStatus}` : ''}</option>}
-              {test.choices.map(choice => <option key={choice.id} value={choice.id} disabled={!choice.selectable || choice.status !== 'ready' || (choice.id === test.targetId && Boolean(test.deviceSelectionStatus))}>{choice.label}{choice.id === test.targetId && test.deviceSelectionStatus ? ` — ${test.deviceSelectionStatus}` : ''}</option>)}
+              {(test.locked || test.hasDeviceSelection) && test.targetId && !test.choices.some(choice => choice.id === test.targetId) && <option value={test.targetId} disabled={Boolean(test.deviceSelectionStatus)}>{test.targetId}{test.deviceSelectionStatus ? ` — ${test.deviceSelectionStatus}` : ''}</option>}
+              {test.choices.map(choice => <option key={choice.id} value={choice.id} disabled={!choice.selectable || choice.status !== 'ready' || (choice.id === test.targetId && Boolean(test.deviceSelectionStatus))}>{test.platform === 'ios' ? iosChoiceLabel(choice) : choice.label}{choice.id === test.targetId && test.deviceSelectionStatus ? ` — ${test.deviceSelectionStatus}` : ''}</option>)}
             </select>
+            {iosDevice && <p id="quick-device-details">{iosChoiceLabel(iosDevice)}</p>}
           </>}
           <label htmlFor="quick-goal">What do you want to test?</label>
           <p id="quick-goal-help">Name {test.platform === 'web' ? 'the site or search subject' : 'the app'}, describe what to do, and explain what should happen.{test.platform === 'web' && ' For Web, provide a URL or describe a clear search goal.'} You can include technical identifiers here.</p>
@@ -69,7 +76,7 @@ export function QuickTestPage({ active, onCaseManager, onOpenReport }: QuickTest
     </div>}
     {showWorkbench && <div className="devices-workbench">
       <section className="operation-card"><header className="card-header"><h2>Activity</h2></header><div className="operation-body operation-body--run">
-        <RunTimeline variant="quick-test" snapshot={snapshot} pendingGoal={test.goal} connection={test.connection} selectedStepId={step} resultHeadingRef={heading} onSelectStep={setStep} onCancel={() => void test.cancel()} onNewRun={newTest} />
+        <RunTimeline variant="quick-test" snapshot={snapshot} pendingGoal={test.pendingGoal} connection={test.connection} selectedStepId={step} resultHeadingRef={heading} onSelectStep={setStep} onCancel={() => void test.cancel()} onNewRun={newTest} />
       </div></section>
       <LiveEvidencePanel tab={tab} snapshot={snapshot} selectedStepId={step} platform={snapshot?.platform ?? (test.platform || null)} targetLabel={snapshot?.application ?? 'Application identity unavailable'} onTabChange={setTab} onClearStep={() => setStep(null)} />
     </div>}

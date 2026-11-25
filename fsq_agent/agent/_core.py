@@ -126,7 +126,11 @@ class FsqAgent:
 
     @staticmethod
     def _runtime_secret_values(settings: Settings) -> tuple[str, ...]:
-        return tuple(sorted(set(settings.runtime_secrets.private_values().values()), key=len, reverse=True))
+        values = set(settings.runtime_secrets.private_values().values())
+        if settings.harness.platform == "ios":
+            ios = settings.harness.ios
+            values.update(value for value in (ios.xcode_org_id, ios.xcode_signing_id, ios.updated_wda_bundle_id) if value)
+        return tuple(sorted(values, key=len, reverse=True))
 
     async def run_in_context(
         self,

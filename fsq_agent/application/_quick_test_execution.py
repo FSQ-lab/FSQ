@@ -45,6 +45,10 @@ async def execute_prepared_quick_test(prepared: QuickTestPrepareResult, goal: st
         check_cancelled()
     settings = prepared.settings.model_copy(deep=True)
     secrets = (*settings.runtime_secrets.private_values().values(), settings.agent_runtime.api_key)
+    if settings.harness.platform == "ios":
+        ios = settings.harness.ios
+        secrets += tuple(value for value in (ios.xcode_org_id, ios.xcode_signing_id, ios.updated_wda_bundle_id) if value)
+    preparation_warnings = ["quick_test.ios_application_installation_unverified"] if prepared.installation_unverified else []
 
     def safe(text):
         return _safe_text(str(text), secrets)
@@ -88,7 +92,10 @@ async def execute_prepared_quick_test(prepared: QuickTestPrepareResult, goal: st
         "target": prepared.target,
         "application": safe(prepared.application),
     }
-    await _emit(event_sink, {"phase": "running", "message": "Executing the prepared Quick Test goal.", "application": base["application"]})
+    message = "Executing the prepared Quick Test goal."
+    if prepared.installation_unverified:
+        message = "Executing against the explicit iOS bundle ID; installation could not be verified before execution."
+    await _emit(event_sink, {"phase": "running", "message": message, "application": base["application"]})
     try:
         execution = await DynamicExecutionService(agent=agent_factory(settings)).execute(
             DynamicExecutionRequest(
@@ -129,7 +136,7 @@ async def execute_prepared_quick_test(prepared: QuickTestPrepareResult, goal: st
             **paths,
             verification=verification,
             duration_ms=frozen.duration_ms if frozen else None,
-            warnings=["quick_test.execution_processing_stopped"],
+            warnings=[*preparation_warnings, "quick_test.execution_processing_stopped"],
         )
         if cancelled or (frozen and frozen.outcome == "error"):
             return recovered
@@ -144,7 +151,7 @@ async def execute_prepared_quick_test(prepared: QuickTestPrepareResult, goal: st
     recording = execution.recording
     paths = _paths(settings.output.runs_dir, result.report.run_id, report=result.report.path, candidate=recording.recorded_case_path if recording else None)
     verification = VerificationResult.model_validate(_safe_encoded_values(RunLifecycleService.safe_value(result.verification.model_dump(), secrets), secrets))
-    warnings = [safe(item) for item in recording.warnings] if recording else ["case.recording_unavailable"]
+    warnings = [*preparation_warnings, *(safe(item) for item in recording.warnings)] if recording else [*preparation_warnings, "case.recording_unavailable"]
     if recording and recording.status != "recorded":
         warnings.append("case.recording_failed")
         warnings.extend(safe(item) for item in recording.errors)

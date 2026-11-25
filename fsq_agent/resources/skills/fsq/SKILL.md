@@ -34,14 +34,14 @@ one compact batch of read-only discovery commands and their purpose; ordinary
 read-only commands do not need separate permission for each call. Host and
 operating-system approval mechanisms remain independent.
 
-Select Android, Web, Windows, or macOS under the existing host restrictions.
+Select Android, iOS, Web, Windows, or macOS under the existing host restrictions.
 Use the user's stated platform or exact project/host facts. For the selected
 platform discover prerequisites and device/browser choices with:
 
 `fsq --output json --non-interactive quick-test context --platform "<platform>"`
 
-For Android or Web, pass an already established exact device serial or browser
-channel when available:
+For Android, iOS, or Web, pass an already established exact Android serial,
+iOS Simulator/physical-device UDID, or browser channel when available:
 
 `fsq --output json --non-interactive quick-test context --platform "<platform>" --target-id "<target-id>"`
 
@@ -53,6 +53,14 @@ explicit selection exists. Never replace an explicit device, including a missing
 or unauthorized one. Multiple Android devices or unresolved browser choices need
 one user decision; do not guess from ordering. Windows/macOS do not accept a
 target-id option: their application identity is part of the goal.
+
+For iOS, obtain the user's explicit device choice even if just one is selectable.
+If the selected physical device is blocked on WDA signing, direct the user to the
+local setup in the returned diagnostic. Never request signing values in chat,
+include them in a goal or Quick Test arguments, or perform the setup yourself.
+If the host cannot enumerate apps on that device, use only an exact user-supplied
+bundle ID and acknowledge that installation is unverified. A Simulator can use
+an installed app or an exact absolute local `.app` path.
 
 Ask for the smallest cohesive group of unresolved user-owned decisions only.
 Do not repeat settled questions. Preserve exact supplied URLs, package/bundle
@@ -108,8 +116,8 @@ selected browser and separate exact URL:
 
 `fsq --output jsonl --non-interactive quick-test run --platform web --target-id "<target-id>" --url "<exact-url>" --goal "<confirmed-goal>"`
 
-For Android or Web without a separate starting URL, use the existing goal path
-with the selected device/browser. URL-free Web search keeps the discovery
+For Android, iOS, or Web without a separate starting URL, use the existing goal
+path with the selected device/browser. URL-free Web search keeps the discovery
 objective and checkable result in the goal; do not guess a starting address:
 
 `fsq --output jsonl --non-interactive quick-test run --platform "<platform>" --target-id "<target-id>" --goal "<confirmed-goal>"`

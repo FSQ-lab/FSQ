@@ -16,7 +16,7 @@ from fsq_agent.adapters.cli import main
 from fsq_agent.application import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode
 
 
-@pytest.mark.parametrize(("platform", "target"), [("web", "chrome"), ("android", "device-1"), ("macos", None), ("windows", None)])
+@pytest.mark.parametrize(("platform", "target"), [("web", "chrome"), ("android", "device-1"), ("ios", "ios-udid"), ("macos", None), ("windows", None)])
 def test_standalone_run_maps_request_and_streams_one_terminal(monkeypatch, tmp_path, platform, target):
     seen = []
 
@@ -65,11 +65,11 @@ def test_web_url_option_preserves_target_and_goal_in_machine_request(monkeypatch
     assert record["type"] == "result"
 
 
-@pytest.mark.parametrize("platform", ["android", "macos", "windows"])
+@pytest.mark.parametrize("platform", ["android", "ios", "macos", "windows"])
 def test_url_option_rejected_for_native_before_submission(monkeypatch, platform):
     monkeypatch.setattr("fsq_agent.adapters.cli._main.run_quick_test", lambda *a, **k: pytest.fail("Native URL submitted"))
     args = ["--platform", platform, "--goal", "Calculator: 1+1=2", "--url", "https://example.test"]
-    if platform == "android":
+    if platform in {"android", "ios"}:
         args += ["--target-id", "device"]
     result = CliRunner().invoke(main, ["--output", "json", "quick-test", "run", *args])
     assert result.exit_code == 2
@@ -89,7 +89,14 @@ def test_invalid_web_url_has_safe_terminal_without_inference_or_config(monkeypat
 
 
 @pytest.mark.parametrize(
-    "argv", [[], ["--platform", "web", "--goal", "Test"], ["--platform", "macos", "--goal", "Test", "--target-id", "override"], ["--platform", "web", "--goal", " ", "--target-id", "chrome"]]
+    "argv",
+    [
+        [],
+        ["--platform", "web", "--goal", "Test"],
+        ["--platform", "ios", "--goal", "Test"],
+        ["--platform", "macos", "--goal", "Test", "--target-id", "override"],
+        ["--platform", "web", "--goal", " ", "--target-id", "chrome"],
+    ],
 )
 def test_invalid_run_is_structured_and_never_submitted(monkeypatch, argv):
     monkeypatch.setattr("fsq_agent.adapters.cli._main.run_quick_test", lambda *a, **k: pytest.fail("Invalid submission"))
@@ -111,16 +118,18 @@ def test_terminal_execution_status_controls_exit(monkeypatch, status, exit_code)
     assert json.loads(result.output)["result"]["status"] == status
 
 
-def test_context_unavailable_is_valid_result_without_submission(monkeypatch):
+@pytest.mark.parametrize("platform", ["web", "ios"])
+def test_context_unavailable_is_valid_result_without_submission(monkeypatch, platform):
     monkeypatch.setattr(
         "fsq_agent.adapters.cli._main.get_quick_test_context", lambda request: SimpleNamespace(can_start=False, model_dump=lambda **kw: {"can_start": False, "platform": request.platform})
     )
-    result = CliRunner().invoke(main, ["--output", "json", "quick-test", "context", "--platform", "web"])
+    result = CliRunner().invoke(main, ["--output", "json", "quick-test", "context", "--platform", platform])
     assert result.exit_code == 4
     record = json.loads(result.output)
     assert record["type"] == "result"
     assert record["operation"] == "quick-test.context"
     assert record["result"]["can_start"] is False
+    assert record["result"]["platform"] == platform
 
 
 def test_preparation_error_retains_classified_facts_without_run(monkeypatch):

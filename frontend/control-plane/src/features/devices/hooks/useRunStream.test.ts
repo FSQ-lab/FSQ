@@ -8,7 +8,7 @@ afterEach(() => {
   TestEventSource.instances = [];
 });
 
-const snapshot = (overrides: Partial<RunSnapshot> = {}): RunSnapshot => ({
+const snapshot = (overrides: Partial<Extract<RunSnapshot, { platform: 'web' | 'macos' | 'android' | 'windows' }>> = {}): RunSnapshot => ({
   workflow: 'case-manager', application: null, platformRevision: null,
   requestId: 'request-1', runId: 'run-1', workspaceName: 'test', platform: 'web', targetId: 'chrome', mode: 'explore', status: 'running',
   source: { goal: 'Verify' }, startedAt: '', completedAt: null, cancelRequested: false,

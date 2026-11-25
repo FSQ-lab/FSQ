@@ -242,14 +242,16 @@ class ControlPlaneState:
     def bootstrap(self) -> dict[str, Any]:
         with self._condition:
             active = self._tasks.get(self._current_request_id or "")
+            platforms = [
+                {"id": "android", "label": "Android"},
+                {"id": "web", "label": "Web"},
+                {"id": "windows", "label": "Windows"},
+                {"id": "macos", "label": "macOS"},
+            ]
             return {
                 "apiVersion": "1.0",
-                "platforms": [
-                    {"id": "android", "label": "Android"},
-                    {"id": "web", "label": "Web"},
-                    {"id": "windows", "label": "Windows"},
-                    {"id": "macos", "label": "macOS"},
-                ],
+                "platforms": platforms,
+                "quickTestPlatforms": [platforms[0], {"id": "ios", "label": "iOS"}, *platforms[1:]],
                 "busy": active is not None,
                 "activeTask": self._summary(active) if active else None,
             }

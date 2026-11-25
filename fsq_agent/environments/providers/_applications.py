@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fsq_agent.environments.providers._adb_transport import inventory, package_inventory, package_status, third_party_package_inventory, valid_package
+from fsq_agent.environments.providers._ios import _ios_application_inventory, _lookup_ios_application
 from fsq_agent.environments.providers._web import web_candidate_paths
 from fsq_agent.models import ApplicationCandidate, ApplicationLookupHint, web_executable_matches_channel
 
@@ -73,6 +74,10 @@ def discover_candidates(selected: str, name: str, *, explicit_reference: str | N
     # The public boundary retains provenance. Only the concrete validation
     # scope is shared here; an inferred reference is never relabeled explicit.
     reference = inferred_hint.value if inferred_hint is not None else explicit_reference
+    if selected == "ios":
+        candidates = _lookup_ios_application(target_id, reference, deadline)
+        _budget(deadline, len(candidates))
+        return candidates
     if selected == "macos" and inferred_hint is not None:
         if inferred_hint.kind == "bundle_id" and not _BUNDLE_ID.fullmatch(inferred_hint.value):
             raise ValueError("Invalid bundle reference.")
@@ -596,10 +601,14 @@ def collect_inventory(
     *,
     target_id: str | None = None,
     windows_catalogue: Sequence[WindowsApplicationConfig] | None = None,
-) -> list[ApplicationCandidate]:
+) -> list[ApplicationCandidate] | None:
     deadline = time.monotonic() + 5.0
     if selected == "android":
         candidates = _collect_android_inventory(target_id, deadline)
+    elif selected == "ios":
+        candidates = _ios_application_inventory(target_id, deadline)
+        if candidates is None:
+            return None
     elif selected == "macos" and platform.system() == "Darwin":
         candidates = _collect_macos_inventory(deadline)
     elif selected == "windows" and platform.system() == "Windows":

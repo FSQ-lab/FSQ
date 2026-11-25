@@ -42,7 +42,7 @@ export function publicReportValid(value: unknown): value is PublicRunReport {
   for (const key of ['run','source','execution','verification','evidence']) if (!reportFact(value[key])) return false;
   if (!optional((value.execution as ReportFact).interpretations, v => Array.isArray(v) && v.every(item => object(item) && ['recorded_fact','deterministic_classification','ai_suggestion'].includes(String(item.kind)) && optional(item.label,text) && optional(item.text,text) && optional(item.unavailable_reason,text) && Array.isArray(item.references) && item.references.every(ref => object(ref) && text(ref.run_id) && optional(ref.artifact_id,text) && optional(ref.step_execution_id,text))))) return false;
   const run = value.run as ReportFact;
-  if (!text(run.run_id) || !platform(run.platform) || !optional(run.mode,v => ['strict','explore'].includes(String(v))) || !object(run.gate) || !['passed','failed','error','incomplete'].includes(String(run.gate.status)) || !Array.isArray(run.gate.reasons) || !run.gate.reasons.every(item => text(item) || reportFact(item))) return false;
+  if (!text(run.run_id) || !(platform(run.platform) || run.platform === 'ios') || !optional(run.mode,v => ['strict','explore'].includes(String(v))) || !object(run.gate) || !['passed','failed','error','incomplete'].includes(String(run.gate.status)) || !Array.isArray(run.gate.reasons) || !run.gate.reasons.every(item => text(item) || reportFact(item))) return false;
   if (!metrics(value.metrics) || !Object.values(value.processing as ReportFact).every(item => reportFact(item))) return false;
   const comparison = value.comparison as ReportFact;
   if (!optional(comparison.before_after,v => Array.isArray(v) && v.every(diff))) return false;

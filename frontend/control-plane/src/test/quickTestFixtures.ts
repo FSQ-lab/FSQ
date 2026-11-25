@@ -1,6 +1,6 @@
-import type { DiagnosticDetail, PlatformId, QuickDiagnostics } from '../api/types';
+import type { DiagnosticDetail, QuickDiagnostics, QuickTestPlatformId } from '../api/types';
 
-export function quickDiagnostics(platform: PlatformId = 'macos', targetId: string | null = null): QuickDiagnostics {
+export function quickDiagnostics(platform: QuickTestPlatformId = 'macos', targetId: string | null = null): QuickDiagnostics {
   const ready: DiagnosticDetail = { status: 'ready', code: null, message: 'Ready', action: '' };
   const pending: DiagnosticDetail = { status: 'pending', code: 'context.pending', message: 'Application identification is pending.', action: 'Describe the application and goal, then start Quick Test.' };
   const notApplicable: DiagnosticDetail = { status: 'not_applicable', code: null, message: 'Not needed for this context.', action: '' };
@@ -17,6 +17,6 @@ export function quickDiagnostics(platform: PlatformId = 'macos', targetId: strin
       strict_core: pending, provider: ready, suggestion_analyzer: notApplicable, dynamic_agent: pending,
     },
     status: 'pending', checkedAt: '2026-10-17T15:40:00Z',
-    ...(platform === 'android' ? { targetId } : {}),
+    ...(platform === 'android' || platform === 'ios' ? { targetId } : {}),
   };
 }

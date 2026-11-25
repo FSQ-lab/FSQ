@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from fsq_agent.application.contracts.doctor import DoctorPlatformResult
 from fsq_agent.config import Settings
-from fsq_agent.models import AndroidDevice, AndroidWorkspaceTarget, IOSWorkspaceTarget, MacOSWorkspaceTarget, VerificationResult, WebWorkspaceTarget, WindowsWorkspaceTarget
+from fsq_agent.models import AndroidDevice, AndroidWorkspaceTarget, IOSDevice, IOSWorkspaceTarget, MacOSWorkspaceTarget, VerificationResult, WebWorkspaceTarget, WindowsWorkspaceTarget
 
 
 class WorkspaceRequest(BaseModel):
@@ -54,7 +54,7 @@ class WorkspaceInitializeResult(BaseModel):
 
 class QuickTestContextRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     target_id: str | None = Field(default=None, strict=True, min_length=1, max_length=256)
     user_config_root: Path | None = None
 
@@ -63,6 +63,8 @@ class QuickTestContextRequest(BaseModel):
         if self.target_id is not None:
             if self.platform == "android":
                 AndroidDevice(serial=self.target_id, state="device")
+            elif self.platform == "ios":
+                IOSDevice(udid=self.target_id, name="iOS selection", kind="simulator", state="unknown")
             elif self.platform == "web":
                 if self.target_id not in get_args(WebWorkspaceTarget.model_fields["browser_channel"].annotation):
                     raise ValueError("Unsupported browser channel.")
@@ -86,7 +88,7 @@ class QuickTestPrepareRequest(QuickTestContextRequest):
     def explicit_selection(self):
         if self.url is not None and self.platform != "web":
             raise ValueError("An explicit starting URL is supported only for Web.")
-        if self.platform in {"android", "web"} and self.target_id is None:
+        if self.platform in {"android", "ios", "web"} and self.target_id is None:
             raise ValueError("Explicit device or browser selection is required.")
         return self
 
@@ -105,11 +107,13 @@ class QuickTestChoice(BaseModel):
     label: str
     selectable: bool
     status: Literal["ready", "unavailable", "error"]
+    kind: Literal["simulator", "device"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    state: Literal["booted", "shutdown", "connected", "unavailable", "unknown"] | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class QuickTestContextResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    platform: Literal["android", "web", "windows", "macos"]
+    platform: Literal["android", "web", "windows", "macos", "ios"]
     target_id: str | None
     can_start: bool
     choices: tuple[QuickTestChoice, ...]
@@ -127,6 +131,7 @@ class QuickTestPrepareResult(BaseModel):
     application: str
     settings: Settings = Field(exclude=True, repr=False)
     requires_web_search_evidence: bool = False
+    installation_unverified: bool = Field(default=False, exclude=True)
 
 
 class QuickTestRunResult(BaseModel):

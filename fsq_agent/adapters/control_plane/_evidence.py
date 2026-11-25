@@ -36,9 +36,12 @@ def configured_secret_values(settings: Any | None) -> tuple[str, ...]:
         return ()
     runtime_secrets = getattr(settings, "runtime_secrets", None)
     private_values = getattr(runtime_secrets, "private_values", None)
-    if not callable(private_values):
-        return ()
-    return tuple(value for value in private_values().values() if value)
+    values = tuple(private_values().values()) if callable(private_values) else ()
+    harness = getattr(settings, "harness", None)
+    if getattr(harness, "platform", None) == "ios":
+        ios = harness.ios
+        values += (ios.xcode_org_id, ios.xcode_signing_id, ios.updated_wda_bundle_id)
+    return tuple(value for value in values if value)
 
 
 def safe_text(value: object, *, secret_values: tuple[str, ...] = (), limit: int = 1000) -> str:
@@ -612,6 +615,9 @@ def _safe_details(value: Any, sanitizer, *, depth: int = 0) -> Any:
             "set_cookie",
             "private_values",
             "credentials",
+            "xcode_org_id",
+            "xcode_signing_id",
+            "updated_wda_bundle_id",
         }
         return {
             sanitizer(str(key), limit=100): "[redacted]"

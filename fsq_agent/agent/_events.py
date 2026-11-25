@@ -19,7 +19,7 @@ class RunEventEmitter:
 
     async def emit(self, event: RunEvent) -> None:
         self.sequence += 1
-        values = _safe_event_value(event.model_dump(mode="json"), self._secret_values)
+        values = _safe_event_value(event.model_dump(mode="json"), self._secret_values, preserve_keys=True)
         values["sequence"] = self.sequence
         sequenced = RunEvent.model_validate(values)
         if self.logger and event.type not in {"run_completed", "run_failed"}:
@@ -30,7 +30,7 @@ class RunEventEmitter:
                 await result
 
 
-def _safe_event_value(value, secret_values):
+def _safe_event_value(value, secret_values, *, preserve_keys=False):
     if isinstance(value, dict):
         secret_keys = {
             "password",
@@ -52,12 +52,14 @@ def _safe_event_value(value, secret_values):
             "client_secret",
             "api-key",
         }
-        return {
-            key: "[REDACTED]"
-            if re.sub(r"([a-z0-9])([A-Z])", lambda match: match[1] + "_" + match[2], unquote(str(key))).casefold().replace("-", "_") in secret_keys
-            else _safe_event_value(item, secret_values)
-            for key, item in value.items()
-        }
+        result = {}
+        for key, item in value.items():
+            raw_key = str(key)
+            decoded = unquote(raw_key)
+            safe_key = "[REDACTED]" if not preserve_keys and any(secret in raw_key or secret in decoded for secret in secret_values) else key
+            normalized = re.sub(r"([a-z0-9])([A-Z])", lambda match: match[1] + "_" + match[2], decoded).casefold().replace("-", "_")
+            result[safe_key] = "[REDACTED]" if normalized in secret_keys else _safe_event_value(item, secret_values)
+        return result
     if isinstance(value, list):
         return [_safe_event_value(item, secret_values) for item in value]
     if not isinstance(value, str):
@@ -75,7 +77,7 @@ def _safe_event_value(value, secret_values):
     def safe_url(match):
         try:
             parts = urlsplit(match.group())
-            query = [(key, _safe_event_value({key: item}, secret_values)[key]) for key, item in parse_qsl(parts.query, keep_blank_values=True)]
+            query = [pair for key, item in parse_qsl(parts.query, keep_blank_values=True) for pair in _safe_event_value({key: item}, secret_values).items()]
             return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, urlencode(query), parts.fragment))
         except ValueError:
             return "[REDACTED_URL]"

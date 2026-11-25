@@ -75,6 +75,50 @@ async def test_shared_execution_freezes_inputs_and_never_publishes(monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_quick_test_ios_provenance_records_udid_and_app_but_not_signing(monkeypatch, tmp_path):
+    from fsq_agent.config import create_workspace_at_root
+    from fsq_agent.models import IOSWorkspaceTarget, WorkspacePlatformCreateInput
+
+    root = tmp_path / "quick-test"
+    app = IOSWorkspaceTarget(bundle_id="com.example.app", app_path=tmp_path / "Example.app")
+    app.app_path.mkdir()
+    create_workspace_at_root(
+        root_path=root, name="quick-test", platforms=[WorkspacePlatformCreateInput(platform="ios", target=IOSWorkspaceTarget(bundle_id="com.example.default"), env={})], user_config_root=tmp_path
+    )
+    settings = Settings(harness={"platform": "ios"})
+    settings.workspace.root_dir = root
+    settings.output.runs_dir = root / ".fsq/runs/ios"
+    settings.cases.dir = root / "cases/ios"
+    settings.agent_runtime.user_config_root = tmp_path
+    ios = settings.harness.ios
+    ios.udid = "sim-test-udid"
+    ios.bundle_id = app.bundle_id
+    ios.app_path = app.app_path
+    ios.xcode_org_id = "TESTTEAM01"
+    ios.xcode_signing_id = "Fixture Identity"
+    ios.updated_wda_bundle_id = "com.example.privatewda"
+    item = QuickTestPrepareResult(workspace_name="quick-test", root_path=root, platform_revision="revision", target_id=ios.udid, target=app, application="Example", settings=settings)
+    monkeypatch.setattr(
+        "fsq_agent.application._quick_test_execution.diagnose_platform_settings", lambda settings: SimpleNamespace(commands=SimpleNamespace(case_create=SimpleNamespace(status="ready")))
+    )
+    monkeypatch.setattr("fsq_agent.application._quick_test_execution.validate_runtime_settings", lambda settings: None)
+
+    class Agent:
+        async def run_in_context(self, task, context, **kwargs):
+            verification = VerificationResult(status="success", summary="Observed Example. Fixture Identity TESTTEAM01 com.example.privatewda")
+            return DynamicAgentOutcome(task=task, steps=[], verification=verification)
+
+    result = await application.execute_prepared_quick_test(item, "Open Example and read its header", agent_factory=lambda settings: Agent())
+    raw = (settings.output.runs_dir / result.run_id / "run.json").read_text(encoding="utf-8")
+    facts = json.loads(raw)["provenance"]["configuration"]["quick_test_target"]
+    assert facts == {"target_id": "sim-test-udid", "bundle_id": "com.example.app", "application_name": "Example.app"}
+    assert str(app.app_path) not in raw
+    for private in (ios.xcode_org_id, ios.xcode_signing_id, ios.updated_wda_bundle_id):
+        assert private not in raw
+        assert private not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_quick_test_runs_keep_distinct_target_provenance_and_report_links(monkeypatch, tmp_path):
     from click.testing import CliRunner
 

@@ -53,6 +53,9 @@ from fsq_agent.models import (
 DEFAULT_WINDOWS_WAIT_TIMEOUT_SECONDS = 10.0
 WINDOW_READY_TIMEOUT_SECONDS = 30.0
 WINDOW_LAUNCH_WAIT_FOR = "exists visible enabled"
+_FOREGROUND_WAIT_SECONDS = 0.250
+_FOREGROUND_POLL_SECONDS = 0.010
+_FOREGROUND_ERROR = "Could not verify the Windows target or an owned popup as the foreground window (hwnd={hwnd})."
 UI_SNAPSHOT_MAX_DEPTH = 48
 UI_SNAPSHOT_MAX_NODES = 2500
 UI_SNAPSHOT_MAX_CHILDREN = 250
@@ -64,6 +67,7 @@ SW_RESTORE = 9
 SW_SHOWNOACTIVATE = 4
 SW_SHOWMINNOACTIVE = 7
 GW_OWNER = 4
+_ERROR_INVALID_WINDOW_HANDLE = 1400
 PW_RENDERFULLCONTENT = 0x00000002
 BI_RGB = 0
 DIB_RGB_COLORS = 0
@@ -117,6 +121,10 @@ WINDOWS_SNAPSHOT_POLICY = TreeCompactionPolicy(
 _T = TypeVar("_T")
 _WindowRect = tuple[int, int, int, int]
 _HOST_FRAME_EXECUTABLE = "applicationframehost.exe"
+
+
+class _PopupWindowDisappearedError(RuntimeError):
+    """A popup vanished during the Win32 owner lookup without a native error code."""
 
 
 def _normalize_windows_executable_path(raw_path: str) -> str:
@@ -265,10 +273,19 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 top_query["control_type"] = "Window"
             for elem in self._list_top_windows(**top_query):
                 hwnd = getattr(elem, "handle", None)
-                pid = getattr(elem, "process_id", None)
-                if not isinstance(hwnd, int) or not isinstance(pid, int):
+                if not isinstance(hwnd, int):
                     continue
-                if self.backend_kind == "uia" and not self._is_candidate_top_window_visible_or_minimized(elem, hwnd):
+                pid = getattr(elem, "process_id", None)
+                if self.backend_kind == "uia":
+                    if not self._is_candidate_top_window_visible_or_minimized(elem, hwnd):
+                        continue
+                    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                        if isinstance(hwnd, bool) or hwnd <= 0:
+                            continue
+                        pid = self._window_process_id(hwnd)
+                        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                            continue
+                elif not isinstance(pid, int):
                     continue
                 is_started_pid = self._launched_pid is not None and pid == self._launched_pid
                 exe_norm = self._safe_normalized_process_path(pid)
@@ -489,6 +506,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
 
     def _press_key(self, params: WindowsPressKeyParams) -> dict[str, object]:
         window, hwnd = self._ensure_window_foreground()
+        self._require_foreground(hwnd)
         window.type_keys(params.key, with_spaces=True, set_foreground=hwnd is None)
         return self._passed({"key": params.key})
 
@@ -1072,20 +1090,42 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         set_focus = getattr(window, "set_focus", None)
         if callable(set_focus):
             set_focus()
-        self._require_foreground(hwnd)
+        if hwnd is not None:
+            self._wait_for_foreground(hwnd)
         return window, hwnd
 
+    def _wait_for_foreground(self, hwnd: int) -> None:
+        deadline = time.monotonic() + _FOREGROUND_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            # A popup may close between its PID and owner queries. Retry only during activation.
+            try:
+                verified = self._is_target_foreground(hwnd)
+            except _PopupWindowDisappearedError:
+                verified = False
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != _ERROR_INVALID_WINDOW_HANDLE:
+                    raise
+                verified = False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if verified:
+                return
+            time.sleep(min(remaining, _FOREGROUND_POLL_SECONDS))
+        raise RuntimeError(_FOREGROUND_ERROR.format(hwnd=hwnd))
+
     def _require_foreground(self, hwnd: int | None) -> None:
-        if hwnd is None:
-            return
+        if hwnd is not None and not self._is_target_foreground(hwnd):
+            raise RuntimeError(_FOREGROUND_ERROR.format(hwnd=hwnd))
+
+    def _is_target_foreground(self, hwnd: int) -> bool:
         if self._bound_handle in (None, hwnd) and not self._is_window_iconic(hwnd):
             foreground = self._foreground_window_handle()
             if foreground == hwnd:
-                return
+                return True
             target_pid = self._window_process_id(hwnd)
-            if target_pid is not None and self._is_owned_popup(foreground, hwnd, target_pid) and self._foreground_window_handle() == foreground:
-                return
-        raise RuntimeError(f"Could not verify the Windows target or an owned popup as the foreground window (hwnd={hwnd}).")
+            return target_pid is not None and self._is_owned_popup(foreground, hwnd, target_pid) and self._foreground_window_handle() == foreground
+        return False
 
     def _is_win32_window(self, hwnd: int) -> bool:
         if os.name != "nt" or not isinstance(hwnd, int) or hwnd <= 0:
@@ -1202,7 +1242,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             if error:
                 raise ctypes.WinError(error)
             if not self._is_win32_window(hwnd):
-                raise RuntimeError(f"Window disappeared during Win32 popup ownership check (hwnd={hwnd}).")
+                raise _PopupWindowDisappearedError(f"Window disappeared during Win32 popup ownership check (hwnd={hwnd}).")
             return 0
         return int(owner)
 

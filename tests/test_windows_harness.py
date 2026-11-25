@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import io
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1083,6 +1084,141 @@ def test_pywinauto_driver_handles_multi_pid_resident_handoff_and_closes_only_new
     assert 701 not in desktop.windows
     assert [e for e in desktop.events if e[0] == "close_window"] == [("close_window", 701, 300)]
     assert [e for e in desktop.events if e[0] == "kill_process"] == []
+
+
+@pytest.mark.parametrize(
+    ("backend", "reported_handle", "reported_pid", "native_pid", "binds", "queries_native_pid"),
+    [
+        pytest.param("uia", 701, 0, 300, True, True, id="zero-uia-pid"),
+        pytest.param("uia", 701, -1, 300, True, True, id="negative-uia-pid"),
+        pytest.param("uia", 701, None, 300, True, True, id="missing-uia-pid"),
+        pytest.param("uia", 701, "300", 300, True, True, id="string-uia-pid"),
+        pytest.param("uia", 701, True, 300, True, True, id="boolean-uia-pid"),
+        pytest.param("uia", None, 0, 300, False, False, id="missing-hwnd"),
+        pytest.param("uia", "701", 0, 300, False, False, id="string-hwnd"),
+        pytest.param("uia", 0, 0, 300, False, False, id="zero-hwnd"),
+        pytest.param("uia", -1, 0, 300, False, False, id="negative-hwnd"),
+        pytest.param("uia", True, 0, 300, False, False, id="boolean-hwnd"),
+        pytest.param("uia", 701, 0, None, False, True, id="missing-native-pid"),
+        pytest.param("uia", 701, 0, 0, False, True, id="zero-native-pid"),
+        pytest.param("uia", 701, 0, -1, False, True, id="negative-native-pid"),
+        pytest.param("uia", 701, 0, "300", False, True, id="string-native-pid"),
+        pytest.param("uia", 701, 0, 400, False, True, id="different-executable"),
+        pytest.param("uia", 701, 0, 500, False, True, id="unverified-executable"),
+        pytest.param("uia", 701, 300, 400, True, False, id="valid-uia-pid"),
+        pytest.param("win32", 701, 0, 300, False, False, id="no-fallback-for-win32-backend"),
+    ],
+)
+def test_pywinauto_driver_launch_candidate_native_pid_fallback(monkeypatch, backend, reported_handle, reported_pid, native_pid, binds, queries_native_pid) -> None:
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    edge_exe = r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+    resident_pid = desktop.add_process(edge_exe, pid=300)
+    desktop.add_process(r"C:\Apps\Other\other.exe", pid=400)
+    desktop.add_process(edge_exe, pid=500, accessible=False)
+    existing = desktop.add_window(resident_pid, "Work Mail - Microsoft Edge", handle=700, active=True)
+    hwnd = 701
+
+    def on_start(d, _cmd: str) -> int:
+        d.add_window(resident_pid, "Blank tab", handle=702)
+        d.add_window(resident_pid, "New tab - Microsoft Edge", handle=hwnd, active=True)
+        return d.add_process(edge_exe, pid=350, alive=False)
+
+    def list_top_windows(**query: object) -> list:
+        candidates = desktop.find_top_windows(**query)
+        if query.get("handle") is not None:
+            return candidates
+        pid_attr = {} if reported_pid is None else {"process_id": reported_pid}
+        return [SimpleNamespace(handle=reported_handle if w.handle == hwnd else w.handle, visible=w.visible, **pid_attr) for w in candidates]
+
+    def lookup_native_pid(handle: int) -> object:
+        native_queries.append(handle)
+        return {existing.handle: resident_pid, hwnd: native_pid}.get(handle)
+
+    native_queries: list[int] = []
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe, backend_kind=backend, window_title_re="New tab - Microsoft Edge")
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", list_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_window_process_id", lookup_native_pid)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle in desktop.windows)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _handle: False)
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: desktop.active_handle)
+
+    try:
+        if binds:
+            assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+            assert [event for event in desktop.events if event[0] == "connect"] == [("connect", {"handle": hwnd})]
+        else:
+            with pytest.raises(TimeoutError, match="No visible top-level window matched"):
+                driver.launch_app(WindowsLaunchAppParams())
+            assert not any(event[0] == "connect" for event in desktop.events)
+        assert native_queries == ([hwnd] if queries_native_pid else [])
+    finally:
+        driver.close()
+
+    assert desktop.processes[resident_pid]["alive"] is True
+    assert existing.closed is False
+    assert (hwnd in desktop.windows) is not binds
+
+
+def test_pywinauto_driver_native_pid_fallback_does_not_authorize_keyboard_input_without_foreground(monkeypatch) -> None:
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    edge_exe = r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+    resident_pid = desktop.add_process(edge_exe, pid=300)
+    unrelated_pid = desktop.add_process(r"C:\Apps\Other\other.exe", pid=400)
+    unrelated = desktop.add_window(unrelated_pid, "Other App", handle=800, active=True)
+    hwnd = 701
+
+    def on_start(d, _cmd: str) -> int:
+        d.add_window(resident_pid, "New tab - Microsoft Edge", handle=hwnd, active=True)
+        return d.add_process(edge_exe, pid=350, alive=False)
+
+    def list_top_windows(**query: object) -> list:
+        candidates = desktop.find_top_windows(**query)
+        if query.get("handle") is not None:
+            return candidates
+        return [SimpleNamespace(handle=hwnd, visible=w.visible, process_id=0) if w.handle == hwnd else w for w in candidates]
+
+    def lookup_native_pid(handle: int) -> int:
+        desktop.events.append(("native_pid", handle))
+        return desktop.windows[handle].process_id
+
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe, window_title_re="New tab - Microsoft Edge")
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", list_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_window_process_id", lookup_native_pid)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle in desktop.windows)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda _handle: False)
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: desktop.active_handle)
+
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert [event for event in desktop.events if event[0] in {"native_pid", "connect"}] == [
+            ("native_pid", hwnd),
+            ("connect", {"handle": hwnd}),
+        ]
+        target = desktop.windows[hwnd]
+        monkeypatch.setattr(target, "set_focus", lambda: desktop.events.append(("set_focus", hwnd)), raising=False)
+        desktop.active_handle = unrelated.handle
+
+        with pytest.raises(RuntimeError, match="Could not verify the Windows target or an owned popup as the foreground window"):
+            driver.press_key(WindowsPressKeyParams(key="{F5}"))
+
+        assert desktop.active_handle == unrelated.handle
+        assert [event for event in desktop.events if event[0] in {"set_focus", "type_keys"}] == [("set_focus", hwnd)]
+    finally:
+        driver.close()
 
 
 def test_pywinauto_driver_title_re_is_scoped_to_configured_executable_and_rebinds_after_splash(monkeypatch) -> None:

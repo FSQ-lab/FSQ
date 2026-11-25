@@ -185,7 +185,7 @@ def failed_android_settings(monkeypatch, tmp_path):
         pytest.fail("Configuration-error diagnosis must not infer, inspect a device, construct a Driver or mutate a Workspace")
 
     monkeypatch.setattr("fsq_agent.application._quick_test.load_platform_settings", load_failure)
-    for name in ("build_quick_test_intent_analyzer", "create_workspace_at_root", "add_workspace_platform", "update_workspace_platform"):
+    for name in ("build_quick_test_intent_analyzer", "load_quick_test_workspace_settings"):
         monkeypatch.setattr(f"fsq_agent.application._quick_test.{name}", forbidden)
     monkeypatch.setattr("fsq_agent.application.doctor.check_provider_readiness", forbidden)
     monkeypatch.setattr("fsq_agent.environments.AndroidDeviceDiscovery.discover", forbidden)

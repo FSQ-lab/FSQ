@@ -413,6 +413,7 @@ class RunLifecycleService:
             "new_command_timeout_seconds",
             "skip_app_kill",
             "backend_kind",
+            "quick_test_target",
         }
         safe_config = {key: value for key, value in (configuration or {}).items() if key in allowed}
         runtime_policy = (configuration or {}).get("agent_runtime")

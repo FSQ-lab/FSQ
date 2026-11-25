@@ -12,12 +12,13 @@ import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 from fsq_agent.agent import Verifier
 from fsq_agent.config import list_workspace_registry
+from fsq_agent.core import RuntimeSecretStore
 from fsq_agent.core.evidence import EvidenceRecorder
 from fsq_agent.models import (
     ConfigurationError,
@@ -64,6 +65,8 @@ class DynamicExecutionRequest:
     report_coordinator: Callable[[TaskResult], None] | None = None
     recording_error_sink: Callable[[Exception], None] | None = None
     requires_web_search_evidence: bool = False
+    quick_test_target_id: str | None = None
+    quick_test_application: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,8 +165,13 @@ class DynamicExecutionService:
         recorder = None
         primary_failure = False
         try:
+            configuration = lifecycle.safe_configuration(settings)
+            if request.quick_test_target_id is not None:
+                private_values = (*secret_values, settings.agent_runtime.api_key)
+                target = _quick_test_target(settings, request.quick_test_target_id, request.quick_test_application, private_values)
+                configuration["quick_test_target"] = lifecycle.safe_value(target, private_values)
             metadata = lifecycle.snapshot_sources(
-                run_dir, metadata, sources={"goal": request.task.planning_reference_text or request.task.description}, secret_values=secret_values, configuration=lifecycle.safe_configuration(settings)
+                run_dir, metadata, sources={"goal": request.task.planning_reference_text or request.task.description}, secret_values=secret_values, configuration=configuration
             )
             metadata = transition_run(run_dir, metadata, "running")
             lifecycle.heartbeat(run_dir)
@@ -369,6 +377,42 @@ def _usable_web_observation(ref: EvidenceArtifactRef, run_dir: Path) -> bool:
         return isinstance(content, str) and bool(content.strip())
     except (OSError, ValueError, ReportGenerationError):
         return False
+
+
+def _quick_test_target(settings: Settings, target_id: str, application: str | None, private_values: tuple[str, ...]) -> dict[str, str | None]:
+    platform = settings.harness.platform
+    target: dict[str, str | None] = {"target_id": target_id}
+    if platform == "android":
+        target["app_id"] = settings.harness.android.app_id
+    elif platform == "web":
+        target["browser_channel"] = settings.harness.web.channel
+        url = settings.harness.web.base_url
+        if url is not None:
+            decoded, form_decoded = unquote(url), unquote_plus(url)
+            if any(value and (value in decoded or value in form_decoded) for value in private_values):
+                url = "[redacted URL]"
+            else:
+                url = RuntimeSecretStore.sanitize_urls(url, whole_url=True)
+        target["base_url"] = url
+    elif platform == "macos":
+        macos = settings.harness.macos
+        target["bundle_id"] = macos.bundle_id
+        target["application_name"] = macos.app_path.name if macos.app_path else None
+    elif platform == "windows":
+        path = settings.harness.windows.app_path
+        target["application_name"] = path.name if path else None
+        if path is not None:
+            identity = PureWindowsPath(path).as_posix()
+            # Compare private values conservatively without changing the executable identity being hashed.
+            comparable_path = identity.casefold()
+            decoded_path = unquote(identity).replace("\\", "/").casefold()
+            comparable_secrets = (value.replace("\\", "/").casefold() for value in private_values if value)
+            if not any(value in comparable_path or value in decoded_path for value in comparable_secrets):
+                # Only a normalized identifier is retained, never the local path or a digest of a known private value.
+                target["application_identity"] = f"sha256:{hashlib.sha256(identity.encode()).hexdigest()}"
+        if application:
+            target["application_label"] = PureWindowsPath(application).name
+    return target
 
 
 def _redact_metadata_text(text: str, private_values: tuple[str, ...], workspace: Path) -> str:

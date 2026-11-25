@@ -48,14 +48,17 @@ iOS Simulator/physical-device UDID, or browser channel when available:
 Read choices, checks, diagnosis, and can_start. A completed non-startable context
 can exit 4 with a valid result; it is not malformed output or a failed test.
 Pending application identification/preparation is not evidence of failure.
-For Android only, select and report the sole available selectable device if no
-explicit selection exists. Never replace an explicit device, including a missing
-or unauthorized one. Multiple Android devices or unresolved browser choices need
-one user decision; do not guess from ordering. Windows/macOS do not accept a
-target-id option: their application identity is part of the goal.
+For Android, iOS, and Web, if no explicit target is supplied and context reports
+exactly one selectable ready choice (`selectable=true` and `status="ready"`),
+you may select and report that sole target or omit `--target-id` so FSQ
+deterministically auto-selects it. Never replace an explicit target, including a
+missing, offline, or unauthorized one. Zero or multiple available devices or
+browsers require an explicit user decision; do not guess from ordering or goal
+text. Windows/macOS do not accept a target-id option: their application identity
+is part of the goal.
 
-For iOS, obtain the user's explicit device choice even if just one is selectable.
-If the selected physical device is blocked on WDA signing, direct the user to the
+For iOS physical devices (whether explicitly selected or sole-device
+auto-selected), if the device is blocked on WDA signing, direct the user to the
 local setup in the returned diagnostic. Never request signing values in chat,
 include them in a goal or Quick Test arguments, or perform the setup yourself.
 If the host cannot enumerate apps on that device, use only an exact user-supplied
@@ -112,15 +115,17 @@ Host, operating-system, sandbox, and Coding Agent approvals remain independent.
 ## Run Quick Test once with real progress
 
 For Web with a known starting address, submit exactly one command with the
-selected browser and separate exact URL:
+selected browser (or omit `--target-id` when only one browser channel is
+available) and separate exact URL:
 
-`fsq --output jsonl --non-interactive quick-test run --platform web --target-id "<target-id>" --url "<exact-url>" --goal "<confirmed-goal>"`
+`fsq --output jsonl --non-interactive quick-test run --platform web [--target-id "<target-id>"] --url "<exact-url>" --goal "<confirmed-goal>"`
 
 For Android, iOS, or Web without a separate starting URL, use the existing goal
-path with the selected device/browser. URL-free Web search keeps the discovery
+path with the selected device/browser (or omit `--target-id` when only one
+selectable ready target is available). URL-free Web search keeps the discovery
 objective and checkable result in the goal; do not guess a starting address:
 
-`fsq --output jsonl --non-interactive quick-test run --platform "<platform>" --target-id "<target-id>" --goal "<confirmed-goal>"`
+`fsq --output jsonl --non-interactive quick-test run --platform "<platform>" [--target-id "<target-id>"] --goal "<confirmed-goal>"`
 
 For Windows/macOS omit target-id:
 

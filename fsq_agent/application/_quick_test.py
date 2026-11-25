@@ -61,6 +61,18 @@ def _safe_candidate_diagnostics(candidates: Sequence[ApplicationCandidate], *, l
     return items
 
 
+def _safe_choice_diagnostics(choices: Sequence[QuickTestChoice], *, limit: int = 8) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for choice in choices[:limit]:
+        entry: dict[str, str] = {"id": choice.id, "label": choice.label}
+        if choice.kind:
+            entry["kind"] = choice.kind
+        if choice.state:
+            entry["state"] = choice.state
+        items.append(entry)
+    return items
+
+
 def _error(
     kind: str,
     *,
@@ -68,6 +80,7 @@ def _error(
     stage: str | None = None,
     target_name: str | None = None,
     candidates: Sequence[ApplicationCandidate] | None = None,
+    choice_candidates: Sequence[QuickTestChoice] | None = None,
     url: str | None = None,
     action: str | None = None,
 ) -> ApplicationError:
@@ -85,6 +98,8 @@ def _error(
             details["url"] = safe_url
     if candidates:
         details["candidates"] = _safe_candidate_diagnostics(candidates)
+    elif choice_candidates:
+        details["candidates"] = _safe_choice_diagnostics(choice_candidates)
     return ApplicationError(
         code=ApplicationErrorCode(f"quick_test.{kind}"),
         category=ApplicationErrorCategory.UNAVAILABLE if kind == "persistence_failed" else ApplicationErrorCategory.REQUEST_VALIDATION,
@@ -226,13 +241,39 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
         context = _context(request, settings)
     except Exception:  # noqa: BLE001 -- configuration and host errors become safe prerequisite facts.
         raise _error("prerequisites", reason="context_unavailable") from None
+    effective_target_id = request.target_id
+    if request.platform in {"android", "ios", "web"} and effective_target_id is None:
+        selectable = [choice for choice in context.choices if choice.selectable and choice.status == "ready"]
+        if len(selectable) == 1:
+            effective_target_id = selectable[0].id
+            resolved_request = request.model_copy(update={"target_id": effective_target_id})
+            try:
+                settings = load_platform_settings(request.platform, user_config_root=request.user_config_root)
+                context = _context(resolved_request, settings)
+            except Exception:  # noqa: BLE001 -- configuration and host errors become safe prerequisite facts.
+                raise _error("prerequisites", reason="context_unavailable") from None
+        elif len(selectable) > 1:
+            noun = "browser channels" if request.platform == "web" else "devices"
+            raise _error(
+                "prerequisites",
+                reason="target_ambiguous",
+                choice_candidates=selectable,
+                action=f"Multiple available {request.platform} {noun} were found. Specify an explicit target_id.",
+            )
+        else:
+            noun = "browser channel" if request.platform == "web" else "device"
+            raise _error(
+                "prerequisites",
+                reason="target_unavailable",
+                action=f"No available {request.platform} {noun} was found. Connect or start one, or check host prerequisites.",
+            )
     if not context.can_start:
         if request.platform == "ios":
             signing = next((item for item in context.checks if item.id == "wda_signing" and item.status in {"unavailable", "error"}), None)
             if signing is not None:
                 raise _error("prerequisites", reason="ios_wda_signing_required", action=signing.action)
         raise _error("prerequisites", reason="prerequisites_not_ready")
-    physical_ios = request.platform == "ios" and any(choice.id == request.target_id and choice.kind == "device" for choice in context.choices)
+    physical_ios = request.platform == "ios" and any(choice.id == effective_target_id and choice.kind == "device" for choice in context.choices)
     if physical_ios:
         _check_ios_signing(settings, request.goal)
     cancel()
@@ -249,7 +290,7 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
                 raise _error("discovery_failed", reason="windows_catalogue_invalid") from None
         inventory_result = runtime.list_applications(
             platform=request.platform,
-            target_id=request.target_id,
+            target_id=effective_target_id,
             windows_catalogue=catalogue,
             force_refresh=False,
         )
@@ -280,7 +321,7 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     if not physical_ios and inventory_result is not None and inventory_result.from_cache and not intent.sufficient and intent.reason == "application_not_found":
         refreshed = runtime.list_applications(
             platform=request.platform,
-            target_id=request.target_id,
+            target_id=effective_target_id,
             windows_catalogue=catalogue,
             force_refresh=True,
         )
@@ -332,10 +373,10 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
                     url=intent.base_url,
                 ) from None
             application = address
-        paths = runtime.discover_web_executables(request.target_id)
-        if len(paths) != 1 or not runtime.web_executable_matches_channel(request.target_id, paths[0]):
+        paths = runtime.discover_web_executables(effective_target_id)
+        if len(paths) != 1 or not runtime.web_executable_matches_channel(effective_target_id, paths[0]):
             raise _error("prerequisites", reason="browser_executable_unavailable")
-        target = WebWorkspaceTarget(browser_channel=request.target_id, browser_executable_path=paths[0])
+        target = WebWorkspaceTarget(browser_channel=effective_target_id, browser_executable_path=paths[0])
         settings.harness.web.base_url = address
     else:
         if inventory_result is None:
@@ -358,7 +399,7 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
                 platform=request.platform,
                 name=name,
                 explicit_reference=intent.explicit_reference,
-                target_id=request.target_id,
+                target_id=effective_target_id,
             )
             if lookup.status != "complete":
                 raise _error("discovery_failed", target_name=name, reason=lookup.code)
@@ -385,7 +426,7 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
             raise _error("application_missing", target_name=intent.target_name, reason=intent.explanation or "missing_application")
 
     cancel()
-    _bind_target(settings, target, request.target_id)
+    _bind_target(settings, target, effective_target_id)
     try:
         validate_runtime_settings(settings)
         available, _, _ = runtime.check_target_availability(settings)
@@ -400,7 +441,7 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
     elif request.platform == "ios":
         for field in _IOS_SIGNING_FIELDS:
             setattr(frozen.harness.ios, field, None)
-    _bind_target(frozen, target, request.target_id)
+    _bind_target(frozen, target, effective_target_id)
     if request.platform == "web":
         frozen.harness.web.base_url = address
     cancel()
@@ -408,7 +449,7 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
         workspace_name=name,
         root_path=frozen.workspace.root_dir,
         platform_revision=revision,
-        target_id=request.target_id or f"{request.platform}-app",
+        target_id=effective_target_id or f"{request.platform}-app",
         target=target,
         application=application,
         settings=frozen,

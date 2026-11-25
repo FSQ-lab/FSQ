@@ -105,3 +105,14 @@ it('validates iOS task recovery separately from runnable Case Manager platforms'
   expect(() => validateRunSnapshot({ ...task, targetId: '' })).toThrow();
 });
 
+
+it.each(['android', 'ios', 'web'] as const)('accepts null targetId while %s auto-target quick-test is preparing or failed before bind', async platform => {
+  const task = { ...preparation, platform, targetId: null };
+  const body = { apiVersion: '1', platforms: [{ id: 'android', label: 'Android' }, { id: 'web', label: 'Web' }], quickTestPlatforms: [{ id: 'ios', label: 'iOS' }], busy: true, activeTask: task };
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(body)));
+  expect((await controlPlaneClient.bootstrap()).activeTask).toEqual(task);
+  expect(validateRunSnapshot(task)).toEqual(task);
+  // Once a runId is allocated, a non-empty valid targetId is required.
+  expect(() => validateRunSnapshot({ ...task, runId: 'run-1', workspaceName: 'quick-test' })).toThrow();
+  expect(() => validateRunSnapshot({ ...task, targetId: '' })).toThrow();
+});

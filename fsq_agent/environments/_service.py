@@ -33,6 +33,11 @@ def _web_candidate_paths(channel: str) -> list[Path]:
 
 
 class PlatformRuntimeService:
+    def list_applications(self, *, platform: str, target_id: str | None = None, windows_catalogue=None, force_refresh: bool = False):
+        from fsq_agent.environments._applications import list_applications
+
+        return list_applications(platform=platform, target_id=target_id, windows_catalogue=windows_catalogue, force_refresh=force_refresh)
+
     def lookup_application(self, *, platform: str, name: str, explicit_reference: str | None = None, target_id: str | None = None, inferred_hint: ApplicationLookupHint | None = None):
         from fsq_agent.environments._applications import lookup_application
 

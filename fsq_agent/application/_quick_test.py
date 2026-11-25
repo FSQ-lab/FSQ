@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 
-from fsq_agent.ai_services import QuickTestWebAddressParser, build_quick_test_intent_analyzer
+from fsq_agent.ai_services import build_quick_test_intent_analyzer, validate_quick_test_web_url
 from fsq_agent.application.contracts.shared import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode
 from fsq_agent.application.contracts.workspace import QuickTestCheck, QuickTestChoice, QuickTestContextRequest, QuickTestContextResult, QuickTestPrepareRequest, QuickTestPrepareResult
 from fsq_agent.application.doctor import PlatformDiagnosticContext, diagnose_platform_settings
@@ -29,7 +28,9 @@ from fsq_agent.environments import AndroidDeviceDiscovery, PlatformRuntimeServic
 from fsq_agent.models import AndroidWorkspaceTarget, ConfigurationError, MacOSWorkspaceTarget, WebWorkspaceTarget, WindowsWorkspaceTarget, WorkspacePlatformCreateInput
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
+
+    from fsq_agent.models import ApplicationCandidate
 
 _ERRORS = {
     "insufficient": ("The goal does not supply sufficient test intent.", "State an action and a checkable outcome."),
@@ -45,14 +46,58 @@ _ERRORS = {
 }
 
 
-def _error(kind: str, *, reason: str | None = None) -> ApplicationError:
+def _safe_url_diagnostic(url: str) -> str | None:
+    # Never echo userinfo/credentials or control characters in diagnostic details.
+    if "@" in url or any(ord(char) < 32 or ord(char) == 127 for char in url):
+        return None
+    return url[:256]
+
+
+def _safe_candidate_diagnostics(candidates: Sequence[ApplicationCandidate], *, limit: int = 8) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for candidate in candidates[:limit]:
+        entry: dict[str, str] = {"label": candidate.label}
+        if candidate.candidate_id:
+            entry["candidate_id"] = candidate.candidate_id
+        if candidate.app_id:
+            entry["app_id"] = candidate.app_id
+        elif candidate.bundle_id:
+            entry["bundle_id"] = candidate.bundle_id
+        elif candidate.app_path is not None:
+            entry["app_path"] = str(candidate.app_path)
+        items.append(entry)
+    return items
+
+
+def _error(
+    kind: str,
+    *,
+    reason: str | None = None,
+    stage: str | None = None,
+    target_name: str | None = None,
+    candidates: Sequence[ApplicationCandidate] | None = None,
+    url: str | None = None,
+) -> ApplicationError:
     message, action = _ERRORS[kind]
+    details: dict[str, object] = {}
+    if stage:
+        details["stage"] = stage
+    if target_name:
+        details["target_name"] = target_name
+    if reason:
+        details["reason"] = reason
+    if url:
+        safe_url = _safe_url_diagnostic(url)
+        if safe_url:
+            details["url"] = safe_url
+    if candidates:
+        details["candidates"] = _safe_candidate_diagnostics(candidates)
     return ApplicationError(
         code=ApplicationErrorCode(f"quick_test.{kind}"),
         category=ApplicationErrorCategory.UNAVAILABLE if kind == "persistence_failed" else ApplicationErrorCategory.REQUEST_VALIDATION,
         message=message,
         action=action,
-        details={"stage": "workspace_persistence", "reason": reason} if reason else None,
+        details=details or None,
     )
 
 
@@ -121,95 +166,191 @@ def _context(request: QuickTestContextRequest, settings: Settings | None) -> Qui
     )
 
 
+def _build_native_target(platform: str, candidate: ApplicationCandidate):
+    if platform == "android":
+        return AndroidWorkspaceTarget(app_id=candidate.app_id)
+    if platform == "macos":
+        return MacOSWorkspaceTarget(app_path=candidate.app_path, bundle_id=candidate.bundle_id)
+    return WindowsWorkspaceTarget(app_path=candidate.app_path, window_title_re=candidate.window_title_re)
+
+
+def _selected_candidates(inventory: Sequence[ApplicationCandidate], candidate_ids: Sequence[str]) -> list[ApplicationCandidate]:
+    if not candidate_ids:
+        return []
+    by_id = {item.candidate_id: item for item in inventory if item.candidate_id}
+    return [by_id[cid] for cid in candidate_ids if cid in by_id]
+
+
 def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Callable[[], None] | None = None) -> QuickTestPrepareResult:
     cancel = check_cancelled or (lambda: None)
     cancel()
     address = None
-    addresses = ()
-    if request.platform == "web":
-        if request.url is not None:
-            try:
-                address = QuickTestWebAddressParser().validate(request.url)
-            except ValueError:
-                raise _error("invalid_web_address") from None
+    if request.platform == "web" and request.url is not None:
+        try:
+            address = validate_quick_test_web_url(request.url)
+        except ValueError:
+            raise _error("invalid_web_address", reason="invalid_explicit_url", url=request.url) from None
     try:
         settings = load_platform_settings(request.platform, user_config_root=request.user_config_root)
         context = _context(request, settings)
     except Exception:  # noqa: BLE001 -- configuration and host errors become safe prerequisite facts.
-        raise _error("prerequisites") from None
+        raise _error("prerequisites", reason="context_unavailable") from None
     if not context.can_start:
-        raise _error("prerequisites")
+        raise _error("prerequisites", reason="prerequisites_not_ready")
     cancel()
-    if request.platform == "web" and request.url is None:
-        addresses = _web_addresses(request.goal)
-    try:
-        catalogue = load_windows_application_catalogue() if request.platform == "windows" else None
-    except ConfigurationError:
-        raise _error("discovery_failed") from None
-    try:
-        options = {"url": request.url} if request.url is not None else {}
-        if catalogue is not None:
-            options["application_catalogue"] = catalogue
-        intent = build_quick_test_intent_analyzer(settings).analyze(platform=request.platform, goal=request.goal, **options)
-    except Exception:  # noqa: BLE001 -- preserve failure, never return raw provider/model output.
-        raise _error("inference_failed") from None
-    cancel()
-    if not intent.sufficient:
-        raise _error({"insufficient": "insufficient", "missing_application": "application_missing", "ambiguous_application": "application_ambiguous"}[intent.reason])
+
     runtime = PlatformRuntimeService()
+    catalogue = None
+    inventory_result = None
+    if request.platform != "web":
+        if request.platform == "windows":
+            try:
+                catalogue = load_windows_application_catalogue()
+            except ConfigurationError:
+                raise _error("discovery_failed", reason="windows_catalogue_invalid") from None
+        inventory_result = runtime.list_applications(
+            platform=request.platform,
+            target_id=request.target_id,
+            windows_catalogue=catalogue,
+            force_refresh=False,
+        )
+        if inventory_result.status != "complete":
+            raise _error("discovery_failed", reason=inventory_result.code)
+        cancel()
+
+    def _analyze_once(candidates: Sequence[ApplicationCandidate] | None):
+        try:
+            options: dict[str, object] = {}
+            if request.url is not None:
+                options["url"] = address
+            if candidates is not None:
+                options["candidates"] = candidates
+            return build_quick_test_intent_analyzer(settings).analyze(platform=request.platform, goal=request.goal, **options)
+        except ValueError:
+            if request.platform == "web":
+                raise _error("invalid_web_address", reason="invalid_extracted_web_url") from None
+            raise _error("inference_failed", reason="intent_analysis_failed") from None
+        except Exception:  # noqa: BLE001 -- preserve failure, never return raw provider/model output.
+            raise _error("inference_failed", reason="intent_analysis_failed") from None
+
+    intent = _analyze_once(inventory_result.candidates if inventory_result is not None else None)
+    cancel()
+
+    # Cache-miss single live refresh: only for native platforms when initial inventory came from cache
+    # and the model reported application_not_found. Re-invoke Model.complete at most once, and only
+    # if the refreshed inventory actually changed.
+    if inventory_result is not None and inventory_result.from_cache and not intent.sufficient and intent.reason == "application_not_found":
+        refreshed = runtime.list_applications(
+            platform=request.platform,
+            target_id=request.target_id,
+            windows_catalogue=catalogue,
+            force_refresh=True,
+        )
+        if refreshed.status != "complete":
+            raise _error("discovery_failed", reason=refreshed.code)
+        cancel()
+        if refreshed.fingerprint != inventory_result.fingerprint:
+            inventory_result = refreshed
+            intent = _analyze_once(inventory_result.candidates)
+            cancel()
+
+    if not intent.sufficient:
+        kind = {
+            "insufficient": "insufficient",
+            "missing_application": "application_missing",
+            "application_not_found": "application_not_found",
+            "ambiguous_application": "application_ambiguous",
+        }[intent.reason]
+        diag_candidates = _selected_candidates(inventory_result.candidates, intent.candidate_ids) if inventory_result is not None else []
+        raise _error(
+            kind,
+            target_name=intent.target_name,
+            reason=intent.explanation or intent.reason,
+            candidates=diag_candidates or None,
+        )
+
     requires_web_search_evidence = False
     if request.platform == "web":
         if request.url is not None:
             application = address
-        elif addresses:
-            if intent.explicit_reference not in addresses:
-                raise _error("invalid_web_address")
-            address = intent.explicit_reference
-            application = address
-        else:
-            if intent.reason != "web_search" or not intent.application_name or intent.explicit_reference is not None or intent.inferred_hint is not None:
-                raise _error("invalid_web_address")
+        elif intent.reason == "web_search":
+            if not intent.target_name or intent.base_url is not None:
+                raise _error("invalid_web_address", reason="invalid_web_search_decision")
             address = None
-            application = intent.application_name
+            application = intent.target_name
             requires_web_search_evidence = True
+        else:
+            if not intent.base_url:
+                raise _error("invalid_web_address", target_name=intent.target_name, reason="missing_web_url")
+            try:
+                address = validate_quick_test_web_url(intent.base_url)
+            except ValueError:
+                raise _error(
+                    "invalid_web_address",
+                    target_name=intent.target_name,
+                    reason="invalid_extracted_url",
+                    url=intent.base_url,
+                ) from None
+            application = address
         paths = runtime.discover_web_executables(request.target_id)
         if len(paths) != 1 or not runtime.web_executable_matches_channel(request.target_id, paths[0]):
-            raise _error("prerequisites")
+            raise _error("prerequisites", reason="browser_executable_unavailable")
         target = WebWorkspaceTarget(browser_channel=request.target_id, browser_executable_path=paths[0])
         settings.harness.web.base_url = address
-    elif request.platform == "windows" and intent.explicit_reference is None and intent.app_config_id is not None:
-        target, application = _windows_catalogue_target(runtime, catalogue, intent.app_config_id)
     else:
-        name = intent.application_name or intent.explicit_reference
-        if not name:
-            raise _error("application_missing")
-        lookup = runtime.lookup_application(platform=request.platform, name=name, explicit_reference=intent.explicit_reference, target_id=request.target_id, inferred_hint=intent.inferred_hint)
-        if lookup.status != "complete":
-            raise _error("discovery_failed")
-        if not lookup.candidates:
-            raise _error("application_not_found")
-        if len(lookup.candidates) != 1:
-            raise _error("application_ambiguous")
-        candidate = lookup.candidates[0]
-        try:
-            if request.platform == "android":
-                target = AndroidWorkspaceTarget(app_id=candidate.app_id)
-            elif request.platform == "macos":
-                target = MacOSWorkspaceTarget(app_path=candidate.app_path, bundle_id=candidate.bundle_id)
-            else:
-                target = WindowsWorkspaceTarget(app_path=candidate.app_path)
-        except ValueError:
-            raise _error("discovery_failed") from None
-        application = candidate.label
+        if inventory_result is None:
+            raise _error("discovery_failed", reason="inventory_unavailable")
+        if intent.candidate_id is not None:
+            by_id = {item.candidate_id: item for item in inventory_result.candidates if item.candidate_id}
+            candidate = by_id.get(intent.candidate_id)
+            if candidate is None:
+                raise _error("inference_failed", target_name=intent.target_name, reason="unknown_candidate_id")
+            try:
+                target = _build_native_target(request.platform, candidate)
+            except ValueError:
+                raise _error("discovery_failed", target_name=intent.target_name or candidate.label, reason="invalid_candidate_target") from None
+            application = candidate.label
+        elif intent.explicit_reference is not None:
+            name = intent.target_name or intent.explicit_reference
+            lookup = runtime.lookup_application(
+                platform=request.platform,
+                name=name,
+                explicit_reference=intent.explicit_reference,
+                target_id=request.target_id,
+            )
+            if lookup.status != "complete":
+                raise _error("discovery_failed", target_name=name, reason=lookup.code)
+            if not lookup.candidates:
+                raise _error(
+                    "application_not_found",
+                    target_name=name,
+                    reason=intent.explanation or "explicit_reference_not_found",
+                )
+            if len(lookup.candidates) != 1:
+                raise _error(
+                    "application_ambiguous",
+                    target_name=name,
+                    reason="multiple_candidates_matched",
+                    candidates=lookup.candidates,
+                )
+            candidate = lookup.candidates[0]
+            try:
+                target = _build_native_target(request.platform, candidate)
+            except ValueError:
+                raise _error("discovery_failed", target_name=name, reason="invalid_candidate_target") from None
+            application = candidate.label
+        else:
+            raise _error("application_missing", target_name=intent.target_name, reason=intent.explanation or "missing_application")
+
     cancel()
     _bind_target(settings, target, request.target_id)
     try:
         validate_runtime_settings(settings)
         available, _, _ = runtime.check_target_availability(settings)
     except Exception:  # noqa: BLE001 -- target checks never leak host or credential values.
-        raise _error("prerequisites") from None
+        raise _error("prerequisites", target_name=application, reason="target_validation_failed") from None
     if not available:
-        raise _error("prerequisites")
+        raise _error("prerequisites", target_name=application, reason="target_unavailable")
     cancel()
     root, name, revision, frozen = _persist(request, target)
     # Loading never authorizes a changed target: _persist verifies target, identity and revision.
@@ -227,28 +368,6 @@ def prepare_quick_test(request: QuickTestPrepareRequest, *, check_cancelled: Cal
         settings=frozen.model_copy(deep=True),
         requires_web_search_evidence=requires_web_search_evidence,
     )
-
-
-def _windows_catalogue_target(runtime, catalogue, selected_id):
-    entry = next((entry for entry in catalogue if entry.id == selected_id), None)
-    if entry is None:
-        raise _error("discovery_failed")
-    for candidate_path in entry.path_candidates:
-        lookup = runtime.lookup_application(platform="windows", name=entry.name, explicit_reference=os.path.expandvars(candidate_path))
-        if lookup.status != "complete" or len(lookup.candidates) > 1:
-            raise _error("discovery_failed")
-        if lookup.candidates:
-            if lookup.candidates[0].app_path is None:
-                raise _error("discovery_failed")
-            return WindowsWorkspaceTarget(app_path=lookup.candidates[0].app_path, window_title_re=entry.window_title_re), entry.name
-    raise _error("discovery_failed")
-
-
-def _web_addresses(goal: str) -> tuple[str, ...]:
-    try:
-        return QuickTestWebAddressParser().extract(goal)
-    except ValueError:
-        raise _error("invalid_web_address") from None
 
 
 def _bind_target(settings, target, target_id):
@@ -287,18 +406,18 @@ def _persist(request, target):
     try:
         return _persist_target(request, target)
     except _WorkspaceConflictError as error:
-        raise _error("workspace_conflict", reason=error.reason) from None
+        raise _error("workspace_conflict", stage="workspace_persistence", reason=error.reason) from None
     except ConfigurationError as error:
         if _has_io_cause(error):
-            raise _error("persistence_failed", reason="io_error") from None
+            raise _error("persistence_failed", stage="workspace_persistence", reason="io_error") from None
         if error.context.get("error_code") == "workspace_conflict":
-            raise _error("workspace_conflict", reason="revision_conflict") from None
+            raise _error("workspace_conflict", stage="workspace_persistence", reason="revision_conflict") from None
         reason = error.context.get("workspace_failure")
         if isinstance(reason, str) and reason in {"identity_conflict", "identity_unavailable", "configuration_conflict", "unsafe_root"}:
-            raise _error("workspace_conflict", reason=reason) from None
-        raise _error("persistence_failed", reason="storage_error") from None
+            raise _error("workspace_conflict", stage="workspace_persistence", reason=reason) from None
+        raise _error("persistence_failed", stage="workspace_persistence", reason="storage_error") from None
     except Exception as error:  # noqa: BLE001 -- storage and unexpected persistence failures must not masquerade as identity conflicts.
-        raise _error("persistence_failed", reason="io_error" if _has_io_cause(error) else "storage_error") from None
+        raise _error("persistence_failed", stage="workspace_persistence", reason="io_error" if _has_io_cause(error) else "storage_error") from None
 
 
 def _persist_target(request, target):

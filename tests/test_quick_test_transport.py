@@ -364,3 +364,23 @@ def test_quick_task_gate_does_not_change_legacy_unknown_endpoint_errors(tmp_path
     server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=tmp_path))
     assert server.handle_get(f"{PREFIX}/runs/missing/unknown")[1]["code"] == "not_found"
     assert server.handle_post(f"{PREFIX}/runs/missing/unknown", {})[1]["code"] == "not_found"
+
+
+def test_quick_test_preparation_error_forwards_structured_details(monkeypatch, tmp_path):
+    from fsq_agent.application import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode
+
+    err = ApplicationError(
+        code=ApplicationErrorCode("quick_test.application_not_found"),
+        category=ApplicationErrorCategory.REQUEST_VALIDATION,
+        message="No matching application was found in supported local discovery.",
+        action="Use an installed application's exact identity or path in the goal.",
+        details={"target_name": "WeChat", "reason": "WeChat is not installed on dev-1."},
+    )
+    monkeypatch.setattr("fsq_agent.adapters.control_plane._quick_test.prepare_quick_test", lambda *a, **kw: (_ for _ in ()).throw(err))
+    server = ControlPlaneServer(ControlPlaneServerOptions(user_config_root=tmp_path))
+    status, accepted = server.handle_post(f"{PREFIX}/quick-test/runs", {"platform": "android", "targetId": "dev-1", "goal": "打开微信发消息"})
+    assert status == 202
+    terminal = wait_terminal(server, accepted["requestId"])
+    assert terminal["status"] == "error"
+    assert terminal["error"]["code"] == "quick_test.application_not_found"
+    assert terminal["error"]["details"] == {"target_name": "WeChat", "reason": "WeChat is not installed on dev-1."}

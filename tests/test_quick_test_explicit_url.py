@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from fsq_agent.agent_engine import EngineError, ModelResult
-from fsq_agent.ai_services import QuickTestIntent, QuickTestIntentAnalyzer, QuickTestWebAddressParser
+from fsq_agent.ai_services import QuickTestIntent, QuickTestIntentAnalyzer
 from fsq_agent.application import ApplicationError, QuickTestPrepareRequest, prepare_quick_test, run_quick_test
 from fsq_agent.config import save_openai_provider
 from fsq_agent.environments import PlatformRuntimeService
@@ -18,7 +18,17 @@ from fsq_agent.models import DynamicAgentOutcome, ExecutableStep, PlatformRuntim
 
 class Session:
     def __init__(self, **updates):
-        self.payload = {"sufficient": True, "reason": "sufficient", "application_name": None, "explicit_reference": None, "inferred_hint": None, **updates}
+        self.payload = {
+            "sufficient": True,
+            "reason": "sufficient",
+            "target_name": None,
+            "candidate_id": None,
+            "explicit_reference": None,
+            "base_url": None,
+            "candidate_ids": [],
+            "explanation": None,
+            **updates,
+        }
         self.requests = []
         self.closed = False
 
@@ -63,24 +73,24 @@ INVALID_URLS = [
 @pytest.mark.parametrize("echo", [None, "https://other.test/", "https://example.test"])
 def test_explicit_target_uses_caller_value_without_model_echo_or_goal_extraction(url, echo):
     goal = "Verify the heading, then navigate to https://later.test and check its form."
-    session = Session(explicit_reference=echo)
+    session = Session(base_url=echo)
     intent = QuickTestIntentAnalyzer(session).analyze(platform="web", goal=goal, url=url)
     assert intent.sufficient
-    assert intent.explicit_reference == url
+    assert intent.base_url == url
     assert len(session.requests) == 1
     context = json.loads(session.requests[0].input.splitlines()[-1])
     assert context == {"platform": "web", "goal": goal, "url": url}
-    assert "actions and a checkable outcome" in session.requests[0].input
+    assert "checkable outcome" in session.requests[0].input
     assert session.closed
 
 
 @pytest.mark.parametrize("reason", ["sufficient", "web_search"])
 def test_model_search_label_cannot_enable_search_or_replace_explicit_start(reason):
-    session = Session(reason=reason, application_name="other site")
+    session = Session(reason=reason, target_name="other site")
     result = QuickTestIntentAnalyzer(session).analyze(platform="web", goal="Search for the support link and verify its heading", url=URLS[0])
     assert result.sufficient
     assert result.reason == "sufficient"
-    assert result.explicit_reference == URLS[0]
+    assert result.base_url == URLS[0]
 
 
 @pytest.mark.parametrize("url", INVALID_URLS)
@@ -149,7 +159,7 @@ def request(root, url, *, goal="Verify the heading; then visit https://later.tes
 
 @pytest.mark.parametrize("url", URLS)
 def test_preparation_freezes_complete_url_without_search_or_goal_substitution(web, monkeypatch, url):
-    session = Session(explicit_reference="https://other.test")
+    session = Session(base_url="https://other.test")
     install_session(monkeypatch, session)
     result = prepare_quick_test(request(web, url))
     assert result.application == url
@@ -159,9 +169,8 @@ def test_preparation_freezes_complete_url_without_search_or_goal_substitution(we
     assert len(session.requests) == 1
 
 
-def test_explicit_start_never_extracts_goal_urls_in_either_layer(web, monkeypatch):
-    monkeypatch.setattr(QuickTestWebAddressParser, "extract", lambda *args: pytest.fail("Explicit starting URL must not be extracted from goal"))
-    install_session(monkeypatch, Session())
+def test_explicit_start_keeps_caller_url_independent_of_goal_links(web, monkeypatch):
+    install_session(monkeypatch, Session(base_url="https://later.test"))
     goal = "Verify heading, then test the link to https://later.test under its stated conditions."
     result = prepare_quick_test(request(web, URLS[0], goal=goal))
     assert result.settings.harness.web.base_url == URLS[0]
@@ -176,7 +185,7 @@ def test_explicit_start_never_extracts_goal_urls_in_either_layer(web, monkeypatc
     ],
 )
 def test_goal_only_chinese_boundaries_keep_original_goal_and_exact_reference(web, monkeypatch, goal):
-    session = Session(explicit_reference="https://example.com")
+    session = Session(base_url="https://example.com")
     install_session(monkeypatch, session)
     value = QuickTestPrepareRequest(platform="web", target_id="chrome", goal=goal, user_config_root=web)
     result = prepare_quick_test(value)
@@ -188,13 +197,13 @@ def test_goal_only_chinese_boundaries_keep_original_goal_and_exact_reference(web
 
 
 def test_normalized_model_echo_cannot_replace_explicit_url(web, monkeypatch):
-    install_session(monkeypatch, Session(explicit_reference=URLS[0].lower()))
+    install_session(monkeypatch, Session(base_url=URLS[0].lower()))
     result = prepare_quick_test(request(web, URLS[0]))
     assert result.settings.harness.web.base_url == URLS[0]
 
 
 def test_invalid_model_output_fails_safely_without_retry_or_persistence(web, monkeypatch):
-    session = Session(sufficient="true", application_name="sk-unit-secret")
+    session = Session(sufficient="true", target_name="sk-unit-secret")
     install_session(monkeypatch, session)
     with pytest.raises(ApplicationError) as error:
         prepare_quick_test(request(web, URLS[0]))
@@ -210,7 +219,7 @@ def test_application_freezes_caller_url_even_when_analyzer_returns_an_alternate(
 
     def analyze(**kwargs):
         seen.append(kwargs)
-        return QuickTestIntent(True, "web_search", "alternate", "https://other.test")
+        return QuickTestIntent(True, "web_search", "alternate", base_url="https://other.test")
 
     monkeypatch.setattr("fsq_agent.application._quick_test.build_quick_test_intent_analyzer", lambda settings: SimpleNamespace(analyze=analyze))
     value = request(web, URLS[0])
@@ -298,7 +307,7 @@ async def test_original_chinese_goal_runs_through_real_shared_execution(web, mon
     from fsq_agent.execution import DynamicExecutionService
 
     goal = "在 Chrome 中打开精确网址 https://example.com\uff08不得替换为其他站点\uff09\uff0c检查页面标题\uff0c并验证标题是否恰为 Example Domain\uff1b保留可支持结论的页面证据。"
-    install_session(monkeypatch, Session(explicit_reference="https://example.com"))
+    install_session(monkeypatch, Session(base_url="https://example.com"))
     requests = []
     contexts = []
     tasks = []

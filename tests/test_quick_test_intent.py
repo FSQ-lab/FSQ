@@ -3,12 +3,14 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from fsq_agent.agent_engine import EngineError, ModelResult
-from fsq_agent.ai_services import QuickTestIntentAnalyzer, build_quick_test_intent_analyzer
-from fsq_agent.config import load_platform_settings, load_windows_application_catalogue
+from fsq_agent.ai_services import QuickTestIntent, QuickTestIntentAnalyzer, build_quick_test_intent_analyzer
+from fsq_agent.config import load_platform_settings
+from fsq_agent.models import ApplicationCandidate
 
 
 class Session:
@@ -35,474 +37,278 @@ class Session:
 
 
 def output(**updates):
-    return json.dumps({"sufficient": True, "reason": "sufficient", "application_name": "Calculator", "explicit_reference": None, "inferred_hint": None, **updates})
+    return json.dumps(
+        {
+            "sufficient": True,
+            "reason": "sufficient",
+            "target_name": "Calculator",
+            "candidate_id": "c001",
+            "explicit_reference": None,
+            "base_url": None,
+            "candidate_ids": [],
+            "explanation": None,
+            **updates,
+        }
+    )
 
 
-@pytest.mark.parametrize("name", ["edge", "微软浏览器"])
-def test_windows_catalogue_selection_uses_one_semantic_request_without_paths(name):
-    session = Session(output(application_name=name, app_config_id="edge", inferred_hint={"kind": "app_path", "value": r"C:\Guessed\edge.exe"}))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal=f"打开{name}\uff0c访问www.google.com", application_catalogue=load_windows_application_catalogue())
-    assert result.app_config_id == "edge"
-    assert result.inferred_hint is None
+CANDIDATES = (
+    ApplicationCandidate(
+        candidate_id="c001",
+        identity="com.vendor.calculator",
+        label="Calculator",
+        aliases=("计算器",),
+        app_id="com.vendor.calculator",
+        source="android_package",
+    ),
+    ApplicationCandidate(
+        candidate_id="c002",
+        identity="com.android.vending",
+        label="Google Play Store",
+        aliases=("应用商店",),
+        app_id="com.android.vending",
+        source="android_package",
+    ),
+)
+
+WINDOWS_CANDIDATES = (
+    ApplicationCandidate(
+        candidate_id="c001",
+        identity="C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+        label="Microsoft Edge",
+        aliases=("edge",),
+        app_path=Path("C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"),
+        window_title_re=".*Microsoft Edge.*",
+        source="windows_catalogue",
+    ),
+)
+
+
+def test_candidate_selection_uses_single_tool_free_call_and_hides_host_fields():
+    session = Session(output(target_name="Microsoft Edge", candidate_id="c001"))
+    result = QuickTestIntentAnalyzer(session).analyze(
+        platform="windows",
+        goal="打开微软浏览器\uff0c访问 example.com 并检查标题",
+        candidates=WINDOWS_CANDIDATES,
+    )
+    assert result == QuickTestIntent(
+        sufficient=True,
+        reason="sufficient",
+        target_name="Microsoft Edge",
+        candidate_id="c001",
+    )
     assert len(session.requests) == 1
     request = session.requests[0]
-    assert "Microsoft Edge" in request.input
-    assert "ProgramFiles" not in request.input
-    assert "path_candidates" not in request.input
-    assert "app_config_id" in request.output.schema["required"]
+    assert "window_title_re" not in request.input
+    assert "launch_args" not in request.input
+    assert "window_title_re" not in request.output.schema["properties"]
+    assert "launch_args" not in request.output.schema["properties"]
+    context = json.loads(request.input.splitlines()[-1])
+    assert context["candidates"][0]["candidate_id"] == "c001"
+    assert "window_title_re" not in context["candidates"][0]
     assert session.closed
 
 
-def test_windows_catalogue_null_retains_inferred_hint():
-    session = Session(output(app_config_id=None, inferred_hint={"kind": "app_path", "value": r"C:\Apps\calc.exe"}))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal="Calculator: verify 1+1=2", application_catalogue=load_windows_application_catalogue())
-    assert result.app_config_id is None
-    assert result.inferred_hint.value == r"C:\Apps\calc.exe"
-
-
-@pytest.mark.parametrize("selected", ["invented", "EDGE", "", 3])
-def test_windows_catalogue_unknown_or_invalid_selection_is_not_no_match(selected):
-    session = Session(output(app_config_id=selected))
-    with pytest.raises(EngineError):
-        QuickTestIntentAnalyzer(session).analyze(platform="windows", goal="Calculator: verify 1+1=2", application_catalogue=load_windows_application_catalogue())
+def test_cross_language_alias_and_entry_app_selection_without_literal_grounding():
+    session = Session(output(target_name="Google Play Store", candidate_id="c002", explanation="Install target app via Play Store first."))
+    result = QuickTestIntentAnalyzer(session).analyze(
+        platform="android",
+        goal="先去应用商店安装微信\uff0c然后检查安装结果",
+        candidates=CANDIDATES,
+    )
+    assert result.sufficient
+    assert result.candidate_id == "c002"
+    assert result.target_name == "Google Play Store"
+    assert result.explanation == "Install target app via Play Store first."
     assert session.closed
 
 
-def test_windows_catalogue_field_must_be_present_even_for_no_match():
-    with pytest.raises(EngineError):
-        QuickTestIntentAnalyzer(Session(output())).analyze(platform="windows", goal="Calculator: verify 1+1=2", application_catalogue=load_windows_application_catalogue())
+@pytest.mark.parametrize("bad_id", ["c999", "invented", "C001", ""])
+def test_unknown_or_invented_candidate_id_is_rejected(bad_id):
+    session = Session(output(candidate_id=bad_id))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: 1+1=2", candidates=CANDIDATES)
+    assert error.value.category == "invalid_output"
+    assert session.closed
 
 
-def test_windows_explicit_path_has_priority_over_valid_catalogue_selection():
-    path = r"C:\Custom\browser.exe"
-    session = Session(output(application_name=None, explicit_reference=path, app_config_id="edge"))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal=f"打开{path}\uff0c访问www.google.com", application_catalogue=load_windows_application_catalogue())
-    assert result.explicit_reference == path
-    assert result.inferred_hint is None
+def test_explicit_reference_allowed_only_when_verbatim_in_goal():
+    goal = "In com.custom.calculator verify 1+1=2"
+    session = Session(output(candidate_id=None, explicit_reference="com.custom.calculator"))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="android", goal=goal, candidates=CANDIDATES)
+    assert result.sufficient
+    assert result.candidate_id is None
+    assert result.explicit_reference == "com.custom.calculator"
 
 
-@pytest.mark.parametrize("reference", ["https://getsamplefiles.com/download/pdf/sample-1.pdf", "edge://downloads"])
-def test_windows_catalogue_ignores_navigation_uri_as_explicit_application_reference(reference):
-    goal = f"打开Edge\uff0c导航到 {reference}\uff0c然后检查结果"
-    session = Session(output(application_name="Edge", explicit_reference=reference, app_config_id="edge"))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal=goal, application_catalogue=load_windows_application_catalogue())
+def test_ungrounded_explicit_reference_is_rejected():
+    session = Session(output(candidate_id=None, explicit_reference="com.invented.calculator"))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: 1+1=2", candidates=CANDIDATES)
+    assert error.value.category == "invalid_output"
+    assert session.closed
+
+
+@pytest.mark.parametrize("actual", ["com.tencent.mm2", "com.tencent.mm.evil", "evilcom.tencent.mm", "com.tencent.mm-suffix"])
+def test_explicit_identity_does_not_accept_larger_identifier_prefix(actual):
+    session = Session(output(candidate_id=None, explicit_reference="com.tencent.mm"))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="android", goal=f"用{actual}搜索联系人并验证结果", candidates=CANDIDATES)
+    assert error.value.category == "invalid_output"
+
+
+@pytest.mark.parametrize(("platform", "reference"), [("android", "com.vendor.calculator"), ("macos", "/Applications/Calculator.app"), ("windows", r"C:\Apps\Calculator.exe")])
+def test_native_reference_surrounding_whitespace_is_normalized(platform, reference):
+    session = Session(output(candidate_id=None, explicit_reference=f"\n\t {reference} \r\n"))
+    result = QuickTestIntentAnalyzer(session).analyze(platform=platform, goal=f"Open {reference} and verify 1+1=2")
+    assert result.explicit_reference == reference
+    assert session.closed
+
+
+@pytest.mark.parametrize("reference", ["com.vendor.\ncalculator", "com.vendor.\tcalculator", "com.vendor.\x00calculator"])
+def test_native_reference_embedded_controls_are_rejected(reference):
+    session = Session(output(candidate_id=None, explicit_reference=reference))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="android", goal=f"Open {reference} and verify 1+1=2")
+    assert error.value.category == "invalid_output"
+    assert session.closed
+
+
+def test_native_sufficient_requires_candidate_or_explicit_reference():
+    session = Session(output(candidate_id=None, explicit_reference=None))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: 1+1=2", candidates=CANDIDATES)
+    assert error.value.category == "invalid_output"
+
+
+def test_application_not_found_and_ambiguous_preserve_structured_diagnostics():
+    not_found = QuickTestIntentAnalyzer(Session(output(sufficient=False, reason="application_not_found", target_name="WeChat", candidate_id=None, explanation="WeChat is not installed."))).analyze(
+        platform="android", goal="打开微信发消息", candidates=CANDIDATES
+    )
+    assert not not_found.sufficient
+    assert not_found.reason == "application_not_found"
+    assert not_found.target_name == "WeChat"
+    assert not_found.explanation == "WeChat is not installed."
+
+    ambiguous = QuickTestIntentAnalyzer(
+        Session(output(sufficient=False, reason="ambiguous_application", target_name="App", candidate_id=None, candidate_ids=["c001", "c002"], explanation="Two candidates match."))
+    ).analyze(platform="android", goal="打开应用并检查", candidates=CANDIDATES)
+    assert not ambiguous.sufficient
+    assert ambiguous.reason == "ambiguous_application"
+    assert ambiguous.candidate_ids == ("c001", "c002")
+
+
+def test_ambiguous_rejects_unknown_diagnostic_candidate_ids():
+    session = Session(output(sufficient=False, reason="ambiguous_application", candidate_id=None, candidate_ids=["c001", "c999"]))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="android", goal="打开应用并检查", candidates=CANDIDATES)
+    assert error.value.category == "invalid_output"
+
+
+def test_candidate_id_takes_priority_and_clears_explicit_reference():
+    session = Session(output(candidate_id="c001", explicit_reference="com.vendor.calculator"))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Open com.vendor.calculator and verify 1+1=2", candidates=CANDIDATES)
+    assert result.candidate_id == "c001"
     assert result.explicit_reference is None
-    assert result.app_config_id == "edge"
 
 
-@pytest.mark.parametrize("reason", ["insufficient", "ambiguous_application"])
-def test_windows_catalogue_does_not_turn_insufficient_or_ambiguous_intent_into_success(reason):
-    session = Session(output(sufficient=False, reason=reason, application_name=None, app_config_id=None))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="windows", goal="浏览器", application_catalogue=load_windows_application_catalogue())
-    assert not result.sufficient
-    assert result.reason == reason
+@pytest.mark.parametrize(("platform", "bad_ref"), [("android", "Calculator"), ("macos", "Calculator"), ("windows", "notepad.exe")])
+def test_malformed_native_explicit_reference_is_rejected(platform, bad_ref):
+    session = Session(output(candidate_id=None, explicit_reference=bad_ref))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform=platform, goal=f"Open {bad_ref} and verify result")
+    assert error.value.category == "invalid_output"
 
 
-def test_other_platform_schema_does_not_add_catalogue_selection():
-    session = Session(output())
-    QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: verify 1+1=2")
-    assert "app_config_id" not in session.requests[0].output.schema["properties"]
+@pytest.mark.parametrize("bad_url", ["javascript:alert(1)", "file:///etc/passwd", "ftp://example.test", "https://user:pass@example.test", "https://example.test:0"])
+def test_analyzer_rejects_malformed_model_extracted_web_url(bad_url):
+    session = Session(output(reason="sufficient", target_name="site", candidate_id=None, base_url=bad_url))
+    with pytest.raises(ValueError, match=r"HTTP\(S\) URL|URL|port|credentials|scheme|host"):
+        QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f"Open {bad_url} and verify heading")
+    assert session.closed
 
 
 @pytest.mark.parametrize(
-    "goal", ["搜索 FSQ github\uff0c并且帮我找到FSQ 的官网地址", "Goal: search for FSQ on GitHub and find its official website", "Search FSQ // find its official site", "Search FSQ //"]
+    ("goal", "completed_url", "target_name"),
+    [
+        ("please open x.com and check trending posts", "https://x.com", "x.com"),
+        ("open localhost:3000 and check login button", "http://localhost:3000", "localhost:3000"),
+        ("visit 127.0.0.1:8080/health and verify status ok", "http://127.0.0.1:8080/health", "127.0.0.1:8080"),
+    ],
 )
-def test_address_free_search_is_grounded_tool_free_intent(goal):
-    session = Session(output(reason="web_search", application_name="FSQ"))
+def test_web_bare_domain_and_localhost_scheme_completion(goal, completed_url, target_name):
+    session = Session(output(reason="sufficient", target_name=target_name, candidate_id=None, base_url=completed_url))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="web", goal=goal)
+    assert result.sufficient
+    assert result.reason == "sufficient"
+    assert result.base_url == completed_url
+    assert "bare domain" in session.requests[0].input
+    assert "`https://` for public domains" in session.requests[0].input
+    assert "`http://` for `localhost`" in session.requests[0].input
+    assert session.closed
+
+
+@pytest.mark.parametrize(
+    "goal",
+    ["搜索 FSQ github\uff0c并且帮我找到FSQ 的官网地址", "Goal: search for FSQ on GitHub and find its official website"],
+)
+def test_address_free_web_search_succeeds_without_base_url(goal):
+    session = Session(output(reason="web_search", target_name="FSQ", candidate_id=None, base_url=None))
     result = QuickTestIntentAnalyzer(session).analyze(platform="web", goal=goal)
     assert result.sufficient
     assert result.reason == "web_search"
-    assert result.application_name == "FSQ"
-    assert result.explicit_reference is None
-    assert result.inferred_hint is None
-    assert len(session.requests) == 1
-    assert "search/discovery" in session.requests[0].input
+    assert result.target_name == "FSQ"
+    assert result.base_url is None
     assert session.closed
 
 
-@pytest.mark.parametrize(
-    "updates",
-    [
-        {"application_name": "Invented"},
-        {"application_name": None},
-        {"explicit_reference": "https://invented.test"},
-        {"inferred_hint": {"kind": "app_id", "value": "com.fsq"}},
-    ],
-)
-def test_search_output_cannot_invent_subject_address_or_native_hint(updates):
-    payload = {"reason": "web_search", "application_name": "FSQ", **updates}
-    with pytest.raises(EngineError):
-        QuickTestIntentAnalyzer(Session(output(**payload))).analyze(platform="web", goal="Search FSQ and find its official website")
-
-
-@pytest.mark.parametrize("goal", ["FSQ", "帮我测一下网页"])
-def test_bare_web_topics_remain_insufficient(goal):
-    result = QuickTestIntentAnalyzer(Session(output(sufficient=False, reason="insufficient", application_name=None))).analyze(platform="web", goal=goal)
-    assert not result.sufficient
-
-
-def test_short_actionable_goal_is_not_length_gated():
-    session = Session(output())
-    result = QuickTestIntentAnalyzer(session, reasoning_effort="low").analyze(platform="windows", goal="Calculator: 1+1=2")
+def test_web_goal_extracts_base_url_without_rigid_punctuation_state_machine():
+    session = Session(output(reason="sufficient", target_name="example.com", candidate_id=None, base_url="https://example.com"))
+    result = QuickTestIntentAnalyzer(session).analyze(
+        platform="web",
+        goal="在 Chrome 中打开精确网址 https://example.com\uff08不得替换为其他站点\uff09\uff0c检查页面标题",
+    )
     assert result.sufficient
-    assert result.application_name == "Calculator"
-    assert session.requests[0].reasoning_effort == "low"
-    assert session.requests[0].output.schema["additionalProperties"] is False
-    assert session.closed
+    assert result.reason == "sufficient"
+    assert result.base_url == "https://example.com"
 
 
-@pytest.mark.parametrize(
-    ("platform", "goal", "name", "reference", "url"),
-    [
-        ("android", "Browse the Downloads list in Files and tell me what is visible; do not change anything.", "Files", None, None),
-        ("macos", "Explore Calculator's available views and describe what you observe.", "Calculator", None, None),
-        ("windows", "Inspect Notepad's current document without saving or editing it.", "Notepad", None, None),
-        ("web", "Browse https://example.com/news and report the visible headlines.", None, "https://example.com/news", None),
-        ("web", "Explore the currently visible navigation and describe it without submitting anything.", None, None, "https://example.com"),
-    ],
-)
-def test_scoped_inspection_intent_needs_no_invented_qa_assertion(platform, goal, name, reference, url):
-    session = Session(output(application_name=name, explicit_reference=reference))
-
-    result = QuickTestIntentAnalyzer(session).analyze(platform=platform, goal=goal, url=url)
-
-    assert result.sufficient
-    assert result.application_name == name
-    assert result.explicit_reference == (url or reference)
-    assert len(session.requests) == 1
-    assert session.closed
+def test_web_search_rejects_non_null_base_url():
+    session = Session(output(reason="web_search", target_name="FSQ", candidate_id=None, base_url="https://example.com"))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="web", goal="Search FSQ and find its official website")
+    assert error.value.category == "invalid_output"
 
 
-@pytest.mark.parametrize(("platform", "goal", "url"), [("android", "Files", None), ("macos", "Calculator", None), ("web", "News", "https://example.com")])
-def test_bare_application_or_topic_does_not_authorize_an_exploration_flow(platform, goal, url):
-    session = Session(output(sufficient=False, reason="insufficient", application_name=None))
-
-    result = QuickTestIntentAnalyzer(session).analyze(platform=platform, goal=goal, url=url)
-
-    assert not result.sufficient
-    assert result.reason == "insufficient"
-    assert len(session.requests) == 1
-    assert session.closed
+def test_web_sufficient_requires_base_url_when_no_caller_url():
+    session = Session(output(reason="sufficient", target_name="example", candidate_id=None, base_url=None))
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="web", goal="Open example and verify heading")
+    assert error.value.category == "invalid_output"
 
 
-@pytest.mark.parametrize("reason", ["insufficient", "missing_application", "ambiguous_application"])
-def test_insufficient_intent_is_distinct_from_model_failure(reason):
-    session = Session(output(sufficient=False, reason=reason, application_name=None))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="macos", goal="Calculator")
+@pytest.mark.parametrize("reason", ["insufficient", "missing_application", "application_not_found", "ambiguous_application"])
+def test_insufficient_reasons_are_distinct_from_model_failure(reason):
+    session = Session(output(sufficient=False, reason=reason, target_name="App", candidate_id=None))
+    result = QuickTestIntentAnalyzer(session).analyze(platform="android", goal="App", candidates=CANDIDATES)
     assert not result.sufficient
     assert result.reason == reason
 
 
-@pytest.mark.parametrize("text", ["", "[]", "null", "```json\n{}\n```", output(sufficient="true"), output(extra="secret"), output(reason="invented"), output(application_name=" ")])
+@pytest.mark.parametrize("text", ["", "[]", "null", "```json\n{}\n```", output(sufficient="true"), output(extra="secret"), output(reason="invented"), output(target_name=" ")])
 def test_strict_output_rejects_malformed(text):
     session = Session(text)
-    with pytest.raises(EngineError, match="output"):
-        QuickTestIntentAnalyzer(session).analyze(platform="windows", goal="Calculator: 1+1=2")
+    with pytest.raises(EngineError) as error:
+        QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: 1+1=2", candidates=CANDIDATES)
+    assert error.value.category == "invalid_output"
     assert session.closed
 
 
 def test_parsed_output_required_and_refusal_preserved():
     for session in [Session(output(), parsed=False), Session(EngineError("refusal", "Refused."))]:
-        with pytest.raises(EngineError) as error:
-            QuickTestIntentAnalyzer(session).analyze(platform="web", goal="Check https://example.com")
-        assert error.value.category in {"invalid_output", "refusal"}
+        with pytest.raises(EngineError):
+            QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: 1+1=2", candidates=CANDIDATES)
         assert session.closed
-
-
-def test_model_cannot_claim_an_inferred_native_identity_is_explicit():
-    session = Session(output(explicit_reference="com.vendor.calculator"))
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: 1+1=2")
-    assert error.value.category == "invalid_output"
-
-
-def test_explicit_identity_is_retained_only_when_present_in_current_goal():
-    session = Session(output(explicit_reference="com.vendor.calculator"))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="android", goal="In com.vendor.calculator check 1+1=2")
-    assert result.explicit_reference == "com.vendor.calculator"
-
-
-@pytest.mark.parametrize(("platform", "reference"), [("android", "com.vendor.calculator"), ("macos", "/Applications/Calculator.app"), ("windows", r"C:\Apps\Calculator.exe")])
-def test_native_reference_surrounding_whitespace_is_normalized_before_validation(platform, reference):
-    session = Session(output(application_name=None, explicit_reference=f"\n\t {reference} \r\n"))
-    result = QuickTestIntentAnalyzer(session).analyze(platform=platform, goal=f"In {reference} verify 1+1=2")
-    assert result.explicit_reference == reference
-    assert len(session.requests) == 1
-    assert session.closed
-
-
-@pytest.mark.parametrize("reference", ["com.vendor.\ncalculator", "com.vendor.\tcalculator", "com.vendor.\x00calculator"])
-def test_native_reference_embedded_controls_remain_invalid(reference):
-    session = Session(output(application_name=None, explicit_reference=reference))
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(session).analyze(platform="android", goal=f"In {reference} verify 1+1=2")
-    assert error.value.category == "invalid_output"
-    assert len(session.requests) == 1
-    assert session.closed
-
-
-def test_model_native_hint_cannot_replace_the_application_name_query():
-    session = Session(output(application_name="com.vendor.calculator"))
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(session).analyze(platform="android", goal="Calculator: 1+1=2")
-    assert error.value.category == "invalid_output"
-
-
-@pytest.mark.parametrize(
-    ("goal", "name"),
-    [
-        ("用微信搜索联系人张三\uff0c确认出现匹配结果", "微信"),
-        ("打开计算器计算1+1并确认结果为2", "计算器"),
-        ("用WeChat搜索联系人并确认匹配结果", "WeChat"),
-        ("打开Calculator计算1+1并确认结果为2", "Calculator"),
-        ("Calculator: verify 1+1=2", "Calculator"),
-    ],
-)
-def test_grounding_allows_continuous_cjk_and_mixed_script_goal(goal, name):
-    result = QuickTestIntentAnalyzer(Session(output(application_name=name))).analyze(platform="android", goal=goal)
-    assert result.application_name == name
-
-
-@pytest.mark.parametrize(
-    ("goal", "name"),
-    [
-        ("Use SuperCalculator and verify 1+1=2", "Calculator"),
-        ("Use CalculatorPro and verify 1+1=2", "Calculator"),
-        ("Use Calculator2 and verify 1+1=2", "Calculator"),
-        ("Use Calculator_pro and verify 1+1=2", "Calculator"),
-        ("Use Calculator\u0301 and verify 1+1=2", "Calculator"),
-        ("用支付宝搜索联系人并确认匹配结果", "微信"),
-        ("Use WeChat and verify search", "com.tencent.mm"),
-    ],
-)
-def test_grounding_rejects_adjacent_latin_tokens_and_unrelated_substitution(goal, name):
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(Session(output(application_name=name))).analyze(platform="android", goal=goal)
-    assert error.value.category == "invalid_output"
-
-
-@pytest.mark.parametrize(
-    ("goal", "reference"),
-    [
-        ("用com.tencent.mm搜索联系人并确认匹配结果", "com.tencent.mm"),
-        ("In com.android.calculator2 verify 1+1=2", "com.android.calculator2"),
-    ],
-)
-def test_explicit_identity_allows_cjk_sentence_adjacency(goal, reference):
-    result = QuickTestIntentAnalyzer(Session(output(application_name=None, explicit_reference=reference))).analyze(platform="android", goal=goal)
-    assert result.explicit_reference == reference
-
-
-@pytest.mark.parametrize("actual", ["com.tencent.mm2", "com.tencent.mm.evil", "evilcom.tencent.mm", "com.tencent.mm-suffix"])
-def test_explicit_identity_does_not_accept_a_larger_identifier_prefix(actual):
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(Session(output(application_name=None, explicit_reference="com.tencent.mm"))).analyze(platform="android", goal=f"用{actual}搜索联系人并验证结果")
-    assert error.value.category == "invalid_output"
-
-
-@pytest.mark.parametrize("scheme", ["http", "https"])
-@pytest.mark.parametrize("punctuation", ["\uff0c", "\u3002", "\uff1b", "\uff01", "\uff1f", "\u201d", "\u2019"])
-def test_http_reference_accepts_sentence_punctuation(scheme, punctuation):
-    reference = f"{scheme}://example.com"
-    session = Session(output(application_name=None, explicit_reference=reference))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f"Open {reference}{punctuation} Verify its heading.")
-    assert result.explicit_reference == reference
-    assert len(session.requests) == 1
-    assert session.closed
-
-
-@pytest.mark.parametrize(
-    "reference",
-    [
-        "https://example.com",
-        "http://localhost:8080/docs",
-        "HTTPS://example.com/CaseSensitive",
-        "https://example.com/path/a.b?q=one.two&next=%2Fdocs%2F#section-1",
-        "https://example.com/report.",
-        "https://example.com/?q=one;",
-        "https://example.com/#section!",
-    ],
-)
-def test_http_reference_preserves_complete_url(reference):
-    session = Session(output(application_name=None, explicit_reference=reference))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f'Open "{reference}" and verify its heading.')
-    assert result.explicit_reference == reference
-    assert len(session.requests) == 1
-    assert session.closed
-
-
-@pytest.mark.parametrize(
-    ("goal", "reference"),
-    [
-        ("打开https://example.test/docs\uff0c确认标题", "https://example.test/docs"),
-        ("Open “HTTPS://Example.TEST:443/a(b(c))?q=%2f#片段!” and verify", "HTTPS://Example.TEST:443/a(b(c))?q=%2f#片段!"),
-        ("Open https://[::1]:8443/a(b)?# and verify", "https://[::1]:8443/a(b)?#"),
-        ("Open [site](https://example.test/report. 'title') and verify", "https://example.test/report."),
-        ("Open https://example.test? and verify", "https://example.test?"),
-        ("Open https://example.test/#part, and verify", "https://example.test/#part,"),
-        ("Open https://example.test/a\nVerify the heading", "https://example.test/a"),
-        ("Open https://example.test/a\tVerify the heading", "https://example.test/a"),
-        (r'Open [https://label.test](<HTTPS://Example.TEST/a%2Fb?!> "say \"hello\" https://title.test") and verify', "HTTPS://Example.TEST/a%2Fb?!"),
-    ],
-)
-def test_shared_parser_provenance_uses_real_output_schema(goal, reference):
-    session = Session(output(application_name=None, explicit_reference=reference))
-    result = QuickTestIntentAnalyzer(session).analyze(platform="web", goal=goal)
-    assert result.explicit_reference == reference
-    assert len(session.requests) == 1
-    assert session.closed
-
-
-@pytest.mark.parametrize(
-    ("goal", "reference"),
-    [
-        ("Open https://example.test? and verify", "https://example.test"),
-        ("Open <https://example.test/report.> and verify", "https://example.test/report"),
-        ("Open <HTTPS://Example.TEST/a%2Fb> and verify", "https://example.test/a%2Fb"),
-        ("Open <https://example.test/a%2Fb> and verify", "https://example.test/a%2fb"),
-        ("Open [https://label.test](https://destination.test 'https://title.test') and verify", "https://label.test"),
-        ("Open [site](https://destination.test 'https://title.test') and verify", "https://title.test"),
-        ("Open https://example.test and verify", None),
-        ("Open https://example.test and verify", "example.test"),
-        ("Open https://[::1]:8443/a(b)?# and verify", "https://[::1]/a(b)?#"),
-        ("Open https://example.test and verify", " https://example.test "),
-        ("Open https://example.test and verify", "\nhttps://example.test\n"),
-        (r'Open [https://label.test](https://example.test "say \"hello\" https://title.test") and verify', "https://label.test"),
-        (r'Open [site](https://example.test "say \"hello\" https://title.test") and verify', "https://title.test"),
-    ],
-)
-def test_web_output_cannot_change_or_omit_exact_selected_reference(goal, reference):
-    session = Session(output(application_name="site", explicit_reference=reference))
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(session).analyze(platform="web", goal=goal)
-    assert error.value.category == "invalid_output"
-    assert len(session.requests) == 1
-    assert session.closed
-
-
-@pytest.mark.parametrize(
-    "supplied",
-    [
-        "ftp://example.test",
-        "https://example.test/%GG",
-        "https://example.test/a(b",
-        '"https://example.test/a\tb"',
-        "https://example.test/a\u200bb",
-        *[
-            template.format(f"//{host}")
-            for host in ["example.test", "例子.test", "☃.test", "😀.test", "\u0301.test", "_.test", "%41.test", ").test", ">.test"]
-            for template in ["{}", '"{}"', "<{}>", "`{}`", "[site]({})"]
-        ],
-    ],
-)
-def test_invalid_supplied_address_cannot_receive_positive_search_classification(supplied):
-    session = Session(output(reason="web_search", application_name="FSQ"))
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f"Search FSQ {supplied} and find its official site")
-    assert error.value.category == "invalid_output"
-    assert session.requests == []
-    assert session.closed
-
-
-@pytest.mark.parametrize(
-    ("supplied", "reference"), [("https://[::1]]?x=1", "https://[::1]"), ("https://example.test/a)?x=1", "https://example.test/a"), ("https://example.test/a]#part", "https://example.test/a")]
-)
-def test_malformed_boundary_cannot_ground_a_shortened_model_reference(supplied, reference):
-    session = Session(output(application_name=None, explicit_reference=reference))
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f"Open {supplied} and verify")
-    assert error.value.category == "invalid_output"
-    assert session.requests == []
-    assert session.closed
-
-
-@pytest.mark.parametrize(
-    ("supplied", "reference"),
-    [
-        ("https://example.com.evil", "https://example.com"),
-        ("https://example.com/path", "https://example.com"),
-        ("https://example.com/?q=one", "https://example.com/"),
-        ("https://example.com?q=one", "https://example.com"),
-        ("https://example.com#section", "https://example.com"),
-        ("https://example.com/path-more", "https://example.com/path"),
-        ("https://example.com/path?q=one", "https://example.com/path"),
-        ("https://example.com/?q=one&next=two", "https://example.com/?q=one"),
-        ("https://example.com/#part&next=two", "https://example.com/#part"),
-        ("https://example.com@other.test/", "https://example.com"),
-        ("https://user@example.com/", "https://user@example.com/"),
-        ("prefixhttps://example.com", "https://example.com"),
-        ("prefix_https://example.com", "https://example.com"),
-        ("prefix-https://example.com", "https://example.com"),
-        ("file:https://example.com", "https://example.com"),
-        ("https://outer.test/?next=https://example.com", "https://example.com"),
-        ("https://outer.test/#https://example.com", "https://example.com"),
-        ("https://outer.test/https://example.com", "https://example.com"),
-        ("https://other.test", "https://example.com"),
-    ],
-)
-def test_http_reference_rejects_partial_or_embedded_url(supplied, reference):
-    session = Session(output(application_name=None, explicit_reference=reference))
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(session).analyze(platform="web", goal=f"Open {supplied} and verify its heading.")
-    assert error.value.category == "invalid_output"
-    invalid_syntax = {
-        "https://example.com@other.test/",
-        "https://user@example.com/",
-        "prefixhttps://example.com",
-        "prefix_https://example.com",
-        "prefix-https://example.com",
-        "file:https://example.com",
-    }
-    assert len(session.requests) == (0 if supplied in invalid_syntax else 1)
-    assert session.closed
-
-
-def test_inferred_hint_is_preserved_separately_from_explicit_provenance():
-    hint = {"kind": "app_id", "value": "com.tencent.mm"}
-    result = QuickTestIntentAnalyzer(Session(output(application_name="微信", inferred_hint=hint))).analyze(platform="android", goal="用微信搜索联系人张三\uff0c确认出现匹配结果")
-    assert result.application_name == "微信"
-    assert result.explicit_reference is None
-    assert result.inferred_hint.kind == "app_id"
-    assert result.inferred_hint.value == "com.tencent.mm"
-
-
-@pytest.mark.parametrize(
-    "hint",
-    [
-        {"kind": "url", "value": "https://example.com"},
-        {"kind": "app_id", "value": ""},
-        {"kind": "app_id", "value": 42},
-        {"kind": "app_id", "value": "com.tencent.mm", "verified": True},
-        {"kind": "app_id", "value": "com.tencent.mm\ncommand"},
-        {"kind": "bundle_id", "value": "com.tencent.mm"},
-    ],
-)
-def test_malformed_or_wrong_platform_hint_is_rejected(hint):
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(Session(output(application_name="WeChat", inferred_hint=hint))).analyze(platform="android", goal="Use WeChat to search and verify the match")
-    assert error.value.category == "invalid_output"
-
-
-@pytest.mark.parametrize(
-    ("platform", "hint"),
-    [
-        ("windows", {"kind": "app_path", "value": r"C:\Applications\WeChat.exe"}),
-        ("macos", {"kind": "bundle_id", "value": "com.tencent.xinWeChat"}),
-        ("macos", {"kind": "app_path", "value": "/Applications/WeChat.app"}),
-    ],
-)
-def test_native_hints_remain_typed_assistance_without_explicit_identity(platform, hint):
-    result = QuickTestIntentAnalyzer(Session(output(application_name="WeChat", inferred_hint=hint))).analyze(platform=platform, goal="Use WeChat to search and verify the result")
-    assert result.explicit_reference is None
-    assert result.inferred_hint.model_dump() == hint
-
-
-def test_hint_cannot_supply_a_missing_application_name():
-    with pytest.raises(EngineError) as error:
-        QuickTestIntentAnalyzer(Session(output(application_name=None, inferred_hint={"kind": "app_id", "value": "com.tencent.mm"}))).analyze(
-            platform="android", goal="Search for a contact and verify the result"
-        )
-    assert error.value.category == "invalid_output"
 
 
 @pytest.mark.parametrize("provider", ["openai", "azure_openai", "deepseek", "google_gemini", "kimi", "github_copilot"])
@@ -511,9 +317,9 @@ def test_factory_uses_configured_neutral_session_without_workspace(monkeypatch, 
     settings.agent_runtime.provider = provider
     session = Session(output())
     seen = []
-    monkeypatch.setattr("fsq_agent.ai_services._factory.build_model_provider_session", lambda value: seen.append(value) or session)
+    monkeypatch.setattr("fsq_agent.ai_services._factory.build_model_provider_session", lambda current: seen.append(current) or session)
     analyzer = build_quick_test_intent_analyzer(settings)
-    assert not session.requests
-    analyzer.analyze(platform="android", goal="Calculator: 1+1=2")
+    result = analyzer.analyze(platform="android", goal="Calculator: 1+1=2", candidates=CANDIDATES)
+    assert result.sufficient
     assert seen == [settings]
     assert session.requests[0].reasoning_effort == settings.agent_runtime.reasoning_effort

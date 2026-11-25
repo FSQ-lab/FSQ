@@ -268,8 +268,8 @@ Web contracts:
 
 Windows contracts:
 
-- Models owns the shared Windows catalogue record boundary: stable ID, name, semantic description, executable path candidates, and existing `window_title_re`, consumed by Config and Quick Test preparation/intent analysis. Records contain no backend objects, process identity, model sessions, or executable code.
-- `WindowsWorkspaceTarget` and `WindowsHarnessSettings` retain their existing fields and semantics. Catalogue IDs are not persisted on Workspace targets, Cases, or runtime harness settings; resolved paths and title regexes use existing fields.
+- Models owns the shared Windows catalogue record boundary (`WindowsApplicationConfig`: stable ID, name, semantic description, executable path candidates, and host-owned `window_title_re`) consumed by Config and host-side Windows inventory collection, plus shared immutable Quick Test native application candidate/inventory contracts (`ApplicationCandidate`, `ApplicationInventoryResult`, `ApplicationLookupResult`). Records contain no backend objects, process identity, model sessions, or executable code.
+- `WindowsWorkspaceTarget` and `WindowsHarnessSettings` retain their existing fields and semantics. Catalogue IDs and inventory candidate IDs are not persisted on Workspace targets, Cases, or runtime harness settings; resolved paths and host-owned title regexes use existing fields.
 - Windows parameter models include locator, point, lifecycle, desktop click variants, hover, scroll wheel, drag/drop, text input, key input, UI snapshot, read-only visual inspection (`inspectWithAI`), local color sampling (`sampleColor`), deterministic visibility assertions (`assertVisible`), and scoped tri-state Windows AI assertion models (`assertWithAI`).
 - Windows settings are grouped under `WindowsHarnessSettings` and are selected by `HarnessSettings.platform == "windows"`.
 - Windows explicit observation commands are `ui_snapshot`/`uiSnapshot`, `inspect_with_ai`/`inspectWithAI`, and `sample_color`/`sampleColor`, returning normalized observation content through the shared driver observation contract without entering recorded business-action Cases.
@@ -301,7 +301,7 @@ iOS contracts:
 - `_runs.py`: shared Run metadata, frozen result, safe context, dynamic outcome, and provenance values.
 - `_platform_runtime.py`: Shared `PlatformRuntimeCheck` boundary model, its status/readiness invariants, and the pure Web executable product/channel identity contract. It does not discover installed browsers, inspect filesystem existence or permissions, install runtimes, or own host-specific candidate paths.
 - `_platform_runtime.py` also carries `PlatformPrerequisiteCheck` values, including explicit unresolved-context `pending` facts used by shared Application diagnosis.
-- `_application_lookup.py`: exported immutable `ApplicationCandidate`, `ApplicationLookupHint`, and `ApplicationLookupResult` boundary values for the confirmed Environments application lookup contract.
+- `_application_lookup.py`: exported immutable `WindowsApplicationConfig`, `ApplicationCandidate` (carrying host-assigned `candidate_id`, `identity`, `label`, `aliases`, platform-specific `app_id`/`bundle_id`/`app_path`, optional host-only `window_title_re`, and `source`), `ApplicationInventoryResult`, and `ApplicationLookupResult` boundary values for Environments inventory/validation contracts.
 - `_fsq.py`: FSQ AI Test DSL case metadata, reusable lifecycle hook models, config lifecycle hook settings, and case models.
 - `_tools.py`: Unified capability metadata, replay policy, invocation/result contracts, registry snapshot models, AgentTool definition/call/result models, and temporary backward-compatible diagnostic aliases.
 - `_ai_assertion.py`: Provider-backed platform AI assertion request/result models.

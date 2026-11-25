@@ -936,6 +936,23 @@ def _emit_safe_internal_diagnostic(error: ApplicationError) -> None:
                 if key in diagnostic:
                     click.echo(f"{key}: {diagnostic[key]}", err=True)
         return
+    if error.code.value.startswith("quick_test.") and error.details:
+        target_name = error.details.get("target_name")
+        reason = error.details.get("reason")
+        url = error.details.get("url")
+        candidates = error.details.get("candidates")
+        if isinstance(target_name, str) and target_name:
+            click.echo(f"Target: {target_name}", err=True)
+        if isinstance(reason, str) and reason:
+            click.echo(f"Reason: {reason}", err=True)
+        if isinstance(url, str) and url:
+            click.echo(f"URL: {url}", err=True)
+        if isinstance(candidates, list) and candidates:
+            labels = [str(item.get("label") or item.get("candidate_id") or "") for item in candidates if isinstance(item, dict)]
+            labels = [label for label in labels if label]
+            if labels:
+                click.echo(f"Candidates: {', '.join(labels)}", err=True)
+        return
     if error.code != ApplicationErrorCode.INTERNAL_ERROR:
         return
     exception_type = error.details.get("exception_type")

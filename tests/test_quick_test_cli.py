@@ -242,3 +242,49 @@ _main.main(['--output','jsonl','--non-interactive','quick-test','run','--platfor
     assert records[-1]["result"]["run_id"] == run_id
     assert sum(record["type"] != "event" for record in records) == 1
     assert Path(records[-1]["result"]["execution_result_path"]).is_file()
+
+
+def test_cli_renders_structured_quick_test_diagnostic_details(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from fsq_agent.adapters.cli import main
+    from fsq_agent.application import ApplicationError, ApplicationErrorCategory, ApplicationErrorCode
+
+    err = ApplicationError(
+        code=ApplicationErrorCode("quick_test.application_ambiguous"),
+        category=ApplicationErrorCategory.REQUEST_VALIDATION,
+        message="The goal matches multiple applications.",
+        action="Use the intended application's exact identity or path in a new goal.",
+        details={
+            "target_name": "微信",
+            "reason": "Both WeChat and WeCom matched.",
+            "candidates": [{"candidate_id": "android:1", "label": "WeChat"}, {"candidate_id": "android:2", "label": "WeCom"}],
+        },
+    )
+
+    async def fail_run(*args, **kwargs):
+        raise err
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.run_quick_test", fail_run)
+    runner = CliRunner()
+
+    human = runner.invoke(
+        main,
+        ["quick-test", "run", "--platform", "android", "--target-id", "dev-1", "--goal", "打开微信发消息"],
+        env={"FSQ_USER_CONFIG_ROOT": str(tmp_path)},
+    )
+    assert human.exit_code != 0
+    assert "Target: 微信" in human.output
+    assert "Reason: Both WeChat and WeCom matched." in human.output
+    assert "Candidates: WeChat, WeCom" in human.output
+
+    as_json = runner.invoke(
+        main,
+        ["--output", "json", "quick-test", "run", "--platform", "android", "--target-id", "dev-1", "--goal", "打开微信发消息"],
+        env={"FSQ_USER_CONFIG_ROOT": str(tmp_path)},
+    )
+    assert as_json.exit_code != 0
+    record = json.loads(as_json.output)
+    assert record["error"]["details"]["target_name"] == "微信"
+    assert record["error"]["details"]["reason"] == "Both WeChat and WeCom matched."
+    assert len(record["error"]["details"]["candidates"]) == 2

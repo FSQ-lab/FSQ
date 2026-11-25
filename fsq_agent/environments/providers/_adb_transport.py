@@ -103,13 +103,12 @@ def valid_package(value):
     return isinstance(value, str) and 0 < len(value) <= 255 and PACKAGE.fullmatch(value) is not None
 
 
-def package_inventory(serial: str, deadline: float) -> set[str]:
-    """Read package identities using only an already-running ADB server."""
+def _shell_package_list(serial: str, command: str, deadline: float) -> set[str]:
     if not SERIAL.fullmatch(serial):
         raise ValueError("adb_failed")
     with connection(deadline) as wire:
         request(wire, f"host:transport:{serial}", deadline)
-        request(wire, "shell,v2,raw:cmd package list packages", deadline)
+        request(wire, f"shell,v2,raw:{command}", deadline)
         output = bytearray()
         received = 0
         while True:
@@ -132,6 +131,16 @@ def package_inventory(serial: str, deadline: float) -> set[str]:
             raise ValueError("adb_failed")
         packages.add(line[8:])
     return packages
+
+
+def package_inventory(serial: str, deadline: float) -> set[str]:
+    """Read package identities using only an already-running ADB server."""
+    return _shell_package_list(serial, "cmd package list packages", deadline)
+
+
+def third_party_package_inventory(serial: str, deadline: float) -> set[str]:
+    """Read third-party package identities using only an already-running ADB server."""
+    return _shell_package_list(serial, "cmd package list packages -3", deadline)
 
 
 def package_status(serial: str, app_id: str, timeout_seconds: float = 5.0) -> str:

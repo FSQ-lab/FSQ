@@ -1123,6 +1123,7 @@ def test_pywinauto_driver_launch_candidate_native_pid_fallback(monkeypatch, back
     def on_start(d, _cmd: str) -> int:
         d.add_window(resident_pid, "Blank tab", handle=702)
         d.add_window(resident_pid, "New tab - Microsoft Edge", handle=hwnd, active=True)
+        launch_started["done"] = True
         return d.add_process(edge_exe, pid=350, alive=False)
 
     def list_top_windows(**query: object) -> list:
@@ -1133,10 +1134,15 @@ def test_pywinauto_driver_launch_candidate_native_pid_fallback(monkeypatch, back
         return [SimpleNamespace(handle=reported_handle if w.handle == hwnd else w.handle, visible=w.visible, **pid_attr) for w in candidates]
 
     def lookup_native_pid(handle: int) -> object:
-        native_queries.append(handle)
+        if launch_started["done"]:
+            post_launch_native_queries.append(handle)
+        else:
+            pre_launch_native_queries.append(handle)
         return {existing.handle: resident_pid, hwnd: native_pid}.get(handle)
 
-    native_queries: list[int] = []
+    launch_started = {"done": False}
+    pre_launch_native_queries: list[int] = []
+    post_launch_native_queries: list[int] = []
     desktop.on_start = on_start
     driver = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe, backend_kind=backend, window_title_re="New tab - Microsoft Edge")
     monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 0)
@@ -1157,7 +1163,9 @@ def test_pywinauto_driver_launch_candidate_native_pid_fallback(monkeypatch, back
             with pytest.raises(TimeoutError, match="No visible top-level window matched"):
                 driver.launch_app(WindowsLaunchAppParams())
             assert not any(event[0] == "connect" for event in desktop.events)
-        assert native_queries == ([hwnd] if queries_native_pid else [])
+        expected_pre = [existing.handle] if backend == "uia" and (not isinstance(reported_pid, int) or isinstance(reported_pid, bool) or reported_pid <= 0) else []
+        assert pre_launch_native_queries == expected_pre
+        assert post_launch_native_queries == ([hwnd] if queries_native_pid else [])
     finally:
         driver.close()
 
@@ -1391,6 +1399,781 @@ def test_pywinauto_driver_minimized_pre_existing_window_is_treated_as_borrowed_o
     assert desktop.processes[resident_pid]["alive"] is True
     assert minimized_win.closed is False
     assert [e for e in desktop.events if e[0] in ("kill_process", "close_window")] == []
+
+
+def test_pywinauto_driver_async_handoff_waits_for_new_window_without_hijacking_visible_fsq_ui_edge(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    resident_pid = desktop.add_process(edge_exe, pid=300)
+    fsq_ui_win = desktop.add_window(
+        resident_pid,
+        "FSQ Control Plane and 1 more page - Work - Microsoft Edge",
+        handle=700,
+        visible=True,
+        active=True,
+    )
+    poll_calls = {"count": 0}
+    launched_state: dict[str, int] = {}
+
+    def on_start(d, _cmd: str) -> int:
+        # Launcher stub starts and is still handing off over IPC during initial polls; new window is not created yet.
+        stub_pid = d.add_process(edge_exe, pid=350, alive=True)
+        launched_state["stub_pid"] = stub_pid
+        return stub_pid
+
+    def list_top_windows(**query: object) -> list:
+        if query.get("handle") is None and driver._launched:
+            poll_calls["count"] += 1
+            if poll_calls["count"] == 3:
+                desktop.processes[launched_state["stub_pid"]]["alive"] = False
+                desktop.add_window(resident_pid, "New tab - Microsoft Edge", handle=701, visible=True, active=True)
+        return desktop.find_top_windows(**query)
+
+    now = {"t": 100.0}
+
+    def fake_sleep(seconds: float) -> None:
+        now["t"] += seconds
+
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe, window_title_re=".*Edge")
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now["t"], sleep=fake_sleep))
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", list_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    try:
+        result = driver.launch_app(WindowsLaunchAppParams())
+        assert result["status"] == "passed"
+        assert poll_calls["count"] == 3
+        assert driver._bound_handle == 701
+        driver.press_key(WindowsPressKeyParams(key="^l"))
+        assert [e for e in desktop.events if e[0] == "type_keys"] == [("type_keys", 701, resident_pid, "^l")]
+        assert fsq_ui_win.typed_keys == []
+    finally:
+        driver.close()
+
+    assert fsq_ui_win.closed is False
+    assert 700 in desktop.windows
+    assert 701 not in desktop.windows
+
+
+def test_pywinauto_driver_never_falls_back_to_already_visible_pre_launch_window_on_timeout(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    resident_pid = desktop.add_process(edge_exe, pid=300)
+    fsq_ui_win = desktop.add_window(
+        resident_pid,
+        "FSQ Control Plane - Microsoft Edge",
+        handle=700,
+        visible=True,
+        active=True,
+    )
+
+    def on_start(d, _cmd: str) -> int:
+        # Launcher exits without opening any new window while FSQ UI window was already visible pre-launch.
+        return d.add_process(edge_exe, pid=350, alive=False)
+
+    now = {"t": 100.0}
+
+    def fake_sleep(seconds: float) -> None:
+        now["t"] += seconds
+
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe, window_title_re=".*Edge")
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 2.0)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now["t"], sleep=fake_sleep))
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    try:
+        with pytest.raises(TimeoutError, match=r"Timed out after 2\.0 seconds resolving Windows main window"):
+            driver.launch_app(WindowsLaunchAppParams())
+        assert driver._bound_handle is None
+        assert not any(e[0] == "connect" and e[1].get("handle") == 700 for e in desktop.events)
+    finally:
+        driver.close()
+
+    assert fsq_ui_win.closed is False
+    assert desktop.processes[resident_pid]["alive"] is True
+
+
+@pytest.mark.parametrize(
+    ("config_args", "extra_args", "expected_handle"),
+    [
+        (['--user-data-dir="C:\\Temp\\fsq-iso"', "--new-window"], None, 801),
+        ([], ["--USER-DATA-DIR=C:\\Temp\\fsq-iso"], None),
+        (["--New-Window"], None, None),
+        (["--new-window"], None, 703),
+        ([], ["--user-data-dir", "C:\\Temp\\fsq-iso"], None),
+    ],
+)
+def test_pywinauto_driver_issue_86_isolated_or_new_window_flags_forbid_pre_existing_window_and_resident_pid(
+    monkeypatch,
+    config_args: list[str],
+    extra_args: list[str] | None,
+    expected_handle: int | None,
+) -> None:
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    resident_pid = desktop.add_process(edge_exe, pid=300)
+    # Minimized pre-existing window that even becomes visible mid-launch must STILL be rejected under isolated/new-window flags.
+    minimized_existing = desktop.add_window(resident_pid, "Daily Profile - Microsoft Edge", handle=700, visible=False)
+    polls = {"count": 0}
+    isolated_state: dict[str, int] = {}
+    has_user_data_dir = any("user-data-dir" in arg.lower() for arg in [*config_args, *(extra_args or [])])
+
+    def on_start(d, _cmd: str) -> int:
+        minimized_existing.visible = True
+        # Even if resident_pid opens an unrelated new tab/window (handle 702) when --user-data-dir is requested, it must be rejected.
+        if has_user_data_dir:
+            d.add_window(resident_pid, "Resident Window - Microsoft Edge", handle=702, visible=True)
+        elif expected_handle == 703:
+            # Without --user-data-dir, --new-window allows a newly created post-launch handle in the resident process after handoff exit.
+            d.add_window(resident_pid, "New Window - Microsoft Edge", handle=703, visible=True, active=True)
+        launcher_alive = expected_handle == 801
+        iso_pid = d.add_process(edge_exe, pid=450, alive=launcher_alive)
+        isolated_state["pid"] = iso_pid
+        return iso_pid
+
+    def list_top_windows(**query: object) -> list:
+        if query.get("handle") is None and driver._launched:
+            polls["count"] += 1
+            if expected_handle == 801 and polls["count"] == 3:
+                desktop.add_window(isolated_state["pid"], "New tab - Microsoft Edge", handle=801, visible=True, active=True)
+        return desktop.find_top_windows(**query)
+
+    now = {"t": 200.0}
+
+    def fake_sleep(seconds: float) -> None:
+        now["t"] += seconds
+
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe, launch_args=config_args)
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 1.5)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now["t"], sleep=fake_sleep))
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", list_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+
+    try:
+        if expected_handle is not None:
+            res = driver.launch_app(WindowsLaunchAppParams(extra_args=extra_args))
+            assert res["status"] == "passed"
+            assert driver._bound_handle == expected_handle
+        else:
+            with pytest.raises(TimeoutError, match=r"Timed out after 1\.5 seconds resolving Windows main window"):
+                driver.launch_app(WindowsLaunchAppParams(extra_args=extra_args))
+            assert driver._bound_handle is None
+            assert not any(e[0] == "connect" and e[1].get("handle") in {700, 702} for e in desktop.events)
+    finally:
+        driver.close()
+
+    assert minimized_existing.closed is False
+    assert desktop.processes[resident_pid]["alive"] is True
+
+
+def test_pywinauto_driver_pre_launch_snapshot_uses_win32_pid_fallback_when_uia_pid_is_zero(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    edge_exe = r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+    resident_pid = desktop.add_process(edge_exe, pid=300)
+    existing = desktop.add_window(resident_pid, "Existing - Microsoft Edge", handle=700, visible=True, active=True)
+
+    def on_start(d, _cmd: str) -> int:
+        stub_pid = d.add_process(edge_exe, pid=350, alive=False)
+        d.add_window(resident_pid, "New tab - Microsoft Edge", handle=701, visible=True, active=True)
+        return stub_pid
+
+    def list_top_windows(**query: object) -> list:
+        raw = desktop.find_top_windows(**query)
+        if query.get("handle") is not None:
+            return raw
+        return [SimpleNamespace(handle=w.handle, visible=w.visible, process_id=0) for w in raw]
+
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe)
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", list_top_windows)
+    # Simulate EnumProcesses unavailable so pre-launch matching_pids relies strictly on window enumeration + Win32 PID fallback.
+    monkeypatch.setattr(driver, "_list_process_ids", list)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_window_process_id", lambda hwnd: desktop.windows[hwnd].process_id if hwnd in desktop.windows else None)
+
+    assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+    assert driver._bound_handle == 701
+    assert driver._owns_process is False
+    driver.close()
+
+    assert desktop.processes[resident_pid]["alive"] is True
+    assert existing.closed is False
+    assert 701 not in desktop.windows
+
+
+def test_pywinauto_driver_standalone_ui_snapshot_succeeds_without_configured_secrets() -> None:
+    from fsq_agent.drivers.windows._pywinauto import PywinautoWindowsDriver
+    from fsq_agent.models import WindowsUiSnapshotParams
+
+    class FakeRect:
+        left = 0
+        top = 0
+        right = 400
+        bottom = 300
+
+    class FakeElementInfo:
+        control_type = "Window"
+        name = "Demo Window"
+        automation_id = "Main"
+        class_name = "DemoWnd"
+        runtime_id = (1, 2)
+        rectangle = FakeRect()
+        visible = True
+        enabled = True
+
+    class FakeWindow:
+        element_info = FakeElementInfo()
+
+        def window_text(self) -> str:
+            return "Demo Window"
+
+        def children(self) -> list:
+            return []
+
+    driver = PywinautoWindowsDriver()
+    driver._resolve_main_window = lambda **_kwargs: FakeWindow()  # type: ignore[method-assign]
+    try:
+        snap = driver.ui_snapshot(WindowsUiSnapshotParams())
+        assert snap["format"] == "xml"
+        assert "Demo Window" in str(snap["xml"])
+    finally:
+        driver.close()
+
+
+def test_pywinauto_driver_rebind_preserves_initial_binding_mode_and_restored_handle(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
+
+    # Case A: Post-launch splash closes after launcher exits -> must NOT fall back to a restored pre-launch handle.
+    desktop = _make_fake_windows_desktop()
+    app_exe = r"C:\Apps\Demo\demo.exe"
+    resident_pid = desktop.add_process(app_exe, pid=300)
+    restored_pre = desktop.add_window(resident_pid, "Restored Old", handle=700, visible=False)
+    splash_state: dict[str, Any] = {}
+
+    def on_start_splash(d, _cmd: str) -> int:
+        restored_pre.visible = True
+        splash_state["win"] = d.add_window(resident_pid, "Splash", handle=701, visible=True, active=True)
+        return d.add_process(app_exe, pid=350, alive=False)
+
+    now = {"t": 50.0}
+    desktop.on_start = on_start_splash
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=app_exe)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now["t"], sleep=lambda s: now.__setitem__("t", now["t"] + s)))
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver._bound_handle == 701
+        splash_state["win"].closed = True
+        desktop.windows.pop(701, None)
+        now["t"] += 5.0
+        with pytest.raises(RuntimeError, match="No visible top-level window matched"):
+            driver._require_window()
+    finally:
+        driver.close()
+
+    # Case B: Borrowed session rebinds only its originally borrowed handle, never another pre-existing handle.
+    desktop2 = _make_fake_windows_desktop()
+    res_pid2 = desktop2.add_process(app_exe, pid=400)
+    borrowed_first = desktop2.add_window(res_pid2, "First Restored", handle=800, visible=False)
+    other_pre = desktop2.add_window(res_pid2, "Other Restored", handle=801, visible=False)
+
+    def on_start_borrow(d, _cmd: str) -> int:
+        borrowed_first.visible = True
+        other_pre.visible = True
+        d.active_handle = borrowed_first.handle
+        return d.add_process(app_exe, pid=450, alive=False)
+
+    now2 = {"t": 100.0}
+    desktop2.on_start = on_start_borrow
+    driver2 = _pywinauto.PywinautoWindowsDriver(app_path=app_exe)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now2["t"], sleep=lambda s: now2.__setitem__("t", now2["t"] + s)))
+    monkeypatch.setattr(driver2, "_application_cls", desktop2.make_app_cls)
+    monkeypatch.setattr(driver2, "_list_top_windows", desktop2.find_top_windows)
+    monkeypatch.setattr(driver2, "_list_process_ids", desktop2.list_pids)
+    monkeypatch.setattr(driver2, "_process_executable_path", desktop2.process_executable)
+    try:
+        assert driver2.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver2._bound_handle == 800
+        borrowed_first.closed = True
+        desktop2.windows.pop(800, None)
+        with pytest.raises(RuntimeError, match="No visible top-level window matched"):
+            driver2._require_window()
+        # Once a verified post-launch window opens, re-resolution switches to it cleanly and closes only that new handle.
+        new_post = desktop2.add_window(res_pid2, "Replacement Post-Launch", handle=802, visible=True, active=True)
+        rebound = driver2._require_window()
+        assert rebound.handle == new_post.handle
+        assert driver2._bound_handle == 802
+    finally:
+        driver2.close()
+    assert other_pre.closed is False
+    assert 802 not in desktop2.windows
+
+
+def test_pywinauto_driver_pending_disabled_post_launch_window_blocks_borrowing_and_enforces_handoff_grace(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    edge_exe = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+    resident_pid = desktop.add_process(edge_exe, pid=300)
+    restored_old = desktop.add_window(resident_pid, "Restored Old - Microsoft Edge", handle=700, visible=False)
+    new_win_holder: dict[str, object] = {"ready": False}
+
+    def on_start(d, _cmd: str) -> int:
+        restored_old.visible = True
+        d.add_window(resident_pid, "Initializing New - Microsoft Edge", handle=701, visible=True, active=True)
+        return d.add_process(edge_exe, pid=350, alive=False)
+
+    now = {"t": 10.0}
+
+    def fake_sleep(seconds: float) -> None:
+        now["t"] += seconds
+        if now["t"] >= 12.4:
+            new_win_holder["ready"] = True
+
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe)
+    orig_try_connect = driver._try_connect_window_handle
+
+    def gated_try_connect(app_cls, handle: int, *, wait_for: str):
+        if handle == 701 and not new_win_holder["ready"]:
+            return None
+        return orig_try_connect(app_cls, handle, wait_for=wait_for)
+
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now["t"], sleep=fake_sleep))
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_try_connect_window_handle", gated_try_connect)
+
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver._bound_handle == 701
+    finally:
+        driver.close()
+
+    # Case B: Hidden newly created post-launch HWND (visible=False initially) also blocks borrowing restored pre-launch handle.
+    desktop_hidden = _make_fake_windows_desktop()
+    res_hidden = desktop_hidden.add_process(edge_exe, pid=310)
+    restored_hidden_case = desktop_hidden.add_window(res_hidden, "Restored Old - Microsoft Edge", handle=710, visible=False)
+    hidden_new_holder: dict[str, Any] = {}
+
+    def on_start_hidden(d, _cmd: str) -> int:
+        restored_hidden_case.visible = True
+        hidden_new_holder["win"] = d.add_window(res_hidden, "Hidden Initializing - Microsoft Edge", handle=711, visible=False)
+        return d.add_process(edge_exe, pid=360, alive=False)
+
+    now_hidden = {"t": 20.0}
+
+    def sleep_hidden(seconds: float) -> None:
+        now_hidden["t"] += seconds
+        if now_hidden["t"] >= 22.4:
+            hidden_new_holder["win"].visible = True
+            desktop_hidden.active_handle = 711
+
+    desktop_hidden.on_start = on_start_hidden
+    driver_hidden = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now_hidden["t"], sleep=sleep_hidden))
+    monkeypatch.setattr(driver_hidden, "_application_cls", desktop_hidden.make_app_cls)
+    monkeypatch.setattr(driver_hidden, "_list_top_windows", desktop_hidden.find_top_windows)
+    monkeypatch.setattr(driver_hidden, "_list_process_ids", desktop_hidden.list_pids)
+    monkeypatch.setattr(driver_hidden, "_process_executable_path", desktop_hidden.process_executable)
+    monkeypatch.setattr(driver_hidden, "_is_win32_window", lambda handle: handle in desktop_hidden.windows)
+    monkeypatch.setattr(driver_hidden, "_is_window_iconic", lambda _handle: False)
+    monkeypatch.setattr(driver_hidden, "_is_win32_window_visible", lambda handle: bool(desktop_hidden.windows[handle].visible))
+    monkeypatch.setattr(driver_hidden, "_foreground_window_handle", lambda: desktop_hidden.active_handle)
+    try:
+        assert driver_hidden.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver_hidden._bound_handle == 711
+    finally:
+        driver_hidden.close()
+
+    # Case C: Failed process enumeration + pywinauto is_process_running() returning False on OpenProcess PermissionError must NOT authorize borrowing.
+    desktop_alive = _make_fake_windows_desktop()
+    res_alive = desktop_alive.add_process(edge_exe, pid=500)
+    restored_alive = desktop_alive.add_window(res_alive, "Restored Old - Microsoft Edge", handle=900, visible=False)
+
+    def on_start_alive(d, _cmd: str) -> int:
+        restored_alive.visible = True
+        return d.add_process(edge_exe, pid=550, alive=True, accessible=False)
+
+    base_app_cls = desktop_alive.make_app_cls()
+
+    class AccessDeniedApp(base_app_cls):  # type: ignore[valid-type, misc]
+        def is_process_running(self) -> bool:
+            # Mirrors pywinauto returning False when OpenProcess raises AccessDenied.
+            return False
+
+    now_alive = {"t": 50.0}
+    desktop_alive.on_start = on_start_alive
+    driver_alive = _pywinauto.PywinautoWindowsDriver(app_path=edge_exe)
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 2.0)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now_alive["t"], sleep=lambda s: now_alive.__setitem__("t", now_alive["t"] + s)))
+    monkeypatch.setattr(driver_alive, "_application_cls", lambda: AccessDeniedApp)
+    monkeypatch.setattr(driver_alive, "_list_top_windows", desktop_alive.find_top_windows)
+    monkeypatch.setattr(driver_alive, "_list_process_ids", list)
+    monkeypatch.setattr(driver_alive, "_query_win32_process_exited", lambda _pid: None)
+    monkeypatch.setattr(driver_alive, "_process_executable_path", desktop_alive.process_executable)
+    try:
+        with pytest.raises(TimeoutError):
+            driver_alive.launch_app(WindowsLaunchAppParams())
+        assert driver_alive._bound_handle is None
+    finally:
+        driver_alive.close()
+
+
+def test_pywinauto_driver_isolated_profile_rejects_host_frame_backed_by_resident_pid(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    app_exe = r"C:\Apps\HostedBrowser\browser.exe"
+    helper_exe = r"C:\Apps\HostedBrowser\helper.exe"
+    host_exe = r"C:\Windows\System32\ApplicationFrameHost.exe"
+    resident_pid = desktop.add_process(app_exe, pid=300)
+    host_pid = desktop.add_process(host_exe, pid=600)
+    post_launch_helper_Holder: dict[str, int] = {}
+
+    def on_start(d, _cmd: str) -> int:
+        # Frame 950 has resident_pid (whose path becomes unreadable post-launch) AND an unrelated new helper child PID:
+        # neither matched_new_pid nor title_fallback may admit it!
+        desktop.processes[resident_pid]["accessible"] = False
+        post_launch_helper_Holder["pid"] = d.add_process(helper_exe, pid=610, alive=True)
+        d.add_window(host_pid, "Hosted Browser", handle=950, visible=True, active=True)
+        return d.add_process(app_exe, pid=450, alive=True)
+
+    now = {"t": 10.0}
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(
+        app_path=app_exe,
+        window_title_re=".*Hosted Browser.*",
+        launch_args=["--user-data-dir=C:\\Temp\\iso"],
+    )
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now["t"], sleep=lambda s: now.__setitem__("t", now["t"] + s)))
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(
+        driver,
+        "_host_frame_core_window_pids",
+        lambda hwnd: [resident_pid, post_launch_helper_Holder["pid"]] if hwnd == 950 else [],
+    )
+    try:
+        with pytest.raises(TimeoutError):
+            driver.launch_app(WindowsLaunchAppParams())
+        assert driver._bound_handle is None
+    finally:
+        driver.close()
+
+    # Inverse transition: pre-launch resident PID path unreadable during snapshot (only in _pre_existing_all_pids),
+    # then readable during launch — must STILL be rejected for both direct and host-frame windows under --user-data-dir.
+    desktop_inv = _make_fake_windows_desktop()
+    inv_res_pid = desktop_inv.add_process(app_exe, pid=305, accessible=False)
+    inv_host_pid = desktop_inv.add_process(host_exe, pid=605)
+
+    def on_start_inv(d, _cmd: str) -> int:
+        desktop_inv.processes[inv_res_pid]["accessible"] = True
+        d.add_window(inv_res_pid, "Hosted Browser Direct", handle=951, visible=True, active=True)
+        d.add_window(inv_host_pid, "Hosted Browser Frame", handle=952, visible=True, active=True)
+        return d.add_process(app_exe, pid=455, alive=True)
+
+    now_inv = {"t": 20.0}
+    desktop_inv.on_start = on_start_inv
+    driver_inv = _pywinauto.PywinautoWindowsDriver(
+        app_path=app_exe,
+        window_title_re=".*Hosted Browser.*",
+        launch_args=["--user-data-dir=C:\\Temp\\iso"],
+    )
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now_inv["t"], sleep=lambda s: now_inv.__setitem__("t", now_inv["t"] + s)))
+    monkeypatch.setattr(driver_inv, "_application_cls", desktop_inv.make_app_cls)
+    monkeypatch.setattr(driver_inv, "_list_top_windows", desktop_inv.find_top_windows)
+    monkeypatch.setattr(driver_inv, "_list_process_ids", desktop_inv.list_pids)
+    monkeypatch.setattr(driver_inv, "_process_executable_path", desktop_inv.process_executable)
+    monkeypatch.setattr(driver_inv, "_host_frame_core_window_pids", lambda hwnd: [inv_res_pid] if hwnd == 952 else [])
+    try:
+        with pytest.raises(TimeoutError):
+            driver_inv.launch_app(WindowsLaunchAppParams())
+        assert driver_inv._bound_handle is None
+    finally:
+        driver_inv.close()
+
+
+def test_pywinauto_driver_multi_candidate_nonblocking_probe_and_direct_priority(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from fsq_agent.drivers.windows import _pywinauto
+
+    app_exe = r"C:\Apps\Demo\demo.exe"
+
+    # 1. A ready candidate behind 4 unready candidates is reached on the very first pass without blocking.
+    desktop_ready = _make_fake_windows_desktop()
+    now_ready = {"t": 200.0}
+    probed_handles: list[int] = []
+
+    def on_start_ready(d, _cmd: str) -> int:
+        pid = d.add_process(app_exe, pid=360, alive=True)
+        for idx in range(5):
+            d.add_window(pid, f"Direct Candidate {idx}", handle=920 + idx, visible=True, active=(idx == 4))
+        return pid
+
+    desktop_ready.on_start = on_start_ready
+    driver_ready = _pywinauto.PywinautoWindowsDriver(app_path=app_exe)
+    orig_ready_connect = driver_ready._try_connect_window_handle
+
+    def unready_prefix_connect(app_cls, handle: int, *, wait_for: str):
+        probed_handles.append(handle)
+        if handle < 924:
+            return None
+        return orig_ready_connect(app_cls, handle, wait_for=wait_for)
+
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 4.0)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now_ready["t"], sleep=lambda s: now_ready.__setitem__("t", round(now_ready["t"] + s, 6))))
+    monkeypatch.setattr(driver_ready, "_application_cls", desktop_ready.make_app_cls)
+    monkeypatch.setattr(driver_ready, "_list_top_windows", desktop_ready.find_top_windows)
+    monkeypatch.setattr(driver_ready, "_list_process_ids", desktop_ready.list_pids)
+    monkeypatch.setattr(driver_ready, "_process_executable_path", desktop_ready.process_executable)
+    monkeypatch.setattr(driver_ready, "_try_connect_window_handle", unready_prefix_connect)
+    try:
+        assert driver_ready.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver_ready._bound_handle == 924
+        assert probed_handles == [920, 921, 922, 923, 924]
+        assert now_ready["t"] == 200.0
+    finally:
+        driver_ready.close()
+
+    # 2. Direct window appearing during host_frame probe still takes priority over host_frame fallback.
+    desktop_prio = _make_fake_windows_desktop()
+    host_exe = r"C:\Windows\System32\ApplicationFrameHost.exe"
+    prio_host_pid = desktop_prio.add_process(host_exe, pid=630)
+    now_prio = {"t": 300.0}
+    prio_state: dict[str, Any] = {"pid": 0, "hidden_direct": None}
+
+    def on_start_prio(d, _cmd: str) -> int:
+        pid = d.add_process(app_exe, pid=370, alive=True)
+        prio_state["pid"] = pid
+        prio_state["hidden_direct"] = d.add_window(pid, "Direct Main", handle=940, visible=False, active=False)
+        d.add_window(prio_host_pid, "Fallback Hosted Window", handle=949, visible=True, active=True)
+        return pid
+
+    desktop_prio.on_start = on_start_prio
+    driver_prio = _pywinauto.PywinautoWindowsDriver(app_path=app_exe)
+    orig_prio_connect = driver_prio._try_connect_window_handle
+
+    def prio_connect(app_cls, handle: int, *, wait_for: str):
+        if handle == 949:
+            prio_state["hidden_direct"].visible = True
+            desktop_prio.active_handle = 940
+        return orig_prio_connect(app_cls, handle, wait_for=wait_for)
+
+    monkeypatch.setattr(_pywinauto, "WINDOW_READY_TIMEOUT_SECONDS", 3.0)
+    monkeypatch.setattr(_pywinauto, "time", SimpleNamespace(monotonic=lambda: now_prio["t"], sleep=lambda s: now_prio.__setitem__("t", round(now_prio["t"] + s, 6))))
+    monkeypatch.setattr(driver_prio, "_application_cls", desktop_prio.make_app_cls)
+    monkeypatch.setattr(driver_prio, "_list_top_windows", desktop_prio.find_top_windows)
+    monkeypatch.setattr(driver_prio, "_list_process_ids", desktop_prio.list_pids)
+    monkeypatch.setattr(driver_prio, "_process_executable_path", desktop_prio.process_executable)
+    monkeypatch.setattr(driver_prio, "_host_frame_core_window_pids", lambda hwnd: [370] if hwnd == 949 else [])
+    monkeypatch.setattr(driver_prio, "_try_connect_window_handle", prio_connect)
+    try:
+        assert driver_prio.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver_prio._bound_handle == 940
+        assert driver_prio._owns_process is True
+    finally:
+        driver_prio.close()
+
+
+def test_pywinauto_driver_win32_backend_binds_newly_launched_minimized_window_and_restores(monkeypatch) -> None:
+    from fsq_agent.drivers.windows import _pywinauto
+
+    desktop = _make_fake_windows_desktop()
+    app_exe = r"C:\Apps\Demo\win32_min.exe"
+    iconic_state = {"iconic": True}
+
+    def on_start(d, _cmd: str) -> int:
+        pid = d.add_process(app_exe, pid=380, alive=True)
+        d.add_window(pid, "Minimized Win32 Launch", handle=980, visible=True, active=True)
+        return pid
+
+    def restore_win(hwnd: int, *, activate: bool = True) -> None:
+        assert hwnd == 980
+        iconic_state["iconic"] = False
+        desktop.active_handle = 980
+
+    desktop.on_start = on_start
+    driver = _pywinauto.PywinautoWindowsDriver(app_path=app_exe, backend_kind="win32")
+    monkeypatch.setattr(driver, "_application_cls", desktop.make_app_cls)
+    monkeypatch.setattr(driver, "_list_top_windows", desktop.find_top_windows)
+    monkeypatch.setattr(driver, "_list_process_ids", desktop.list_pids)
+    monkeypatch.setattr(driver, "_process_executable_path", desktop.process_executable)
+    monkeypatch.setattr(driver, "_is_win32_window", lambda handle: handle == 980)
+    monkeypatch.setattr(driver, "_is_win32_window_visible", lambda handle: handle == 980)
+    monkeypatch.setattr(driver, "_is_window_iconic", lambda handle: handle == 980 and iconic_state["iconic"])
+    monkeypatch.setattr(driver, "_restore_window", restore_win)
+    monkeypatch.setattr(driver, "_foreground_window_handle", lambda: desktop.active_handle)
+    try:
+        assert driver.launch_app(WindowsLaunchAppParams())["status"] == "passed"
+        assert driver._bound_handle == 980
+        assert iconic_state["iconic"] is False
+    finally:
+        driver.close()
+
+
+def test_pywinauto_driver_try_connect_window_handle_nonblocking_and_preserves_window_specification(monkeypatch) -> None:
+    import time as real_time
+    from concurrent.futures import ThreadPoolExecutor
+
+    pywinauto_app = pytest.importorskip("pywinauto.application")
+    pywinauto_fw = pytest.importorskip("pywinauto.findwindows")
+
+    class _FakeElemInfo:
+        def __init__(self, handle: int) -> None:
+            self.handle = handle
+            self.process_id = 4242
+
+    class _FakeWrapper:
+        def __init__(self, handle: int, *, visible: bool = True, enabled: bool = True) -> None:
+            self.element_info = _FakeElemInfo(handle)
+            self._visible = visible
+            self._enabled = enabled
+
+        def is_visible(self) -> bool:
+            return self._visible
+
+        def is_enabled(self) -> bool:
+            return self._enabled
+
+    def fake_find_element(**kwargs: Any):
+        target_handle = kwargs.get("handle")
+        if target_handle == 7777:
+            raise pywinauto_fw.ElementNotFoundError({"handle": 7777})
+        if target_handle == 8888:
+            real_time.sleep(0.35)
+            raise pywinauto_fw.ElementNotFoundError({"handle": 8888})
+        return _FakeElemInfo(int(target_handle or 9999))
+
+    class _NativeSpecApp:
+        def __init__(self, backend: str = "uia") -> None:
+            self.backend_name = backend
+            self.process = 4242
+
+        def connect(self, **_kwargs: Any) -> "_NativeSpecApp":
+            return self
+
+        def window(self, **kwargs: Any):
+            spec = pywinauto_app.WindowSpecification({"handle": kwargs["handle"], "backend": self.backend_name})
+            monkeypatch.setattr(spec.backend, "generic_wrapper_class", lambda elem: _FakeWrapper(elem.handle))
+            return spec
+
+    monkeypatch.setattr(pywinauto_fw, "find_element", fake_find_element)
+
+    from fsq_agent.drivers.windows._pywinauto import PywinautoWindowsDriver
+
+    driver_fast = PywinautoWindowsDriver(app_path=r"C:\Apps\Demo\demo.exe")
+    driver_slow = PywinautoWindowsDriver(app_path=r"C:\Apps\Demo\demo.exe")
+    try:
+        # 1. Concurrent lock-free execution: slow probe on driver_slow (0.35s) must NOT block non-blocking probe on driver_fast.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            slow_future = pool.submit(
+                driver_slow._try_connect_window_handle,
+                _NativeSpecApp,
+                8888,
+                wait_for="exists visible enabled",
+            )
+            real_time.sleep(0.03)
+            started = real_time.monotonic()
+            fast_result = driver_fast._try_connect_window_handle(
+                _NativeSpecApp,
+                7777,
+                wait_for="exists visible enabled",
+            )
+            fast_elapsed = real_time.monotonic() - started
+            assert fast_result is None
+            assert fast_elapsed < 0.15
+            assert slow_future.result() is None
+
+        # 2. Successful bind returns a WindowSpecification (preserving .child_window(...) for locator lookup).
+        ok = driver_fast._try_connect_window_handle(
+            _NativeSpecApp,
+            9999,
+            wait_for="exists visible enabled",
+        )
+        assert ok is not None
+        _conn, bound_spec = ok
+        assert isinstance(bound_spec, pywinauto_app.WindowSpecification)
+        child_spec = driver_fast._child_window(window=bound_spec, auto_id="SearchBox", control_type="Edit")
+        assert isinstance(child_spec, pywinauto_app.WindowSpecification)
+
+        # 3. Title-re WindowSpecification on a hidden/minimized window does NOT fall into pywinauto's 5s wrapper_object() wait.
+        hidden_calls: list[dict[str, Any]] = []
+
+        def hidden_title_find_element(**kwargs: Any):
+            hidden_calls.append(dict(kwargs))
+            if kwargs.get("visible_only", True):
+                raise pywinauto_fw.ElementNotFoundError(kwargs)
+            return _FakeElemInfo(5555)
+
+        monkeypatch.setattr(pywinauto_fw, "find_element", hidden_title_find_element)
+        title_spec = pywinauto_app.WindowSpecification({"title_re": ".*Hidden.*", "backend": "uia"})
+        monkeypatch.setattr(title_spec.backend, "generic_wrapper_class", lambda elem: _FakeWrapper(elem.handle, visible=False, enabled=True))
+        started_hidden = real_time.monotonic()
+        with pytest.raises(pywinauto_fw.ElementNotFoundError):
+            driver_fast._check_window_ready(title_spec, "exists visible")
+        assert real_time.monotonic() - started_hidden < 0.2
+        assert len(hidden_calls) == 1
+
+        # Non-visible wait_for ("exists enabled") sets visible_only=False and succeeds without blocking.
+        driver_fast._check_window_ready(title_spec, "exists enabled")
+        assert hidden_calls[-1]["visible_only"] is False
+
+        # 4. _extract_window_handle on a WindowSpecification must never trigger pywinauto's 5s __getattribute__ lookup.
+        handle_spec = pywinauto_app.WindowSpecification({"handle": 99999999, "backend": "win32"})
+        started_extract = real_time.monotonic()
+        assert driver_fast._extract_window_handle(handle_spec) == 99999999
+        assert real_time.monotonic() - started_extract < 0.2
+
+        started_missing = real_time.monotonic()
+        assert driver_fast._extract_window_handle(title_spec) is None
+        assert real_time.monotonic() - started_missing < 0.2
+    finally:
+        driver_fast.close()
+        driver_slow.close()
 
 
 def test_pywinauto_driver_cleanup_surfaces_disposal_failure_and_keeps_executor_clean(monkeypatch) -> None:

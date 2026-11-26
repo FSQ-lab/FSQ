@@ -53,6 +53,9 @@ from fsq_agent.models import (
 DEFAULT_WINDOWS_WAIT_TIMEOUT_SECONDS = 10.0
 WINDOW_READY_TIMEOUT_SECONDS = 30.0
 WINDOW_LAUNCH_WAIT_FOR = "exists visible enabled"
+_WINDOW_READY_POLL_SECONDS = 0.200
+_STILL_ACTIVE_EXIT_CODE = 259
+_BORROWED_REUSE_HANDOFF_GRACE_SECONDS = 2.0
 _FOREGROUND_WAIT_SECONDS = 0.250
 _FOREGROUND_POLL_SECONDS = 0.010
 _FOREGROUND_ERROR = "Could not verify the Windows target or an owned popup as the foreground window (hwnd={hwnd})."
@@ -136,6 +139,21 @@ def _normalize_windows_executable_path(raw_path: str) -> str:
     return ntpath.normpath(expanded.replace("/", "\\")).casefold()
 
 
+def _parse_launch_window_isolation_flags(launch_args: list[str]) -> tuple[bool, bool]:
+    requires_new_window = False
+    requires_isolated_profile = False
+    for raw_arg in launch_args:
+        if not isinstance(raw_arg, str):
+            continue
+        normalized_arg = raw_arg.strip().strip('"').casefold()
+        if normalized_arg == "--new-window" or normalized_arg.startswith("--new-window="):
+            requires_new_window = True
+        elif normalized_arg == "--user-data-dir" or normalized_arg.startswith("--user-data-dir="):
+            requires_new_window = True
+            requires_isolated_profile = True
+    return requires_new_window, requires_isolated_profile
+
+
 @cache
 def _get_window_api() -> Any:
     import ctypes
@@ -166,10 +184,16 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._app: object | None = None
         self._launched: bool = False
         self._launched_pid: int | None = None
+        self._launched_at: float | None = None
         self._bound_handle: int | None = None
         self._pre_existing_handles: set[int] = set()
+        self._pre_existing_visible_non_iconic_handles: set[int] = set()
         self._pre_existing_pids: set[int] = set()
         self._pre_existing_all_pids: set[int] = set()
+        self._requires_new_window: bool = False
+        self._requires_isolated_profile: bool = False
+        self._session_binding_mode: str | None = None
+        self._borrowed_single_window_handle: int | None = None
         self._owns_process: bool = False
         self._snapshot_secret_values: tuple[str, ...] = ()
         self._executor: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fsq-pywinauto")
@@ -209,18 +233,25 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             self._cleanup_owned_target()
         application_cls = self._application_cls()
         target_norm = _normalize_windows_executable_path(app_path)
-        pre_all_handles, pre_matching_pids, pre_all_pids = self._snapshot_pre_launch_state(target_norm)
+        pre_all_handles, pre_visible_non_iconic_handles, pre_matching_pids, pre_all_pids = self._snapshot_pre_launch_state(target_norm)
         launch_args = [*self.launch_args, *(params.extra_args or [])]
+        requires_new_window, requires_isolated_profile = _parse_launch_window_isolation_flags(launch_args)
         cmd = subprocess.list2cmdline([app_path, *launch_args])
         started = application_cls(backend=self.backend_kind).start(cmd)
         started_pid = getattr(started, "process", None)
         self._app = started
         self._launched = True
         self._launched_pid = started_pid if isinstance(started_pid, int) else None
+        self._launched_at = time.monotonic()
         self._bound_handle = None
         self._pre_existing_handles = pre_all_handles
+        self._pre_existing_visible_non_iconic_handles = pre_visible_non_iconic_handles
         self._pre_existing_pids = pre_matching_pids
         self._pre_existing_all_pids = pre_all_pids
+        self._requires_new_window = requires_new_window
+        self._requires_isolated_profile = requires_isolated_profile
+        self._session_binding_mode = None
+        self._borrowed_single_window_handle = None
         self._owns_process = len(pre_matching_pids) == 0
         try:
             window = self._resolve_main_window(wait=True, wait_for=WINDOW_LAUNCH_WAIT_FOR)
@@ -236,14 +267,20 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         deadline = time.monotonic() + WINDOW_READY_TIMEOUT_SECONDS if wait else None
         while True:
             try:
-                connected, window, handle, owns_process = self._select_target_window(application_cls, wait_for=wait_for, wait=wait)
+                connected, window, handle, owns_process = self._select_target_window(
+                    application_cls,
+                    wait_for=wait_for,
+                )
             except Exception as exc:
                 details = f"app_path={self.app_path!r}, title_re={self.window_title_re!r}, wait_for={wait_for!r}, backend={self.backend_kind!r}; last error: {exc}"
                 if deadline is None:
                     raise RuntimeError(f"Failed to resolve Windows main window ({details})") from exc
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Timed out after {WINDOW_READY_TIMEOUT_SECONDS:.1f} seconds resolving Windows main window ({details})") from exc
+                time.sleep(min(remaining, _WINDOW_READY_POLL_SECONDS))
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"Timed out after {WINDOW_READY_TIMEOUT_SECONDS:.1f} seconds resolving Windows main window ({details})") from exc
-                time.sleep(1.0)
             else:
                 self._app = connected
                 if handle is not None:
@@ -257,73 +294,68 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         application_cls: Any,
         *,
         wait_for: str,
-        wait: bool,
     ) -> tuple[object, object, int | None, bool | None]:
-        timeout = 2 if wait else 0
         if self.app_path:
             if not self._launched:
                 raise LookupError("Configured Windows application has not been launched.")
             if self._bound_handle is not None:
-                rebound = self._try_connect_window_handle(application_cls, self._bound_handle, wait_for=wait_for, timeout=timeout)
+                rebound = self._try_connect_window_handle(application_cls, self._bound_handle, wait_for=wait_for)
                 if rebound is not None:
                     return rebound[0], rebound[1], self._bound_handle, None
                 self._bound_handle = None
             target_norm = _normalize_windows_executable_path(self.app_path)
-            direct_candidates: list[tuple[int, int, bool]] = []
-            host_frame_candidates: list[tuple[int, int]] = []
-            top_query: dict[str, Any] = {"title_re": self.window_title_re, "visible_only": self.backend_kind != "uia"}
-            if self.backend_kind == "uia":
-                top_query["control_type"] = "Window"
-            for elem in self._list_top_windows(**top_query):
-                hwnd = getattr(elem, "handle", None)
-                if not isinstance(hwnd, int):
-                    continue
-                pid = getattr(elem, "process_id", None)
-                if self.backend_kind == "uia":
-                    if not self._is_candidate_top_window_visible_or_minimized(elem, hwnd):
-                        continue
-                    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-                        if isinstance(hwnd, bool) or hwnd <= 0:
-                            continue
-                        pid = self._window_process_id(hwnd)
-                        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-                            continue
-                elif not isinstance(pid, int):
-                    continue
-                is_started_pid = self._launched_pid is not None and pid == self._launched_pid
-                exe_norm = self._safe_normalized_process_path(pid)
-                if is_started_pid or exe_norm == target_norm:
-                    direct_candidates.append((hwnd, pid, hwnd not in self._pre_existing_handles))
-                elif exe_norm is not None and ntpath.basename(exe_norm) == _HOST_FRAME_EXECUTABLE and hwnd not in self._pre_existing_handles:
-                    host_frame_candidates.append((hwnd, pid))
+            new_direct_candidates, restored_pre_existing_candidates, host_frame_candidates, has_hidden_post_launch_candidates = self._enumerate_launch_window_candidates(target_norm)
+            verified_host_frames = [] if new_direct_candidates else self._resolve_verified_host_frame_candidates(host_frame_candidates, target_norm)
+            has_post_launch_candidates = bool(new_direct_candidates or verified_host_frames or has_hidden_post_launch_candidates)
 
-            ordered_direct = [(hwnd, pid) for hwnd, pid, is_new in direct_candidates if is_new] + [(hwnd, pid) for hwnd, pid, is_new in direct_candidates if not is_new]
-            for hwnd, pid in ordered_direct:
-                resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for, timeout=timeout)
-                if resolved is not None:
-                    borrowed = hwnd in self._pre_existing_handles or pid in self._pre_existing_pids
-                    return resolved[0], resolved[1], hwnd, (False if borrowed else None)
-            for hwnd in self._resolve_verified_host_frame_candidates(host_frame_candidates, target_norm):
-                resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for, timeout=timeout)
-                if resolved is not None:
-                    return resolved[0], resolved[1], hwnd, False
+            if new_direct_candidates:
+                for hwnd, pid in new_direct_candidates:
+                    resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for)
+                    if resolved is not None:
+                        self._session_binding_mode = "post_launch"
+                        self._borrowed_single_window_handle = None
+                        borrowed = pid in self._pre_existing_pids or pid in self._pre_existing_all_pids
+                        return resolved[0], resolved[1], hwnd, (False if borrowed else None)
+            elif verified_host_frames:
+                for hwnd in verified_host_frames:
+                    resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for)
+                    if resolved is not None:
+                        refreshed_direct, _, _, _ = self._enumerate_launch_window_candidates(target_norm)
+                        if not refreshed_direct:
+                            self._session_binding_mode = "post_launch"
+                            self._borrowed_single_window_handle = None
+                            return resolved[0], resolved[1], hwnd, False
+                        break
 
+            if self._session_binding_mode == "borrowed":
+                borrowed_hwnd = self._borrowed_single_window_handle
+                if borrowed_hwnd is not None and any(hwnd == borrowed_hwnd for hwnd, _pid in restored_pre_existing_candidates):
+                    resolved = self._try_connect_window_handle(application_cls, borrowed_hwnd, wait_for=wait_for)
+                    if resolved is not None:
+                        return resolved[0], resolved[1], borrowed_hwnd, False
+            elif self._session_binding_mode is None and not has_post_launch_candidates and restored_pre_existing_candidates and self._can_borrow_restored_pre_existing_window():
+                for hwnd, _pid in restored_pre_existing_candidates:
+                    resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for)
+                    if resolved is not None:
+                        self._session_binding_mode = "borrowed"
+                        self._borrowed_single_window_handle = hwnd
+                        return resolved[0], resolved[1], hwnd, False
             raise LookupError("No visible top-level window matched the configured Windows executable.")
 
         if self.window_title_re:
-            connected, window = self._connect_window_by_title_re(application_cls, wait_for=wait_for, timeout=timeout)
+            connected, window = self._connect_window_by_title_re(application_cls, wait_for=wait_for)
             resolved_handle = self._extract_window_handle(window)
             return connected, window, resolved_handle, False
         raise LookupError("Neither Windows app_path nor window_title_re is configured.")
 
-    def _connect_window_by_title_re(self, application_cls: Any, *, wait_for: str, timeout: int) -> tuple[object, object]:
+    def _connect_window_by_title_re(self, application_cls: Any, *, wait_for: str) -> tuple[object, object]:
         window_kwargs: dict[str, Any] = {"title_re": self.window_title_re}
         if self.backend_kind == "uia":
             window_kwargs["control_type"] = "Window"
         try:
             connected = application_cls(backend=self.backend_kind).connect(title_re=self.window_title_re)
             window = connected.window(**window_kwargs)
-            window.wait(wait_for, timeout=timeout)
+            self._check_window_ready(window, wait_for)
         except Exception as primary_error:
             if self.backend_kind != "uia" or sys.platform != "win32":
                 raise
@@ -333,7 +365,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 raise primary_error from None
             for hwnd in iconic_candidates:
                 if isinstance(hwnd, int) and self._is_win32_window(hwnd) and self._is_window_iconic(hwnd) and self._is_win32_window_visible(hwnd):
-                    resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for, timeout=timeout)
+                    resolved = self._try_connect_window_handle(application_cls, hwnd, wait_for=wait_for)
                     if resolved is not None:
                         return resolved
             raise
@@ -349,21 +381,187 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             return self._is_window_iconic(hwnd) or self._is_win32_window_visible(hwnd)
         return elem_visible is not False
 
+    def _is_win32_candidate_visible(self, elem: Any, hwnd: int) -> bool:
+        elem_visible = getattr(elem, "visible", None)
+        if callable(elem_visible):
+            elem_visible = self._safe_call(elem_visible)
+        if elem_visible is not None:
+            return bool(elem_visible)
+        if self._is_win32_window(hwnd):
+            return self._is_win32_window_visible(hwnd)
+        return True
+
+    def _enumerate_launch_window_candidates(
+        self,
+        target_norm: str,
+    ) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]], bool]:
+        new_direct_candidates: list[tuple[int, int]] = []
+        restored_pre_existing_candidates: list[tuple[int, int]] = []
+        host_frame_candidates: list[tuple[int, int]] = []
+        has_hidden_post_launch_candidates = False
+        top_query: dict[str, Any] = {"title_re": self.window_title_re, "visible_only": False}
+        if self.backend_kind == "uia":
+            top_query["control_type"] = "Window"
+        for elem in self._list_top_windows(**top_query):
+            hwnd = getattr(elem, "handle", None)
+            if not isinstance(hwnd, int):
+                continue
+            is_eligible_visibility = self._is_candidate_top_window_visible_or_minimized(elem, hwnd) if self.backend_kind == "uia" else self._is_win32_candidate_visible(elem, hwnd)
+            pid = self._resolve_window_candidate_pid(elem, hwnd)
+            if pid is None:
+                continue
+            is_started_pid = self._launched_pid is not None and pid == self._launched_pid
+            exe_norm = self._safe_normalized_process_path(pid)
+            if is_started_pid or exe_norm == target_norm:
+                is_resident_pid = pid in self._pre_existing_pids or pid in self._pre_existing_all_pids
+                if self._requires_isolated_profile and is_resident_pid and not is_started_pid:
+                    continue
+                if hwnd not in self._pre_existing_handles:
+                    if is_eligible_visibility:
+                        new_direct_candidates.append((hwnd, pid))
+                    else:
+                        has_hidden_post_launch_candidates = True
+                elif is_eligible_visibility and not self._requires_new_window and hwnd not in self._pre_existing_visible_non_iconic_handles and self._is_window_visible_and_non_iconic(elem, hwnd):
+                    restored_pre_existing_candidates.append((hwnd, pid))
+            elif exe_norm is not None and ntpath.basename(exe_norm) == _HOST_FRAME_EXECUTABLE and hwnd not in self._pre_existing_handles:
+                if is_eligible_visibility:
+                    host_frame_candidates.append((hwnd, pid))
+                elif self._resolve_verified_host_frame_candidates([(hwnd, pid)], target_norm):
+                    has_hidden_post_launch_candidates = True
+        return new_direct_candidates, restored_pre_existing_candidates, host_frame_candidates, has_hidden_post_launch_candidates
+
+    def _resolve_window_candidate_pid(self, elem: Any, hwnd: int) -> int | None:
+        pid = getattr(elem, "process_id", None)
+        if self.backend_kind == "uia":
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                if isinstance(hwnd, bool) or hwnd <= 0:
+                    return None
+                pid = self._window_process_id(hwnd)
+                if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                    return None
+            return pid
+        if isinstance(pid, int) and not isinstance(pid, bool):
+            return pid
+        return None
+
+    def _is_window_visible_and_non_iconic(self, elem: Any, hwnd: int) -> bool:
+        elem_visible = getattr(elem, "visible", None)
+        if callable(elem_visible):
+            elem_visible = self._safe_call(elem_visible)
+        if self._is_win32_window(hwnd):
+            if self._is_window_iconic(hwnd):
+                return False
+            if elem_visible is not None:
+                return bool(elem_visible)
+            return self._is_win32_window_visible(hwnd)
+        return elem_visible is True
+
+    def _can_borrow_restored_pre_existing_window(self) -> bool:
+        if self._requires_new_window or self._requires_isolated_profile:
+            return False
+        if self._launched_at is not None and WINDOW_READY_TIMEOUT_SECONDS > 0:
+            grace = min(_BORROWED_REUSE_HANDOFF_GRACE_SECONDS, WINDOW_READY_TIMEOUT_SECONDS * 0.5)
+            if (time.monotonic() - self._launched_at) < grace:
+                return False
+        return self._is_launched_process_exited()
+
+    def _is_launched_process_exited(self) -> bool:
+        pid = self._launched_pid
+        if pid is None or pid <= 0:
+            return False
+        active_pids = self._list_process_ids()
+        if active_pids:
+            return pid not in active_pids
+        win32_exited = self._query_win32_process_exited(pid)
+        if win32_exited is not None:
+            return win32_exited
+        try:
+            self._process_executable_path(pid)
+        except LookupError:
+            return True
+        except Exception:  # noqa: BLE001 - access denial or unavailable Win32 query never proves exit.
+            return False
+        return False
+
+    def _query_win32_process_exited(self, pid: int) -> bool | None:
+        try:
+            import win32api
+            import win32con
+            import win32process
+        except ImportError:
+            return None
+        query_flag = getattr(win32con, "PROCESS_QUERY_LIMITED_INFORMATION", 0x1000)
+        try:
+            handle = win32api.OpenProcess(query_flag, 0, pid)
+        except Exception as exc:  # noqa: BLE001
+            winerror = getattr(exc, "winerror", None)
+            if winerror == 87:
+                return True
+            return None
+        if not handle:
+            return None
+        try:
+            exit_code = win32process.GetExitCodeProcess(handle)
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            win32api.CloseHandle(handle)
+        return isinstance(exit_code, int) and exit_code != _STILL_ACTIVE_EXIT_CODE
+
     def _effective_wait_for(self, wait_for: str, hwnd: int) -> str:
         if self._is_win32_window(hwnd) and self._is_window_iconic(hwnd):
             parts = [state_name for state_name in wait_for.split() if state_name != "visible"]
             return " ".join(parts) or "exists"
         return wait_for
 
-    def _try_connect_window_handle(self, application_cls: Any, handle: int, *, wait_for: str, timeout: int) -> tuple[object, object] | None:
+    def _try_connect_window_handle(self, application_cls: Any, handle: int, *, wait_for: str) -> tuple[object, object] | None:
         try:
             connected = application_cls(backend=self.backend_kind).connect(handle=handle)
             window = connected.window(handle=handle)
             effective_wait = self._effective_wait_for(wait_for, handle)
-            window.wait(effective_wait, timeout=timeout)
+            self._check_window_ready(window, effective_wait)
         except Exception:  # noqa: BLE001 - candidate handle may have closed or become hidden mid-probe.
             return None
         return connected, window
+
+    def _window_specification_query(self, window: Any) -> tuple[dict[str, Any], Any] | None:
+        criteria = getattr(window, "criteria", None)
+        backend = getattr(window, "backend", None)
+        wrapper_cls = getattr(backend, "generic_wrapper_class", None)
+        if not (isinstance(criteria, list) and len(criteria) == 1 and isinstance(criteria[0], dict) and callable(wrapper_cls)):
+            return None
+        query = dict(criteria[0])
+        query.setdefault("backend", getattr(backend, "name", self.backend_kind))
+        app = getattr(window, "app", None)
+        if app is not None and "app" in query:
+            query["process"] = app.process
+            del query["app"]
+        return query, wrapper_cls
+
+    def _check_window_ready(self, window: Any, wait_for: str) -> None:
+        spec_query = self._window_specification_query(window)
+        if spec_query is not None:
+            from pywinauto import findwindows
+
+            query, wrapper_cls = spec_query
+            tokens = wait_for.lower().split()
+            checks = {
+                "exists": (),
+                "visible": ("is_visible",),
+                "enabled": ("is_enabled",),
+                "ready": ("is_visible", "is_enabled"),
+                "active": ("is_active",),
+            }
+            if all(token in checks for token in tokens):
+                if "visible" not in tokens and "ready" not in tokens:
+                    query["visible_only"] = False
+                ctrl = wrapper_cls(findwindows.find_element(**query))
+                for token in tokens:
+                    for method_name in checks[token]:
+                        if not bool(getattr(ctrl, method_name)()):
+                            raise RuntimeError(f"Window did not satisfy wait_for={wait_for!r}.")
+                return
+        window.wait(wait_for, timeout=0)
 
     def _resolve_verified_host_frame_candidates(
         self,
@@ -379,12 +577,21 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             core_pids = [pid for pid in self._host_frame_core_window_pids(hwnd) if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and pid != host_pid]
             matched_direct = False
             matched_new_pid = False
+            rejected_isolated_resident = False
             for child_pid in core_pids:
-                if (self._launched_pid is not None and child_pid == self._launched_pid) or self._safe_normalized_process_path(child_pid) == target_norm:
+                is_started_child = self._launched_pid is not None and child_pid == self._launched_pid
+                is_pre_launch_resident = child_pid in self._pre_existing_pids or child_pid in self._pre_existing_all_pids
+                is_target_exe = self._safe_normalized_process_path(child_pid) == target_norm
+                if self._requires_isolated_profile and not is_started_child and (child_pid in self._pre_existing_pids or (is_target_exe and is_pre_launch_resident)):
+                    rejected_isolated_resident = True
+                    continue
+                if is_started_child or is_target_exe:
                     matched_direct = True
                     break
-                if child_pid not in self._pre_existing_all_pids:
+                if not is_pre_launch_resident:
                     matched_new_pid = True
+            if rejected_isolated_resident and not matched_direct:
+                continue
             if matched_direct:
                 direct_match.append(hwnd)
             elif matched_new_pid:
@@ -399,8 +606,9 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             return []
         return title_fallback
 
-    def _snapshot_pre_launch_state(self, target_norm: str) -> tuple[set[int], set[int], set[int]]:
+    def _snapshot_pre_launch_state(self, target_norm: str) -> tuple[set[int], set[int], set[int], set[int]]:
         all_handles: set[int] = set()
+        visible_non_iconic_handles: set[int] = set()
         matching_pids: set[int] = set()
         all_pids: set[int] = set()
         snapshot_query: dict[str, Any] = {"visible_only": False}
@@ -408,9 +616,14 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
             snapshot_query["control_type"] = "Window"
         for elem in self._list_top_windows(**snapshot_query):
             hwnd = getattr(elem, "handle", None)
-            pid = getattr(elem, "process_id", None)
-            if isinstance(hwnd, int):
+            if isinstance(hwnd, int) and not isinstance(hwnd, bool):
                 all_handles.add(hwnd)
+                if self._is_window_visible_and_non_iconic(elem, hwnd):
+                    visible_non_iconic_handles.add(hwnd)
+                pid = self._resolve_window_candidate_pid(elem, hwnd)
+            else:
+                raw_pid = getattr(elem, "process_id", None)
+                pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) and raw_pid > 0 else None
             if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
                 all_pids.add(pid)
                 if self._safe_normalized_process_path(pid) == target_norm:
@@ -420,7 +633,7 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
                 all_pids.add(pid)
                 if pid not in matching_pids and self._safe_normalized_process_path(pid) == target_norm:
                     matching_pids.add(pid)
-        return all_handles, matching_pids, all_pids
+        return all_handles, visible_non_iconic_handles, matching_pids, all_pids
 
     def _safe_normalized_process_path(self, pid: int) -> str | None:
         try:
@@ -442,6 +655,9 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
     def _cleanup_owned_target(self) -> None:
         if not self._launched:
             return
+        if self._session_binding_mode == "borrowed":
+            self._reset_launch_state()
+            return
         if self._owns_process and self._app is not None:
             kill = getattr(self._app, "kill", None)
             if callable(kill):
@@ -459,10 +675,16 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
         self._app = None
         self._launched = False
         self._launched_pid = None
+        self._launched_at = None
         self._bound_handle = None
         self._pre_existing_handles = set()
+        self._pre_existing_visible_non_iconic_handles = set()
         self._pre_existing_pids = set()
         self._pre_existing_all_pids = set()
+        self._requires_new_window = False
+        self._requires_isolated_profile = False
+        self._session_binding_mode = None
+        self._borrowed_single_window_handle = None
         self._owns_process = False
 
     @_windows_driver_tool("clickOn", description="Click a Windows control or explicit screen point.")
@@ -1076,23 +1298,37 @@ class PywinautoWindowsDriver(AIAssertionBackendToolMixin):
 
     def _extract_window_handle(self, window: Any = None) -> int | None:
         if window is not None:
-            direct = getattr(window, "handle", None)
-            if isinstance(direct, int) and direct > 0:
-                return direct
-            info = getattr(window, "element_info", None)
-            info_handle = getattr(info, "handle", None)
-            if isinstance(info_handle, int) and info_handle > 0:
-                return info_handle
-            wrapper_fn = getattr(window, "wrapper_object", None)
-            if callable(wrapper_fn):
-                wrapper = self._safe_call(wrapper_fn)
-                if wrapper is not None and wrapper is not window:
-                    wrapped_handle = getattr(wrapper, "handle", None)
-                    if isinstance(wrapped_handle, int) and wrapped_handle > 0:
-                        return wrapped_handle
-                    wrapped_info = getattr(getattr(wrapper, "element_info", None), "handle", None)
-                    if isinstance(wrapped_info, int) and wrapped_info > 0:
-                        return wrapped_info
+            spec_query = self._window_specification_query(window)
+            if spec_query is not None:
+                query, _ = spec_query
+                criteria_handle = query.get("handle")
+                if isinstance(criteria_handle, int) and not isinstance(criteria_handle, bool) and criteria_handle > 0:
+                    return criteria_handle
+                with suppress(Exception):
+                    from pywinauto import findwindows
+
+                    elem = findwindows.find_element(**query)
+                    elem_handle = getattr(elem, "handle", None)
+                    if isinstance(elem_handle, int) and not isinstance(elem_handle, bool) and elem_handle > 0:
+                        return elem_handle
+            else:
+                direct = getattr(window, "handle", None)
+                if isinstance(direct, int) and direct > 0:
+                    return direct
+                info = getattr(window, "element_info", None)
+                info_handle = getattr(info, "handle", None)
+                if isinstance(info_handle, int) and info_handle > 0:
+                    return info_handle
+                wrapper_fn = getattr(window, "wrapper_object", None)
+                if callable(wrapper_fn):
+                    wrapper = self._safe_call(wrapper_fn)
+                    if wrapper is not None and wrapper is not window:
+                        wrapped_handle = getattr(wrapper, "handle", None)
+                        if isinstance(wrapped_handle, int) and wrapped_handle > 0:
+                            return wrapped_handle
+                        wrapped_info = getattr(getattr(wrapper, "element_info", None), "handle", None)
+                        if isinstance(wrapped_info, int) and wrapped_info > 0:
+                            return wrapped_info
         if isinstance(self._bound_handle, int) and self._bound_handle > 0:
             return self._bound_handle
         return None

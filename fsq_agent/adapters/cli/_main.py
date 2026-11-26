@@ -7,6 +7,7 @@ import sys
 import webbrowser
 from datetime import UTC, datetime
 from enum import IntEnum
+from importlib import metadata as importlib_metadata
 from math import isfinite
 from pathlib import Path
 
@@ -84,6 +85,11 @@ class ExitCode(IntEnum):
 class ProtocolGroup(click.Group):
     def main(self, args=None, prog_name=None, complete_var=None, standalone_mode=True, **extra):
         invocation_args = list(args) if args is not None else sys.argv[1:]
+        extra_obj = extra.get("obj")
+        if isinstance(extra_obj, dict):
+            extra_obj.setdefault("_invocation_args", invocation_args)
+        else:
+            extra["obj"] = {"_invocation_args": invocation_args}
         try:
             result = super().main(
                 args=args,
@@ -204,32 +210,74 @@ def _top_level_error(error: ApplicationError, output: str, operation: str, stand
     raise click.exceptions.Exit(exit_code) from error
 
 
-@click.group(cls=ProtocolGroup)
-@click.option("--output", "output_format", type=OUTPUTS, default="human", show_default=True)
-@click.option("--non-interactive", is_flag=True, default=False)
+def _distribution_version() -> str:
+    try:
+        return importlib_metadata.version("fsq-agent")
+    except importlib_metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _emit_version(context: click.Context, _param: click.Parameter, value: bool) -> None:
+    if not value or context.resilient_parsing:
+        return
+    resolved_version = _distribution_version()
+    invocation_args = context.obj.get("_invocation_args") if isinstance(context.obj, dict) else None
+    output = _requested_output(invocation_args if isinstance(invocation_args, list) else sys.argv[1:])
+    if output == "human":
+        prog_name = context.info_name or "fsq"
+        click.echo(f"{prog_name} {resolved_version}")
+    else:
+        click.echo(
+            json.dumps(
+                result_record({"version": resolved_version}, operation="version", status="success"),
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+    context.exit(ExitCode.SUCCESS)
+
+
+@click.group(cls=ProtocolGroup, context_settings={"help_option_names": ["-h", "--help"]})
+@click.option(
+    "--version",
+    "-V",
+    is_flag=True,
+    is_eager=True,
+    expose_value=False,
+    callback=_emit_version,
+    help="Show the installed FSQ version and exit.",
+)
+@click.option("--output", "output_format", type=OUTPUTS, default="human", show_default=True, help="Select human, JSON, or JSONL output format.")
+@click.option("--non-interactive", is_flag=True, default=False, help="Reject flows that require terminal prompts or interactive sign-in.")
 @click.pass_context
 def main(context: click.Context, output_format: str, non_interactive: bool) -> None:
+    """FSQ automated UI testing CLI."""
     context.ensure_object(dict)
     context.obj.update(output=output_format, non_interactive=non_interactive)
 
 
 @main.command()
-@click.option("--platform", type=PLATFORMS, default=None)
-@click.option("--agent", type=click.Choice(["skill", "codex"]), default=None)
-@click.option("--no-overwrite", is_flag=True, default=False)
-@click.option("--name", default=None)
-@click.option("--app-id", default=None)
-@click.option("--browser-channel", type=click.Choice(["chromium", "chrome", "chrome-beta", "chrome-dev", "chrome-canary", "msedge", "msedge-beta", "msedge-dev", "msedge-canary"]), default=None)
-@click.option("--browser-executable-path", type=click.Path(path_type=Path, dir_okay=False), default=None)
-@click.option("--app-path", type=click.Path(path_type=Path), default=None)
-@click.option("--window-title-re", default=None)
-@click.option("--launch-args", default=None)
-@click.option("--bundle-id", default=None)
-@click.option("--xcode-org-id", default=None)
-@click.option("--xcode-signing-id", default=None)
-@click.option("--updated-wda-bundle-id", default=None)
-@click.option("--env", "env_values", multiple=True, metavar="NAME=VALUE")
-@click.option("--update-existing", is_flag=True, default=False)
+@click.option("--platform", type=PLATFORMS, default=None, help="Platform to initialize or update in the Workspace.")
+@click.option("--agent", type=click.Choice(["skill", "codex"]), default=None, help="Install a project-local Coding Agent integration.")
+@click.option("--no-overwrite", is_flag=True, default=False, help="Skip existing managed files when installing a Coding Agent integration.")
+@click.option("--name", default=None, help="Explicit Workspace name to create or reuse.")
+@click.option("--app-id", default=None, help="Android application package ID (--platform android).")
+@click.option(
+    "--browser-channel",
+    type=click.Choice(["chromium", "chrome", "chrome-beta", "chrome-dev", "chrome-canary", "msedge", "msedge-beta", "msedge-dev", "msedge-canary"]),
+    default=None,
+    help="Browser channel to use (--platform web).",
+)
+@click.option("--browser-executable-path", type=click.Path(path_type=Path, dir_okay=False), default=None, help="Explicit browser executable path (--platform web).")
+@click.option("--app-path", type=click.Path(path_type=Path), default=None, help="Application executable or bundle path (Windows, macOS, or iOS).")
+@click.option("--window-title-re", default=None, help="Regular expression matching the target window title (--platform windows).")
+@click.option("--launch-args", default=None, help="Additional launch arguments for the Windows application (--platform windows).")
+@click.option("--bundle-id", default=None, help="Application bundle identifier (macOS or iOS).")
+@click.option("--xcode-org-id", default=None, help="Xcode development team ID for physical iOS device signing (--platform ios).")
+@click.option("--xcode-signing-id", default=None, help="Xcode code-signing identity for physical iOS devices (--platform ios).")
+@click.option("--updated-wda-bundle-id", default=None, help="Custom WebDriverAgent bundle ID for physical iOS devices (--platform ios).")
+@click.option("--env", "env_values", multiple=True, metavar="NAME=VALUE", help="Workspace runtime secret in NAME=VALUE form (repeatable).")
+@click.option("--update-existing", is_flag=True, default=False, help="Update an existing platform configuration in the Workspace.")
 @click.pass_context
 def init(
     context: click.Context,
@@ -250,6 +298,7 @@ def init(
     env_values: tuple[str, ...],
     update_existing: bool,
 ) -> None:
+    """Initialize a Workspace platform, a Coding Agent integration, or both."""
     if platform is None and agent is None:
         raise click.UsageError("At least one of --platform or --agent is required.")
     platform_values = (
@@ -344,6 +393,7 @@ def init(
 @main.command()
 @click.pass_context
 def doctor(context: click.Context) -> None:
+    """Diagnose configured Workspace platforms without mutating state."""
     result = diagnose_workspace(DoctorRequest(current_directory=Path.cwd()))
     if context.obj["output"] == "human":
         _render_doctor(result)
@@ -355,7 +405,7 @@ def doctor(context: click.Context) -> None:
 
 @main.group(name="case")
 def case_group() -> None:
-    pass
+    """Create, run, and format FSQ Cases."""
 
 
 @main.group(name="quick-test")
@@ -364,10 +414,11 @@ def quick_test_group() -> None:
 
 
 @quick_test_group.command(name="context")
-@click.option("--platform", type=PLATFORMS, required=True)
-@click.option("--target-id", default=None)
+@click.option("--platform", type=PLATFORMS, required=True, help="Target platform to inspect.")
+@click.option("--target-id", default=None, help="Exact Android serial, iOS UDID, or Web browser channel.")
 @click.pass_context
 def quick_test_context(context: click.Context, platform: str, target_id: str | None) -> None:
+    """Discover Quick Test readiness and available targets without executing a test."""
     result = get_quick_test_context(QuickTestContextRequest(platform=platform, target_id=target_id))
     _emit_terminal(context, result.model_dump(mode="json"))
     if not result.can_start:
@@ -375,13 +426,15 @@ def quick_test_context(context: click.Context, platform: str, target_id: str | N
 
 
 @quick_test_group.command(name="run")
-@click.option("--platform", type=PLATFORMS, required=True)
-@click.option("--goal", required=True)
-@click.option("--target-id", default=None)
+@click.option("--platform", type=PLATFORMS, required=True, help="Target platform for execution.")
+@click.option("--goal", required=True, help="Natural-language goal and expected outcome to verify.")
+@click.option("--target-id", default=None, help="Exact Android serial, iOS UDID, or Web browser channel.")
 @click.option("--url", default=None, help="Exact HTTP(S) starting address (Web only).")
 @click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
 @click.pass_context
 def quick_test_run(context: click.Context, platform: str, goal: str, target_id: str | None, url: str | None, sandbox: bool) -> None:
+    """Execute one standalone Explore goal in the dedicated Quick Test Workspace."""
+
     def progress(event):
         if context.obj["output"] == "jsonl":
             click.echo(json.dumps(event_record(event, operation=_context_operation(context)), ensure_ascii=False, default=str))
@@ -439,13 +492,15 @@ def quick_test_run(context: click.Context, platform: str, goal: str, target_id: 
 
 
 @case_group.command(name="create")
-@click.option("--platform", type=PLATFORMS, required=True)
-@click.option("--goal", required=True)
+@click.option("--platform", type=PLATFORMS, required=True, help="Target platform for Case creation.")
+@click.option("--goal", required=True, help="Natural-language goal to execute and record.")
 @click.option("--name", default=None, help="Stable Case name without a suffix.")
 @click.option("--udid", default=None, help="Transient iOS Simulator or physical device UDID (--platform ios only).")
 @click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
 @click.pass_context
 def case_create(context: click.Context, platform: str, goal: str, name: str | None, udid: str | None, sandbox: bool) -> None:
+    """Execute an AI-driven goal and record a candidate FSQ Case."""
+
     def emit_raw_event(event: dict[str, object]) -> None:
         if context.obj["output"] == "jsonl":
             click.echo(json.dumps(event_record(event, operation=_context_operation(context)), ensure_ascii=False, default=str))
@@ -492,12 +547,13 @@ def case_create(context: click.Context, platform: str, goal: str, name: str | No
 
 @case_group.command(name="test")
 @click.argument("case_path", type=click.Path(path_type=Path))
-@click.option("--platform", type=PLATFORMS, required=True)
-@click.option("--suggest", is_flag=True, default=False)
+@click.option("--platform", type=PLATFORMS, required=True, help="Target platform for deterministic replay.")
+@click.option("--suggest", is_flag=True, default=False, help="Run read-only post-execution AI analysis for suggestions and a candidate Case.")
 @click.option("--udid", default=None, help="Transient iOS Simulator or physical device UDID (--platform ios only).")
 @click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
 @click.pass_context
 def case_test(context: click.Context, case_path: Path, platform: str, suggest: bool, udid: str | None, sandbox: bool) -> None:
+    """Execute an existing FSQ Case once without modifying the source file."""
     try:
         ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform, udid=udid)
         if sandbox:
@@ -545,6 +601,7 @@ def case_test(context: click.Context, case_path: Path, platform: str, suggest: b
 @click.option("--json", "json_output", is_flag=True, help="Return structured static diagnostics and results.")
 @click.pass_context
 def case_format(context: click.Context, case_path: Path, check: bool, show_diff: bool, write: bool, json_output: bool) -> None:
+    """Statically validate and format an FSQ Case file."""
     if json_output:
         context.obj["output"] = "json"
     if sum((check, show_diff, write)) > 1:
@@ -569,26 +626,28 @@ def case_format(context: click.Context, case_path: Path, check: bool, show_diff:
 
 
 @main.command()
-@click.option("--host", default="127.0.0.1")
-@click.option("--port", type=click.IntRange(1, 65535), default=8879)
-@click.option("--open-browser/--no-open-browser", default=True)
+@click.option("--host", default="127.0.0.1", show_default=True, help="Host interface to bind the Control Plane server.")
+@click.option("--port", type=click.IntRange(1, 65535), default=8879, show_default=True, help="TCP port for the Control Plane server.")
+@click.option("--open-browser/--no-open-browser", default=True, show_default=True, help="Open the Control Plane UI in the default browser on startup.")
 def ui(host: str, port: int, open_browser: bool) -> None:
+    """Start the local Control Plane browser UI."""
     run_control_plane(ControlPlaneServerOptions(host=host, port=port, open_browser=open_browser))
 
 
 @main.group()
 def providers() -> None:
-    pass
+    """Configure and inspect the user-level AI Provider."""
 
 
 @providers.command(name="configure")
 @click.argument("name", type=click.Choice(["github_copilot", "azure_openai", "openai", "deepseek", "google_gemini", "kimi"]))
-@click.option("--base-url", default=None)
-@click.option("--model", default=None)
-@click.option("--api-key", default=None)
-@click.option("--region", type=click.Choice(["cn", "global"]), default=None)
+@click.option("--base-url", default=None, help="Azure OpenAI endpoint base URL (azure_openai only).")
+@click.option("--model", default=None, help="Model or deployment name to activate.")
+@click.option("--api-key", default=None, help="API key for the selected Provider.")
+@click.option("--region", type=click.Choice(["cn", "global"]), default=None, help="Kimi API region (kimi only).")
 @click.pass_context
 def providers_configure(context: click.Context, name: str, base_url: str | None, model: str | None, api_key: str | None, region: str | None) -> None:
+    """Configure and activate a user-level AI Provider."""
     machine = context.obj["output"] != "human"
     if name == "github_copilot":
         if base_url is not None or api_key is not None or region is not None:
@@ -690,6 +749,7 @@ def providers_configure(context: click.Context, name: str, base_url: str | None,
 @providers.command(name="status")
 @click.pass_context
 def providers_status(context: click.Context) -> None:
+    """Show the active user-level AI Provider configuration and readiness."""
     result = provider_status()
     value = result.model_dump(mode="json")
     if context.obj["output"] == "human":
@@ -709,18 +769,19 @@ def providers_status(context: click.Context) -> None:
 
 @main.group()
 def runs() -> None:
-    pass
+    """Inspect and export persisted Workspace Run history."""
 
 
 @runs.command(name="list")
-@click.option("--platform", type=PLATFORMS)
-@click.option("--status", "statuses", type=RUN_STATUSES, multiple=True)
-@click.option("--mode", type=click.Choice(["strict", "explore"]))
-@click.option("--since")
-@click.option("--case", "case_id")
-@click.option("--limit", type=click.IntRange(1, 200), default=20)
+@click.option("--platform", type=PLATFORMS, help="Filter Runs by platform.")
+@click.option("--status", "statuses", type=RUN_STATUSES, multiple=True, help="Filter Runs by status (repeatable).")
+@click.option("--mode", type=click.Choice(["strict", "explore"]), help="Filter Runs by execution mode.")
+@click.option("--since", help="Only include Runs within the given duration (for example 30m, 2h, 7d).")
+@click.option("--case", "case_id", help="Filter Runs by exact Case ID.")
+@click.option("--limit", type=click.IntRange(1, 200), default=20, show_default=True, help="Maximum number of Runs to return.")
 @click.pass_context
 def runs_list(context: click.Context, platform: str | None, statuses: tuple[str, ...], mode: str | None, since: str | None, case_id: str | None, limit: int) -> None:
+    """List recorded Runs in the current Workspace."""
     result = list_runs(ListRunsRequest(current_directory=Path.cwd(), platform=platform, statuses=statuses, mode=mode, since=since, case_id=case_id, limit=limit))
     if context.obj["output"] == "human":
         click.echo("RUN ID  PLATFORM  MODE  STATUS  STARTED  DURATION  CASE/GOAL")
@@ -746,10 +807,11 @@ def runs_list(context: click.Context, platform: str | None, statuses: tuple[str,
 
 @runs.command(name="show")
 @click.argument("run_id")
-@click.option("--platform", type=PLATFORMS)
-@click.option("--open", "open_report", is_flag=True)
+@click.option("--platform", type=PLATFORMS, help="Disambiguate the Run by platform.")
+@click.option("--open", "open_report", is_flag=True, help="Rebuild and open the static HTML report in the default browser.")
 @click.pass_context
 def runs_show(context: click.Context, run_id: str, platform: str | None, open_report: bool) -> None:
+    """Show bounded summary details for one Run."""
     if open_report and (context.obj["output"] != "human" or context.obj["non_interactive"]):
         raise click.UsageError("--open requires Human interactive mode")
     request = ShowRunRequest(current_directory=Path.cwd(), run_id=run_id, platform=platform)
@@ -800,16 +862,17 @@ def runs_show(context: click.Context, run_id: str, platform: str | None, open_re
 
 @runs.command(name="export")
 @click.argument("run_id")
-@click.option("--platform", type=PLATFORMS)
-@click.option("--format", "report_format", type=click.Choice(["json", "junit", "html", "bundle"]), required=True)
-@click.option("--output", "output_path", type=click.Path(path_type=Path))
-@click.option("--baseline", "baseline_run_id")
-@click.option("--related-run", "related_run_ids", multiple=True)
-@click.option("--share-profile", type=click.Path(path_type=Path, exists=True, dir_okay=False))
+@click.option("--platform", type=PLATFORMS, help="Disambiguate the Run by platform.")
+@click.option("--format", "report_format", type=click.Choice(["json", "junit", "html", "bundle"]), required=True, help="Export format to generate.")
+@click.option("--output", "output_path", type=click.Path(path_type=Path), help="Destination path for the exported file or bundle.")
+@click.option("--baseline", "baseline_run_id", help="Comparable baseline Run ID for diffing.")
+@click.option("--related-run", "related_run_ids", multiple=True, help="Related Run ID to link in the export (repeatable).")
+@click.option("--share-profile", type=click.Path(path_type=Path, exists=True, dir_okay=False), help="Path to a local share-profile file for bounded redaction.")
 @click.pass_context
 def runs_export(
     context: click.Context, run_id: str, platform: str | None, report_format: str, output_path: Path | None, baseline_run_id: str | None, related_run_ids: tuple[str, ...], share_profile: Path | None
 ) -> None:
+    """Export a Run as JSON, JUnit, portable HTML, or an evidence bundle."""
     result = export_run_report(
         ExportRunReportRequest(
             current_directory=Path.cwd(),
@@ -836,12 +899,13 @@ def runs_export(
 
 @runs.command(name="logs")
 @click.argument("run_id")
-@click.option("--platform", type=PLATFORMS)
-@click.option("--level", "levels", multiple=True)
-@click.option("--phase", "phases", multiple=True)
-@click.option("--limit", type=click.IntRange(1, 5000), default=200)
+@click.option("--platform", type=PLATFORMS, help="Disambiguate the Run by platform.")
+@click.option("--level", "levels", multiple=True, help="Filter log events by level (repeatable).")
+@click.option("--phase", "phases", multiple=True, help="Filter log events by execution phase (repeatable).")
+@click.option("--limit", type=click.IntRange(1, 5000), default=200, show_default=True, help="Maximum number of log events to return.")
 @click.pass_context
 def runs_logs(context: click.Context, run_id: str, platform: str | None, levels: tuple[str, ...], phases: tuple[str, ...], limit: int) -> None:
+    """Read sanitized structured log events for one Run."""
     result = read_run_logs(ReadRunLogsRequest(current_directory=Path.cwd(), run_id=run_id, platform=platform, levels=levels, phases=phases, limit=limit))
     if context.obj["output"] == "human":
         for event in result.events:

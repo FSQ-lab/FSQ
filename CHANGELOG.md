@@ -4,6 +4,11 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-26
+
+- `fsq` CLI adds eager root `--version` / `-V` (supporting Human `<prog_name> <version>`, `json`/`jsonl` `fsq.machine/v1` envelopes, and an `unknown` fallback when distribution metadata is absent), enables `-h` / `--help` uniformly across all commands and groups, and provides concise help text for all public commands and options.
+- Windows launch handoff prevents hijacking pre-launch visible windows during asynchronous single-instance handoff, enforces post-launch window creation for `--new-window` and `--user-data-dir`, falls back to Win32 `GetWindowThreadProcessId` when UIA reports non-positive PIDs, protects borrowed-window reuse from `killApp`/`close()`, and uses non-blocking readiness polling.
+
 ## [0.4.2] - 2026-11-26
 
 - Quick Test resolves targets from bounded read-only host application inventories cached per `(platform, target_id)` with single-shot LLM selection, single cache-miss refresh, simplified explicit Web URL handling, and transparent diagnostic errors.
@@ -219,7 +224,8 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/FSQ-lab/FSQ/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/FSQ-lab/FSQ/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/FSQ-lab/FSQ/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/FSQ-lab/FSQ/compare/v0.3.9...v0.4.0

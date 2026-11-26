@@ -149,7 +149,7 @@ def test_launch_app_restores_iconic_hwnd_and_sets_focus_after_binding(monkeypatc
 
     driver = PywinautoWindowsDriver(app_path=exe_path)
     monkeypatch.setattr(driver, "_application_cls", lambda: _FakeApp)
-    monkeypatch.setattr(driver, "_snapshot_pre_launch_state", lambda _norm: (set(), set(), set()))
+    monkeypatch.setattr(driver, "_snapshot_pre_launch_state", lambda _norm: (set(), set(), set(), set()))
     monkeypatch.setattr(driver, "_list_top_windows", lambda **kwargs: [window])
     monkeypatch.setattr(driver, "_process_executable_path", lambda _pid: exe_path)
     monkeypatch.setattr(driver, "_is_win32_window", lambda candidate: candidate == hwnd)
@@ -1434,7 +1434,7 @@ def test_pywinauto_driver_rejects_unverified_or_ambiguous_uwp_host_frame_without
 
     try:
         with pytest.raises(LookupError, match="No visible top-level window matched"):
-            driver._select_target_window(desktop.make_app_cls(), wait_for="exists visible", wait=False)
+            driver._select_target_window(desktop.make_app_cls(), wait_for="exists visible")
     finally:
         driver.close()
 
@@ -1463,7 +1463,7 @@ def test_pywinauto_driver_uwp_host_frame_respects_explicit_window_title_re_filte
 
     try:
         with pytest.raises(LookupError, match="No visible top-level window matched"):
-            driver._select_target_window(desktop.make_app_cls(), wait_for="exists visible", wait=False)
+            driver._select_target_window(desktop.make_app_cls(), wait_for="exists visible")
     finally:
         driver.close()
 

@@ -190,6 +190,8 @@ Focused verification covers outside-Workspace execution without server startup, 
 
 - Global `--output human|json|jsonl` selects presentation before the command; `runs export --output PATH` independently selects a destination file.
 - `--non-interactive` forbids prompts and implicit interactive authentication.
+- Root `--version` / `-V` is an eager read-only option that prints the installed `fsq-agent` distribution version and exits `0` without requiring a Workspace, Provider, or subcommand. In Human mode it prints `<prog_name> <version>` (for example `fsq 0.4.2` or `fsq-agent 0.4.2`). In `json` and `jsonl` modes it emits one `fsq.machine/v1` terminal result record with `operation="version"`, `status="success"`, and `result={"version": "<version>"}`. If distribution metadata is unavailable in an uninstalled source checkout, it reports `unknown` rather than raising an unhandled error.
+- Help options `-h` and `--help` are enabled uniformly on the root command and every subcommand/group, and all public commands, groups, and options provide concise help text.
 - Human output may be styled; JSON emits one complete operation envelope. JSONL writes each safe event object to stdout when the event is received, preserving callback order without terminal replay, then writes one terminal result or error object when the transport remains writable.
 - Machine output is stdout-only. Diagnostics that cannot be represented as protocol records use stderr. Secrets and hidden reasoning are never emitted.
 - Exit categories are `0` success, `1` test/case failure, `2` usage or validation error, `3` workspace/configuration error, `4` provider/environment unavailable, `5` internal/infrastructure error, and `130` interruption.

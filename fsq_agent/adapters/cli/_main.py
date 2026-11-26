@@ -382,9 +382,6 @@ def quick_test_context(context: click.Context, platform: str, target_id: str | N
 @click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
 @click.pass_context
 def quick_test_run(context: click.Context, platform: str, goal: str, target_id: str | None, url: str | None, sandbox: bool) -> None:
-    ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform)
-    request = QuickTestPrepareRequest(platform=platform, goal=goal, target_id=target_id, url=url)
-
     def progress(event):
         if context.obj["output"] == "jsonl":
             click.echo(json.dumps(event_record(event, operation=_context_operation(context)), ensure_ascii=False, default=str))
@@ -393,6 +390,7 @@ def quick_test_run(context: click.Context, platform: str, goal: str, target_id: 
 
     if sandbox:
         try:
+            ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform)
             outcome = execute_in_windows_sandbox(
                 SandboxCommandSpec(
                     kind="quick_test_run",
@@ -417,6 +415,8 @@ def quick_test_run(context: click.Context, platform: str, goal: str, target_id: 
             _application_error(context, normalize_application_error(error))
         _emit_sandbox_outcome(context, outcome)
         return
+
+    request = QuickTestPrepareRequest(platform=platform, goal=goal, target_id=target_id, url=url)
 
     def check_cancelled():
         task = asyncio.current_task()
@@ -970,7 +970,12 @@ def _emit_terminal(context: click.Context, value: object, *, events: list[dict[s
 def _emit_sandbox_outcome(context: click.Context, outcome: object, *, case_test_suggest: bool | None = None) -> None:
     record = getattr(outcome, "terminal_record", None)
     exit_code = int(getattr(outcome, "exit_code", ExitCode.INTERNAL))
-    if not isinstance(record, dict):
+    stderr_text = str(getattr(outcome, "stderr_text", "") or "").strip()
+    if not isinstance(record, dict) or record.get("type") not in {"result", "error"}:
+        details: dict[str, object] = {
+            "exception_type": "SandboxMissingTerminalRecordError",
+            "has_guest_stderr": bool(stderr_text),
+        }
         _application_error(
             context,
             ApplicationError(
@@ -978,7 +983,7 @@ def _emit_sandbox_outcome(context: click.Context, outcome: object, *, case_test_
                 category=ApplicationErrorCategory.INTERNAL,
                 message="Windows Sandbox execution ended without a structured FSQ terminal record.",
                 action="Inspect Workspace Run artifacts and retry.",
-                details={"exception_type": "SandboxMissingTerminalRecordError"},
+                details=details,
             ),
         )
     rec_type = record.get("type")
@@ -994,16 +999,15 @@ def _emit_sandbox_outcome(context: click.Context, outcome: object, *, case_test_
             category = ApplicationErrorCategory(str(cat_raw))
         except ValueError:
             category = ApplicationErrorCategory.INTERNAL
-        _application_error(
-            context,
-            ApplicationError(
-                code=code,
-                category=category,
-                message=str(err.get("message") or "Windows Sandbox execution failed."),
-                action=str(err["action"]) if err.get("action") else None,
-                details=err.get("details") if isinstance(err.get("details"), dict) else {},
-            ),
+        app_error = ApplicationError(
+            code=code,
+            category=category,
+            message=str(err.get("message") or "Windows Sandbox execution failed."),
+            action=str(err["action"]) if err.get("action") else None,
+            details=err.get("details") if isinstance(err.get("details"), dict) else {},
         )
+        effective_exit = exit_code if exit_code != 0 else _error_exit_code(app_error)
+        _application_error(context, app_error, exit_code_override=effective_exit)
     payload = record.get("result")
     if context.obj["output"] == "human" and case_test_suggest is not None and isinstance(payload, dict):
         click.echo(f"Case {payload.get('status')}: {payload.get('summary')}")
@@ -1020,7 +1024,7 @@ def _emit_sandbox_outcome(context: click.Context, outcome: object, *, case_test_
         raise click.exceptions.Exit(exit_code)
 
 
-def _application_error(context: click.Context, error: ApplicationError) -> None:
+def _application_error(context: click.Context, error: ApplicationError, *, exit_code_override: int | None = None) -> None:
     if context.obj["output"] == "human":
         click.echo(f"Error: {error.message}", err=True)
         if error.action:
@@ -1031,7 +1035,7 @@ def _application_error(context: click.Context, error: ApplicationError) -> None:
             click.echo(json.dumps(error.to_record(operation=_context_operation(context)), ensure_ascii=False, default=str))
         except OSError as exc:
             raise click.exceptions.Exit(ExitCode.INTERNAL) from exc
-    raise click.exceptions.Exit(_error_exit_code(error))
+    raise click.exceptions.Exit(exit_code_override if exit_code_override is not None else _error_exit_code(error))
 
 
 def _valid_native_timing(value: object) -> bool:

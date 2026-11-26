@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import codecs
 import ctypes
 import json
 import os
@@ -48,37 +49,66 @@ _GUEST_PY_BASE = r"C:\fsq_pybase"
 _GUEST_SITE_PACKAGES = r"C:\fsq_site"
 _GUEST_PACKAGE_ROOT = r"C:\fsq_pkg"
 _GUEST_HOST_FSQ_SNAPSHOT = r"C:\fsq_user_cfg"
-_GUEST_CASE_FILE_DIR = r"C:\fsq_case_src"
+_GUEST_CASE_FILE_DIR = rf"{_GUEST_OUT_DIR}\case_src"
 
 _WSB_CONFIG_XML = "<Configuration><VGpu>Enable</VGpu><Networking>Enable</Networking><MemoryInMB>8192</MemoryInMB></Configuration>"
 
-_VC_RUNTIME_DLLS = (
+_REQUIRED_VC_RUNTIME_DLLS = (
     "mfc140u.dll",
     "msvcp140.dll",
     "vcruntime140.dll",
     "vcruntime140_1.dll",
 )
-
+_OPTIONAL_VC_RUNTIME_DLLS = (
+    "msvcp140_1.dll",
+    "msvcp140_2.dll",
+    "concrt140.dll",
+    "vccorlib140.dll",
+)
 _SANDBOX_CLIENT_PROCESS_NAMES = ("WindowsSandboxClient.exe", "WindowsSandboxRemoteSession.exe")
 _HWND_BOTTOM = 1
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
 _SWP_NOACTIVATE = 0x0010
 
-_SITECUSTOMIZE_SOURCE = r"""# Copyright (c) Microsoft Corporation.
+
+def _render_sitecustomize_source() -> str:
+    guest_vc_dlls = rf"{_GUEST_OUT_DIR}\vc_dlls"
+    guest_pywin32_sys32 = rf"{_GUEST_SITE_PACKAGES}\pywin32_system32"
+    guest_pythonwin = rf"{_GUEST_SITE_PACKAGES}\Pythonwin"
+    return f"""# Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
 import os
 import pathlib
+import site
 import sys
 
 if not hasattr(sys, "coinit_flags"):
     sys.coinit_flags = 0
 
-_SANDBOX_MOUNT_CANONICAL = {
-    os.path.normcase(r"C:\Users\WDAGUtilityAccount\fsq-workspace"): r"C:\Users\WDAGUtilityAccount\fsq-workspace",
-    os.path.normcase(r"C:\Users\WDAGUtilityAccount\.fsq\quick-test"): r"C:\Users\WDAGUtilityAccount\.fsq\quick-test",
-}
+if os.path.isdir({_GUEST_SITE_PACKAGES!r}):
+    site.addsitedir({_GUEST_SITE_PACKAGES!r})
+
+_SANDBOX_DLL_DIRS = (
+    {guest_vc_dlls!r},
+    {guest_pywin32_sys32!r},
+    {guest_pythonwin!r},
+    {_GUEST_PY_BASE!r},
+)
+_SANDBOX_DLL_HANDLES = []
+if hasattr(os, "add_dll_directory"):
+    for _dll_dir in _SANDBOX_DLL_DIRS:
+        if os.path.isdir(_dll_dir):
+            try:
+                _SANDBOX_DLL_HANDLES.append(os.add_dll_directory(_dll_dir))
+            except OSError:
+                pass
+
+_SANDBOX_MOUNT_CANONICAL = {{
+    os.path.normcase({_GUEST_WORKSPACE_ROOT!r}): {_GUEST_WORKSPACE_ROOT!r},
+    os.path.normcase({_GUEST_QUICK_TEST_ROOT!r}): {_GUEST_QUICK_TEST_ROOT!r},
+}}
 _orig_is_symlink = pathlib.Path.is_symlink
 _orig_resolve = pathlib.Path.resolve
 
@@ -102,13 +132,14 @@ def _sandbox_resolve(self: pathlib.Path, strict: bool = False) -> pathlib.Path:
                 if strict and not os.path.exists(abs_str):
                     raise FileNotFoundError(abs_str)
                 return pathlib.Path(canonical_root)
-            prefix = norm_root + "\\"
+            prefix = norm_root + "\\\\"
             if norm_str.startswith(prefix):
-                suffix = abs_str[len(canonical_root) :]
-                candidate = canonical_root + suffix
-                if strict and not os.path.exists(candidate):
-                    raise FileNotFoundError(candidate)
-                return pathlib.Path(candidate)
+                rel = os.path.relpath(abs_str, canonical_root)
+                if rel != ".." and not rel.startswith("..\\\\"):
+                    candidate = canonical_root if rel == "." else canonical_root + "\\\\" + rel
+                    if strict and not os.path.exists(candidate):
+                        raise FileNotFoundError(candidate)
+                    return pathlib.Path(candidate)
     except FileNotFoundError:
         raise
     except Exception:
@@ -119,18 +150,23 @@ def _sandbox_resolve(self: pathlib.Path, strict: bool = False) -> pathlib.Path:
 pathlib.Path.is_symlink = _sandbox_is_symlink  # type: ignore[method-assign]
 pathlib.Path.resolve = _sandbox_resolve  # type: ignore[method-assign]
 
-import comtypes.client
-import comtypes.gen
+try:
+    import comtypes.client
+    import comtypes.gen
+except Exception:
+    comtypes = None
+else:
+    _cache_dir = pathlib.Path(os.environ.get("TEMP", r"C:\\Temp")) / "comtypes_cache"
+    _cache_dir.mkdir(parents=True, exist_ok=True)
+    comtypes.client.gen_dir = str(_cache_dir)
 
-_cache_dir = pathlib.Path(os.environ.get("TEMP", r"C:\Temp")) / "comtypes_cache"
-_cache_dir.mkdir(parents=True, exist_ok=True)
-comtypes.client.gen_dir = str(_cache_dir)
-
-if str(_cache_dir) not in comtypes.gen.__path__:
-    comtypes.gen.__path__.insert(0, str(_cache_dir))
+    if str(_cache_dir) not in comtypes.gen.__path__:
+        comtypes.gen.__path__.insert(0, str(_cache_dir))
 """
 
-_GUEST_BOOTSTRAP_SOURCE = r"""# Copyright (c) Microsoft Corporation.
+
+def _render_guest_bootstrap_source() -> str:
+    return f"""# Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
 import json
@@ -139,10 +175,9 @@ import shutil
 import subprocess
 import sys
 
-OUT_DIR = pathlib.Path(r"C:\fsq_sandbox")
-SNAPSHOT_FSQ = pathlib.Path(r"C:\fsq_user_cfg")
+OUT_DIR = pathlib.Path({_GUEST_OUT_DIR!r})
+SNAPSHOT_FSQ = pathlib.Path({_GUEST_HOST_FSQ_SNAPSHOT!r})
 GUEST_FSQ = pathlib.Path.home() / ".fsq"
-
 
 def _sync_user_config() -> None:
     GUEST_FSQ.mkdir(parents=True, exist_ok=True)
@@ -168,7 +203,7 @@ def main() -> int:
         proc = subprocess.Popen(cmd, cwd=spec["cwd"], stdout=out_stream, stderr=err_stream, text=True, encoding="utf-8")
         rc = proc.wait()
     (OUT_DIR / "exit_code.txt").write_text(str(rc), encoding="utf-8")
-    (OUT_DIR / "done.marker").write_text("done\n", encoding="utf-8")
+    (OUT_DIR / "done.marker").write_text("done\\n", encoding="utf-8")
     return rc
 
 
@@ -178,9 +213,9 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except BaseException as exc:
-        (OUT_DIR / "bootstrap_error.txt").write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
+        (OUT_DIR / "bootstrap_error.txt").write_text(f"{{type(exc).__name__}}: {{exc}}\\n", encoding="utf-8")
         (OUT_DIR / "exit_code.txt").write_text("5", encoding="utf-8")
-        (OUT_DIR / "done.marker").write_text("error\n", encoding="utf-8")
+        (OUT_DIR / "done.marker").write_text("error\\n", encoding="utf-8")
         raise
 """
 
@@ -255,10 +290,14 @@ def execute_in_windows_sandbox(
     _ensure_no_running_sandboxes(wsb_executable)
 
     python_base, site_packages, package_root = _discover_python_mounts()
-    external_case_dir, guest_cli_args = _build_guest_cli_args(spec, host_mount_root=host_mount_root, guest_mount_root=guest_mount_root)
+    external_case_file, guest_cli_args = _build_guest_cli_args(spec, host_mount_root=host_mount_root, guest_mount_root=guest_mount_root)
+    path_rebases: list[tuple[str, Path]] = [(guest_mount_root, host_mount_root)]
+    if external_case_file is not None:
+        path_rebases.append((rf"{_GUEST_CASE_FILE_DIR}\{external_case_file.name}", external_case_file))
 
     win_cfg_path = host_mount_root / ".fsq" / "config" / "config.windows.yaml"
     original_win_cfg_bytes = win_cfg_path.read_bytes() if win_cfg_path.is_file() else None
+    rewrote_host_win_cfg = False
 
     sandbox_id: str | None = None
     connect_proc: subprocess.Popen[bytes] | None = None
@@ -266,6 +305,8 @@ def execute_in_windows_sandbox(
 
     staging_dir = Path(tempfile.mkdtemp(prefix="fsq-wsb-")).resolve()
     snapshot_fsq_dir = staging_dir / "user_cfg"
+    restore_error: ApplicationError | None = None
+    active_exception: BaseException | None = None
     try:
         _prepare_guest_user_config_snapshot(
             host_user_root=host_user_root,
@@ -279,10 +320,13 @@ def execute_in_windows_sandbox(
             guest_cwd=guest_mount_root if spec.kind != "quick_test_run" else _GUEST_OUT_DIR,
             guest_cli_args=guest_cli_args,
             include_package_root=package_root is not None,
+            python_base=python_base,
+            site_packages=site_packages,
+            external_case_file=external_case_file,
         )
-
         if original_win_cfg_bytes is not None:
             _rewrite_workspace_config_root_path(win_cfg_path, guest_mount_root)
+            rewrote_host_win_cfg = True
 
         sandbox_id = _start_sandbox_instance(wsb_executable)
         _share_sandbox_folders(
@@ -295,7 +339,6 @@ def execute_in_windows_sandbox(
             snapshot_fsq_dir=snapshot_fsq_dir,
             host_mount_root=host_mount_root,
             guest_mount_root=guest_mount_root,
-            external_case_dir=external_case_dir,
         )
 
         connect_proc = _connect_and_background_sandbox_window(wsb_executable, sandbox_id=sandbox_id)
@@ -324,22 +367,30 @@ def execute_in_windows_sandbox(
             exec_proc=exec_proc,
             host_mount_root=host_mount_root,
             guest_mount_root=guest_mount_root,
+            extra_path_rebases=path_rebases[1:],
             event_callback=event_callback,
             timeout_seconds=timeout_seconds,
         )
+    except BaseException as exc:
+        active_exception = exc
+        raise
     finally:
-        if exec_proc is not None and exec_proc.poll() is None:
-            exec_proc.terminate()
-        if connect_proc is not None and connect_proc.poll() is None:
-            connect_proc.terminate()
+        _terminate_process_safely(exec_proc)
+        _terminate_process_safely(connect_proc)
         if sandbox_id is not None:
             _stop_sandbox_instance(wsb_executable, sandbox_id)
-        _restore_host_workspace_config(
-            win_cfg_path=win_cfg_path,
-            original_bytes=original_win_cfg_bytes,
-            host_mount_root=host_mount_root,
-        )
+        if rewrote_host_win_cfg or (original_win_cfg_bytes is None and win_cfg_path.is_file()):
+            try:
+                _restore_host_workspace_config(
+                    win_cfg_path=win_cfg_path,
+                    original_bytes=original_win_cfg_bytes,
+                    host_mount_root=host_mount_root,
+                )
+            except ApplicationError as err:
+                restore_error = err
         _cleanup_staging_dir_best_effort(staging_dir)
+    if restore_error is not None and active_exception is None:
+        raise restore_error
     if spec.kind == "quick_test_run" and not quick_test_was_registered and win_cfg_path.is_file():
         _register_quick_test_on_host_best_effort(host_mount_root, host_user_root)
 
@@ -419,6 +470,26 @@ def _run_wsb_command(wsb_executable: Path, args: Sequence[str], *, timeout: floa
     return completed
 
 
+def _terminate_process_safely(proc: subprocess.Popen[bytes] | None, *, wait_timeout: float = 5.0) -> None:
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=wait_timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    pass
+        else:
+            proc.wait(timeout=1.0)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def _ensure_no_running_sandboxes(wsb_executable: Path) -> None:
     completed = _run_wsb_command(wsb_executable, ["list", "--raw"], timeout=15.0, check=True)
     raw = (completed.stdout or "").strip()
@@ -426,9 +497,19 @@ def _ensure_no_running_sandboxes(wsb_executable: Path) -> None:
         return
     try:
         parsed = json.loads(raw)
-    except ValueError:
-        return
-    environments = parsed.get("WindowsSandboxEnvironments") if isinstance(parsed, dict) else None
+    except ValueError as exc:
+        raise _sandbox_unavailable(
+            "Windows Sandbox CLI returned an unreadable environment list.",
+            "Verify wsb.exe health (`wsb list --raw`) and retry.",
+            details={"stage": "list"},
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise _sandbox_unavailable(
+            "Windows Sandbox CLI returned an unexpected environment list format.",
+            "Verify wsb.exe health (`wsb list --raw`) and retry.",
+            details={"stage": "list"},
+        )
+    environments = parsed.get("WindowsSandboxEnvironments")
     if isinstance(environments, list) and environments:
         raise _sandbox_unavailable(
             "Another Windows Sandbox instance is already running.",
@@ -438,24 +519,19 @@ def _ensure_no_running_sandboxes(wsb_executable: Path) -> None:
 
 
 def _resolve_initialized_host_workspace(current_directory: Path, user_config_root: Path | None) -> tuple[Path, str]:
-    if user_config_root is None:
-        workspace = require_initialized_workspace(WorkspaceRequest(current_directory=current_directory)).workspace.resolve()
-        resolved_root = (Path.home() / ".fsq").expanduser().resolve()
-        entries = list_workspace_registry(resolved_root)
-        entry = next((item for item in entries if item.root_path.resolve() == workspace), None)
-        if entry is None:
-            raise ApplicationError(
-                code=ApplicationErrorCode.WORKSPACE_NOT_INITIALIZED,
-                category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
-                message="The current directory is not an initialized FSQ Workspace.",
-                action="Run 'fsq init' here or change to an initialized FSQ Workspace.",
-                details={"current_directory": str(workspace), "workspace": str(workspace)},
-            )
-        return workspace, entry.name
-
     resolved = current_directory.expanduser().resolve()
-    resolved_user_root = user_config_root.expanduser().resolve()
-    entries = list_workspace_registry(resolved_user_root)
+    resolved_user_root = (user_config_root or Path.home() / ".fsq").expanduser().resolve()
+    if user_config_root is None:
+        resolved = require_initialized_workspace(WorkspaceRequest(current_directory=current_directory)).workspace.resolve()
+    try:
+        entries = list_workspace_registry(resolved_user_root)
+    except ConfigurationError as exc:
+        raise ApplicationError(
+            code=ApplicationErrorCode.CONFIGURATION_INVALID,
+            category=ApplicationErrorCategory.CONFIGURATION,
+            message="Local FSQ user configuration is invalid.",
+            action="Repair ~/.fsq/config.yaml and retry.",
+        ) from exc
     entry = next((item for item in entries if item.root_path.resolve() == resolved), None)
     if entry is None:
         raise ApplicationError(
@@ -465,24 +541,25 @@ def _resolve_initialized_host_workspace(current_directory: Path, user_config_roo
             action="Run 'fsq init' here or change to an initialized FSQ Workspace.",
             details={"current_directory": str(resolved), "workspace": str(resolved)},
         )
-    try:
-        status = inspect_registered_workspace(entry.name, resolved_user_root)
-    except Exception as exc:
-        raise ApplicationError(
-            code=ApplicationErrorCode.WORKSPACE_NOT_INITIALIZED,
-            category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
-            message="The registered FSQ Workspace is unavailable.",
-            action="Repair it in Control Plane or initialize a valid workspace root.",
-            details={"workspace": str(resolved)},
-        ) from exc
-    if status.status == "unavailable":
-        raise ApplicationError(
-            code=ApplicationErrorCode.WORKSPACE_NOT_INITIALIZED,
-            category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
-            message="The registered FSQ Workspace has no valid platform configuration.",
-            action="Add or repair a platform configuration.",
-            details={"workspace": str(resolved)},
-        )
+    if user_config_root is not None:
+        try:
+            status = inspect_registered_workspace(entry.name, resolved_user_root)
+        except Exception as exc:
+            raise ApplicationError(
+                code=ApplicationErrorCode.WORKSPACE_NOT_INITIALIZED,
+                category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
+                message="The registered FSQ Workspace is unavailable.",
+                action="Repair it in Control Plane or initialize a valid workspace root.",
+                details={"workspace": str(resolved)},
+            ) from exc
+        if status.status == "unavailable":
+            raise ApplicationError(
+                code=ApplicationErrorCode.WORKSPACE_NOT_INITIALIZED,
+                category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
+                message="The registered FSQ Workspace has no valid platform configuration.",
+                action="Add or repair a platform configuration.",
+                details={"workspace": str(resolved)},
+            )
     return resolved, entry.name
 
 
@@ -595,15 +672,15 @@ def _build_guest_cli_args(
     if _is_subpath(resolved_case, host_mount_root):
         rel = resolved_case.relative_to(host_mount_root)
         guest_case_str = str(Path(guest_mount_root) / rel)
-        external_dir = None
+        external_case_file = None
     else:
-        external_dir = resolved_case.parent.resolve()
+        external_case_file = resolved_case
         guest_case_str = rf"{_GUEST_CASE_FILE_DIR}\{resolved_case.name}"
 
     args.extend(["case", "test", guest_case_str, "--platform", "windows"])
     if spec.suggest:
         args.append("--suggest")
-    return external_dir, args
+    return external_case_file, args
 
 
 def _resolve_host_case_path_for_sandbox(case_path: Path, *, workspace_root: Path, current_directory: Path) -> Path | None:
@@ -624,13 +701,20 @@ def _prepare_guest_user_config_snapshot(
     include_workspace_entry: bool,
 ) -> None:
     snapshot_dir.mkdir(parents=True, exist_ok=True)
+    host_cfg_path = host_user_root / "config.yaml"
     try:
         user_cfg = load_user_provider_config(host_user_root)
-    except ConfigurationError:
-        # Strict provider-free `case test` can still execute when Provider is unconfigured,
-        # whereas malformed user configuration is preserved only if needed; check raw file.
+    except ConfigurationError as exc:
+        # Missing/corrupt provider credentials should not block provider-free strict `case test --sandbox`,
+        # whereas a malformed/unreadable host `config.yaml` must fail fast.
+        if host_cfg_path.is_file() and "provider" not in exc.context:
+            raise ApplicationError(
+                code=ApplicationErrorCode.CONFIGURATION_INVALID,
+                category=ApplicationErrorCategory.CONFIGURATION,
+                message="Local FSQ user configuration is invalid.",
+                action="Repair ~/.fsq/config.yaml or reconfigure your Provider before retrying.",
+            ) from exc
         user_cfg = None
-
     provider_dump = user_cfg.model_dump(mode="json").get("provider") if user_cfg is not None else None
     workspaces_dump = [{"name": workspace_name, "root_path": guest_mount_root}] if include_workspace_entry else []
     guest_doc = {
@@ -649,37 +733,93 @@ def _prepare_guest_user_config_snapshot(
                 shutil.copy2(item, dst_auth / item.name)
 
 
+def _stage_runtime_dlls(
+    *,
+    vc_dll_dir: Path,
+    python_base: Path | None,
+    site_packages: Path | None,
+) -> None:
+    windir = Path(os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows")
+    search_dirs: list[Path] = [windir / "System32"]
+    if python_base is not None:
+        search_dirs.append(python_base)
+    if site_packages is not None:
+        search_dirs.extend([site_packages / "Pythonwin", site_packages / "pywin32_system32"])
+
+    def find_dll(dll_name: str) -> Path | None:
+        for directory in search_dirs:
+            candidate = directory / dll_name
+            if candidate.is_file():
+                return candidate
+        return None
+
+    missing_required: list[str] = []
+    for dll_name in _REQUIRED_VC_RUNTIME_DLLS:
+        source = find_dll(dll_name)
+        if source is None:
+            missing_required.append(dll_name)
+        else:
+            shutil.copy2(source, vc_dll_dir / dll_name)
+
+    if missing_required:
+        raise _sandbox_unavailable(
+            "Required host Windows C++/MFC runtime DLLs for Sandbox execution could not be located.",
+            "Install the Microsoft Visual C++ Redistributable (x64) and pywin32 on the host, then retry.",
+            details={"stage": "runtime_dlls", "missing_dlls": missing_required},
+        )
+
+    for dll_name in _OPTIONAL_VC_RUNTIME_DLLS:
+        source = find_dll(dll_name)
+        if source is not None:
+            shutil.copy2(source, vc_dll_dir / dll_name)
+
+    if site_packages is not None:
+        pywin32_sys32 = site_packages / "pywin32_system32"
+        if pywin32_sys32.is_dir():
+            for item in sorted(pywin32_sys32.glob("*.dll")):
+                if item.is_file() and not item.is_symlink():
+                    shutil.copy2(item, vc_dll_dir / item.name)
+
+
 def _stage_sandbox_files(
     *,
     staging_dir: Path,
     guest_cwd: str,
     guest_cli_args: Sequence[str],
     include_package_root: bool,
+    python_base: Path | None = None,
+    site_packages: Path | None = None,
+    external_case_file: Path | None = None,
 ) -> None:
     py_shim_dir = staging_dir / "py_shim"
     py_shim_dir.mkdir(parents=True, exist_ok=True)
-    (py_shim_dir / "sitecustomize.py").write_text(_SITECUSTOMIZE_SOURCE, encoding="utf-8")
-    (staging_dir / "guest_bootstrap.py").write_text(_GUEST_BOOTSTRAP_SOURCE, encoding="utf-8")
+    (py_shim_dir / "sitecustomize.py").write_text(_render_sitecustomize_source(), encoding="utf-8")
+    (staging_dir / "guest_bootstrap.py").write_text(_render_guest_bootstrap_source(), encoding="utf-8")
     (staging_dir / "command.json").write_text(
         json.dumps({"cwd": guest_cwd, "cli_args": list(guest_cli_args)}, ensure_ascii=False),
         encoding="utf-8",
     )
-
+    if external_case_file is not None:
+        case_src_dir = staging_dir / "case_src"
+        case_src_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(external_case_file, case_src_dir / external_case_file.name)
+        except OSError as exc:
+            raise ApplicationError(
+                code=ApplicationErrorCode.CASE_NOT_FOUND,
+                category=ApplicationErrorCategory.REQUEST_VALIDATION,
+                message=f"Unable to read Case file for Sandbox staging: {external_case_file}",
+                action="Verify the Case file exists and is readable, then retry.",
+            ) from exc
     vc_dll_dir = staging_dir / "vc_dlls"
     vc_dll_dir.mkdir(parents=True, exist_ok=True)
-    windir = Path(os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows")
-    sys32 = windir / "System32"
-    for dll_name in _VC_RUNTIME_DLLS:
-        candidate = sys32 / dll_name
-        if candidate.is_file():
-            shutil.copy2(candidate, vc_dll_dir / dll_name)
+    _stage_runtime_dlls(vc_dll_dir=vc_dll_dir, python_base=python_base, site_packages=site_packages)
 
     setup_lines = [
         "@echo off",
-        rf"copy /Y {_GUEST_OUT_DIR}\vc_dlls\*.dll C:\Windows\System32\ >nul 2>&1",
+        rf'if exist "{_GUEST_OUT_DIR}\vc_dlls\*.dll" (copy /Y "{_GUEST_OUT_DIR}\vc_dlls\*.dll" C:\Windows\System32\ >nul || exit /b 1)',
     ]
     (staging_dir / "_setup.cmd").write_bytes(("\r\n".join(setup_lines) + "\r\n").encode("ascii"))
-
     py_paths = [rf"{_GUEST_OUT_DIR}\py_shim"]
     if include_package_root:
         py_paths.append(_GUEST_PACKAGE_ROOT)
@@ -713,11 +853,35 @@ def _stage_sandbox_files(
 
 
 def _rewrite_workspace_config_root_path(config_path: Path, new_root_path: str) -> None:
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ApplicationError(
+            code=ApplicationErrorCode.CONFIGURATION_INVALID,
+            category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
+            message="Host Windows Workspace configuration could not be parsed for Sandbox execution.",
+            action="Inspect and repair .fsq/config/config.windows.yaml before retrying.",
+            details={"config_path": str(config_path)},
+        ) from exc
     if not isinstance(raw, dict):
-        return
+        raise ApplicationError(
+            code=ApplicationErrorCode.CONFIGURATION_INVALID,
+            category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
+            message="Host Windows Workspace configuration must be a YAML mapping.",
+            action="Inspect and repair .fsq/config/config.windows.yaml before retrying.",
+            details={"config_path": str(config_path)},
+        )
     raw["root_path"] = new_root_path
-    _atomic_write_bytes(config_path, yaml.safe_dump(raw, sort_keys=False, allow_unicode=True).encode("utf-8"))
+    try:
+        _atomic_write_bytes(config_path, yaml.safe_dump(raw, sort_keys=False, allow_unicode=True).encode("utf-8"))
+    except OSError as exc:
+        raise ApplicationError(
+            code=ApplicationErrorCode.INTERNAL_ERROR,
+            category=ApplicationErrorCategory.INTERNAL,
+            message="Unable to update host Windows Workspace configuration for Sandbox execution.",
+            action="Ensure .fsq/config/config.windows.yaml is writable and retry.",
+            details={"config_path": str(config_path)},
+        ) from exc
 
 
 def _restore_host_workspace_config(*, win_cfg_path: Path, original_bytes: bytes | None, host_mount_root: Path) -> None:
@@ -726,8 +890,14 @@ def _restore_host_workspace_config(*, win_cfg_path: Path, original_bytes: bytes 
             _atomic_write_bytes(win_cfg_path, original_bytes)
         elif win_cfg_path.is_file():
             _rewrite_workspace_config_root_path(win_cfg_path, str(host_mount_root.resolve()))
-    except OSError:
-        pass
+    except OSError as exc:
+        raise ApplicationError(
+            code=ApplicationErrorCode.INTERNAL_ERROR,
+            category=ApplicationErrorCategory.INTERNAL,
+            message="Failed to restore host Windows Workspace configuration after Sandbox execution.",
+            action=f"Verify root_path in {win_cfg_path} points to {host_mount_root.resolve()}.",
+            details={"config_path": str(win_cfg_path), "expected_root_path": str(host_mount_root.resolve())},
+        ) from exc
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
@@ -775,7 +945,6 @@ def _share_sandbox_folders(
     snapshot_fsq_dir: Path,
     host_mount_root: Path,
     guest_mount_root: str,
-    external_case_dir: Path | None,
 ) -> None:
     shares: list[tuple[Path, str, bool]] = [
         (staging_dir, _GUEST_OUT_DIR, True),
@@ -786,8 +955,6 @@ def _share_sandbox_folders(
     ]
     if package_root is not None:
         shares.append((package_root, _GUEST_PACKAGE_ROOT, False))
-    if external_case_dir is not None:
-        shares.append((external_case_dir, _GUEST_CASE_FILE_DIR, False))
 
     for host_path, guest_path, writable in shares:
         cmd = ["share", "--id", sandbox_id, "-f", str(host_path), "-s", guest_path]
@@ -855,12 +1022,33 @@ def _stop_sandbox_instance(wsb_executable: Path, sandbox_id: str) -> None:
         pass
 
 
+def _extract_safe_exception_type(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        first_line = path.read_text(encoding="utf-8", errors="replace").splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+    token = first_line.split(":", 1)[0].strip()
+    if token and all(ch.isalnum() or ch in {"_", "."} for ch in token) and len(token) <= 128:
+        return token
+    return None
+
+
+def _has_nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _stream_and_collect_guest_result(
     *,
     staging_dir: Path,
     exec_proc: subprocess.Popen[bytes],
     host_mount_root: Path,
     guest_mount_root: str,
+    extra_path_rebases: Sequence[tuple[str, Path]] = (),
     event_callback: Callable[[dict[str, object]], None] | None,
     timeout_seconds: float,
 ) -> tuple[int, dict[str, object] | None, str]:
@@ -868,41 +1056,64 @@ def _stream_and_collect_guest_result(
     stdout_path = staging_dir / "guest_stdout.jsonl"
     stderr_path = staging_dir / "guest_stderr.log"
     exit_code_path = staging_dir / "exit_code.txt"
+    bootstrap_error_path = staging_dir / "bootstrap_error.txt"
+    boot_stdout_path = staging_dir / "boot_stdout.log"
 
-    consumed_lines = 0
+    read_offset = 0
+    utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending_fragment = ""
     terminal_record: dict[str, object] | None = None
     deadline = time.monotonic() + timeout_seconds
+    rebases: tuple[tuple[str, Path], ...] = ((guest_mount_root, host_mount_root), *extra_path_rebases)
 
-    def drain_lines() -> None:
-        nonlocal consumed_lines, terminal_record
-        if not stdout_path.is_file():
+    def process_line(line: str) -> None:
+        nonlocal terminal_record
+        stripped = line.strip()
+        if not stripped:
             return
         try:
-            raw_text = stdout_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+            parsed = json.loads(stripped)
+        except ValueError:
             return
-        # Only process complete newline-terminated lines while streaming
-        complete_lines = raw_text.splitlines(keepends=True)
-        if not done_marker.is_file() and complete_lines and not complete_lines[-1].endswith("\n"):
-            complete_lines = complete_lines[:-1]
-        for line in complete_lines[consumed_lines:]:
-            consumed_lines += 1
-            stripped = line.strip()
-            if not stripped:
-                continue
+        if not isinstance(parsed, dict):
+            return
+        rebased: object = parsed
+        for guest_prefix, host_target in rebases:
+            rebased = _rebase_guest_paths(rebased, guest_mount_root=guest_prefix, host_mount_root=host_target)
+        if not isinstance(rebased, dict):
+            return
+        if rebased.get("type") == "event":
+            event_payload = rebased.get("event")
+            if event_callback is not None and isinstance(event_payload, dict):
+                event_callback(event_payload)
+        elif rebased.get("type") in {"result", "error"}:
+            terminal_record = rebased
+
+    def drain_lines(*, flush_partial: bool = False) -> None:
+        nonlocal read_offset, pending_fragment
+        if stdout_path.is_file():
             try:
-                parsed = json.loads(stripped)
-            except ValueError:
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            rebased = _rebase_guest_paths(parsed, guest_mount_root=guest_mount_root, host_mount_root=host_mount_root)
-            if rebased.get("type") == "event":
-                event_payload = rebased.get("event")
-                if event_callback is not None and isinstance(event_payload, dict):
-                    event_callback(event_payload)
-            elif rebased.get("type") in {"result", "error"}:
-                terminal_record = rebased
+                with stdout_path.open("rb") as handle:
+                    handle.seek(read_offset)
+                    chunk = handle.read()
+                    read_offset += len(chunk)
+            except OSError:
+                chunk = b""
+            if chunk:
+                pending_fragment += utf8_decoder.decode(chunk, final=False)
+                lines = pending_fragment.splitlines(keepends=True)
+                if lines and not lines[-1].endswith("\n"):
+                    pending_fragment = lines.pop()
+                else:
+                    pending_fragment = ""
+                for line in lines:
+                    process_line(line)
+        if flush_partial:
+            pending_fragment += utf8_decoder.decode(b"", final=True)
+            if pending_fragment:
+                trailing = pending_fragment
+                pending_fragment = ""
+                process_line(trailing)
 
     while not done_marker.is_file():
         if time.monotonic() > deadline:
@@ -915,17 +1126,25 @@ def _stream_and_collect_guest_result(
         if exec_proc.poll() is not None and not done_marker.is_file():
             time.sleep(0.5)
             if not done_marker.is_file():
-                drain_lines()
+                drain_lines(flush_partial=True)
+                details: dict[str, object] = {
+                    "exception_type": "SandboxGuestTerminatedError",
+                    "has_boot_stdout": _has_nonempty_file(boot_stdout_path),
+                    "has_guest_stderr": _has_nonempty_file(stderr_path),
+                }
+                bootstrap_exc_type = _extract_safe_exception_type(bootstrap_error_path)
+                if bootstrap_exc_type:
+                    details["bootstrap_exception_type"] = bootstrap_exc_type
                 raise ApplicationError(
                     code=ApplicationErrorCode.INTERNAL_ERROR,
                     category=ApplicationErrorCategory.INTERNAL,
                     message="Windows Sandbox guest execution terminated unexpectedly before producing a completion marker.",
                     action="Inspect Workspace Run artifacts and retry.",
-                    details={"exception_type": "SandboxGuestTerminatedError"},
+                    details=details,
                 )
         time.sleep(0.25)
 
-    drain_lines()
+    drain_lines(flush_partial=True)
     stderr_text = ""
     if stderr_path.is_file():
         try:

@@ -229,7 +229,9 @@ def test_release_install_smoke_checks_every_native_command_exit() -> None:
         "& $python -m pip install $wheels[0].FullName",
         '& $python -c "import fsq_agent"',
         "& $fsq --help",
+        "& $fsq --version",
         "& $fsqAgent --help",
+        "& $fsqAgent --version",
         "$resourceSmoke | & $python -",
     ):
         command_index = lines.index(command)

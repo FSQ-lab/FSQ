@@ -6,8 +6,10 @@ FSQ installs `fsq` and the compatibility alias `fsq-agent`. Both invoke the same
 
 | Option | Meaning |
 |---|---|
-| `--output human|json|jsonl` | Select human or machine-readable output. |
+| `--version`, `-V` | Show the installed FSQ version and exit (`fsq.machine/v1` envelope in `json`/`jsonl` mode). |
+| `--output human\|json\|jsonl` | Select human or machine-readable output. |
 | `--non-interactive` | Reject flows requiring terminal interaction. |
+| `-h`, `--help` | Show help for `fsq` or any subcommand and exit. |
 
 ## Public commands
 

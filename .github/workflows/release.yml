@@ -67,7 +67,9 @@ jobs:
           uv venv --python 3.11 "$RUNNER_TEMP/fsq-release-smoke"
           uv pip install --python "$RUNNER_TEMP/fsq-release-smoke/bin/python" dist/*.whl
           "$RUNNER_TEMP/fsq-release-smoke/bin/fsq" --help
+          "$RUNNER_TEMP/fsq-release-smoke/bin/fsq" --version
           "$RUNNER_TEMP/fsq-release-smoke/bin/fsq-agent" --help
+          "$RUNNER_TEMP/fsq-release-smoke/bin/fsq-agent" --version
           "$RUNNER_TEMP/fsq-release-smoke/bin/python" - <<'PY'
           from pathlib import Path
           from tempfile import TemporaryDirectory
@@ -162,9 +164,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "fsq console-script smoke failed with exit code $LASTEXITCODE."
           }
+          & $fsq --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "fsq --version smoke failed with exit code $LASTEXITCODE."
+          }
           & $fsqAgent --help
           if ($LASTEXITCODE -ne 0) {
             throw "fsq-agent console-script smoke failed with exit code $LASTEXITCODE."
+          }
+          & $fsqAgent --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "fsq-agent --version smoke failed with exit code $LASTEXITCODE."
           }
           $resourceSmoke = @'
           from pathlib import Path

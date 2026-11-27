@@ -8,6 +8,7 @@ from pathlib import Path
 from fsq_agent.agent import check_dynamic_agent_readiness
 from fsq_agent.ai_services import check_case_suggestion_readiness
 from fsq_agent.application.contracts import (
+    SANDBOX_BACKEND_PLATFORMS,
     ApplicationError,
     ApplicationErrorCategory,
     ApplicationErrorCode,
@@ -21,6 +22,7 @@ from fsq_agent.application.contracts import (
     DoctorWorkspaceSummary,
     PlatformDiagnosticContext,
     RegisteredPlatformDoctorRequest,
+    SandboxBackend,
 )
 from fsq_agent.config import inspect_registered_workspace, list_workspace_registry, load_workspace_platform_settings, validate_strict_core_settings
 from fsq_agent.core import CapabilityDefinitionFactory, CapabilityRegistry, CommonPlatformTools
@@ -65,8 +67,27 @@ def diagnose_workspace(request: DoctorRequest) -> DoctorResult:
         raise _workspace_postcondition_error("workspace_root_mismatch")
     if not inventory_platforms:
         raise _workspace_postcondition_error("workspace_inventory_empty")
+    if request.sandbox is not None:
+        owning_platform = SANDBOX_BACKEND_PLATFORMS[request.sandbox]
+        if owning_platform not in status_by_platform:
+            raise ApplicationError(
+                code=ApplicationErrorCode.CONFIGURATION_INVALID,
+                category=ApplicationErrorCategory.WORKSPACE_CONFIGURATION,
+                message=f"Platform '{owning_platform}' is not configured in this Workspace for --sandbox {request.sandbox} diagnostics.",
+                action=f"Initialize '{owning_platform}' in this Workspace (`fsq init --platform {owning_platform} ...`) or omit --sandbox {request.sandbox}.",
+                details={"stage": "workspace_inventory", "reason": f"{owning_platform}_platform_missing", "sandbox": request.sandbox},
+            )
 
-    platforms = tuple(_diagnose_platform(platform, root, status_by_platform[platform]) for platform in _PLATFORMS if platform in status_by_platform)
+    platforms = tuple(
+        _diagnose_platform(
+            platform,
+            root,
+            status_by_platform[platform],
+            sandbox=(request.sandbox if request.sandbox is not None and SANDBOX_BACKEND_PLATFORMS[request.sandbox] == platform else None),
+        )
+        for platform in _PLATFORMS
+        if platform in status_by_platform
+    )
     result_status = _summary_status([command.status for item in platforms for command in (item.commands.case_test, item.commands.case_test_suggest, item.commands.case_create)])
     actions = tuple(dict.fromkeys(detail.action for item in platforms for detail in _details(item) if detail.action))
     return DoctorResult(
@@ -96,7 +117,15 @@ def diagnose_registered_platform(request: RegisteredPlatformDoctorRequest) -> Do
     )
 
 
-def _diagnose_platform(platform: str, root: Path, workspace_platform, user_config_root: Path | None = None, *, target_id: str | None = None) -> DoctorPlatformResult:
+def _diagnose_platform(
+    platform: str,
+    root: Path,
+    workspace_platform,
+    user_config_root: Path | None = None,
+    *,
+    target_id: str | None = None,
+    sandbox: SandboxBackend | None = None,
+) -> DoctorPlatformResult:
     unavailable = DoctorStatusDetail(status="error", code="doctor.configuration_invalid", message=workspace_platform.message, action=workspace_platform.action)
     if workspace_platform.status != "available":
         checks = DoctorChecks(configuration=unavailable, **{name: _blocked("configuration") for name in _CHECK_ORDER[1:]})
@@ -115,10 +144,16 @@ def _diagnose_platform(platform: str, root: Path, workspace_platform, user_confi
     elif platform == "ios" and target_id is not None:
         settings = settings.model_copy(deep=True)
         settings.harness.ios.udid = target_id
-    return diagnose_platform_settings(settings)
+    return diagnose_platform_settings(settings, sandbox=sandbox) if sandbox is not None else diagnose_platform_settings(settings)
 
 
-def diagnose_platform_settings(settings, *, context: PlatformDiagnosticContext | None = None, provider_checks: bool = True) -> DoctorPlatformResult:
+def diagnose_platform_settings(
+    settings,
+    *,
+    context: PlatformDiagnosticContext | None = None,
+    provider_checks: bool = True,
+    sandbox: SandboxBackend | None = None,
+) -> DoctorPlatformResult:
     if settings is None:
         if context is None:
             raise ValueError("A platform diagnostic context is required when settings are unavailable.")
@@ -139,19 +174,35 @@ def diagnose_platform_settings(settings, *, context: PlatformDiagnosticContext |
     platform = settings.harness.platform
     if context is not None and platform != context.platform:
         raise ValueError("Diagnostic context does not match the selected platform.")
+    effective_sandbox = sandbox if sandbox is not None else (context.sandbox if context is not None else None)
     environment = PlatformRuntimeService()
-    prerequisite_facts = _safe_prerequisites(environment, settings, context)
+    prerequisite_facts = _safe_prerequisites(environment, settings, context, sandbox=effective_sandbox) if effective_sandbox is not None else _safe_prerequisites(environment, settings, context)
     prerequisites = tuple(DoctorPrerequisite.model_validate(item.model_dump(exclude={"target_id"})) for item in prerequisite_facts)
     runtime_check = _safe_check("runtime", lambda: _runtime(environment, platform))
     configuration = _pending("workspace") if context is not None and context.workspace_pending else _ready("Platform configuration is ready.")
     unresolved_native = context is not None and context.application_pending and platform != "web"
     if unresolved_native:
         target_configuration = _pending("application")
-        failed = next((item for item in prerequisite_facts if item.status in {"unavailable", "error"}), None)
-        target_availability = DoctorStatusDetail(status=failed.status, code=failed.code, message=failed.message, action=failed.action) if failed else _pending("application")
+        failed = next(
+            (item for item in prerequisite_facts if item.status in {"unavailable", "error"} or (item.status == "not_applicable" and item.code == "windows.dependency_unavailable")),
+            None,
+        )
+        target_availability = (
+            DoctorStatusDetail(
+                status="unavailable" if failed.status == "not_applicable" else failed.status,
+                code=failed.code,
+                message=failed.message,
+                action=failed.action,
+            )
+            if failed
+            else _pending("application")
+        )
     else:
         target_configuration = _configuration_check("target_configuration", lambda: environment.check_target_configuration(settings))
-        target_availability = _safe_check("target_availability", lambda: environment.check_target_availability(settings, prerequisite_facts))
+        if effective_sandbox is not None and platform == SANDBOX_BACKEND_PLATFORMS[effective_sandbox]:
+            target_availability = _safe_check("target_availability", lambda: environment.check_target_availability(settings, prerequisite_facts, sandbox=effective_sandbox))
+        else:
+            target_availability = _safe_check("target_availability", lambda: environment.check_target_availability(settings, prerequisite_facts))
     foundation = (runtime_check, target_configuration, target_availability)
     strict_core = _dependent_check("strict_core", (configuration, *foundation), lambda: _strict(settings))
     if provider_checks or platform not in {"android", "ios", "macos"}:
@@ -198,11 +249,21 @@ def _runtime(environment: PlatformRuntimeService, platform: str) -> tuple[bool, 
     return result.ready, result.message, result.action or ""
 
 
-def _safe_prerequisites(environment: PlatformRuntimeService, settings, context: PlatformDiagnosticContext | None = None):
+def _safe_prerequisites(
+    environment: PlatformRuntimeService,
+    settings,
+    context: PlatformDiagnosticContext | None = None,
+    *,
+    sandbox: SandboxBackend | None = None,
+):
     try:
+        kwargs: dict[str, object] = {}
         if context is not None and (context.application_pending or context.require_explicit_selection):
-            return environment.check_prerequisites(settings, application_pending=context.application_pending, require_explicit_selection=context.require_explicit_selection)
-        return environment.check_prerequisites(settings)
+            kwargs["application_pending"] = context.application_pending
+            kwargs["require_explicit_selection"] = context.require_explicit_selection
+        if sandbox is not None:
+            kwargs["sandbox"] = sandbox
+        return environment.check_prerequisites(settings, **kwargs)  # type: ignore[arg-type]
     except Exception:  # noqa: BLE001 - diagnostic isolation returns one safe prerequisite fact.
         from fsq_agent.models import PlatformPrerequisiteCheck
 
@@ -306,7 +367,10 @@ def _preparation(checks: DoctorChecks, prerequisites: tuple[DoctorPrerequisite, 
     # Unrelated failures retain their original facts; suggestion-only readiness
     # is not an Explore dependency, just as in the configured command graph.
     details = [*(getattr(checks, name) for name in _COMMAND_DEPENDENCIES["case_create"]), *prerequisites]
-    failed = next((item for item in details if item.status in {"unavailable", "error"}), None)
+    failed = next(
+        (item for item in details if item.status in {"unavailable", "error"} or (item.status == "not_applicable" and item.code == "windows.dependency_unavailable")),
+        None,
+    )
     if failed is not None:
         return DoctorStatusDetail(status="unavailable", code=failed.code, message=failed.message, action=failed.action)
     return _ready("Prerequisites for application identification and preparation are ready.")

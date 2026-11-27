@@ -68,6 +68,7 @@ from ._composition import create_case_agent
 from ._windows_sandbox import SandboxCommandSpec, ensure_sandbox_platform_supported, execute_in_windows_sandbox
 
 PLATFORMS = click.Choice(["android", "web", "windows", "macos", "ios"])
+SANDBOX_BACKENDS = click.Choice(["wsb"], case_sensitive=False)
 OUTPUTS = click.Choice(["human", "json", "jsonl"])
 RUN_STATUSES = click.Choice(["preparing", "running", "finalizing", "success", "failed", "inconclusive", "cancelled", "error", "interrupted"])
 
@@ -391,10 +392,12 @@ def init(
 
 
 @main.command()
+@click.option("--sandbox", type=SANDBOX_BACKENDS, default=None, help="Include read-only sandbox backend readiness checks (for example: wsb).")
 @click.pass_context
-def doctor(context: click.Context) -> None:
+def doctor(context: click.Context, sandbox: str | None) -> None:
     """Diagnose configured Workspace platforms without mutating state."""
-    result = diagnose_workspace(DoctorRequest(current_directory=Path.cwd()))
+    normalized_sandbox = sandbox.lower() if sandbox is not None else None
+    result = diagnose_workspace(DoctorRequest(current_directory=Path.cwd(), sandbox=normalized_sandbox))  # type: ignore[arg-type]
     if context.obj["output"] == "human":
         _render_doctor(result)
     else:
@@ -416,10 +419,13 @@ def quick_test_group() -> None:
 @quick_test_group.command(name="context")
 @click.option("--platform", type=PLATFORMS, required=True, help="Target platform to inspect.")
 @click.option("--target-id", default=None, help="Exact Android serial, iOS UDID, or Web browser channel.")
+@click.option("--sandbox", type=SANDBOX_BACKENDS, default=None, help="Include read-only sandbox backend readiness checks (wsb: --platform windows only).")
 @click.pass_context
-def quick_test_context(context: click.Context, platform: str, target_id: str | None) -> None:
+def quick_test_context(context: click.Context, platform: str, target_id: str | None, sandbox: str | None) -> None:
     """Discover Quick Test readiness and available targets without executing a test."""
-    result = get_quick_test_context(QuickTestContextRequest(platform=platform, target_id=target_id))
+    normalized_sandbox = sandbox.lower() if sandbox is not None else None
+    ensure_sandbox_platform_supported(sandbox=normalized_sandbox, platform=platform)  # type: ignore[arg-type]
+    result = get_quick_test_context(QuickTestContextRequest(platform=platform, target_id=target_id, sandbox=normalized_sandbox))  # type: ignore[arg-type]
     _emit_terminal(context, result.model_dump(mode="json"))
     if not result.can_start:
         raise click.exceptions.Exit(ExitCode.UNAVAILABLE)
@@ -430,9 +436,9 @@ def quick_test_context(context: click.Context, platform: str, target_id: str | N
 @click.option("--goal", required=True, help="Natural-language goal and expected outcome to verify.")
 @click.option("--target-id", default=None, help="Exact Android serial, iOS UDID, or Web browser channel.")
 @click.option("--url", default=None, help="Exact HTTP(S) starting address (Web only).")
-@click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
+@click.option("--sandbox", type=SANDBOX_BACKENDS, default=None, help="Run inside an isolated sandbox backend (wsb: --platform windows only).")
 @click.pass_context
-def quick_test_run(context: click.Context, platform: str, goal: str, target_id: str | None, url: str | None, sandbox: bool) -> None:
+def quick_test_run(context: click.Context, platform: str, goal: str, target_id: str | None, url: str | None, sandbox: str | None) -> None:
     """Execute one standalone Explore goal in the dedicated Quick Test Workspace."""
 
     def progress(event):
@@ -441,9 +447,10 @@ def quick_test_run(context: click.Context, platform: str, goal: str, target_id: 
         elif context.obj["output"] == "human":
             click.echo(event.get("message") or event.get("title") or event.get("phase", ""))
 
-    if sandbox:
+    normalized_sandbox = sandbox.lower() if sandbox is not None else None
+    if normalized_sandbox == "wsb":
         try:
-            ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform)
+            ensure_sandbox_platform_supported(sandbox=normalized_sandbox, platform=platform)  # type: ignore[arg-type]
             outcome = execute_in_windows_sandbox(
                 SandboxCommandSpec(
                     kind="quick_test_run",
@@ -496,9 +503,9 @@ def quick_test_run(context: click.Context, platform: str, goal: str, target_id: 
 @click.option("--goal", required=True, help="Natural-language goal to execute and record.")
 @click.option("--name", default=None, help="Stable Case name without a suffix.")
 @click.option("--udid", default=None, help="Transient iOS Simulator or physical device UDID (--platform ios only).")
-@click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
+@click.option("--sandbox", type=SANDBOX_BACKENDS, default=None, help="Run inside an isolated sandbox backend (wsb: --platform windows only).")
 @click.pass_context
-def case_create(context: click.Context, platform: str, goal: str, name: str | None, udid: str | None, sandbox: bool) -> None:
+def case_create(context: click.Context, platform: str, goal: str, name: str | None, udid: str | None, sandbox: str | None) -> None:
     """Execute an AI-driven goal and record a candidate FSQ Case."""
 
     def emit_raw_event(event: dict[str, object]) -> None:
@@ -510,8 +517,9 @@ def case_create(context: click.Context, platform: str, goal: str, name: str | No
             emit_raw_event(event.model_dump(mode="json"))
 
     try:
-        ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform, udid=udid)
-        if sandbox:
+        normalized_sandbox = sandbox.lower() if sandbox is not None else None
+        ensure_sandbox_platform_supported(sandbox=normalized_sandbox, platform=platform, udid=udid)  # type: ignore[arg-type]
+        if normalized_sandbox == "wsb":
             outcome = execute_in_windows_sandbox(
                 SandboxCommandSpec(
                     kind="case_create",
@@ -550,13 +558,14 @@ def case_create(context: click.Context, platform: str, goal: str, name: str | No
 @click.option("--platform", type=PLATFORMS, required=True, help="Target platform for deterministic replay.")
 @click.option("--suggest", is_flag=True, default=False, help="Run read-only post-execution AI analysis for suggestions and a candidate Case.")
 @click.option("--udid", default=None, help="Transient iOS Simulator or physical device UDID (--platform ios only).")
-@click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
+@click.option("--sandbox", type=SANDBOX_BACKENDS, default=None, help="Run inside an isolated sandbox backend (wsb: --platform windows only).")
 @click.pass_context
-def case_test(context: click.Context, case_path: Path, platform: str, suggest: bool, udid: str | None, sandbox: bool) -> None:
+def case_test(context: click.Context, case_path: Path, platform: str, suggest: bool, udid: str | None, sandbox: str | None) -> None:
     """Execute an existing FSQ Case once without modifying the source file."""
     try:
-        ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform, udid=udid)
-        if sandbox:
+        normalized_sandbox = sandbox.lower() if sandbox is not None else None
+        ensure_sandbox_platform_supported(sandbox=normalized_sandbox, platform=platform, udid=udid)  # type: ignore[arg-type]
+        if normalized_sandbox == "wsb":
             outcome = execute_in_windows_sandbox(
                 SandboxCommandSpec(
                     kind="case_test",
@@ -959,6 +968,10 @@ def _render_doctor(result: object) -> None:
                 "xcode_developer_directory": "Xcode developer directory",
                 "application_path": "Application path",
                 "bundle_identifier": "Bundle identifier",
+                "windows_sandbox_cli": "Windows Sandbox CLI",
+                "windows_sandbox_service": "Windows Sandbox service",
+                "windows_sandbox_slot": "Windows Sandbox slot",
+                "windows_sandbox_runtime": "Sandbox guest runtime",
             }
             click.echo("  Prerequisites")
             for detail in platform.prerequisites:

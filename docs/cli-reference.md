@@ -16,7 +16,7 @@ FSQ installs `fsq` and the compatibility alias `fsq-agent`. Both invoke the same
 | Command | Purpose | Workspace required |
 |---|---|---|
 | `fsq init` | Initialize a Workspace platform, a project-local Coding Agent integration, or both. | No |
-| `fsq doctor` | Diagnose configured platforms without mutation. | Yes |
+| `fsq doctor [--sandbox BACKEND]` | Diagnose configured platforms without mutation (optional `--sandbox wsb` checks Windows Sandbox readiness). | Yes |
 | `fsq providers configure/status` | Configure or inspect the user-level Provider. | No |
 | `fsq quick-test context` | Discover platform readiness and device/browser choices without execution. | No project Workspace |
 | `fsq quick-test run` | Execute one standalone Explore goal in the dedicated Quick Test Workspace. | No project Workspace |
@@ -36,8 +36,8 @@ Human output is for terminals. JSON produces one structured result. JSONL emits 
 Standalone Quick Test forms:
 
 ```bash
-fsq quick-test context --platform PLATFORM [--target-id ID]
-fsq quick-test run --platform PLATFORM --goal TEXT [--target-id ID] [--url URL] [--sandbox]
+fsq quick-test context --platform PLATFORM [--target-id ID] [--sandbox BACKEND]
+fsq quick-test run --platform PLATFORM --goal TEXT [--target-id ID] [--url URL] [--sandbox BACKEND]
 fsq --output jsonl --non-interactive quick-test run --platform web --target-id chrome --url 'https://example.com/search?q=FSQ#results' --goal "Verify the results contain FSQ"
 ```
 
@@ -47,7 +47,7 @@ Web-only `--url` supplies one complete HTTP(S) starting address separately from 
 
 Quick Test needs no registered project Workspace and does not inherit the current project's knowledge, private environment, or settings. Runs use the dedicated `~/.fsq/quick-test/` Workspace and shared user-level Provider settings. It is always Explore; recordings remain Run-local, with no save/publication option. Explicit Case creation and strict replay retain their existing commands.
 
-Windows-only `--sandbox` is accepted on `fsq quick-test run`, `fsq case create`, and `fsq case test` when `--platform windows` is selected (invalid with any other platform, exit `2`). On an unlocked Windows 11 host with `wsb.exe` enabled and no conflicting active Sandbox session, FSQ executes the run inside an isolated disposable Windows Sandbox desktop while keeping the Sandbox client window backgrounded (`HWND_BOTTOM` without focus activation) so guest input never steals host keyboard or mouse focus; unavailable or conflicting Sandbox host state exits `4`.
+Optional `--sandbox BACKEND` (currently `wsb` for Windows Sandbox) is accepted on `fsq quick-test context`, `fsq quick-test run`, `fsq case create`, and `fsq case test` when `--platform windows` is selected (invalid backend or non-`windows` platform exits `2`), as well as `fsq doctor --sandbox wsb` in a Workspace with `windows` configured (exit `3` if `windows` is not configured). On `doctor` and `quick-test context`, `--sandbox wsb` runs strictly read-only host readiness checks (`windows_sandbox_cli`, `windows_sandbox_service`, `windows_sandbox_slot`, `windows_sandbox_runtime`) without starting a Sandbox VM. On `quick-test run`, `case create`, and `case test`, an unlocked Windows 11 host with `wsb.exe` enabled and no conflicting active Sandbox session executes the run inside an isolated disposable Windows Sandbox desktop while keeping the Sandbox client window backgrounded (`HWND_BOTTOM` without focus activation) so guest input never steals host keyboard or mouse focus; unavailable or conflicting Sandbox host state exits `4`.
 
 Machine operations are `quick-test.context` and `quick-test.run`. JSON returns one terminal envelope; JSONL streams actual progress followed by one terminal result/error when output remains writable. Context exits `0` when startable and `4` when unavailable. Run exits are `0` success, `1` failed/inconclusive, `2` validation, `3` Workspace/configuration, `4` Provider/runtime unavailable, `5` infrastructure, and `130` cancellation/interruption. Interrupting requests finalization of the same Run; missing terminal facts leave the outcome unknown and do not authorize a retry.
 

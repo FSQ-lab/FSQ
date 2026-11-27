@@ -6,7 +6,7 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from fsq_agent.application.contracts.doctor import DoctorPlatformResult
+from fsq_agent.application.contracts.doctor import SANDBOX_BACKEND_PLATFORMS, DoctorPlatformResult, SandboxBackend
 from fsq_agent.config import Settings
 from fsq_agent.models import AndroidDevice, AndroidWorkspaceTarget, IOSDevice, IOSWorkspaceTarget, MacOSWorkspaceTarget, VerificationResult, WebWorkspaceTarget, WindowsWorkspaceTarget
 
@@ -52,7 +52,7 @@ class WorkspaceInitializeResult(BaseModel):
     browser_executable_path: Path | None = None
 
 
-class QuickTestContextRequest(BaseModel):
+class _QuickTestBaseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     platform: Literal["android", "web", "windows", "macos", "ios"]
     target_id: str | None = Field(default=None, strict=True, min_length=1, max_length=256)
@@ -73,7 +73,19 @@ class QuickTestContextRequest(BaseModel):
         return self
 
 
-class QuickTestPrepareRequest(QuickTestContextRequest):
+class QuickTestContextRequest(_QuickTestBaseRequest):
+    sandbox: SandboxBackend | None = None
+
+    @model_validator(mode="after")
+    def validate_sandbox_platform(self):
+        if self.sandbox is not None:
+            expected_platform = SANDBOX_BACKEND_PLATFORMS[self.sandbox]
+            if self.platform != expected_platform:
+                raise ValueError(f"--sandbox {self.sandbox} is supported only with --platform {expected_platform}.")
+        return self
+
+
+class QuickTestPrepareRequest(_QuickTestBaseRequest):
     goal: str = Field(strict=True, min_length=1, max_length=16000)
     url: str | None = Field(default=None, strict=True, min_length=1)
 

@@ -11,7 +11,7 @@ from fsq_agent.environments.providers._android import ANDROID_RUNTIME_PROVIDER, 
 from fsq_agent.environments.providers._ios import IOS_RUNTIME_PROVIDER, ios_prerequisites
 from fsq_agent.environments.providers._macos import MACOS_RUNTIME_PROVIDER, _macos_prerequisites
 from fsq_agent.environments.providers._web import WEB_NAMES, WEB_RUNTIME_PROVIDER, web_candidate_paths
-from fsq_agent.environments.providers._windows import WINDOWS_RUNTIME_PROVIDER
+from fsq_agent.environments.providers._windows import WINDOWS_RUNTIME_PROVIDER, windows_sandbox_prerequisites
 from fsq_agent.models import PlatformPrerequisiteCheck, PlatformRuntimeCheck, web_executable_matches_channel
 
 if TYPE_CHECKING:
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from fsq_agent.models import ApplicationLookupHint
 
 Platform = Literal["android", "web", "windows", "macos", "ios"]
+SandboxBackend = Literal["wsb"]
 _PROVIDERS: dict[Platform, RuntimeProvider] = {
     "android": ANDROID_RUNTIME_PROVIDER,
     "web": WEB_RUNTIME_PROVIDER,
@@ -65,7 +66,13 @@ class PlatformRuntimeService:
             return False, "Platform Target configuration is invalid.", "Repair the selected platform Target configuration."
         return True, "Platform Target configuration is ready.", ""
 
-    def check_target_availability(self, settings, prerequisites: tuple[PlatformPrerequisiteCheck, ...] | None = None) -> tuple[bool, str, str]:
+    def check_target_availability(
+        self,
+        settings,
+        prerequisites: tuple[PlatformPrerequisiteCheck, ...] | None = None,
+        *,
+        sandbox: SandboxBackend | None = None,
+    ) -> tuple[bool, str, str]:
         if settings.harness.platform == "android":
             facts = prerequisites if prerequisites is not None else self.check_prerequisites(settings)
             failed = next((item for item in facts if item.status != "ready"), None)
@@ -93,9 +100,20 @@ class PlatformRuntimeService:
                 return True, "Configured browser Target is available.", ""
             return False, "The configured browser Target is unavailable.", "Repair or reselect the browser Target."
         if selected == "windows":
-            if Path(settings.harness.windows.app_path).is_file():
-                return True, "Configured Windows application Target is available.", ""
-            return False, "The configured Windows application Target is unavailable.", "Repair or reselect the Windows application Target."
+            if not Path(settings.harness.windows.app_path).is_file():
+                return False, "The configured Windows application Target is unavailable.", "Repair or reselect the Windows application Target."
+            if sandbox == "wsb":
+                win_facts = prerequisites if prerequisites is not None else self.check_prerequisites(settings, sandbox="wsb")
+                failed = next((item for item in win_facts if item.status in {"unavailable", "error"}), None)
+                if failed is not None:
+                    return False, failed.message, failed.action or "Resolve the Windows Sandbox prerequisite and recheck."
+                blocked_item = next(
+                    (item for item in win_facts if item.status == "not_applicable" and item.code == "windows.dependency_unavailable"),
+                    None,
+                )
+                if blocked_item is not None:
+                    return False, blocked_item.message, blocked_item.action or "Resolve the Windows Sandbox prerequisite and recheck."
+            return True, "Configured Windows application Target is available.", ""
         if selected == "macos":
             macos_prerequisites = prerequisites if prerequisites is not None else self.check_prerequisites(settings)
             failed = next((item for item in macos_prerequisites if item.status in {"unavailable", "error"}), None)
@@ -104,7 +122,14 @@ class PlatformRuntimeService:
             return True, "Configured macOS host prerequisites and application Target are available.", ""
         return False, "Unsupported platform target.", "Select a supported platform."
 
-    def check_prerequisites(self, settings, *, application_pending: bool = False, require_explicit_selection: bool = False) -> tuple[PlatformPrerequisiteCheck, ...]:
+    def check_prerequisites(
+        self,
+        settings,
+        *,
+        application_pending: bool = False,
+        require_explicit_selection: bool = False,
+        sandbox: SandboxBackend | None = None,
+    ) -> tuple[PlatformPrerequisiteCheck, ...]:
         if settings.harness.platform == "android":
             if application_pending or require_explicit_selection:
                 return android_prerequisites(settings.harness.android, application_pending=application_pending, require_explicit_selection=require_explicit_selection)
@@ -113,6 +138,8 @@ class PlatformRuntimeService:
             if application_pending or require_explicit_selection:
                 return ios_prerequisites(settings.harness.ios, application_pending=application_pending, require_explicit_selection=require_explicit_selection)
             return ios_prerequisites(settings.harness.ios)
+        if settings.harness.platform == "windows":
+            return windows_sandbox_prerequisites() if sandbox == "wsb" else ()
         if settings.harness.platform != "macos":
             return ()
         if application_pending:

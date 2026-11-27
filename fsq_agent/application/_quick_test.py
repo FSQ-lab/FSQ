@@ -117,7 +117,7 @@ def get_quick_test_context(request: QuickTestContextRequest) -> QuickTestContext
     return _context(request, settings)
 
 
-def _context(request: QuickTestContextRequest, settings: Settings | None) -> QuickTestContextResult:
+def _context(request: QuickTestContextRequest | QuickTestPrepareRequest, settings: Settings | None) -> QuickTestContextResult:
     runtime = PlatformRuntimeService()
     choices = []
     if settings is not None and request.platform == "android":
@@ -163,6 +163,7 @@ def _context(request: QuickTestContextRequest, settings: Settings | None) -> Qui
             application_pending=True,
             workspace_pending=True,
             require_explicit_selection=True,
+            sandbox=getattr(request, "sandbox", None),
             target_id=request.target_id if request.platform in {"android", "ios"} else None,
         ),
     )

@@ -20,7 +20,7 @@ Detailed CLI and Control Plane transport contracts remain specified in `fsq_agen
 
 ## Internal Structure
 
-- `cli/`: CLI parsing, presentation, output modes, exit mapping, and optional Windows-only `--sandbox` `wsb.exe` process delegation (`_windows_sandbox.py`).
+- `cli/`: CLI parsing, presentation, output modes, exit mapping, and optional `--sandbox <backend>` process delegation (`_windows_sandbox.py` for `wsb`).
 - `control_plane/`: Control Plane HTTP/SSE/static transport, projections, and state.
 - `control_plane/static/`: Generated Control Plane package data.
 - `coding_agent/`: FSQ-to-agent_engine request/tool/output assembly, context policy, business event/result adaptation, and public runtime factory.
@@ -48,5 +48,5 @@ Adapters map stable inward failures into documented exit codes or safe HTTP/SSE 
 - CLI and Control Plane composition roots inject the same Coding Agent runtime implementation into SDK-neutral Agent orchestration. Application and inward packages never import `adapters.coding_agent`.
 - Assertion evaluator construction consumes `ai_services`; configured supplier access consumes `providers`. Neither transport nor runtime adapters invoke OpenAI, Agents, or Google GenAI SDK inference directly.
 - CLI keeps this composition in a private helper rather than in command handlers. The helper may construct `FsqAgent` with the public Coding Agent runtime factory and return the SDK-neutral collaborator expected by Application, but it does not validate requests or own execution policy.
-- Optional CLI `--sandbox` delegation for Windows `case create`, `case test`, and `quick-test run` lives in an adapter-private CLI helper (`adapters/cli/_windows_sandbox.py`). It wraps a disposable `wsb.exe` guest CLI invocation, keeps the host Sandbox client window non-activating at the bottom of the Z-order, relays inner CLI protocol records with guest-to-host Workspace path rebasing, restores host Workspace metadata, and stops the Sandbox on teardown without altering inward Application, Execution, or Driver contracts.
+- Optional CLI `--sandbox wsb` delegation for Windows `case create`, `case test`, and `quick-test run` lives in an adapter-private CLI helper (`adapters/cli/_windows_sandbox.py`). It wraps a disposable `wsb.exe` guest CLI invocation, keeps the host Sandbox client window non-activating at the bottom of the Z-order, relays inner CLI protocol records with guest-to-host Workspace path rebasing, restores host Workspace metadata, and stops the Sandbox on teardown without altering inward Application, Execution, or Driver contracts.
 - Module relocation does not change CLI, HTTP, SSE, frontend, workspace, Case, evidence, report, Provider, or Runs contracts.

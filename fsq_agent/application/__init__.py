@@ -5,6 +5,7 @@ from fsq_agent.application._errors import normalize_application_error
 from fsq_agent.application.cases import create_case, format_case, save_recorded_case, test_case
 from fsq_agent.application.coding_agents import install_coding_agent
 from fsq_agent.application.contracts import (
+    SANDBOX_BACKEND_PLATFORMS,
     ApplicationError,
     ApplicationErrorCategory,
     ApplicationErrorCode,
@@ -52,6 +53,7 @@ from fsq_agent.application.contracts import (
     RunSource,
     RunStepCounts,
     RunSummary,
+    SandboxBackend,
     ShowRunRequest,
     ShowRunResult,
     WorkspaceInitializeRequest,
@@ -96,6 +98,7 @@ from fsq_agent.application.workspace import (
 )
 
 __all__ = [
+    "SANDBOX_BACKEND_PLATFORMS",
     "ApplicationError",
     "ApplicationErrorCategory",
     "ApplicationErrorCode",
@@ -154,6 +157,7 @@ __all__ = [
     "RunSource",
     "RunStepCounts",
     "RunSummary",
+    "SandboxBackend",
     "ShowRunRequest",
     "ShowRunResult",
     "WorkspaceInitializeRequest",

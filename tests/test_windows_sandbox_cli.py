@@ -36,11 +36,15 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("command_args", "expected_operation"),
     [
-        (["case", "create", "--platform", "web", "--goal", "Verify heading", "--sandbox"], "case.create"),
-        (["case", "create", "--platform", "ios", "--goal", "Verify heading", "--sandbox"], "case.create"),
-        (["case", "test", "sample.fsq.yaml", "--platform", "android", "--sandbox"], "case.test"),
-        (["quick-test", "run", "--platform", "macos", "--goal", "Verify Calculator", "--sandbox"], "quick-test.run"),
-        (["quick-test", "run", "--platform", "web", "--target-id", "chrome", "--goal", "Verify heading", "--sandbox"], "quick-test.run"),
+        (["case", "create", "--platform", "web", "--goal", "Verify heading", "--sandbox", "wsb"], "case.create"),
+        (["case", "create", "--platform", "ios", "--goal", "Verify heading", "--sandbox", "wsb"], "case.create"),
+        (["case", "test", "sample.fsq.yaml", "--platform", "android", "--sandbox", "wsb"], "case.test"),
+        (["quick-test", "run", "--platform", "macos", "--goal", "Verify Calculator", "--sandbox", "wsb"], "quick-test.run"),
+        (["quick-test", "run", "--platform", "web", "--target-id", "chrome", "--goal", "Verify heading", "--sandbox", "wsb"], "quick-test.run"),
+        (["quick-test", "context", "--platform", "web", "--sandbox", "wsb"], "quick-test.context"),
+        (["quick-test", "context", "--platform", "android", "--sandbox", "wsb"], "quick-test.context"),
+        (["quick-test", "context", "--platform", "macos", "--sandbox", "wsb"], "quick-test.context"),
+        (["quick-test", "context", "--platform", "ios", "--sandbox", "wsb"], "quick-test.context"),
     ],
 )
 def test_sandbox_flag_rejects_non_windows_platforms_with_exit_2(monkeypatch: pytest.MonkeyPatch, command_args: list[str], expected_operation: str) -> None:
@@ -54,11 +58,36 @@ def test_sandbox_flag_rejects_non_windows_platforms_with_exit_2(monkeypatch: pyt
     assert "--platform windows" in record["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    ("command_args", "expected_operation"),
+    [
+        (["doctor", "--sandbox"], "doctor"),
+        (["doctor", "--sandbox", "hyperv"], "doctor"),
+        (["quick-test", "context", "--platform", "windows", "--sandbox"], "quick-test.context"),
+        (["quick-test", "context", "--platform", "windows", "--sandbox", "tart"], "quick-test.context"),
+        (["quick-test", "run", "--platform", "windows", "--goal", "Open Notepad", "--sandbox"], "quick-test.run"),
+        (["quick-test", "run", "--platform", "windows", "--goal", "Open Notepad", "--sandbox", "utm"], "quick-test.run"),
+        (["case", "create", "--platform", "windows", "--goal", "Open Notepad", "--sandbox"], "case.create"),
+        (["case", "create", "--platform", "windows", "--goal", "Open Notepad", "--sandbox", "unknown"], "case.create"),
+        (["case", "test", "sample.fsq.yaml", "--platform", "windows", "--sandbox"], "case.test"),
+        (["case", "test", "sample.fsq.yaml", "--platform", "windows", "--sandbox", "unknown"], "case.test"),
+    ],
+)
+def test_sandbox_option_rejects_missing_or_unknown_backend_with_exit_2(monkeypatch: pytest.MonkeyPatch, command_args: list[str], expected_operation: str) -> None:
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.execute_in_windows_sandbox", lambda *a, **k: pytest.fail("Invalid --sandbox backend must fail static validation"))
+    result = CliRunner().invoke(main, ["--output", "json", "--non-interactive", *command_args])
+    assert result.exit_code == 2, result.output
+    record = json.loads(result.output)
+    assert record["type"] == "error"
+    assert record["operation"] == expected_operation
+    assert record["error"]["category"] == "request_validation"
+
+
 def test_sandbox_flag_rejects_ios_udid_on_windows_case_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("fsq_agent.adapters.cli._main.execute_in_windows_sandbox", lambda *a, **k: pytest.fail("Should reject --udid before sandbox start"))
     for subcmd in (
-        ["case", "create", "--platform", "windows", "--goal", "Test", "--udid", "sim-1", "--sandbox"],
-        ["case", "test", "a.fsq.yaml", "--platform", "windows", "--udid", "sim-1", "--sandbox"],
+        ["case", "create", "--platform", "windows", "--goal", "Test", "--udid", "sim-1", "--sandbox", "wsb"],
+        ["case", "test", "a.fsq.yaml", "--platform", "windows", "--udid", "sim-1", "--sandbox", "wsb"],
     ):
         result = CliRunner().invoke(main, ["--output", "json", *subcmd])
         assert result.exit_code == 2
@@ -105,7 +134,7 @@ def test_cli_delegates_windows_commands_to_sandbox_and_emits_single_terminal_rec
 
     qt_res = CliRunner().invoke(
         main,
-        ["--output", "jsonl", "--non-interactive", "quick-test", "run", "--platform", "windows", "--goal", "Open Notepad", "--sandbox"],
+        ["--output", "jsonl", "--non-interactive", "quick-test", "run", "--platform", "windows", "--goal", "Open Notepad", "--sandbox", "WSB"],
     )
     assert qt_res.exit_code == 0, qt_res.output
     qt_records = [json.loads(line) for line in qt_res.output.splitlines()]
@@ -116,7 +145,7 @@ def test_cli_delegates_windows_commands_to_sandbox_and_emits_single_terminal_rec
 
     cc_res = CliRunner().invoke(
         main,
-        ["--output", "jsonl", "case", "create", "--platform", "windows", "--goal", "Verify Notepad", "--name", "notepad-smoke", "--sandbox"],
+        ["--output", "jsonl", "case", "create", "--platform", "windows", "--goal", "Verify Notepad", "--name", "notepad-smoke", "--sandbox", "wsb"],
     )
     assert cc_res.exit_code == 0, cc_res.output
     cc_records = [json.loads(line) for line in cc_res.output.splitlines()]
@@ -127,7 +156,7 @@ def test_cli_delegates_windows_commands_to_sandbox_and_emits_single_terminal_rec
 
     ct_res = CliRunner().invoke(
         main,
-        ["--output", "human", "case", "test", "notepad-smoke.fsq.yaml", "--platform", "windows", "--suggest", "--sandbox"],
+        ["--output", "human", "case", "test", "notepad-smoke.fsq.yaml", "--platform", "windows", "--suggest", "--sandbox", "wsb"],
     )
     assert ct_res.exit_code == 0, ct_res.output
     assert "Case success: Notepad verified." in ct_res.output
@@ -676,7 +705,7 @@ def test_emit_sandbox_outcome_preserves_guest_error_exit_code_and_rejects_malfor
     )
     res = CliRunner().invoke(
         main,
-        ["--output", "json", "quick-test", "run", "--platform", "windows", "--goal", "Open Notepad", "--sandbox"],
+        ["--output", "json", "quick-test", "run", "--platform", "windows", "--goal", "Open Notepad", "--sandbox", "wsb"],
     )
     assert res.exit_code == 130, res.output
     payload = json.loads(res.output)
@@ -693,7 +722,7 @@ def test_emit_sandbox_outcome_preserves_guest_error_exit_code_and_rejects_malfor
     )
     bad_res = CliRunner().invoke(
         main,
-        ["--output", "json", "quick-test", "run", "--platform", "windows", "--goal", "Open Notepad", "--sandbox"],
+        ["--output", "json", "quick-test", "run", "--platform", "windows", "--goal", "Open Notepad", "--sandbox", "wsb"],
     )
     assert bad_res.exit_code == 5, bad_res.output
     bad_payload = json.loads(bad_res.output)
@@ -793,3 +822,279 @@ def test_stage_runtime_dlls_raises_unavailable_when_required_dll_missing(monkeyp
     missing = exc_info.value.details.get("missing_dlls")
     assert isinstance(missing, list)
     assert "mfc140u.dll" in missing
+
+
+def test_windows_sandbox_environment_prerequisites_ready_and_single_wsb_list_probe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from fsq_agent.config import Settings
+    from fsq_agent.environments import PlatformRuntimeService
+
+    service = PlatformRuntimeService()
+    settings = Settings(harness={"platform": "windows"})
+    assert service.check_prerequisites(settings) == ()
+
+    wsb_path = tmp_path / "System32" / "wsb.exe"
+    wsb_path.parent.mkdir(parents=True)
+    wsb_path.write_bytes(b"wsb")
+    for dll_name in ("mfc140u.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"):
+        (wsb_path.parent / dll_name).write_bytes(b"dll")
+
+    py_base = tmp_path / "pybase"
+    py_base.mkdir()
+    (py_base / "python.exe").write_bytes(b"py")
+    site_pkg = tmp_path / "site-packages"
+    site_pkg.mkdir()
+
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.sys.platform", "win32")
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.sys.base_prefix", str(py_base))
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.site.getsitepackages", lambda: [str(site_pkg)])
+    monkeypatch.setenv("SYSTEMROOT", str(tmp_path))
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.shutil.which", lambda name: str(wsb_path) if name in {"wsb.exe", "wsb"} else None)
+
+    wsb_calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        wsb_calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout='{"WindowsSandboxEnvironments": []}', stderr="")
+
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.subprocess.run", fake_run)
+
+    facts = service.check_prerequisites(settings, sandbox="wsb")
+    assert [f.identifier for f in facts] == [
+        "windows_sandbox_cli",
+        "windows_sandbox_service",
+        "windows_sandbox_slot",
+        "windows_sandbox_runtime",
+    ]
+    assert all(f.status == "ready" for f in facts)
+    assert wsb_calls == [[str(wsb_path.resolve()), "list", "--raw"]]
+
+    app_exe = tmp_path / "notepad.exe"
+    app_exe.write_bytes(b"exe")
+    settings.harness.windows.app_path = app_exe
+    ready, msg, _ = service.check_target_availability(settings, facts, sandbox="wsb")
+    assert ready is True
+    assert "available" in msg
+
+
+def test_windows_sandbox_environment_prerequisites_busy_slot_and_missing_wsb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from fsq_agent.config import Settings
+    from fsq_agent.environments import PlatformRuntimeService
+
+    service = PlatformRuntimeService()
+    settings = Settings(harness={"platform": "windows"})
+    app_exe = tmp_path / "notepad.exe"
+    app_exe.write_bytes(b"exe")
+    settings.harness.windows.app_path = app_exe
+
+    fake_windir = tmp_path / "WinNoWsb"
+    (fake_windir / "System32").mkdir(parents=True)
+    monkeypatch.setenv("SYSTEMROOT", str(fake_windir))
+    monkeypatch.setenv("WINDIR", str(fake_windir))
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.sys.platform", "win32")
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.shutil.which", lambda _name: None)
+
+    missing_facts = service.check_prerequisites(settings, sandbox="wsb")
+    by_id = {f.identifier: f for f in missing_facts}
+    assert by_id["windows_sandbox_cli"].status == "unavailable"
+    assert by_id["windows_sandbox_cli"].code == "windows.sandbox_cli_missing"
+    assert by_id["windows_sandbox_service"].status == "not_applicable"
+    assert by_id["windows_sandbox_service"].code == "windows.dependency_unavailable"
+    assert by_id["windows_sandbox_slot"].status == "not_applicable"
+    assert by_id["windows_sandbox_runtime"].status == "unavailable"
+    ready, _, _ = service.check_target_availability(settings, missing_facts, sandbox="wsb")
+    assert ready is False
+
+    wsb_path = fake_windir / "System32" / "wsb.exe"
+    wsb_path.write_bytes(b"wsb")
+    for dll_name in ("mfc140u.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"):
+        (fake_windir / "System32" / dll_name).write_bytes(b"dll")
+    py_base = tmp_path / "pybase"
+    py_base.mkdir()
+    (py_base / "python.exe").write_bytes(b"py")
+    site_pkg = tmp_path / "site-packages"
+    site_pkg.mkdir()
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.sys.base_prefix", str(py_base))
+    monkeypatch.setattr("fsq_agent.environments.providers._windows.site.getsitepackages", lambda: [str(site_pkg)])
+    monkeypatch.setattr(
+        "fsq_agent.environments.providers._windows.subprocess.run",
+        lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, stdout='{"WindowsSandboxEnvironments": [{"Id": "active-1"}]}', stderr=""),
+    )
+
+    busy_facts = service.check_prerequisites(settings, sandbox="wsb")
+    busy_by_id = {f.identifier: f for f in busy_facts}
+    assert busy_by_id["windows_sandbox_cli"].status == "ready"
+    assert busy_by_id["windows_sandbox_service"].status == "ready"
+    assert busy_by_id["windows_sandbox_slot"].status == "unavailable"
+    assert busy_by_id["windows_sandbox_slot"].code == "windows.sandbox_busy"
+    assert busy_by_id["windows_sandbox_runtime"].status == "ready"
+    ready_busy, msg_busy, _ = service.check_target_availability(settings, busy_facts, sandbox="wsb")
+    assert ready_busy is False
+    assert "already running" in msg_busy
+
+
+def test_cli_quick_test_context_sandbox_gates_can_start_and_preserves_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from fsq_agent.models import PlatformPrerequisiteCheck, PlatformRuntimeCheck
+    from fsq_agent.providers import ProviderReadiness
+
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.PlatformRuntimeService.check",
+        lambda _self, platform: PlatformRuntimeCheck(platform=platform, status="ready", ready=True, message="ready"),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.check_provider_readiness",
+        lambda _settings: ProviderReadiness(ready=True, session_status="session_available", code="provider_session_available", message="ready", action=""),
+    )
+    monkeypatch.setattr("fsq_agent.application.doctor.check_case_suggestion_readiness", lambda _settings: (True, "ready", ""))
+
+    seen_sandbox_flags: list[str | None] = []
+
+    def fake_prereqs(_self, _settings, *, application_pending=False, require_explicit_selection=False, sandbox=None):
+        seen_sandbox_flags.append(sandbox)
+        if sandbox != "wsb":
+            return ()
+        return (
+            PlatformPrerequisiteCheck(
+                identifier="windows_sandbox_cli",
+                code="windows.sandbox_cli_missing",
+                status="unavailable",
+                message="Windows Sandbox CLI (wsb.exe) is unavailable on this host.",
+                action="Enable the Windows Sandbox optional feature.",
+            ),
+        )
+
+    monkeypatch.setattr("fsq_agent.application.doctor.PlatformRuntimeService.check_prerequisites", fake_prereqs)
+
+    default_res = CliRunner().invoke(main, ["--output", "json", "quick-test", "context", "--platform", "windows"])
+    assert default_res.exit_code == 0, default_res.output
+    default_payload = json.loads(default_res.output)["result"]
+    assert default_payload["can_start"] is True
+    assert seen_sandbox_flags[-1] is None
+
+    sandbox_res = CliRunner().invoke(main, ["--output", "json", "quick-test", "context", "--platform", "windows", "--sandbox", "WSB"])
+    assert sandbox_res.exit_code == 4, sandbox_res.output
+    sandbox_payload = json.loads(sandbox_res.output)["result"]
+    assert sandbox_payload["can_start"] is False
+    assert seen_sandbox_flags[-1] == "wsb"
+    check_ids = {item["id"]: item["status"] for item in sandbox_payload["checks"]}
+    assert check_ids["windows_sandbox_cli"] == "unavailable"
+
+    # Verify dependency-blocked Windows Sandbox prerequisite (`not_applicable` + `windows.dependency_unavailable`)
+    # also gates `target_availability`, `preparation`, and `can_start` in Quick Test context mode.
+    def fake_dependency_blocked_prereqs(_self, _settings, *, sandbox=None, **_kw):
+        if sandbox != "wsb":
+            return ()
+        return (
+            PlatformPrerequisiteCheck(
+                identifier="windows_sandbox_service",
+                code="windows.dependency_unavailable",
+                status="not_applicable",
+                message="Check blocked by windows_sandbox_cli.",
+                action="Resolve the blocking Windows Sandbox prerequisite first.",
+            ),
+        )
+
+    monkeypatch.setattr("fsq_agent.application.doctor.PlatformRuntimeService.check_prerequisites", fake_dependency_blocked_prereqs)
+    blocked_res = CliRunner().invoke(main, ["--output", "json", "quick-test", "context", "--platform", "windows", "--sandbox", "wsb"])
+    assert blocked_res.exit_code == 4, blocked_res.output
+    blocked_payload = json.loads(blocked_res.output)["result"]
+    assert blocked_payload["can_start"] is False
+    assert blocked_payload["diagnosis"]["preparation"]["status"] == "unavailable"
+    assert blocked_payload["diagnosis"]["checks"]["target_availability"]["status"] == "unavailable"
+    assert blocked_payload["diagnosis"]["checks"]["target_availability"]["code"] == "windows.dependency_unavailable"
+
+
+def test_cli_doctor_sandbox_requires_windows_platform_and_renders_sandbox_labels(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from fsq_agent.models import PlatformPrerequisiteCheck, PlatformRuntimeCheck, WorkspacePlatformStatus, WorkspaceRegistryEntry, WorkspaceStatus
+    from fsq_agent.providers import ProviderReadiness
+
+    ws_root = tmp_path / "ws"
+    ws_root.mkdir()
+
+    def setup_workspace(platforms: list[str]) -> None:
+        monkeypatch.setattr("fsq_agent.application.doctor.list_workspace_registry", lambda: [WorkspaceRegistryEntry(name="ws", root_path=ws_root)])
+        monkeypatch.setattr(
+            "fsq_agent.application.doctor.inspect_registered_workspace",
+            lambda _name, **_kw: WorkspaceStatus(
+                name="ws",
+                root_path=ws_root,
+                status="available",
+                message="ok",
+                platforms=[
+                    WorkspacePlatformStatus(
+                        platform=p,
+                        config_path=ws_root / ".fsq" / "config" / f"config.{p}.yaml",
+                        status="available",
+                        message="available",
+                    )
+                    for p in platforms
+                ],
+            ),
+        )
+
+    setup_workspace(["web"])
+    with CliRunner().isolated_filesystem(temp_dir=tmp_path):
+        monkeypatch.setattr("fsq_agent.adapters.cli._main.Path.cwd", lambda: ws_root)
+        no_win = CliRunner().invoke(main, ["--output", "json", "doctor", "--sandbox", "wsb"])
+        assert no_win.exit_code == 3, no_win.output
+        err = json.loads(no_win.output)
+        assert err["type"] == "error"
+        assert err["error"]["category"] == "workspace_configuration"
+        assert err["error"]["code"] == "configuration.invalid"
+
+    from fsq_agent.config import Settings
+
+    app_exe = tmp_path / "notepad.exe"
+    app_exe.write_bytes(b"exe")
+    win_settings = Settings(harness={"platform": "windows", "windows": {"app_path": app_exe}})
+    web_settings = Settings(harness={"platform": "web", "web": {"channel": "chrome"}})
+
+    setup_workspace(["web", "windows"])
+    monkeypatch.setattr("fsq_agent.application.doctor.load_workspace_platform_settings", lambda _r, p: win_settings if p == "windows" else web_settings)
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.PlatformRuntimeService.check",
+        lambda _self, platform: PlatformRuntimeCheck(platform=platform, status="ready", ready=True, message="ready"),
+    )
+    monkeypatch.setattr("fsq_agent.application.doctor.PlatformRuntimeService.check_target_configuration", lambda *_a, **_kw: (True, "ready", ""))
+    orig_avail = __import__("fsq_agent.environments", fromlist=["PlatformRuntimeService"]).PlatformRuntimeService.check_target_availability
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.PlatformRuntimeService.check_target_availability",
+        lambda self, s, prereqs=None, **kw: (True, "ready", "") if s.harness.platform == "web" else orig_avail(self, s, prereqs, **kw),
+    )
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.check_provider_readiness",
+        lambda _s: ProviderReadiness(ready=True, session_status="session_available", code="provider_session_available", message="ready", action=""),
+    )
+    monkeypatch.setattr("fsq_agent.application.doctor.check_case_suggestion_readiness", lambda _s: (True, "ready", ""))
+    monkeypatch.setattr("fsq_agent.application.doctor.check_dynamic_agent_readiness", lambda _s: (True, "ready", ""))
+    monkeypatch.setattr("fsq_agent.application.doctor.validate_strict_core_settings", lambda _s: None)
+    monkeypatch.setattr("fsq_agent.application.doctor.CapabilityDefinitionFactory.platform_definitions", lambda *_a, **_kw: [])
+    monkeypatch.setattr("fsq_agent.application.doctor.CommonPlatformTools.capability_definitions", list)
+
+    monkeypatch.setattr(
+        "fsq_agent.application.doctor.PlatformRuntimeService.check_prerequisites",
+        lambda _self, settings, *, sandbox=None, **_kw: (
+            (
+                PlatformPrerequisiteCheck(identifier="windows_sandbox_cli", status="ready", message="wsb.exe ready."),
+                PlatformPrerequisiteCheck(
+                    identifier="windows_sandbox_slot",
+                    code="windows.sandbox_busy",
+                    status="unavailable",
+                    message="Another Windows Sandbox instance is already running.",
+                    action="Close the active Windows Sandbox session before retrying.",
+                ),
+            )
+            if settings.harness.platform == "windows" and sandbox == "wsb"
+            else ()
+        ),
+    )
+
+    monkeypatch.setattr("fsq_agent.adapters.cli._main.Path.cwd", lambda: ws_root)
+    human_res = CliRunner().invoke(main, ["doctor", "--sandbox", "wsb"])
+    assert human_res.exit_code == 0, human_res.output  # web ready + windows unavailable => partial => exit 0
+    assert "Windows Sandbox CLI" in human_res.output
+    assert "Windows Sandbox slot" in human_res.output
+    assert "windows.sandbox_busy" in human_res.output
+
+    setup_workspace(["windows"])
+    win_only_res = CliRunner().invoke(main, ["doctor", "--sandbox", "WSB"])
+    assert win_only_res.exit_code == 4, win_only_res.output

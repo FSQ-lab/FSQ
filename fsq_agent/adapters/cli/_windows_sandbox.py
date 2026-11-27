@@ -20,9 +20,11 @@ from typing import TYPE_CHECKING, Literal
 import yaml
 
 from fsq_agent.application import (
+    SANDBOX_BACKEND_PLATFORMS,
     ApplicationError,
     ApplicationErrorCategory,
     ApplicationErrorCode,
+    SandboxBackend,
     WorkspaceRequest,
     require_initialized_workspace,
 )
@@ -242,15 +244,16 @@ class SandboxExecutionOutcome:
     stderr_text: str
 
 
-def ensure_sandbox_platform_supported(*, sandbox: bool, platform: str, udid: str | None = None) -> None:
-    if not sandbox:
+def ensure_sandbox_platform_supported(*, sandbox: SandboxBackend | None, platform: str, udid: str | None = None) -> None:
+    if sandbox is None:
         return
-    if platform != "windows":
+    expected_platform = SANDBOX_BACKEND_PLATFORMS[sandbox]
+    if platform != expected_platform:
         raise ApplicationError(
             code=ApplicationErrorCode.CASE_INVALID,
             category=ApplicationErrorCategory.REQUEST_VALIDATION,
-            message="--sandbox is supported only with --platform windows.",
-            action="Omit --sandbox or select --platform windows.",
+            message=f"--sandbox {sandbox} is supported only with --platform {expected_platform}.",
+            action=f"Omit --sandbox {sandbox} or select --platform {expected_platform}.",
         )
     if udid is not None:
         raise ApplicationError(
@@ -270,7 +273,7 @@ def execute_in_windows_sandbox(
     if sys.platform != "win32":
         raise _sandbox_unavailable(
             "Windows Sandbox execution requires a Windows host.",
-            "Run --sandbox on an unlocked Windows 11 host with Windows Sandbox enabled.",
+            "Run --sandbox wsb on an unlocked Windows 11 host with Windows Sandbox enabled.",
         )
 
     wsb_executable = _resolve_wsb_executable()
@@ -513,7 +516,7 @@ def _ensure_no_running_sandboxes(wsb_executable: Path) -> None:
     if isinstance(environments, list) and environments:
         raise _sandbox_unavailable(
             "Another Windows Sandbox instance is already running.",
-            "Close or stop the active Windows Sandbox session (`wsb stop --id <ID>`) before running FSQ with --sandbox.",
+            "Close or stop the active Windows Sandbox session (`wsb stop --id <ID>`) before running FSQ with --sandbox wsb.",
             details={"running_count": len(environments)},
         )
 
@@ -705,7 +708,7 @@ def _prepare_guest_user_config_snapshot(
     try:
         user_cfg = load_user_provider_config(host_user_root)
     except ConfigurationError as exc:
-        # Missing/corrupt provider credentials should not block provider-free strict `case test --sandbox`,
+        # Missing/corrupt provider credentials should not block provider-free strict `case test --sandbox wsb`,
         # whereas a malformed/unreadable host `config.yaml` must fail fast.
         if host_cfg_path.is_file() and "provider" not in exc.context:
             raise ApplicationError(

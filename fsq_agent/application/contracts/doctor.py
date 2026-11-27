@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DetailStatus = Literal["ready", "unavailable", "error", "not_applicable", "pending"]
 SummaryStatus = Literal["ready", "partial", "unavailable", "pending"]
+SandboxBackend = Literal["wsb"]
+SANDBOX_BACKEND_PLATFORMS: dict[SandboxBackend, Literal["windows"]] = {"wsb": "windows"}
 
 
 class PlatformDiagnosticContext(BaseModel):
@@ -18,6 +20,7 @@ class PlatformDiagnosticContext(BaseModel):
     application_pending: bool = False
     workspace_pending: bool = False
     require_explicit_selection: bool = False
+    sandbox: SandboxBackend | None = None
     target_id: str | None = Field(
         default=None,
         strict=True,
@@ -31,12 +34,17 @@ class PlatformDiagnosticContext(BaseModel):
     def _mobile_scope_only(self):
         if self.target_id is not None and self.platform not in {"android", "ios"}:
             raise ValueError("target_id is supported only for Android and iOS.")
+        if self.sandbox is not None:
+            expected_platform = SANDBOX_BACKEND_PLATFORMS[self.sandbox]
+            if self.platform != expected_platform:
+                raise ValueError(f"--sandbox {self.sandbox} is supported only with --platform {expected_platform}.")
         return self
 
 
 class DoctorRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     current_directory: Path
+    sandbox: SandboxBackend | None = None
 
 
 class RegisteredPlatformDoctorRequest(BaseModel):

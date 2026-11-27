@@ -16,7 +16,7 @@ Run on Windows with an existing application path and an interactive desktop sess
 
 Windows Quick Test includes application presets for Edge, Chrome, Edge Beta, Edge Canary, Notepad, and Calculator. Applications must already be installed and accessible in the interactive desktop session.
 
-Optional `--sandbox` on `fsq quick-test run`, `fsq case create`, and `fsq case test` (`--platform windows` only) requires Windows 11 with the Windows Sandbox optional feature (`wsb.exe`) enabled, an unlocked interactive host desktop session, and no other running Windows Sandbox instance. Target applications must exist inside the fresh Sandbox image (for example Microsoft Edge) unless already accessible within the mounted Workspace.
+Optional `--sandbox wsb` on `fsq quick-test run`, `fsq case create`, and `fsq case test` (`--platform windows` only) requires Windows 11 with the Windows Sandbox optional feature (`wsb.exe`) enabled, an unlocked interactive host desktop session, no other running Windows Sandbox instance, and host Visual C++/MFC runtime DLLs (`mfc140u.dll`, `msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`). Run `fsq quick-test context --platform windows --sandbox wsb` or `fsq doctor --sandbox wsb` to check Windows Sandbox host readiness without starting a Sandbox VM. Target applications must exist inside the fresh Sandbox image (for example Microsoft Edge) unless already accessible within the mounted Workspace.
 
 ## macOS
 

@@ -15,6 +15,7 @@ from fsq_agent.application.contracts.cases import (
 )
 from fsq_agent.application.contracts.coding_agents import CodingAgentInstallFileResult, CodingAgentInstallRequest, CodingAgentInstallResult
 from fsq_agent.application.contracts.doctor import (
+    SANDBOX_BACKEND_PLATFORMS,
     DoctorChecks,
     DoctorCommands,
     DoctorPlatformResult,
@@ -25,6 +26,7 @@ from fsq_agent.application.contracts.doctor import (
     DoctorWorkspaceSummary,
     PlatformDiagnosticContext,
     RegisteredPlatformDoctorRequest,
+    SandboxBackend,
 )
 from fsq_agent.application.contracts.environments import EnvironmentSummary
 from fsq_agent.application.contracts.providers import ProviderConfigurationResult, ProviderStatusResult
@@ -69,6 +71,7 @@ from fsq_agent.application.contracts.workspace import (
 )
 
 __all__ = [
+    "SANDBOX_BACKEND_PLATFORMS",
     "ApplicationError",
     "ApplicationErrorCategory",
     "ApplicationErrorCode",
@@ -127,6 +130,7 @@ __all__ = [
     "RunSource",
     "RunStepCounts",
     "RunSummary",
+    "SandboxBackend",
     "ShowRunRequest",
     "ShowRunResult",
     "WorkspaceInitializeRequest",

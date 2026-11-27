@@ -179,6 +179,8 @@ Goal-based Case creation and Quick Test result summaries preserve a validated no
 
 Control Plane retains task reservation, request IDs, threads, cancellation handles, evidence/event projection, and HTTP response shapes while consuming shared preparation/execution. CLI uses its host process and output adapters. No Application queue, detached task service, cross-process exclusion, or project-context inheritance exists. Shared CLI/browser execution semantics, safe identities, cancellation/failure preservation, no publication, and Web evidence-flag propagation are verified with controlled collaborators; live platform/model evidence remains separately reported.
 
+Optional CLI `--sandbox` execution on Windows is an adapter-owned process-delegation boundary in `adapters.cli`: the guest `fsq` process inside Windows Sandbox invokes unchanged `application` operations (`create_case`, `test_case`, `run_quick_test`) against the mounted Workspace, so `CaseCreateRequest`, `CaseTestRequest`, and `QuickTestPrepareRequest` gain no transport-specific sandbox fields.
+
 ### Registered-platform diagnosis
 
 `diagnose_registered_platform` and its immutable `RegisteredPlatformDoctorRequest` are public Application exports for explicitly selected registered Workspace diagnosis. The request supplies a Workspace name and platform; an optional user-config root is a trusted composition input and is not accepted from browser requests. Application resolves the registered root through Config and returns a `DoctorResult` containing only the requested platform. It shares component checks, ordered prerequisite facts, command dependency rules, and safe errors with CLI Doctor. CLI Doctor retains its exact-current-root, all-configured-platform behavior.

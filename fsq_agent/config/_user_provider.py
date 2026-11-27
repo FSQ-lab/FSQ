@@ -232,6 +232,10 @@ def _register_workspace(entry: WorkspaceRegistryEntry, user_config_root: str | P
             raise ConfigurationError("Unable to register workspace.", context={"name": entry.name}) from exc
 
 
+def register_existing_workspace_root(entry: WorkspaceRegistryEntry, user_config_root: str | Path | None = None) -> None:
+    _register_workspace(entry, user_config_root)
+
+
 def _openai_key(value: str) -> str:
     if not isinstance(value, str):
         raise TypeError("API key must be a string")

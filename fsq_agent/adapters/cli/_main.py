@@ -65,6 +65,7 @@ from fsq_agent.application import (
 )
 
 from ._composition import create_case_agent
+from ._windows_sandbox import SandboxCommandSpec, ensure_sandbox_platform_supported, execute_in_windows_sandbox
 
 PLATFORMS = click.Choice(["android", "web", "windows", "macos", "ios"])
 OUTPUTS = click.Choice(["human", "json", "jsonl"])
@@ -429,16 +430,46 @@ def quick_test_context(context: click.Context, platform: str, target_id: str | N
 @click.option("--goal", required=True, help="Natural-language goal and expected outcome to verify.")
 @click.option("--target-id", default=None, help="Exact Android serial, iOS UDID, or Web browser channel.")
 @click.option("--url", default=None, help="Exact HTTP(S) starting address (Web only).")
+@click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
 @click.pass_context
-def quick_test_run(context: click.Context, platform: str, goal: str, target_id: str | None, url: str | None) -> None:
+def quick_test_run(context: click.Context, platform: str, goal: str, target_id: str | None, url: str | None, sandbox: bool) -> None:
     """Execute one standalone Explore goal in the dedicated Quick Test Workspace."""
-    request = QuickTestPrepareRequest(platform=platform, goal=goal, target_id=target_id, url=url)
 
     def progress(event):
         if context.obj["output"] == "jsonl":
             click.echo(json.dumps(event_record(event, operation=_context_operation(context)), ensure_ascii=False, default=str))
         elif context.obj["output"] == "human":
             click.echo(event.get("message") or event.get("title") or event.get("phase", ""))
+
+    if sandbox:
+        try:
+            ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform)
+            outcome = execute_in_windows_sandbox(
+                SandboxCommandSpec(
+                    kind="quick_test_run",
+                    current_directory=Path.cwd(),
+                    output_format=context.obj["output"],
+                    non_interactive=context.obj["non_interactive"],
+                    goal=goal,
+                    target_id=target_id,
+                    url=url,
+                ),
+                event_callback=progress,
+            )
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            _application_error(
+                context, ApplicationError(code=ApplicationErrorCode.RUN_CANCELLED, category=ApplicationErrorCategory.INTERNAL, message="Quick Test interrupted before a terminal result was available.")
+            )
+        except click.exceptions.Exit:
+            raise
+        except ApplicationError as error:
+            _application_error(context, error)
+        except Exception as error:  # noqa: BLE001 -- normalize transport failures without leaking details.
+            _application_error(context, normalize_application_error(error))
+        _emit_sandbox_outcome(context, outcome)
+        return
+
+    request = QuickTestPrepareRequest(platform=platform, goal=goal, target_id=target_id, url=url)
 
     def check_cancelled():
         task = asyncio.current_task()
@@ -465,21 +496,35 @@ def quick_test_run(context: click.Context, platform: str, goal: str, target_id: 
 @click.option("--goal", required=True, help="Natural-language goal to execute and record.")
 @click.option("--name", default=None, help="Stable Case name without a suffix.")
 @click.option("--udid", default=None, help="Transient iOS Simulator or physical device UDID (--platform ios only).")
+@click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
 @click.pass_context
-def case_create(context: click.Context, platform: str, goal: str, name: str | None, udid: str | None) -> None:
+def case_create(context: click.Context, platform: str, goal: str, name: str | None, udid: str | None, sandbox: bool) -> None:
     """Execute an AI-driven goal and record a candidate FSQ Case."""
+
+    def emit_raw_event(event: dict[str, object]) -> None:
+        if context.obj["output"] == "jsonl":
+            click.echo(json.dumps(event_record(event, operation=_context_operation(context)), ensure_ascii=False, default=str))
 
     def emit_event(event: object) -> None:
         if context.obj["output"] == "jsonl":
-            click.echo(
-                json.dumps(
-                    event_record(event.model_dump(mode="json"), operation=_context_operation(context)),
-                    ensure_ascii=False,
-                    default=str,
-                )
-            )
+            emit_raw_event(event.model_dump(mode="json"))
 
     try:
+        ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform, udid=udid)
+        if sandbox:
+            outcome = execute_in_windows_sandbox(
+                SandboxCommandSpec(
+                    kind="case_create",
+                    current_directory=Path.cwd(),
+                    output_format=context.obj["output"],
+                    non_interactive=context.obj["non_interactive"],
+                    goal=goal,
+                    case_name=name,
+                ),
+                event_callback=emit_raw_event,
+            )
+            _emit_sandbox_outcome(context, outcome)
+            return
         result = asyncio.run(
             create_case(
                 CaseCreateRequest(current_directory=Path.cwd(), platform=platform, goal=goal, case_name=name, udid=udid),
@@ -488,6 +533,8 @@ def case_create(context: click.Context, platform: str, goal: str, name: str | No
             )
         )
         _emit_terminal(context, result.model_dump(mode="json"))
+    except click.exceptions.Exit:
+        raise
     except ApplicationError as exc:
         _application_error(context, exc)
     except KeyboardInterrupt as exc:
@@ -503,10 +550,25 @@ def case_create(context: click.Context, platform: str, goal: str, name: str | No
 @click.option("--platform", type=PLATFORMS, required=True, help="Target platform for deterministic replay.")
 @click.option("--suggest", is_flag=True, default=False, help="Run read-only post-execution AI analysis for suggestions and a candidate Case.")
 @click.option("--udid", default=None, help="Transient iOS Simulator or physical device UDID (--platform ios only).")
+@click.option("--sandbox", is_flag=True, default=False, help="Run inside an isolated Windows Sandbox desktop (--platform windows only).")
 @click.pass_context
-def case_test(context: click.Context, case_path: Path, platform: str, suggest: bool, udid: str | None) -> None:
+def case_test(context: click.Context, case_path: Path, platform: str, suggest: bool, udid: str | None, sandbox: bool) -> None:
     """Execute an existing FSQ Case once without modifying the source file."""
     try:
+        ensure_sandbox_platform_supported(sandbox=sandbox, platform=platform, udid=udid)
+        if sandbox:
+            outcome = execute_in_windows_sandbox(
+                SandboxCommandSpec(
+                    kind="case_test",
+                    current_directory=Path.cwd(),
+                    output_format=context.obj["output"],
+                    non_interactive=context.obj["non_interactive"],
+                    case_path=case_path,
+                    suggest=suggest,
+                ),
+            )
+            _emit_sandbox_outcome(context, outcome, case_test_suggest=suggest)
+            return
         result = test_case(CaseTestRequest(current_directory=Path.cwd(), platform=platform, case_path=case_path, suggest=suggest, udid=udid))
         if context.obj["output"] == "human":
             click.echo(f"Case {result.status}: {result.summary}")
@@ -519,6 +581,8 @@ def case_test(context: click.Context, case_path: Path, platform: str, suggest: b
                 click.echo("Source Case was not modified.")
         else:
             _emit_terminal(context, result.model_dump(mode="json"))
+    except click.exceptions.Exit:
+        raise
     except ApplicationError as exc:
         _application_error(context, exc)
     except KeyboardInterrupt as exc:
@@ -967,7 +1031,64 @@ def _emit_terminal(context: click.Context, value: object, *, events: list[dict[s
     _emit(context, value)
 
 
-def _application_error(context: click.Context, error: ApplicationError) -> None:
+def _emit_sandbox_outcome(context: click.Context, outcome: object, *, case_test_suggest: bool | None = None) -> None:
+    record = getattr(outcome, "terminal_record", None)
+    exit_code = int(getattr(outcome, "exit_code", ExitCode.INTERNAL))
+    stderr_text = str(getattr(outcome, "stderr_text", "") or "").strip()
+    if not isinstance(record, dict) or record.get("type") not in {"result", "error"}:
+        details: dict[str, object] = {
+            "exception_type": "SandboxMissingTerminalRecordError",
+            "has_guest_stderr": bool(stderr_text),
+        }
+        _application_error(
+            context,
+            ApplicationError(
+                code=ApplicationErrorCode.INTERNAL_ERROR,
+                category=ApplicationErrorCategory.INTERNAL,
+                message="Windows Sandbox execution ended without a structured FSQ terminal record.",
+                action="Inspect Workspace Run artifacts and retry.",
+                details=details,
+            ),
+        )
+    rec_type = record.get("type")
+    if rec_type == "error":
+        err = record.get("error") if isinstance(record.get("error"), dict) else {}
+        code_raw = err.get("code", ApplicationErrorCode.INTERNAL_ERROR.value)
+        cat_raw = err.get("category", ApplicationErrorCategory.INTERNAL.value)
+        try:
+            code = ApplicationErrorCode(str(code_raw))
+        except ValueError:
+            code = ApplicationErrorCode.INTERNAL_ERROR
+        try:
+            category = ApplicationErrorCategory(str(cat_raw))
+        except ValueError:
+            category = ApplicationErrorCategory.INTERNAL
+        app_error = ApplicationError(
+            code=code,
+            category=category,
+            message=str(err.get("message") or "Windows Sandbox execution failed."),
+            action=str(err["action"]) if err.get("action") else None,
+            details=err.get("details") if isinstance(err.get("details"), dict) else {},
+        )
+        effective_exit = exit_code if exit_code != 0 else _error_exit_code(app_error)
+        _application_error(context, app_error, exit_code_override=effective_exit)
+    payload = record.get("result")
+    if context.obj["output"] == "human" and case_test_suggest is not None and isinstance(payload, dict):
+        click.echo(f"Case {payload.get('status')}: {payload.get('summary')}")
+        click.echo(f"Report: {payload.get('report_path')}")
+        if payload.get("suggestion_path") is not None:
+            click.echo(f"Suggestions: {payload.get('suggestion_path')}")
+        if payload.get("candidate_case_path") is not None:
+            click.echo(f"Candidate Case: {payload.get('candidate_case_path')}")
+        if case_test_suggest:
+            click.echo("Source Case was not modified.")
+    else:
+        _emit_terminal(context, payload)
+    if exit_code != 0:
+        raise click.exceptions.Exit(exit_code)
+
+
+def _application_error(context: click.Context, error: ApplicationError, *, exit_code_override: int | None = None) -> None:
     if context.obj["output"] == "human":
         click.echo(f"Error: {error.message}", err=True)
         if error.action:
@@ -978,7 +1099,7 @@ def _application_error(context: click.Context, error: ApplicationError) -> None:
             click.echo(json.dumps(error.to_record(operation=_context_operation(context)), ensure_ascii=False, default=str))
         except OSError as exc:
             raise click.exceptions.Exit(ExitCode.INTERNAL) from exc
-    raise click.exceptions.Exit(_error_exit_code(error))
+    raise click.exceptions.Exit(exit_code_override if exit_code_override is not None else _error_exit_code(error))
 
 
 def _valid_native_timing(value: object) -> bool:

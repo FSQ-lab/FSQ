@@ -37,7 +37,7 @@ Standalone Quick Test forms:
 
 ```bash
 fsq quick-test context --platform PLATFORM [--target-id ID]
-fsq quick-test run --platform PLATFORM --goal TEXT [--target-id ID] [--url URL]
+fsq quick-test run --platform PLATFORM --goal TEXT [--target-id ID] [--url URL] [--sandbox]
 fsq --output jsonl --non-interactive quick-test run --platform web --target-id chrome --url 'https://example.com/search?q=FSQ#results' --goal "Verify the results contain FSQ"
 ```
 
@@ -46,6 +46,8 @@ fsq --output jsonl --non-interactive quick-test run --platform web --target-id c
 Web-only `--url` supplies one complete HTTP(S) starting address separately from the required goal. It preserves the exact address, including case, escapes, port, path, query, fragment, and punctuation. Invalid or unsafe addresses fail before inference or Workspace mutation, without correction or search fallback. Keep test actions, expected outcomes, and limits in `--goal`. Without `--url`, existing goal-based address parsing and address-free search remain available. Browser Quick Test retains its single goal field.
 
 Quick Test needs no registered project Workspace and does not inherit the current project's knowledge, private environment, or settings. Runs use the dedicated `~/.fsq/quick-test/` Workspace and shared user-level Provider settings. It is always Explore; recordings remain Run-local, with no save/publication option. Explicit Case creation and strict replay retain their existing commands.
+
+Windows-only `--sandbox` is accepted on `fsq quick-test run`, `fsq case create`, and `fsq case test` when `--platform windows` is selected (invalid with any other platform, exit `2`). On an unlocked Windows 11 host with `wsb.exe` enabled and no conflicting active Sandbox session, FSQ executes the run inside an isolated disposable Windows Sandbox desktop while keeping the Sandbox client window backgrounded (`HWND_BOTTOM` without focus activation) so guest input never steals host keyboard or mouse focus; unavailable or conflicting Sandbox host state exits `4`.
 
 Machine operations are `quick-test.context` and `quick-test.run`. JSON returns one terminal envelope; JSONL streams actual progress followed by one terminal result/error when output remains writable. Context exits `0` when startable and `4` when unavailable. Run exits are `0` success, `1` failed/inconclusive, `2` validation, `3` Workspace/configuration, `4` Provider/runtime unavailable, `5` infrastructure, and `130` cancellation/interruption. Interrupting requests finalization of the same Run; missing terminal facts leave the outcome unknown and do not authorize a retry.
 

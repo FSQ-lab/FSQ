@@ -171,9 +171,28 @@ def test_execute_in_windows_sandbox_rejects_non_win32_host(monkeypatch: pytest.M
     assert exc_info.value.category.value == "unavailable"
 
 
+def _create_fake_python_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    fake_windir = tmp_path / "EmptyWindows"
+    (fake_windir / "System32").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("SYSTEMROOT", str(fake_windir))
+    monkeypatch.setenv("WINDIR", str(fake_windir))
+
+    fake_py_base = tmp_path / "pybase"
+    fake_py_base.mkdir(exist_ok=True)
+    (fake_py_base / "python.exe").write_text("stub", encoding="utf-8")
+    for dll_name in ("mfc140u.dll", "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"):
+        (fake_py_base / dll_name).write_bytes(b"stub-dll")
+    fake_site = tmp_path / "site-packages"
+    fake_site.mkdir(exist_ok=True)
+    return fake_py_base, fake_site
+
+
 def test_execute_in_windows_sandbox_orchestrates_mounts_rewrites_and_restores_workspace_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     user_root = tmp_path / "host_user_fsq"
     save_openai_provider(api_key="sk-real-secret-test-key", model="gpt-4.1", user_config_root=user_root)
+
+    fake_app = tmp_path / "notepad.exe"
+    fake_app.write_text("stub", encoding="utf-8")
 
     ws_root = tmp_path / "ws"
     ws_root.mkdir(parents=True, exist_ok=True)
@@ -183,7 +202,7 @@ def test_execute_in_windows_sandbox_orchestrates_mounts_rewrites_and_restores_wo
         platforms=[
             WorkspacePlatformCreateInput(
                 platform="windows",
-                target=WindowsWorkspaceTarget(app_path=r"C:\Windows\System32\notepad.exe", window_title_re=".*Notepad.*"),
+                target=WindowsWorkspaceTarget(app_path=str(fake_app), window_title_re=".*Notepad.*"),
             )
         ],
         user_config_root=user_root,
@@ -197,12 +216,7 @@ def test_execute_in_windows_sandbox_orchestrates_mounts_rewrites_and_restores_wo
 
     fake_wsb = tmp_path / "wsb.exe"
     fake_wsb.write_text("stub", encoding="utf-8")
-    fake_py_base = tmp_path / "pybase"
-    fake_py_base.mkdir()
-    (fake_py_base / "python.exe").write_text("stub", encoding="utf-8")
-    fake_site = tmp_path / "site-packages"
-    fake_site.mkdir()
-
+    fake_py_base, fake_site = _create_fake_python_env(tmp_path, monkeypatch)
     wsb_calls: list[list[str]] = []
     observed_cfg_root_during_share: list[str] = []
     observed_snapshot_provider: list[object] = []
@@ -306,12 +320,7 @@ def test_quick_test_sandbox_registers_quick_test_workspace_on_host_and_rewrites_
 
     fake_wsb = tmp_path / "wsb.exe"
     fake_wsb.write_text("stub", encoding="utf-8")
-    fake_py_base = tmp_path / "pybase"
-    fake_py_base.mkdir()
-    (fake_py_base / "python.exe").write_text("stub", encoding="utf-8")
-    fake_site = tmp_path / "site-packages"
-    fake_site.mkdir()
-
+    fake_py_base, fake_site = _create_fake_python_env(tmp_path, monkeypatch)
     wsb_calls: list[list[str]] = []
 
     def fake_run_wsb(wsb_executable: Path, args: Sequence[str], *, timeout: float = 60.0, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -481,6 +490,9 @@ def test_external_case_copies_single_file_and_rebases_guest_case_path(monkeypatc
     user_root = tmp_path / "host_user_fsq"
     save_openai_provider(api_key="sk-real-secret-test-key", model="gpt-4.1", user_config_root=user_root)
 
+    fake_app = tmp_path / "notepad.exe"
+    fake_app.write_text("stub", encoding="utf-8")
+
     ws_root = tmp_path / "ws"
     ws_root.mkdir()
     create_workspace_at_root(
@@ -489,7 +501,7 @@ def test_external_case_copies_single_file_and_rebases_guest_case_path(monkeypatc
         platforms=[
             WorkspacePlatformCreateInput(
                 platform="windows",
-                target=WindowsWorkspaceTarget(app_path=r"C:\Windows\System32\notepad.exe", window_title_re=".*Notepad.*"),
+                target=WindowsWorkspaceTarget(app_path=str(fake_app), window_title_re=".*Notepad.*"),
             )
         ],
         user_config_root=user_root,
@@ -504,12 +516,7 @@ def test_external_case_copies_single_file_and_rebases_guest_case_path(monkeypatc
 
     fake_wsb = tmp_path / "wsb.exe"
     fake_wsb.write_text("stub", encoding="utf-8")
-    fake_py_base = tmp_path / "pybase"
-    fake_py_base.mkdir()
-    (fake_py_base / "python.exe").write_text("stub", encoding="utf-8")
-    fake_site = tmp_path / "site-packages"
-    fake_site.mkdir()
-
+    fake_py_base, fake_site = _create_fake_python_env(tmp_path, monkeypatch)
     wsb_calls: list[list[str]] = []
     shared_host_paths: list[str] = []
 

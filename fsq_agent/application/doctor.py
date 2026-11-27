@@ -144,7 +144,7 @@ def _diagnose_platform(
     elif platform == "ios" and target_id is not None:
         settings = settings.model_copy(deep=True)
         settings.harness.ios.udid = target_id
-    return diagnose_platform_settings(settings, sandbox=sandbox)
+    return diagnose_platform_settings(settings, sandbox=sandbox) if sandbox is not None else diagnose_platform_settings(settings)
 
 
 def diagnose_platform_settings(
@@ -176,7 +176,7 @@ def diagnose_platform_settings(
         raise ValueError("Diagnostic context does not match the selected platform.")
     effective_sandbox = sandbox if sandbox is not None else (context.sandbox if context is not None else None)
     environment = PlatformRuntimeService()
-    prerequisite_facts = _safe_prerequisites(environment, settings, context, sandbox=effective_sandbox)
+    prerequisite_facts = _safe_prerequisites(environment, settings, context, sandbox=effective_sandbox) if effective_sandbox is not None else _safe_prerequisites(environment, settings, context)
     prerequisites = tuple(DoctorPrerequisite.model_validate(item.model_dump(exclude={"target_id"})) for item in prerequisite_facts)
     runtime_check = _safe_check("runtime", lambda: _runtime(environment, platform))
     configuration = _pending("workspace") if context is not None and context.workspace_pending else _ready("Platform configuration is ready.")

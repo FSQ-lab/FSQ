@@ -4,6 +4,11 @@ All notable changes are documented here. FSQ follows Semantic Versioning after p
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-27
+
+- CLI `case create`, `case test`, and `quick-test run` add isolated disposable Windows Sandbox execution (`--sandbox wsb` for `--platform windows`) with non-activating background Sandbox window placement, read-only host Python/package/user-config mounting, writable Workspace mounting with automatic guest-to-host path rebasing and metadata restoration, COM MTA / `comtypes` / VC++ & MFC runtime DLL setup, and guaranteed Sandbox teardown.
+- `fsq doctor [--sandbox wsb]` and `fsq quick-test context --platform windows [--sandbox wsb]` add optional read-only Windows Sandbox readiness diagnostics (`windows_sandbox_cli`, `windows_sandbox_service`, `windows_sandbox_slot`, and `windows_sandbox_runtime`) without starting a VM or mutating host state.
+
 ## [0.4.3] - 2026-11-26
 
 - `fsq` CLI adds eager root `--version` / `-V` (supporting Human `<prog_name> <version>`, `json`/`jsonl` `fsq.machine/v1` envelopes, and an `unknown` fallback when distribution metadata is absent), enables `-h` / `--help` uniformly across all commands and groups, and provides concise help text for all public commands and options.
@@ -224,7 +229,8 @@ Release preparation; this entry does not establish a published package, tag, or 
 
 - This is an alpha release. Public APIs and Case authoring details may evolve before 1.0.
 
-[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/FSQ-lab/FSQ/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/FSQ-lab/FSQ/compare/v0.4.3...v0.4.5
 [0.4.3]: https://github.com/FSQ-lab/FSQ/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/FSQ-lab/FSQ/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/FSQ-lab/FSQ/compare/v0.4.0...v0.4.1
